@@ -211,12 +211,9 @@ describe('retryAsync', () => {
       label: 'backoff-test',
     });
 
-    // Advance through all retries
-    // Retry 1: 2000ms * 2^0 = 2000ms
+    // Advance through all retries: 2000ms, 4000ms, 8000ms
     await vi.advanceTimersByTimeAsync(2000);
-    // Retry 2: 2000ms * 2^1 = 4000ms
     await vi.advanceTimersByTimeAsync(4000);
-    // Retry 3: 2000ms * 2^2 = 8000ms
     await vi.advanceTimersByTimeAsync(8000);
 
     await promise;
@@ -315,12 +312,7 @@ describe('retryAsync', () => {
       label: 'cap-test',
     });
 
-    // Advance enough to exhaust all retries
-    // Retry 1: min(2000*1, 5000) = 2000
-    // Retry 2: min(2000*2, 5000) = 4000
-    // Retry 3: min(2000*4, 5000) = 5000 (capped)
-    // Retry 4: min(2000*8, 5000) = 5000 (capped)
-    // Retry 5: min(2000*16, 5000) = 5000 (capped)
+    // Advance enough to exhaust all retries: min(2000*2^n, 5000), so retries 3-5 are capped at 5000
     for (const ms of [2000, 4000, 5000, 5000, 5000]) {
       await vi.advanceTimersByTimeAsync(ms);
     }

@@ -6,7 +6,7 @@
 import type { JiraTransition, JiraUser } from '../types.js';
 
 /**
- * Map a raw Jira user object to {@link JiraUser}.
+ * Map a raw Jira user object (Atlassian REST API shape) to {@link JiraUser}.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised user.
  */
@@ -21,7 +21,7 @@ export function mapUser(raw: unknown): JiraUser {
 }
 
 /**
- * Map a raw Jira workflow transition to {@link JiraTransition}.
+ * Map a raw Jira workflow transition (Atlassian REST API shape) to {@link JiraTransition}.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised transition.
  */

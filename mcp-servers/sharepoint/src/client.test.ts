@@ -105,9 +105,7 @@ describe('SharePointClient', () => {
     vi.restoreAllMocks();
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Constructor & Configuration
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Constructor & Configuration ────────────────────────────────────────────────────────────────
 
   describe('constructor', () => {
     it('should initialize with valid config', () => {
@@ -608,9 +606,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Path Handling
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Path Handling ──────────────────────────────────────────────────────────────────────────────
 
   describe('encodeGraphPath', () => {
     it('should encode path segments for Graph API', async () => {
@@ -770,9 +766,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Tool Implementations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Tool Implementations ───────────────────────────────────────────────────────────────────────
 
   describe('listFiles', () => {
     it('should list files in base directory', async () => {
@@ -1589,9 +1583,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Empty Folder Support
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Empty Folder Support ───────────────────────────────────────────────────────────────────────
 
   describe('createRemoteFolder', () => {
     it('should create a new folder successfully', async () => {
@@ -1800,9 +1792,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Factory & Initialization
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Factory & Initialization ───────────────────────────────────────────────────────────────────
 
   describe('initializeSharePointClient', () => {
     const originalEnv = process.env.TOKENS_DIR;

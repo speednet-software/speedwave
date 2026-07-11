@@ -1,6 +1,5 @@
-//! Host-side meeting transcription — SSOT layer (ADR-056). Capture +
-//! Whisper + model store; gated behind the `audio-transcription` feature
-//! (CLI never enables it). Speaker diarization was removed (ADR-075).
+//! Host-side meeting transcription — SSOT layer (ADR-056). Capture + Whisper + model store;
+//! gated behind `audio-transcription` (CLI never enables it). Diarization removed (ADR-075).
 
 pub mod accel;
 pub mod audio;
@@ -49,9 +48,8 @@ pub fn models_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::MODELS_SUBDIR)
 }
 
-/// Resolves the `AudioCapture` backend for this host: macOS = the bundled
-/// `audio-capture-cli` (CoreAudio process taps); Windows = WASAPI loopback via
-/// the `wasapi` crate (mic via cpal); else = `FileAudioCapture` (file input).
+/// Resolves the `AudioCapture` backend for this host: macOS = bundled `audio-capture-cli`
+/// (CoreAudio taps); Windows = WASAPI loopback via `wasapi` (mic via cpal); else = file input.
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     #[cfg(target_os = "macos")]
     {
@@ -68,15 +66,13 @@ pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn dirs_are_under_the_data_dir() {
-        // Structural invariant only — both dirs share one data-dir parent and
-        // end with their subdir. Asserted without naming the production
-        // `data_dir()` singleton, so it holds under any isolated tempdir.
+        // Structural invariant only — both dirs share one data-dir parent, without naming the
+        // production `data_dir()` singleton, so it holds under any isolated tempdir.
         let transcripts = transcripts_dir();
         let models = models_dir();
         assert!(transcripts.ends_with(crate::consts::TRANSCRIPTS_SUBDIR));

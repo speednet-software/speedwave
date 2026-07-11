@@ -19,9 +19,8 @@ const PATH_SEP: char = ':';
 #[cfg(windows)]
 const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
 
-/// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive).
-/// Matches on the file name, so an absolute path (e.g. the
-/// `C:\Windows\System32\wsl.exe` that `reset_vm` builds) is recognised too.
+/// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive). Matches on the file
+/// name, so an absolute path like `C:\Windows\System32\wsl.exe` from `reset_vm` is recognised too.
 #[cfg(windows)]
 fn is_always_system_command(cmd: &str) -> bool {
     let name = std::path::Path::new(cmd)
@@ -33,14 +32,8 @@ fn is_always_system_command(cmd: &str) -> bool {
         .any(|c| c.eq_ignore_ascii_case(name))
 }
 
-/// Resolves the path to a binary command via bundled resources or system PATH.
-///
-/// Resolution order (each step only if `SPEEDWAVE_RESOURCES_DIR` is set):
-/// 1. `<dir>/lima/bin/<cmd>` (macOS Lima bundle).
-/// 2. `<dir>/nerdctl-full/bin/<cmd>` (reserved layout, not populated in prod).
-/// 3. `<dir>/nodejs/bin/<cmd>` (Unix) or `<dir>/nodejs/<cmd>.exe` (Windows).
-/// 4. `<dir>/<cmd>` (native CLI helpers at the top of `Resources/`).
-/// 5. Otherwise the bare command name (system PATH lookup).
+/// Resolves a binary via bundled resources or system PATH: if `SPEEDWAVE_RESOURCES_DIR` is set,
+/// tries Lima bundle, nerdctl-full, nodejs, `Resources/`; else falls back to bare-name PATH lookup.
 pub fn resolve_binary(cmd: &str) -> String {
     if let Ok(resources_dir) = std::env::var(BUNDLE_RESOURCES_ENV) {
         let resources = PathBuf::from(&resources_dir);
@@ -101,14 +94,8 @@ pub fn resolve_binary(cmd: &str) -> String {
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Creates a `Command` for the given binary with bundled-binary resolution.
-///
-/// - Applies `CREATE_NO_WINDOW` on Windows.
-/// - For `limactl`, sets `LIMA_HOME` to the isolated Speedwave directory.
-/// - For bundled binaries, prepends their parent directory to `PATH`.
-///
-/// `container_exec()` bypasses this and uses raw `Command::new()` (TTY needs a
-/// console window on Windows).
+/// Creates a `Command` for `cmd` with bundled-binary resolution: `CREATE_NO_WINDOW` on Windows,
+/// `LIMA_HOME` for `limactl`, `PATH` prepend for bundled bins. `container_exec()` bypasses this.
 pub fn command(cmd: &str) -> Command {
     let resolved = resolve_binary(cmd);
     let mut command = Command::new(&resolved);
@@ -157,20 +144,15 @@ pub fn command(cmd: &str) -> Command {
                 command.env("LIMA_HOME", &home);
             }
             None => {
-                log::error!("LIMA_HOME not set: could not determine home directory");
+                log::error!("could not determine LIMA_HOME directory");
             }
         }
     }
     command
 }
 
-/// Creates a `Command` for a system binary (no bundled-binary resolution).
-///
-/// Use this for system utilities like `wsl.exe`, `powershell.exe`, `tasklist`,
-/// `taskkill`, `icacls`, etc. that are never bundled in the app resources.
-///
-/// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
-/// For interactive TTY commands, use raw `Command::new()` instead.
+/// Creates a `Command` for a system binary never bundled (`wsl.exe`, `powershell.exe`, `tasklist`,
+/// `taskkill`, `icacls`). Applies `CREATE_NO_WINDOW`; TTY commands use raw `Command::new()`.
 pub fn system_command(program: &str) -> Command {
     let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -178,6 +160,14 @@ pub fn system_command(program: &str) -> Command {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    apply_wsl_utf8(&mut command, program);
+    command
+}
+
+/// Creates a `Command` for an interactive TTY spawn (wsl/ssh/self-reexec). Omits `CREATE_NO_WINDOW`
+/// (a PTY needs a visible window). No bundled resolution; `program` is used verbatim.
+pub fn interactive_command(program: &str) -> Command {
+    let mut command = Command::new(program);
     apply_wsl_utf8(&mut command, program);
     command
 }
@@ -194,9 +184,32 @@ pub fn system_powershell_path() -> PathBuf {
         .join("powershell.exe")
 }
 
-/// `system_command` pinned to the absolute PowerShell path.
-pub fn powershell_command() -> Command {
+/// Raw absolute-path PowerShell `Command`. Private: every spawn goes through
+/// the deadline-bounded `run_powershell` / `run_powershell_capture`.
+fn powershell_command_raw() -> Command {
     system_command(&system_powershell_path().to_string_lossy())
+}
+
+/// Runs PowerShell under a kill deadline, inheriting stdio so output streams to
+/// the console. Use for status-only probes and long elevated installs.
+pub fn run_powershell(
+    args: &[&str],
+    deadline: std::time::Duration,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let mut cmd = powershell_command_raw();
+    cmd.args(args);
+    run_with_timeout(&mut cmd, deadline)
+}
+
+/// Runs PowerShell under a kill deadline, capturing stdout + stderr. Use for
+/// probes that read output (SHA256, timezone, WMI model).
+pub fn run_powershell_capture(
+    args: &[&str],
+    deadline: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    let mut cmd = powershell_command_raw();
+    cmd.args(args);
+    run_with_timeout_capture(&mut cmd, deadline)
 }
 
 /// Forces UTF-8 output from `wsl.exe` (default is UTF-16LE / localized);
@@ -212,9 +225,8 @@ fn apply_wsl_utf8(command: &mut Command, program: &str) {
     }
 }
 
-/// Runs a command with a timeout, killing the process if it exceeds the deadline.
-/// Polls `child.try_wait()` every 200ms; does not capture stdout/stderr.
-/// Do not use with `Stdio::piped()` (pipe-buffer deadlock risk).
+/// Runs a command with a timeout, killing the process if it exceeds the deadline. Polls
+/// `child.try_wait()` every 200ms; no stdout/stderr capture. Avoid `Stdio::piped()` (deadlock).
 pub fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
@@ -228,7 +240,7 @@ pub fn run_with_timeout(
             None => {
                 if start.elapsed() >= timeout {
                     if let Err(e) = child.kill() {
-                        log::warn!("run_with_timeout: kill failed: {e}");
+                        log::warn!("failed to kill timed-out process: {e}");
                     }
                     let _ = child.wait();
                     anyhow::bail!(
@@ -243,6 +255,79 @@ pub fn run_with_timeout(
     }
 }
 
+/// Runs a command with a timeout, capturing stdout + stderr; kills on deadline. Concurrent reader
+/// threads drain pipes, avoiding the `run_with_timeout` buffer-fill deadlock. Forces piped stdio.
+pub fn run_with_timeout_capture(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let program = cmd.get_program().to_string_lossy().to_string();
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+
+    let mut out_pipe = match child.stdout.take() {
+        Some(p) => p,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("command '{program}' produced no stdout pipe");
+        }
+    };
+    let mut err_pipe = match child.stderr.take() {
+        Some(p) => p,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("command '{program}' produced no stderr pipe");
+        }
+    };
+
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if start.elapsed() >= timeout {
+                    if let Err(e) = child.kill() {
+                        log::warn!("failed to kill timed-out process: {e}");
+                    }
+                    let _ = child.wait();
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    anyhow::bail!(
+                        "command '{}' timed out after {}s",
+                        program,
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    };
+
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Returns the isolated LIMA_HOME directory `~/.speedwave/lima` (avoids
 /// collision with a user-installed Lima at `~/.lima`).
 pub fn lima_home() -> Option<PathBuf> {
@@ -250,7 +335,11 @@ pub fn lima_home() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are acceptable assertions"
+)]
 pub(crate) mod tests {
     use super::*;
     use std::env;
@@ -748,5 +837,117 @@ pub(crate) mod tests {
             elapsed < Duration::from_secs(5),
             "should not wait for the full 60s, elapsed: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn interactive_command_uses_program_verbatim() {
+        assert_eq!(
+            interactive_command("wsl.exe")
+                .get_program()
+                .to_string_lossy(),
+            "wsl.exe"
+        );
+        assert_eq!(
+            interactive_command("ssh").get_program().to_string_lossy(),
+            "ssh"
+        );
+    }
+
+    #[test]
+    fn interactive_command_sets_wsl_utf8_for_wsl_only() {
+        assert!(has_wsl_utf8(&interactive_command("wsl.exe")));
+        assert!(!has_wsl_utf8(&interactive_command("ssh")));
+    }
+
+    #[test]
+    fn interactive_command_does_not_modify_path_or_lima_home() {
+        let cmd = interactive_command("limactl");
+        assert!(cmd.get_envs().all(|(k, _)| k != "PATH"));
+        assert!(cmd.get_envs().all(|(k, _)| k != "LIMA_HOME"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_timeout_capture_collects_stdout() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let out = run_with_timeout_capture(
+            Command::new("sh").args(["-c", "printf hello"]),
+            Duration::from_secs(5),
+        )
+        .expect("fast command should succeed");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_timeout_capture_reports_nonzero_exit() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let out = run_with_timeout_capture(
+            Command::new("sh").args(["-c", "exit 3"]),
+            Duration::from_secs(5),
+        )
+        .expect("nonzero exit is not a spawn error");
+        assert!(!out.status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_with_timeout_capture_kills_on_deadline() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let result =
+            run_with_timeout_capture(Command::new("sleep").arg("60"), Duration::from_millis(200));
+        assert!(result.is_err(), "slow command should be killed");
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "should not wait for the full 60s"
+        );
+    }
+
+    // Windows-only: exercises the real PowerShell path. cfg-gated because the
+    // System32 powershell.exe does not exist on Unix CI.
+    #[test]
+    #[cfg(windows)]
+    fn powershell_command_raw_points_at_powershell_exe() {
+        let p = powershell_command_raw()
+            .get_program()
+            .to_string_lossy()
+            .to_string();
+        assert!(p.ends_with("powershell.exe"), "got: {p}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_powershell_capture_reads_stdout() {
+        use std::time::Duration;
+
+        let out = run_powershell_capture(
+            &["-NoProfile", "-Command", "Write-Output hi"],
+            Duration::from_secs(30),
+        )
+        .expect("powershell probe should run");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_powershell_kills_on_deadline() {
+        use std::time::Duration;
+
+        let result = run_powershell(
+            &["-NoProfile", "-Command", "Start-Sleep -Seconds 60"],
+            Duration::from_millis(300),
+        );
+        assert!(result.is_err(), "long powershell should be killed");
+        assert!(result.unwrap_err().to_string().contains("timed out"));
     }
 }

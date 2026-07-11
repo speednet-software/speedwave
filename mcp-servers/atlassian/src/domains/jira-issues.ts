@@ -39,46 +39,27 @@ const ISSUE_FIELDS = [
 ] as const;
 
 /**
- * With a project allowlist configured, upstream pages that filter down to zero visible
- * issues are skipped (bounded by this cap) rather than passed through, so a caller can't
- * infer out-of-allowlist matches from an empty page whose cursor says "not last".
+ * With a project allowlist, upstream pages that filter to zero visible issues are skipped
+ * (bounded by this cap) so a caller can't infer out-of-allowlist matches from an empty page.
  */
 const MAX_SEARCH_CONTINUATION_PAGES = 5;
 
 /** Client for Jira issue operations. */
 export interface JiraIssuesClient {
   /**
-   * Search issues with JQL using the enhanced search endpoint.
-   * @param params - Search parameters.
-   * @param params.jql - The JQL query string.
-   * @param params.maxResults - Page size (default 50, capped at 100).
-   * @param params.nextPageToken - Opaque cursor from a previous page.
-   * @returns Page of issues plus the next-page cursor (absent on the last page). With a
-   * project allowlist configured, all-excluded upstream pages are skipped (bounded) so the
-   * cursor/is_last never reveal the existence of out-of-allowlist matches.
+   * Search issues with JQL via the enhanced search endpoint (`maxResults` default 50, capped
+   * at 100); with a project allowlist, all-excluded pages are skipped so cursor/is_last don't leak.
    */
   search(params: {
     jql: string;
     maxResults?: number;
     nextPageToken?: string;
   }): Promise<JiraSearchResult>;
-  /**
-   * Get a single issue by key or ID.
-   * @param issueIdOrKey - The issue key (e.g. `PROJ-123`) or numeric ID.
-   * @returns The normalised issue.
-   */
+  /** Get a single issue by key (e.g. `PROJ-123`) or numeric ID. */
   get(issueIdOrKey: string): Promise<JiraIssue>;
   /**
-   * Create an issue.
-   * @param params - Creation parameters.
-   * @param params.projectKey - Target project key.
-   * @param params.summary - Issue summary.
-   * @param params.issueType - Issue type name (e.g. `Task`, `Bug`).
-   * @param params.body - Description as plain text (converted to ADF) or a raw ADF document.
-   * @param params.priority - Optional priority name.
-   * @param params.labels - Optional labels to apply.
-   * @param params.assigneeAccountId - Optional account ID to assign to.
-   * @returns The created issue, re-fetched and normalised.
+   * Create an issue. `body` is plain text (converted to ADF) or a raw ADF document.
+   * Returns the created issue, re-fetched and normalised.
    */
   create(params: {
     projectKey: string;
@@ -90,15 +71,8 @@ export interface JiraIssuesClient {
     assigneeAccountId?: string;
   }): Promise<JiraIssue>;
   /**
-   * Update mutable fields of an issue (only provided fields change).
-   * @param issueIdOrKey - The issue key (an allowlist requires a key, not a numeric ID) or ID.
-   * @param params - Fields to change.
-   * @param params.summary - New summary.
-   * @param params.body - New description (plain text → ADF, or a raw ADF document).
-   * @param params.priority - New priority name.
-   * @param params.labels - Replacement label set.
-   * @param params.assigneeAccountId - Optional account ID to reassign to.
-   * @returns The updated issue, re-fetched and normalised.
+   * Update mutable fields of an issue (only provided fields change; an allowlist requires
+   * a key, not a numeric ID). Returns the updated issue, re-fetched and normalised.
    */
   update(
     issueIdOrKey: string,
@@ -119,13 +93,8 @@ export interface JiraIssuesClient {
   /** Get the account the API token authenticates as. */
   getMyself(): Promise<JiraUser>;
   /**
-   * Attach a file to an issue (`POST .../attachments`, multipart).
-   * @param issueIdOrKey - The issue key or ID (allowlist enforced).
-   * @param params - Attachment parameters.
-   * @param params.filename - File name shown in Jira.
-   * @param params.data - Raw file bytes.
-   * @param params.contentType - MIME type for the file part.
-   * @returns The created attachment, normalised.
+   * Attach a file to an issue (`POST .../attachments`, multipart, allowlist enforced).
+   * Returns the normalised attachment.
    */
   addAttachment(
     issueIdOrKey: string,
@@ -133,17 +102,15 @@ export interface JiraIssuesClient {
   ): Promise<JiraAttachment>;
   /**
    * Delete an attachment by its global attachment ID.
-   * @param attachmentId - The attachment ID (from a created/listed attachment).
-   * @throws {ScopeError} When a Jira project allowlist is configured — a bare
-   *   attachment ID cannot be verified against the allowlist, so we fail closed.
+   * @throws {ScopeError} With a Jira project allowlist — a bare ID can't be verified, fails closed.
    */
   deleteAttachment(attachmentId: string): Promise<void>;
 }
 
 /**
- * Create a Jira issues client.
+ * Create a {@link JiraIssuesClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
- * @returns A {@link JiraIssuesClient}.
+ * @returns A Jira issues client.
  */
 export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClient {
   // Enforce the Jira project allowlist for an issue ref (see assertJiraIssueKeyAllowed).
@@ -295,9 +262,8 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
 }
 
 /**
- * Map a raw Jira attachment object to {@link JiraAttachment}.
+ * Map a raw Jira attachment object (Atlassian REST API shape) to {@link JiraAttachment}.
  * @param raw - The raw object as returned by the Atlassian REST API.
- * @returns The normalised attachment.
  */
 export function mapAttachment(raw: unknown): JiraAttachment {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -312,14 +278,11 @@ export function mapAttachment(raw: unknown): JiraAttachment {
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Normalisers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
- * Map a raw Jira issue (with `fields`) to {@link JiraIssue}.
+ * Map a raw Jira issue (with `fields`, Atlassian REST API shape) to {@link JiraIssue}.
  * @param raw - The raw object as returned by the Atlassian REST API.
- * @returns The normalised issue.
  */
 export function mapIssue(raw: unknown): JiraIssue {
   const o = (raw ?? {}) as Record<string, unknown>;

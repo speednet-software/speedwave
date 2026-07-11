@@ -113,9 +113,9 @@ export class ChatMessageComponent {
   });
 
   /**
-   * Forwards a permission decision upstream tagged with the block's index.
-   * @param blockIndex - Index of the permission_prompt block within this message.
-   * @param decision - User's choice on the prompt.
+   * Forwards a permission decision upstream, tagged with the `permission_prompt` block's index within this message.
+   * @param blockIndex - Index of the `permission_prompt` block within this message.
+   * @param decision - The user's decision for the prompt.
    */
   onPermissionDecided(blockIndex: number, decision: 'allow_once' | 'allow_always' | 'deny'): void {
     this.permissionDecided.emit({ blockIndex, decision });

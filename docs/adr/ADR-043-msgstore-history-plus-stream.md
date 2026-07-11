@@ -1,11 +1,11 @@
 # ADR-043: MsgStore — Broadcast Channel Plus Bounded History
 
 > **Status:** Retired (2026-06-10) — `MsgStore`, the `MsgStoreRegistry`, and the `subscribe_session`/`chat_patch::*` Tauri bridge were deleted together with the JSON-Patch wire transport (see the [ADR-042](ADR-042-json-patch-stream-protocol.md) status note). This document records the original design.
-> **Context:** The JSON-Patch stream of a live Claude Code session (ADR-042) must reach multiple consumers — the chat view, a re-opened window, a diagnostic export — without racing, dropping, or duplicating state, and a late subscriber must see the full conversation from the start.
+> **Context:** The JSON-Patch stream of a live Claude Code session[^1] (ADR-042) must reach multiple consumers — the chat view, a re-opened window, a diagnostic export — without racing, dropping, or duplicating state, and a late subscriber must see the full conversation from the start.
 
 ## Decision
 
-Each active session owns one `MsgStore` (keyed by `session_id`) that combines a live `tokio::broadcast` channel with a bounded in-memory replay buffer. A subscriber calls `history_plus_stream()` to receive the full history first and then transition seamlessly to live events. A subscriber that falls behind the broadcast channel gets a single `Resync` snapshot of the current state rather than a crash or silent drift.
+Each active session owns one `MsgStore` (keyed by `session_id`) that combines a live `tokio::broadcast` channel[^2] with a bounded in-memory replay buffer. A subscriber calls `history_plus_stream()` to receive the full history first and then transition seamlessly to live events. A subscriber that falls behind the broadcast channel gets a single `Resync` snapshot of the current state rather than a crash or silent drift.
 
 ## Why
 
@@ -13,7 +13,7 @@ Each active session owns one `MsgStore` (keyed by `session_id`) that combines a 
 - A broadcast-only channel handles multiple consumers but is bounded; a slow consumer hits `RecvError::Lagged` and, with no replay, its state-tree silently diverges from the publisher's.
 - Combining a broadcast sender with a byte-capped history gives every consumer a consistent snapshot through one API, and makes backpressure explicit and recoverable.
 - History is capped by serialized byte budget, not entry count, because entries vary from a few hundred bytes (a text delta) to several megabytes (a large tool result). The cap is `DEFAULT_HISTORY_BYTES = 100 * 1024 * 1024` (100 MiB); on overflow the oldest entries are dropped from the front, preserving patch ordering. A single oversized message is always kept rather than producing an empty history.
-- Design is modelled on a known production implementation (BloopAI/vibe-kanban's `MsgStore`), so corner cases have a readable reference; the byte cap value is Speedwave's own round constant.
+- Design is modelled on a known production implementation (BloopAI/vibe-kanban's `MsgStore`)[^3], so corner cases have a readable reference; the byte cap value is Speedwave's own round constant.
 
 ## How it works
 
@@ -51,6 +51,8 @@ Each active session owns one `MsgStore` (keyed by `session_id`) that combines a 
 
 ## References
 
-- `tokio::sync::broadcast` (channel + `RecvError::Lagged` semantics): https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html
-- BloopAI/vibe-kanban `MsgStore` (the reference design — broadcast sender + `VecDeque` history + `history_plus_stream`): https://github.com/BloopAI/vibe-kanban
-- Claude Code CLI `--output-format stream-json`: https://code.claude.com/docs/en/cli-reference
+[^1]: Claude Code CLI `--output-format stream-json`: https://code.claude.com/docs/en/cli-reference
+
+[^2]: `tokio::sync::broadcast` (channel + `RecvError::Lagged` semantics): https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html
+
+[^3]: BloopAI/vibe-kanban `MsgStore` (the reference design - broadcast sender + `VecDeque` history + `history_plus_stream`): https://github.com/BloopAI/vibe-kanban

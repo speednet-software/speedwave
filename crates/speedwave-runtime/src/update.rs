@@ -8,9 +8,7 @@ use crate::consts;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ── Types ──────────────────────────────────────────────────────────────────
 
 /// Pre-update snapshot used to roll back a project on failure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,9 +22,8 @@ pub struct UpdateSnapshot {
     pub plugin_manifests: Vec<crate::plugin::PluginManifest>,
 }
 
-/// Marker on update failures from `compose_down` onwards — containers may be
-/// partially or fully torn down, so a rollback is warranted. Early failures
-/// (prereq/security/build/render) leave old containers running; no marker there.
+/// Marker on update failures from `compose_down` onwards (containers may be partly/fully torn down;
+/// rollback warranted). Early failures (prereq/security/build/render) leave old containers running.
 #[derive(Debug, Clone, Copy)]
 pub struct ContainersTornDown;
 
@@ -59,9 +56,7 @@ pub fn is_torn_down(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ContainersTornDown>().is_some()
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot helpers
-// ---------------------------------------------------------------------------
+// ── Snapshot helpers ───────────────────────────────────────────────────────
 
 fn snapshot_dir(project: &str) -> anyhow::Result<PathBuf> {
     let dir = consts::data_dir().join("snapshots").join(project);
@@ -81,9 +76,8 @@ fn snapshot_path_in(data_dir: &std::path::Path, project: &str) -> PathBuf {
         .join("snapshot.json")
 }
 
-/// Sets `0o700` permissions on `dir` and its parent (if any).
-/// Used by both `save_snapshot()` and `save_snapshot_in()` to secure the
-/// `snapshots/<project>/` directory and its parent `snapshots/` directory.
+/// Sets `0o700` permissions on `dir` and its parent (if any). Used by `save_snapshot()` and
+/// `save_snapshot_in()` to secure `snapshots/<project>/` and its parent `snapshots/` directory.
 #[cfg(unix)]
 fn secure_snapshot_dirs(dir: &std::path::Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -251,13 +245,10 @@ fn maybe_prune_previous_bundle_inner(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Update / rollback
-// ---------------------------------------------------------------------------
+// ── Update / rollback ──────────────────────────────────────────────────────
 
-/// Compose mutation core. Caller MUST build images before calling —
-/// builds run outside the lock (90+ s would block concurrent sessions).
-/// See ADR-066.
+/// Compose mutation core. Caller MUST build images before calling — builds run outside the lock
+/// (90+ s would block concurrent sessions). See ADR-066.
 #[cfg(any(test, feature = "test-support"))]
 pub fn apply_update_transaction(
     runtime: &crate::runtime::LockedRuntime,
@@ -471,9 +462,8 @@ enum RollbackComposeChoice {
     Abort,
 }
 
-/// Picks the rollback source: snapshot if it passes, else a clean fresh render
-/// (forward-fix for snapshots predating a new invariant), else abort. `fresh` is
-/// `None` when no fresh render could be produced.
+/// Picks the rollback source: snapshot if it passes, else a clean fresh render (forward-fix for
+/// snapshots predating a new invariant), else abort. `fresh` is `None` when no render was produced.
 fn choose_rollback_compose(
     snapshot_violations: &[compose::SecurityViolation],
     fresh: Option<(&str, &[compose::SecurityViolation])>,
@@ -588,12 +578,14 @@ fn render_fresh_compose_for_rollback(
     Some((compose_yml, manifests))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: unwrap/expect on fixtures is the sanctioned boundary"
+)]
 mod tests {
     use super::*;
 
@@ -1008,7 +1000,10 @@ mod tests {
     }
 
     // SSOT guard: asserts CONTAINER_STABILIZATION_DELAY_SECS stays sane.
-    #[allow(clippy::assertions_on_constants)]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "deliberately asserting a compile-time SSOT constant stays in range"
+    )]
     #[test]
     fn test_stabilization_delay_is_reasonable() {
         assert!(
@@ -1184,9 +1179,8 @@ mod tests {
 
     #[test]
     fn choose_rollback_forward_fixes_when_snapshot_fails_but_fresh_passes() {
-        // The v0.13.3 Slack case: the snapshot compose predates the /workspace
-        // mount, so the new SecurityCheck flags it — but a freshly rendered
-        // compose is clean. Rollback must forward-fix, not abort.
+        // v0.13.3 Slack case: snapshot predates /workspace, so SecurityCheck flags it — but a fresh
+        // render is clean. Rollback must forward-fix, not abort.
         let snap = vec![slack_missing_workspace_violation()];
         let choice = choose_rollback_compose(&snap, Some((FRESH_YAML, &[])));
         assert_eq!(

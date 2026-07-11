@@ -48,16 +48,16 @@ The privacy gates that send conversation/code content (`OTEL_LOG_USER_PROMPTS`, 
 
 ## Footnotes
 
-[^1]: https://code.claude.com/docs/en/monitoring-usage.md — Claude Code monitoring & telemetry: `CLAUDE_CODE_ENABLE_TELEMETRY`, the `OTEL_*` exporter/endpoint/header variables, and the privacy gates including `OTEL_LOG_TOOL_DETAILS` (works with logs export) vs `OTEL_LOG_TOOL_CONTENT` (traces/spans only).
+[^1]: https://code.claude.com/docs/en/monitoring-usage.md - Claude Code monitoring & telemetry: `CLAUDE_CODE_ENABLE_TELEMETRY`, the `OTEL_*` exporter/endpoint/header variables, and the privacy gates including `OTEL_LOG_TOOL_DETAILS` (works with logs export) vs `OTEL_LOG_TOOL_CONTENT` (traces/spans only).
 
-[^2]: https://learn.microsoft.com/en-us/windows/win32/msi/programfilesfolder — Microsoft: `%ProgramData%` / `CommonAppDataFolder` is the machine-wide, admin-writable application-data location on Windows; the macOS `/Library/Application Support` analogue is likewise admin-writable only.
+[^2]: https://learn.microsoft.com/en-us/windows/win32/msi/programfilesfolder - Microsoft: `%ProgramData%` / `CommonAppDataFolder` is the machine-wide, admin-writable application-data location on Windows; the macOS `/Library/Application Support` analogue is likewise admin-writable only.
 
-[^3]: https://code.claude.com/docs/en/settings.md — Claude Code settings precedence: enterprise-managed settings (`managed-settings.json`) rank above command-line args, project/local settings, and user settings.
+[^3]: https://code.claude.com/docs/en/settings.md - Claude Code settings precedence: enterprise-managed settings (`managed-settings.json`) rank above command-line args, project/local settings, and user settings.
 
-[^4]: https://github.com/anthropics/claude-code/issues/8500 — "Environment Variables No Longer Override settings.json in v2.0.1": documented regression where a `settings.json` `env` value out-precedenced an inline shell variable, closed "not planned" with no fix confirmation; the process-env-vs-settings.json order is therefore version-dependent.
+[^4]: https://github.com/anthropics/claude-code/issues/8500 - "Environment Variables No Longer Override settings.json in v2.0.1": documented regression where a `settings.json` `env` value out-precedenced an inline shell variable, closed "not planned" with no fix confirmation; the process-env-vs-settings.json order is therefore version-dependent.
 
-[^5]: https://code.claude.com/docs/en/data-usage.md — Claude Code data usage: prompt/response/tool/API-body content is included in telemetry only when the corresponding `OTEL_LOG_*` gate is explicitly enabled; defaults are off.
+[^5]: https://code.claude.com/docs/en/data-usage.md - Claude Code data usage: prompt/response/tool/API-body content is included in telemetry only when the corresponding `OTEL_LOG_*` gate is explicitly enabled; defaults are off.
 
-[^6]: https://code.claude.com/docs/en/data-usage.md — Claude Code data usage: `DISABLE_TELEMETRY` controls Anthropic's own operational telemetry (Statsig), independent of the OTLP exporter; it also gates feature-flag/killswitch evaluation.
+[^6]: https://code.claude.com/docs/en/data-usage.md - Claude Code data usage: `DISABLE_TELEMETRY` controls Anthropic's own operational telemetry (Statsig), independent of the OTLP exporter; it also gates feature-flag/killswitch evaluation.
 
-[^7]: https://code.claude.com/docs/en/server-managed-settings.md — Claude Code server-managed settings: "Server-managed settings are bypassed" when the user configures a third-party model provider, including "a non-default `ANTHROPIC_BASE_URL`"; endpoint-managed settings (a `managed-settings.json` file) are the MDM alternative.
+[^7]: https://code.claude.com/docs/en/server-managed-settings.md - Claude Code server-managed settings: "Server-managed settings are bypassed" when the user configures a third-party model provider, including "a non-default `ANTHROPIC_BASE_URL`"; endpoint-managed settings (a `managed-settings.json` file) are the MDM alternative.

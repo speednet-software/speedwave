@@ -853,9 +853,8 @@ describe('GitHubClient', () => {
     });
 
     it('stringifies a Buffer-typed response body that is not a TypedArray view', async () => {
-      // A real Buffer is also `ArrayBuffer.isView()`, so the `Buffer.isBuffer`
-      // fallback path is only reachable for a Buffer-prototyped object that lacks
-      // the typed-array internal slots — synthesize one to exercise that branch.
+      // A real Buffer is also `ArrayBuffer.isView()`; synthesize a Buffer-prototyped object
+      // lacking typed-array internal slots to reach the `Buffer.isBuffer` fallback path.
       const bufferLike: Buffer = Object.assign(Object.create(Buffer.prototype) as Buffer, {
         toString: () => 'buffer diff',
       });

@@ -87,34 +87,34 @@ Same outcome again (ADR-055). Four upstream Office/PDF MCP servers were evaluate
 
 ## Sources
 
-[^1]: `mcp-servers/playwright/package.json` in this repository — 14-line thin wrapper pinning `@playwright/mcp`.
+[^1]: `mcp-servers/playwright/package.json` in this repository - 14-line thin wrapper pinning `@playwright/mcp`.
 
-[^2]: `mcp-servers/playwright/Containerfile` in this repository — base image, single `npm install -g`, single `sed` patch, `CMD` invoking the binary. Documented in ADR-039.
+[^2]: `mcp-servers/playwright/Containerfile` in this repository - base image, single `npm install -g`, single `sed` patch, `CMD` invoking the binary. Documented in ADR-039.
 
-[^3]: GitHub official MCP server — repository, toolsets, `--read-only`/`--toolsets` flags, local (stdio + PAT) vs remote modes, MIT license, "Go library API is unstable" note: <https://github.com/github/github-mcp-server>
+[^3]: GitHub official MCP server - repository, toolsets, `--read-only`/`--toolsets` flags, local (stdio + PAT) vs remote modes, MIT license, "Go library API is unstable" note: <https://github.com/github/github-mcp-server>
 
-[^4]: GitHub Docs — "Set up the GitHub MCP Server" (local mode `GITHUB_PERSONAL_ACCESS_TOKEN`; remote endpoint `https://api.githubcopilot.com/mcp/` with OAuth 2.1 + PKCE or PAT bearer): <https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp/set-up-the-github-mcp-server>; Remote GitHub MCP Server GA announcement (2025-09-04): <https://github.blog/changelog/2025-09-04-remote-github-mcp-server-is-now-generally-available/>
+[^4]: GitHub Docs - "Set up the GitHub MCP Server" (local mode `GITHUB_PERSONAL_ACCESS_TOKEN`; remote endpoint `https://api.githubcopilot.com/mcp/` with OAuth 2.1 + PKCE or PAT bearer): <https://docs.github.com/en/copilot/how-tos/provide-context/use-mcp/set-up-the-github-mcp-server>; Remote GitHub MCP Server GA announcement (2025-09-04): <https://github.blog/changelog/2025-09-04-remote-github-mcp-server-is-now-generally-available/>
 
-[^5]: `mcp-servers/gitlab/src/tools/index.ts` in this repository — tools declared in camelCase with no service prefix (`listProjectIds`, `getMrFull`, `searchCode`, `listMrIds`).
+[^5]: `mcp-servers/gitlab/src/tools/index.ts` in this repository - tools declared in camelCase with no service prefix (`listProjectIds`, `getMrFull`, `searchCode`, `listMrIds`).
 
-[^6]: ADR-036 — Self-Declaring Worker Policy via `_meta` (per-tool `deferLoading`/`timeoutClass`/`timeoutMs`/`osCategory`; removal of the hub `TOOL_POLICIES` map and `BUILT_IN_SERVICES` list): `docs/adr/ADR-036-self-declaring-worker-policy.md`; MCP specification `_meta` field: <https://modelcontextprotocol.io/specification/2025-11-25/server/tools/>
+[^6]: ADR-036 - Self-Declaring Worker Policy via `_meta` (per-tool `deferLoading`/`timeoutClass`/`timeoutMs`/`osCategory`; removal of the hub `TOOL_POLICIES` map and `BUILT_IN_SERVICES` list): `docs/adr/ADR-036-self-declaring-worker-policy.md`; MCP specification `_meta` field: <https://modelcontextprotocol.io/specification/2025-11-25/server/tools/>
 
-[^7]: ADR-039 — Playwright Shared Browser Service (the `sed` patch disabling `@playwright/mcp`'s Streamable-HTTP heartbeat at image build time, acknowledged as deliberate tech debt pending an upstream `--no-heartbeat` flag): `docs/adr/ADR-039-playwright-shared-browser-service.md`
+[^7]: ADR-039 - Playwright Shared Browser Service (the `sed` patch disabling `@playwright/mcp`'s Streamable-HTTP heartbeat at image build time, acknowledged as deliberate tech debt pending an upstream `--no-heartbeat` flag): `docs/adr/ADR-039-playwright-shared-browser-service.md`
 
-[^8]: GitHub REST API best practices — Link-header pagination, conditional requests, primary and secondary rate limits: <https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api>; rate-limit details: <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api>
+[^8]: GitHub REST API best practices - Link-header pagination, conditional requests, primary and secondary rate limits: <https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api>; rate-limit details: <https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api>
 
-[^9]: GHSA-h5c3-5r3r-rr8q — ReDoS in `@octokit/plugin-paginate-rest` Link-header parsing (`paginate.iterator()`), fixed in 9.2.2 / 11.4.1: <https://github.com/advisories/GHSA-h5c3-5r3r-rr8q>
+[^9]: GHSA-h5c3-5r3r-rr8q - ReDoS in `@octokit/plugin-paginate-rest` Link-header parsing (`paginate.iterator()`), fixed in 9.2.2 / 11.4.1: <https://github.com/advisories/GHSA-h5c3-5r3r-rr8q>
 
-[^10]: GHSA-x4c5-c7rf-jjgv — ReDoS in `@octokit/endpoint` (`endpoint.parse()`), fixed in 9.0.6 / 10.1.3: <https://github.com/octokit/endpoint.js/security/advisories/GHSA-x4c5-c7rf-jjgv>; GHSA-xx4v-prfh-6cgc — ReDoS in `@octokit/request-error` via crafted `Authorization` header, fixed in 5.1.1 / 6.1.7: <https://github.com/octokit/request-error.js/security/advisories/GHSA-xx4v-prfh-6cgc>
+[^10]: GHSA-x4c5-c7rf-jjgv - ReDoS in `@octokit/endpoint` (`endpoint.parse()`), fixed in 9.0.6 / 10.1.3: <https://github.com/octokit/endpoint.js/security/advisories/GHSA-x4c5-c7rf-jjgv>; GHSA-xx4v-prfh-6cgc - ReDoS in `@octokit/request-error` via crafted `Authorization` header, fixed in 5.1.1 / 6.1.7: <https://github.com/octokit/request-error.js/security/advisories/GHSA-xx4v-prfh-6cgc>
 
-[^11]: Octokit — GitHub's official JavaScript/TypeScript SDK (MIT), `@octokit/rest` / `@octokit/core` / `@octokit/graphql`: <https://github.com/octokit/octokit.js>
+[^11]: Octokit - GitHub's official JavaScript/TypeScript SDK (MIT), `@octokit/rest` / `@octokit/core` / `@octokit/graphql`: <https://github.com/octokit/octokit.js>
 
-[^12]: `@octokit/plugin-throttling` — rate-limit handling per GitHub's guidelines (requires `onRateLimit` / `onSecondaryRateLimit` handlers): <https://github.com/octokit/plugin-throttling.js>
+[^12]: `@octokit/plugin-throttling` - rate-limit handling per GitHub's guidelines (requires `onRateLimit` / `onSecondaryRateLimit` handlers): <https://github.com/octokit/plugin-throttling.js>
 
-[^13]: `@octokit/plugin-retry` — automatic retry of transient request errors: <https://github.com/octokit/plugin-retry.js>; `@octokit/plugin-paginate-rest` — `octokit.paginate()` / `octokit.paginate.iterator()`: <https://github.com/octokit/plugin-paginate-rest.js>
+[^13]: `@octokit/plugin-retry` - automatic retry of transient request errors: <https://github.com/octokit/plugin-retry.js>; `@octokit/plugin-paginate-rest` - `octokit.paginate()` / `octokit.paginate.iterator()`: <https://github.com/octokit/plugin-paginate-rest.js>
 
-[^14]: GitHub Docs — comparing the REST and GraphQL APIs (GraphQL fetches nested/related data in one request where REST needs several): <https://docs.github.com/en/rest/about-the-rest-api/comparing-githubs-rest-api-and-graphql-api>
+[^14]: GitHub Docs - comparing the REST and GraphQL APIs (GraphQL fetches nested/related data in one request where REST needs several): <https://docs.github.com/en/rest/about-the-rest-api/comparing-githubs-rest-api-and-graphql-api>
 
-[^15]: Atlassian Rovo MCP Server — official documentation ("Connect Claude Desktop to Atlassian with the Rovo MCP Server", hosted at `mcp.atlassian.com`, no self-hostable container): <https://support.atlassian.com/rovo/docs/connect-to-mcp-servers/>
+[^15]: Atlassian Rovo MCP Server - official documentation ("Getting started with the Atlassian Rovo MCP Server", hosted at `mcp.atlassian.com/v1/mcp/authv2`, no self-hostable container): <https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/>
 
 [^16]: `jira.js` npm package (single maintainer, no sponsorship listed): <https://www.npmjs.com/package/jira.js>; `confluence.js` npm package (same author, no sponsorship listed): <https://www.npmjs.com/package/confluence.js>

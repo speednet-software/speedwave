@@ -1,25 +1,5 @@
-//! On-demand download + verification + caching of the Whisper models (ADR-056).
-//!
-//! Models live under `<data_dir>/models/whisper/`
-//! (perms `0o700`, files `0o600` — they aren't secrets, but neither are they
-//! world-readable). `ensure_model()` downloads a model if absent, **streaming
-//! it to a `.part` temp file in the same directory while computing SHA256 on
-//! the fly**, then verifies against the catalogue hash and atomically renames
-//! into place; on hash mismatch or any error the temp is removed and nothing
-//! partial is left behind. The HTTP client uses a **custom redirect policy
-//! that only follows redirects to hosts in `consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`**
-//! (Hugging Face `302`s to its Xet CDN, GitHub release assets to theirs — both
-//! with signed URLs — so `Policy::none()` would break the download; an
-//! unrecognised redirect host produces a `Mismatch`-class error rather than
-//! being followed). There is a per-model size cap from the catalogue plus the
-//! `MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES` overall dome.
-//!
-//! (The downloader is a blocking API — a multi-GiB download is a long blocking
-//! operation the Tauri layer wraps in `spawn_blocking`. It re-implements a
-//! small bounded-streaming reader here rather than reusing the Desktop's
-//! `http_util` — `speedwave-runtime` is pure Rust with no Tauri coupling — but
-//! follows the same principles: request timeout, restricted redirects, no
-//! buffer-the-whole-body-in-memory.)
+//! On-demand download/verify/cache of Whisper models (ADR-056) under models/whisper/ (0700/0600).
+//! Streams to a .part temp, SHA256-verifies, atomic rename; redirects allowlisted, size-capped.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -48,9 +28,8 @@ pub enum ModelStoreError {
     /// Unknown catalogue key.
     #[error("no such model in the catalogue: {0}")]
     UnknownModel(String),
-    /// The download's redirect chain led to a host not on the allowlist
-    /// (`consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`) — most likely a
-    /// CDN hostname changed, which means the model catalogue needs updating.
+    /// Redirect chain led to a host not on `consts::TRANSCRIPTION_MODEL_ALLOWED_REDIRECT_HOSTS`
+    /// — most likely a CDN hostname changed and the catalogue needs updating.
     #[error("model download redirected to a host not on the allowlist ({0}) — the model URL may have changed; report this")]
     DisallowedRedirect(String),
     /// `Content-Length` (or the bytes actually streamed) exceeded the per-model
@@ -96,9 +75,8 @@ pub enum ModelStoreError {
     Io(#[from] std::io::Error),
 }
 
-/// Progress of a model download, reported via the `&mut dyn FnMut(...)`
-/// callback `ensure_*` take. `total_bytes` is `None` when the server didn't
-/// send `Content-Length` (rare for these CDNs — observed present in spike 0C).
+/// Progress of a model download, reported via the `&mut dyn FnMut(...)` callback `ensure_*`
+/// takes. `total_bytes` is `None` when the server didn't send `Content-Length` (rare here).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DownloadProgress {
     /// Catalogue key of the model being downloaded.
@@ -153,9 +131,8 @@ impl ModelStore {
         self.whisper_dir().join(info.file)
     }
 
-    /// `true` if the file size is within `[90%, 105%]` of the catalogue estimate
-    /// (download SHA-verifies before rename; the window rejects truncated or
-    /// oversized leftovers while tolerating upstream size drift).
+    /// `true` if the file size is within `[90%, 105%]` of the catalogue estimate (SHA-verified
+    /// before rename; the window rejects truncated/oversized leftovers, tolerates size drift).
     fn whisper_is_present(&self, info: &WhisperModelInfo) -> bool {
         match std::fs::metadata(self.whisper_path(info)) {
             Ok(m) => {
@@ -190,9 +167,8 @@ impl ModelStore {
         }
         std::fs::create_dir_all(self.whisper_dir())?;
         restrict_dir_perms(&self.whisper_dir());
-        // Per-model cap = catalogue approx_bytes + 5% headroom (the file is a
-        // fixed size; this just keeps a wildly-wrong Content-Length from
-        // writing gigabytes).
+        // Per-model cap = catalogue approx_bytes + 5% headroom; just guards against a
+        // wildly-wrong Content-Length writing gigabytes (the file itself is a fixed size).
         let per_model_cap = info.approx_bytes + info.approx_bytes / 20 + 1024;
         // Total-storage check.
         let current_total = self.total_bytes_used();
@@ -221,11 +197,8 @@ impl ModelStore {
         Ok(dest)
     }
 
-    /// Downloads `url` to `dest`, verifies SHA256 against `expected_sha256`,
-    /// enforces `cap`, restricts perms, and on a hash mismatch removes the
-    /// (already-renamed-away) temp and errors. The shared body of `ensure_model`
-    /// — and the seam tests use to drive a `mockito` URL through the full
-    /// verify path.
+    /// Downloads `url` to `dest`, verifies SHA256 against `expected_sha256`, enforces `cap`,
+    /// restricts perms, removes the file on mismatch. Shared body of `ensure_model` / test seam.
     fn download_to(
         &self,
         url: &str,
@@ -337,11 +310,8 @@ fn host_on_allowlist(url: &reqwest::Url) -> bool {
     }
 }
 
-/// Streams `url` into `dest`, computing SHA256 on the fly, enforcing `cap`,
-/// reporting progress, and atomically renaming on success. On any error the
-/// `.part` temp is removed. Returns the lowercase-hex SHA256 of the bytes
-/// downloaded (the caller compares it against the catalogue). `dest`'s parent
-/// directory must already exist.
+/// Streams `url` into `dest`, hashing SHA256, enforcing `cap`, reporting progress, and atomically
+/// renaming on success (`.part` temp removed on error). Returns hex SHA256; parent must exist.
 fn download_verified(
     url: &str,
     dest: &Path,
@@ -449,11 +419,8 @@ fn stream_to_path(
     Ok(hex_lower(&hasher.finalize()))
 }
 
-/// Maps a `reqwest::Error` to our error type, surfacing a redirect-policy
-/// rejection specially (so the caller / UI can say "the model URL changed").
-/// `reqwest` reports a custom-redirect-policy rejection as a redirect error
-/// (`is_redirect()`), with our `attempt.error(...)` message buried in the
-/// error's `source()` chain — we walk that chain to recover the host.
+/// Maps a `reqwest::Error` to our error type, surfacing a redirect-policy rejection specially
+/// (`is_redirect()`, message buried in `source()`) so the UI can say "the model URL changed".
 fn classify_reqwest_err(e: &reqwest::Error) -> ModelStoreError {
     if e.is_redirect() {
         // Try to pull the host out of our "disallowed redirect host: <host>"
@@ -505,30 +472,22 @@ fn dir_size(dir: &Path) -> u64 {
     total
 }
 
-/// Best-effort `chmod 0o700` on a directory (Unix only; no-op elsewhere).
+/// Best-effort owner-only dir perms (Unix `chmod 0o700` / Windows DACL); logs, doesn't fail.
 fn restrict_dir_perms(dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    if let Err(e) = crate::fs_perms::set_owner_only_dir(dir) {
+        log::warn!(target: "transcription::models", "failed to restrict perms on {}: {e}", dir.display());
     }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
-/// Best-effort `chmod 0o600` on a file (Unix only; no-op elsewhere).
+/// Best-effort owner-only file perms (Unix `chmod 0o600` / Windows DACL); logs, doesn't fail.
 fn restrict_file_perms(file: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = crate::fs_perms::set_owner_only(file) {
+        log::warn!(target: "transcription::models", "failed to restrict perms on {}: {e}", file.display());
     }
-    #[cfg(not(unix))]
-    let _ = file;
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
 
@@ -660,9 +619,8 @@ mod tests {
 
     #[test]
     fn redirect_ssrf_guard_blocks_private_and_reserved_targets() {
-        // The redirect policy follows a target only if it's allowlisted AND
-        // passes the shared SSRF validator. The validator rejects loopback, the
-        // cloud-metadata link-local endpoint, and private IPs.
+        // The redirect policy follows a target only if allowlisted AND SSRF-validated;
+        // the validator rejects loopback, the cloud-metadata link-local endpoint, and private IPs.
         for u in [
             "http://127.0.0.1/m.bin",
             "http://169.254.169.254/latest/meta-data/",
@@ -809,19 +767,8 @@ mod tests {
 
     #[test]
     fn ensure_model_storage_cap_arithmetic_blocks_overflow() {
-        // We can't put 12 GiB on disk in a unit test, so verify the *check*:
-        // pre-fill the model dir so `total_bytes_used()` is reported as huge by
-        // a wrapper, then... actually, the cleanest direct check is that the
-        // dome is enforced on `total + approx`. We assert via a tiny store
-        // whose root we point at a dir we then claim is "full" — but
-        // total_bytes_used walks the real fs. So instead: assert the
-        // arithmetic relationship the code uses, against the real constant and
-        // the real catalogue, so a future change that, say, drops the check
-        // would be caught by ensure_model_rejects_unknown_key + the mockito
-        // download tests, and the *sizing* of the dome is covered by the
-        // catalogue test. Here we just confirm the dome is bigger than any
-        // single model (so `ensure_model` for an empty store always proceeds
-        // past the cap check), which is the property the check relies on:
+        // Can't fill 12 GiB of disk in a unit test, so assert the property the `total + approx
+        // > MAX` check relies on: the dome exceeds any single model's size.
         let biggest = crate::transcription::model_catalog::WHISPER_MODELS
             .iter()
             .map(|m| m.approx_bytes)
@@ -831,10 +778,8 @@ mod tests {
             biggest < consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             "the dome must exceed the largest model, else ensure_model could never download it"
         );
-        // And: a store with files summing over the dome would block a new
-        // download. We can't write that much, but `total_bytes_used` is just
-        // `dir_size`, which we exercise elsewhere — the cap check in
-        // ensure_model is `current + approx > MAX`, plain arithmetic.
+        // A store summing over the dome would block a new download: `total_bytes_used` is
+        // plain `dir_size` (exercised elsewhere), and the check is `current + approx > MAX`.
     }
 
     #[test]
@@ -843,11 +788,9 @@ mod tests {
         let store = ModelStore::with_root(dir.path());
         let info = whisper_model("tiny").unwrap();
         std::fs::create_dir_all(store.whisper_dir()).unwrap();
-        // Write a file of exactly approx_bytes so whisper_is_present() == true.
         let path = store.whisper_path(info);
-        // approx_bytes for tiny is ~78 MiB — too big to actually write in a unit
-        // test. So instead: temporarily we can't make whisper_is_present true
-        // without that size. Verify the *negative* side (not present) + delete-noop:
+        // tiny's approx_bytes (~78 MiB) is too big to write in a unit test, so verify the
+        // *negative* side (not present) + delete-noop instead:
         assert!(
             !store
                 .whisper_status()
@@ -874,9 +817,8 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Regression: a complete file whose size drifts from the catalogue
-    /// estimate is still "present" (large-v3 showed "not downloaded" under the
-    /// old 64-byte tolerance). Sparse `set_len` keeps multi-GB sizes instant.
+    /// Regression: a complete file whose size drifts from the catalogue estimate is still
+    /// "present" (large-v3 was falsely "not downloaded" under the old 64-byte tolerance).
     #[test]
     fn present_check_tolerates_size_drift_but_rejects_truncation() {
         let dir = tempfile::tempdir().unwrap();
@@ -932,5 +874,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
         assert!(store.whisper_dir().starts_with(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_dir_perms_sets_0o700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("whisper");
+        std::fs::create_dir_all(&target).unwrap();
+
+        restrict_dir_perms(&target);
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_file_perms_sets_0o600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("m.bin");
+        std::fs::write(&target, b"data").unwrap();
+
+        restrict_file_perms(&target);
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0o600, got 0o{mode:o}");
+    }
+
+    #[test]
+    fn restrict_perms_on_a_missing_path_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        restrict_dir_perms(&missing);
+        restrict_file_perms(&missing);
     }
 }

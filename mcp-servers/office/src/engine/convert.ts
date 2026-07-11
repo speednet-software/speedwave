@@ -30,10 +30,9 @@ export interface PdfOptions {
 export type TextInput = { path: string } | { markdown: string } | { html: string };
 
 /**
- * Resolve a {@link TextInput} to a concrete file path: a provided path is validated as an input file;
- * inline content (≤ `MAX_INLINE_BYTES`) is written to a temp file with the given extension.
- * @param input - The text input (path or inline).
- * @param inlineExt - Extension to use for the temp file when content is inline (e.g. `".md"`, `".html"`).
+ * Resolve a {@link TextInput} to a concrete file path: a provided path is validated as an input file; inline content (≤ `MAX_INLINE_BYTES`) is written to a temp file with the given extension.
+ * @param input - the text input (path or inline)
+ * @param inlineExt - extension to use for the temp file when content is inline (e.g. `".md"`, `".html"`)
  * @returns The path to use and whether it is a temp file the caller should delete.
  * @throws {ValidationError} When inline content exceeds the size cap, or when `input` has no recognized key.
  */
@@ -60,8 +59,8 @@ async function materializeTextInput(
 
 /**
  * Base URL for WeasyPrint's `url_fetcher`: `/workspace/` for inline content, else the file's own directory.
- * @param filePath - The materialized file path.
- * @param isTemp - Whether the materialization wrote to `/tmp` (inline content).
+ * @param filePath - the materialized file path
+ * @param isTemp - whether the materialization wrote to `/tmp` (inline content)
  * @returns A `file://` base URL under `/workspace`.
  */
 function baseUrlFor(filePath: string, isTemp: boolean): string {
@@ -74,7 +73,7 @@ const PAGE_SIZE_KEYWORD = /^(A[0-5]|B[0-5]|letter|legal|ledger)(\s+(portrait|lan
 const CSS_LENGTH = /^[+-]?(\d+(\.\d+)?|\.\d+)(cm|mm|in|px|pt|pc|q)$|^0$/i;
 /**
  * True if `value` is one to four space-separated CSS `<length>` tokens (the `margin` shorthand).
- * @param value - The candidate margin string.
+ * @param value - the candidate margin string
  */
 function isCssMargin(value: string): boolean {
   const parts = value.trim().split(/\s+/);
@@ -83,7 +82,7 @@ function isCssMargin(value: string): boolean {
 
 /**
  * Validate `opts` and build the safe `@page` declaration (`size: …; margin: …;`).
- * @param opts - Page-rendering options.
+ * @param opts - page-rendering options
  * @returns The validated `size: <...>; margin: <...>;` string for an `@page` block.
  * @throws {ValidationError} If `pageSize` or `margin` is not a recognized CSS value.
  */
@@ -107,9 +106,9 @@ function pageRuleBody(opts: PdfOptions): string {
 }
 
 /**
- * Build a minimal print-oriented HTML wrapper around `bodyHtml` using an already-validated `@page` rule body.
- * @param bodyHtml - The HTML body fragment to wrap.
- * @param ruleBody - The validated `size: …; margin: …;` string from {@link pageRuleBody}.
+ * Build a minimal print-oriented HTML wrapper around `bodyHtml` using an already-validated `@page` rule body from {@link pageRuleBody}.
+ * @param bodyHtml - the HTML body fragment to wrap
+ * @param ruleBody - the validated `size: …; margin: …;` string from {@link pageRuleBody}
  */
 function wrapPrintHtmlWithRule(bodyHtml: string, ruleBody: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
@@ -124,9 +123,9 @@ img { max-width: 100%; }
 
 /**
  * Render an HTML file to PDF via WeasyPrint (`scripts/weasyprint_render.py`), atomically moved onto `destAbs`.
- * @param htmlAbs - Absolute path of the source HTML.
- * @param baseUrl - Base URL for resolving relative resources (a `file://` URL under `/workspace`).
- * @param destAbs - Absolute destination path for the PDF (already validated).
+ * @param htmlAbs - absolute path of the source HTML
+ * @param baseUrl - base URL for resolving relative resources (a `file://` URL under `/workspace`)
+ * @param destAbs - absolute destination path for the PDF (already validated)
  */
 async function htmlFileToPdf(htmlAbs: string, baseUrl: string, destAbs: string): Promise<void> {
   const tmpPdf = path.join(os.tmpdir(), `office-pdf-${randomUUID()}.pdf`);
@@ -140,10 +139,10 @@ async function htmlFileToPdf(htmlAbs: string, baseUrl: string, destAbs: string):
 
 /**
  * Markdown (path or inline) → PDF via pandoc → HTML → WeasyPrint.
- * @param input - The Markdown source.
- * @param outName - Output filename/path (optional; defaults under `/workspace/.speedwave/office/`).
- * @param opts - Page-rendering options.
- * @param overwrite - Permit overwriting an existing output (default false).
+ * @param input - the Markdown source
+ * @param outName - output filename/path (optional; defaults under `/workspace/.speedwave/office/`)
+ * @param opts - page-rendering options
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced PDF.
  */
 export async function markdownToPdf(
@@ -173,11 +172,11 @@ export async function markdownToPdf(
 }
 
 /**
- * HTML (path or inline) → PDF via WeasyPrint (local resources only).
- * @param input - The HTML source.
- * @param outName - Output filename/path (optional).
- * @param opts - Page-rendering options (applied as an injected `@page` rule when the HTML has no `<head>`).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * HTML (path or inline) → PDF via WeasyPrint (local resources only); `opts` is applied as an injected `@page` rule when the HTML has no `<head>`.
+ * @param input - the HTML source
+ * @param outName - output filename/path (optional)
+ * @param opts - page-rendering options (applied as an injected `@page` rule when the HTML has no `<head>`)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced PDF.
  */
 export async function htmlToPdf(
@@ -219,11 +218,11 @@ export async function htmlToPdf(
 
 /**
  * Markdown (path or inline) → another format via pandoc, atomically moved onto the validated destination.
- * @param input - The Markdown source.
- * @param writer - Pandoc output writer (`"docx"` | `"pptx"`).
- * @param defaultBase - Default base filename when `outName` is omitted.
- * @param outName - Output filename/path (optional).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * @param input - the Markdown source
+ * @param writer - pandoc output writer (`"docx"` | `"pptx"`)
+ * @param defaultBase - default base filename when `outName` is omitted
+ * @param outName - output filename/path (optional)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced file.
  */
 async function markdownViaPandoc(
@@ -250,9 +249,9 @@ async function markdownViaPandoc(
 
 /**
  * Markdown (path or inline) → `.docx` via pandoc.
- * @param input - The Markdown source.
- * @param outName - Output filename/path (optional).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * @param input - the Markdown source
+ * @param outName - output filename/path (optional)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced `.docx`.
  */
 export async function markdownToDocx(
@@ -265,9 +264,9 @@ export async function markdownToDocx(
 
 /**
  * Markdown (path or inline) → `.pptx` via pandoc's pptx writer (one slide per top-level heading).
- * @param input - The Markdown source.
- * @param outName - Output filename/path (optional).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * @param input - the Markdown source
+ * @param outName - output filename/path (optional)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced `.pptx`.
  */
 export async function markdownToPptx(
@@ -293,16 +292,15 @@ const PASSWORD_OR_ENCRYPTED = /\b(?:password|encrypt(?:ed|ion)?)\b/i;
 
 /**
  * Strips path-like tokens (anything containing `/`) so an echoed source path can never false-trigger the signature match.
- * @param detail - The raw failure detail text.
+ * @param detail - the raw failure detail text
  */
 function withoutPathTokens(detail: string): string {
   return detail.replace(/\S*\/\S+/g, '');
 }
 
 /**
- * Re-throw a LibreOffice subprocess failure as a {@link ValidationError} with actionable guidance,
- * anchoring the password/encrypted case to a whole-word signature outside any echoed file path.
- * @param err - The error thrown by `runOk` for the `soffice` invocation.
+ * Re-throw a LibreOffice subprocess failure as a {@link ValidationError} with actionable guidance, anchoring the password/encrypted case to a whole-word signature outside any echoed file path.
+ * @param err - the error thrown by `runOk` for the `soffice` invocation
  */
 function translateLibreOfficeError(err: unknown): never {
   const detail = err instanceof Error ? err.message : String(err);
@@ -319,10 +317,9 @@ function translateLibreOfficeError(err: unknown): never {
 }
 
 /**
- * Run `soffice --headless --convert-to <fmt>` on `srcAbs` into a fresh temp dir with a per-call user profile,
- * serialized through the LibreOffice queue. Returns the produced file's temp path.
- * @param srcAbs - Absolute path of the source Office file.
- * @param target - Target format token (e.g. `"pdf"`).
+ * Run `soffice --headless --convert-to <fmt>` on `srcAbs` into a fresh temp dir with a per-call user profile, serialized through the LibreOffice queue.
+ * @param srcAbs - absolute path of the source Office file
+ * @param target - target format token (e.g. `"pdf"`)
  * @returns The absolute path of the produced file under a temp directory.
  * @throws {ValidationError} If LibreOffice fails to run or produces no output file.
  */
@@ -375,9 +372,9 @@ async function libreOfficeConvert(srcAbs: string, target: string): Promise<strin
 
 /**
  * `.docx`/`.xlsx`/`.pptx` → PDF via LibreOffice headless (a true render).
- * @param userPath - Caller-supplied path to the Office file, under `/workspace`.
- * @param outName - Output filename/path (optional).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * @param userPath - caller-supplied path to the Office file, under `/workspace`
+ * @param outName - output filename/path (optional)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced PDF.
  */
 export async function officeToPdf(
@@ -404,10 +401,10 @@ export async function officeToPdf(
 
 /**
  * Convert an Office/ODF file to another format from the {@link CONVERT_MATRIX}. Targets outside the matrix are rejected.
- * @param userPath - Caller-supplied path to the source file, under `/workspace`.
- * @param target - Target format token (must be allowed for the source extension).
- * @param outName - Output filename/path (optional).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * @param userPath - caller-supplied path to the source file, under `/workspace`
+ * @param target - target format token (must be allowed for the source extension)
+ * @param outName - output filename/path (optional)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced file.
  * @throws {ValidationError} If the source extension is unknown or the target is not allowed for it.
  */

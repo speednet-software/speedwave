@@ -191,9 +191,8 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
     if [ ! -e "${_dest}" ]; then
         cp "${_tmpl}" "${_dest}"
     else
-        # Merge template keys; drop a stale /model that disagrees with the
-        # injected ANTHROPIC_MODEL, or (on the account-default path, env unset)
-        # a foreign provider/model id (ADR-073 E1). Atomic; node failure → skip.
+        # Merge template keys; drop a stale model disagreeing with ANTHROPIC_MODEL, or (env
+        # unset) a foreign provider/model id (ADR-073 E1). Atomic; node failure → skip.
         node -e "
 const fs = require('fs');
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
@@ -220,9 +219,8 @@ if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
     ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
 fi
 
-# Install bundled official Anthropic plugins (from defaults::BUNDLED_PLUGINS).
-# Only installs plugins not already present, so a user's `/plugin disable` is never
-# re-enabled by a restart. Non-fatal + bounded so a slow/failed install never blocks startup.
+# Install bundled official Anthropic plugins (defaults::BUNDLED_PLUGINS); only installs plugins
+# not already present, so `/plugin disable` survives a restart. Non-fatal and bounded.
 if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     _mp="${SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE:-claude-plugins-official}"
     if ! echo "${_mp}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then

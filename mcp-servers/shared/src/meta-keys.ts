@@ -1,6 +1,5 @@
 /**
- * SSOT for `_meta` key names on MCP tools: prefixed `speedwave.pl/…` keys plus a
- * reader that falls back to the legacy unprefixed keys.
+ * SSOT for `_meta` key names on MCP tools: prefixed `speedwave.pl/…` keys plus a reader falling back to legacy unprefixed keys.
  * @module shared/meta-keys
  */
 
@@ -26,11 +25,11 @@ export const META_KEYS = Object.freeze({
 export type MetaKey = (typeof META_KEYS)[keyof typeof META_KEYS];
 
 /**
- * Read a `_meta` value, preferring the prefixed key and falling back to the legacy
- * unprefixed key (back-compat for third-party plugin workers).
- * @param meta - The tool's `_meta` record (may be undefined).
- * @param prefixedKey - The MCP-spec-compliant prefixed key, e.g. `META_KEYS.DEFER_LOADING`.
- * @param legacyKey - The legacy unprefixed key, e.g. `'deferLoading'`.
+ * Read a `_meta` value, preferring the prefixed key and falling back to the legacy unprefixed key
+ * (back-compat for third-party plugin workers); e.g. `META_KEYS.DEFER_LOADING` / `'deferLoading'`.
+ * @param meta - The tool's `_meta` object, or undefined.
+ * @param prefixedKey - The MCP-spec-compliant prefixed key to look up first.
+ * @param legacyKey - The unprefixed legacy key to fall back to.
  */
 export function metaValue(
   meta: Record<string, unknown> | undefined,

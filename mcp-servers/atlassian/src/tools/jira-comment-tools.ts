@@ -141,7 +141,6 @@ const addWorklogTool: Tool = {
 /**
  * Build the Jira comment/worklog tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for comments and worklog.
  */
 export function createJiraCommentTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [addCommentTool, getCommentsTool, addWorklogTool];

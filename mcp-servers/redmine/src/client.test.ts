@@ -61,9 +61,7 @@ describe('RedmineClient', () => {
     vi.clearAllMocks();
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Constructor and Initialization
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Constructor and Initialization ─────────────────────────────────────────────────────────────
 
   describe('constructor', () => {
     it('should create axios instance with correct config', () => {
@@ -142,9 +140,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Issue Operations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Issue Operations ───────────────────────────────────────────────────────────────────────────
 
   describe('listIssues', () => {
     it('should fetch issues with default parameters', async () => {
@@ -800,9 +796,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Time Entry Operations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Time Entry Operations ──────────────────────────────────────────────────────────────────────
 
   describe('listTimeEntries', () => {
     it('should fetch time entries with default parameters', async () => {
@@ -975,9 +969,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Journal Operations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Journal Operations ─────────────────────────────────────────────────────────────────────────
 
   describe('listJournals', () => {
     it('should fetch journals for an issue', async () => {
@@ -1054,9 +1046,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // User Operations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── User Operations ────────────────────────────────────────────────────────────────────────────
 
   describe('getCurrentUser', () => {
     it('should fetch current user', async () => {
@@ -1201,9 +1191,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Relation Operations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Relation Operations ────────────────────────────────────────────────────────────────────────
 
   describe('listRelations', () => {
     it('should list relations for an issue', async () => {
@@ -1353,9 +1341,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Relation Error Handling
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Relation Error Handling ────────────────────────────────────────────────────────────────────
 
   describe('listRelations - error handling', () => {
     it('should throw when issue does not exist (404)', async () => {
@@ -1543,9 +1529,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Error Handling
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
 
   describe('formatError', () => {
     beforeEach(() => {
@@ -1780,9 +1764,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Retry Mechanism
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Retry Mechanism ────────────────────────────────────────────────────────────────────────────
 
   describe('retry interceptor', () => {
     it('should retry failed requests up to 3 times', async () => {
@@ -1886,9 +1868,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Input Sanitization
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Input Sanitization ─────────────────────────────────────────────────────────────────────────
 
   describe('input sanitization', () => {
     it('should remove script tags from input', async () => {
@@ -1985,9 +1965,7 @@ describe('RedmineClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Project Scoping
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Project Scoping ────────────────────────────────────────────────────────────────────────────
 
   describe('Project Scoping', () => {
     const scopedProjectConfig: RedmineProjectConfig = {
@@ -3471,9 +3449,7 @@ describe('RedmineClient', () => {
   });
 });
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Factory Tests
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Client Factory Tests ─────────────────────────────────────────────────────────────────────────
 
 describe('initializeRedmineClient', () => {
   let mockAxiosInstance: any;
@@ -3681,9 +3657,7 @@ describe('initializeRedmineClient', () => {
     expect(client?.getMappings()).toEqual({});
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Eager project_name fetch
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Eager project_name fetch ───────────────────────────────────────────────────────────────────
 
   describe('lazy project_name fetch', () => {
     it('should fetch project_name when project_id is set but project_name is absent', async () => {
@@ -4048,9 +4022,8 @@ describe('initializeRedmineClient', () => {
     });
 
     it('caches successful result on subsequent calls (memo across N calls)', async () => {
-      // showProject internally catches rejections and returns null — there is
-      // no caller-visible rejection path. The relevant memo invariant for
-      // redmine: once a name is resolved, repeated calls do NOT re-hit HTTP.
+      // showProject catches rejections and returns null (no caller-visible rejection path);
+      // once a name is resolved, repeated calls must not re-hit HTTP.
       mockAxiosInstance.get.mockResolvedValue({
         data: { project: { id: 42, name: 'My Project', identifier: 'my-project' } },
       });

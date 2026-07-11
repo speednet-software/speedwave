@@ -5,9 +5,8 @@ interface SyncMarkdownParser {
 
 /**
  * Parses Markdown synchronously; throws if an async extension made `parse` return a Promise.
- * @param parser - the `marked` namespace or a scoped `Marked` instance
- * @param src - Markdown source
- * @returns HTML string (sanitise at bind time)
+ * @param parser - The `marked` namespace or a scoped `Marked` instance.
+ * @param src - Markdown source.
  */
 export function parseMarkdownSync(parser: SyncMarkdownParser, src: string): string {
   const html = parser.parse(src, { async: false });

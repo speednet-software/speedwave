@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use image::{ColorType, ImageEncoder};
 use speedwave_runtime::consts::DATA_DIR;
+use speedwave_runtime::fs_perms::set_owner_only;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -55,7 +56,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
     let target = clip_path(project_dir);
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("paste_watcher: cannot create {}: {e}", parent.display());
+            log::warn!("cannot create paste directory {}: {e}", parent.display());
             return;
         }
     }
@@ -63,7 +64,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
     let mut clipboard = match Clipboard::new() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("paste_watcher: clipboard unavailable: {e} — CLI paste disabled");
+            log::warn!("clipboard unavailable: {e} — CLI paste disabled");
             return;
         }
     };
@@ -75,14 +76,9 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                 let h = hash_image(&img);
                 if Some(h) != last_hash {
                     if let Err(e) = write_png(&target, &img) {
-                        log::warn!("paste_watcher: write {} failed: {e}", target.display());
+                        log::warn!("failed to write {}: {e}", target.display());
                     } else {
-                        log::debug!(
-                            "paste_watcher: wrote {} ({}x{})",
-                            target.display(),
-                            img.width,
-                            img.height
-                        );
+                        log::debug!("wrote {} ({}x{})", target.display(), img.width, img.height);
                     }
                     last_hash = Some(h);
                 }
@@ -91,7 +87,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                 // No image in clipboard — keep the last file (or absence) as is.
             }
             Err(e) => {
-                log::trace!("paste_watcher: get_image error: {e}");
+                log::trace!("failed to get clipboard image: {e}");
             }
         }
         thread::sleep(Duration::from_millis(POLL_MS));
@@ -123,26 +119,15 @@ fn write_png(target: &Path, img: &arboard::ImageData<'_>) -> Result<()> {
             .context("png encode")?;
     }
     // Owner-only perm BEFORE rename so the final inode never appears world-readable.
-    set_owner_only(&tmp)?;
+    set_owner_only(&tmp)
+        .map_err(|e| anyhow::anyhow!(e))
+        .with_context(|| format!("owner-only perms {}", tmp.display()))?;
     std::fs::rename(&tmp, target).with_context(|| format!("rename → {}", target.display()))?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_owner_only(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 600 {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_owner_only(_path: &Path) -> Result<()> {
-    // Windows: NTFS ACLs handled by parent dir creation; no per-file chmod.
-    Ok(())
-}
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 

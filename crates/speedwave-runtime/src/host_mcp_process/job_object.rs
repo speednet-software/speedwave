@@ -1,10 +1,12 @@
-//! Windows Job Object kill-on-close: host MCP workers die with the parent.
-//! No-op stubs on non-Windows. See ADR-048 ("PRE-INSTALL orphan worker
-//! sweep") for the architectural rationale and TOCTOU known-limitation.
+//! Windows Job Object kill-on-close: host MCP workers die with the parent. No-op stubs elsewhere.
+//! See ADR-048 ("PRE-INSTALL orphan worker sweep") for rationale and the TOCTOU known-limitation.
 
 #[cfg(target_os = "windows")]
 // FFI boundary — `unsafe_code` is allowed only here; each block carries SAFETY docs.
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "Job Object FFI boundary; every block carries a SAFETY comment"
+)]
 mod imp {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE};
@@ -117,14 +119,15 @@ mod imp {
 pub use imp::{attach_to_kill_on_close_job, JobHandle};
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[cfg(not(target_os = "windows"))]
     #[test]
+    #[expect(clippy::unwrap_used, reason = "test fixture spawn/wait")]
     fn stub_returns_none_without_panic() {
         // `/bin/sh -c "exit 0"` works under minimal/sandboxed PATH.
+        // SSOT-allow: test fixture spawn
         let child = std::process::Command::new("/bin/sh")
             .args(["-c", "exit 0"])
             .spawn()
@@ -136,8 +139,13 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "test fixture: powershell.exe must be available on Windows test hosts"
+    )]
     fn attach_to_live_child_kills_on_handle_drop() {
         // PS Start-Sleep blocks 30 s ignoring stdio (timeout.exe exits early on null stdout).
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
             .stdout(std::process::Stdio::null())

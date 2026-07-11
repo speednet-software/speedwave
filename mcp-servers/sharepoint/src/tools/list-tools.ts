@@ -1,21 +1,6 @@
 /**
- * List Tools — CRUD for SharePoint Lists, items, and columns + page deletion.
- *
- * 13 tools:
- *   listLists, getList, createList, updateList, deleteList,
- *   addListColumn, removeListColumn,
- *   listItems, getItem, createItem, updateItem, deleteItem,
- *   deletePage (deletion-ops bundle)
- *
- * Site-policy by omission (ADR-060): no tool accepts `site_id`. Worker uses
- * `client.getSiteId()` from `/tokens/site_id`.
- *
- * Scope requirement: `Sites.Manage.All` (consts.rs SHAREPOINT_OAUTH_SCOPES).
- * `createList` formally requires Sites.Manage.All per Microsoft Graph.
- *
- * Column-type schema for `addListColumn` limited to documented Graph types:
- * text, number, boolean, dateTime, choice, lookup. Other types (calculated,
- * geolocation, term) are out of scope.
+ * List Tools — CRUD for SharePoint Lists, items, and columns + page deletion (13 tools: listLists, getList, createList, updateList, deleteList, addListColumn, removeListColumn, listItems, getItem, createItem, updateItem, deleteItem, deletePage).
+ * ADR-060 site policy: no tool accepts `site_id`, worker uses `client.getSiteId()`; scope is `Sites.Manage.All`; `addListColumn` supports only text/number/boolean/dateTime/choice/lookup (calculated/geolocation/term out of scope).
  */
 
 import {
@@ -33,9 +18,7 @@ import { ListsClient } from '../graph/lists-client.js';
 import { ColumnsClient } from '../graph/columns-client.js';
 import { PagesClient } from '../graph/pages-client.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ─────────────────────────────────────────────────────────────────────────
 
 /** Minimal Graph list projection used by the tools. */
 export interface SharePointList {
@@ -71,9 +54,7 @@ export interface SharePointListItem {
   webUrl?: string;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool schemas
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool schemas ──────────────────────────────────────────────────────────────────
 
 const listListsTool: Tool = {
   name: 'listLists',
@@ -417,9 +398,7 @@ const deletePageTool: Tool = {
   },
 };
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Handlers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Handlers ──────────────────────────────────────────────────────────────────────
 
 function lists(client: SharePointClient): ListsClient {
   return new ListsClient(client);
@@ -441,16 +420,15 @@ function wrapErr(code: string, error: unknown): ToolResult {
 }
 
 /**
- * Build the Graph column definition for `addListColumn`. Graph requires one
- * type-specific sub-object (text/number/boolean/dateTime/choice/lookup).
- * @param params - flat tool params (see `addListColumnTool` schema)
- * @param params.name - internal column name
- * @param params.displayName - human-readable label (defaults to `name`)
- * @param params.type - column type (text/number/boolean/dateTime/choice/lookup)
- * @param params.required - whether the column is required
- * @param params.choices - allowed values when type === "choice"
- * @param params.lookupListId - source list id when type === "lookup"
- * @param params.lookupColumnName - source column when type === "lookup"
+ * Build the Graph column definition for `addListColumn`: one type-specific sub-object per type.
+ * @param params - Column fields.
+ * @param params.name - Internal column name.
+ * @param params.displayName - Display name for the column.
+ * @param params.type - Column type (text/number/boolean/dateTime/choice/lookup).
+ * @param params.required - Whether the column is required.
+ * @param params.choices - Choice values (type: 'choice' only).
+ * @param params.lookupListId - Graph id of the source list (type: 'lookup' only).
+ * @param params.lookupColumnName - Existing column name on the source list (type: 'lookup' only).
  */
 function buildColumnPayload(params: {
   name: string;
@@ -494,7 +472,7 @@ function buildColumnPayload(params: {
 
 /**
  * Handler for `listLists` — GET all lists in the configured site.
- * @param client - the SharePoint client
+ * @param client - Configured SharePoint client.
  */
 async function handleListLists(client: SharePointClient): Promise<ToolResult> {
   try {
@@ -517,9 +495,9 @@ async function handleListLists(client: SharePointClient): Promise<ToolResult> {
 
 /**
  * Handler for `getList` — GET one list with `$expand=columns`.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
+ * @param client - Configured SharePoint client.
+ * @param params - Lookup params.
+ * @param params.listId - Graph list id, from listLists.
  */
 async function handleGetList(
   client: SharePointClient,
@@ -536,13 +514,13 @@ async function handleGetList(
 }
 
 /**
- * Handler for `createList` — POST a new list (requires Sites.Manage.All).
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.displayName - human-readable list name
- * @param params.description - optional description
- * @param params.template - optional list template (e.g. "genericList")
- * @param params.columns - optional initial column definitions
+ * Handler for `createList` — POST a new list (requires Sites.Manage.All); `template` defaults to "genericList".
+ * @param client - Configured SharePoint client.
+ * @param params - New list fields.
+ * @param params.displayName - Display name for the new list.
+ * @param params.description - Optional list description.
+ * @param params.template - List template, e.g. "genericList".
+ * @param params.columns - Optional initial column definitions.
  */
 async function handleCreateList(
   client: SharePointClient,
@@ -570,11 +548,11 @@ async function handleCreateList(
 
 /**
  * Handler for `updateList` — PATCH list metadata.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.displayName - new display name
- * @param params.description - new description
+ * @param client - Configured SharePoint client.
+ * @param params - Fields to update.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.displayName - New display name.
+ * @param params.description - New description.
  */
 async function handleUpdateList(
   client: SharePointClient,
@@ -595,9 +573,9 @@ async function handleUpdateList(
 
 /**
  * Handler for `deleteList` — DELETE a list.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
+ * @param client - Configured SharePoint client.
+ * @param params - Target list.
+ * @param params.listId - Graph list id, from listLists.
  */
 async function handleDeleteList(
   client: SharePointClient,
@@ -614,17 +592,17 @@ async function handleDeleteList(
 }
 
 /**
- * Handler for `addListColumn` — POST a new column on a list.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.name - internal column name
- * @param params.displayName - optional human-readable label
- * @param params.type - column type (text/number/boolean/dateTime/choice/lookup)
- * @param params.required - whether the column is required
- * @param params.choices - choice values when type === "choice"
- * @param params.lookupListId - source list id when type === "lookup"
- * @param params.lookupColumnName - source column when type === "lookup"
+ * Handler for `addListColumn` — POST a new column on a list; see `buildColumnPayload` for the per-type field mapping.
+ * @param client - Configured SharePoint client.
+ * @param params - New column fields.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.name - Internal column name.
+ * @param params.displayName - Display name for the column.
+ * @param params.type - Column type (text/number/boolean/dateTime/choice/lookup).
+ * @param params.required - Whether the column is required.
+ * @param params.choices - Choice values (type: 'choice' only).
+ * @param params.lookupListId - Graph id of the source list (type: 'lookup' only).
+ * @param params.lookupColumnName - Existing column name on the source list (type: 'lookup' only).
  */
 async function handleAddListColumn(
   client: SharePointClient,
@@ -658,10 +636,10 @@ async function handleAddListColumn(
 
 /**
  * Handler for `removeListColumn` — DELETE a column from a list.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.columnId - id of the column to remove
+ * @param client - Configured SharePoint client.
+ * @param params - Target column.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.columnId - Graph column id, from getList (columns[].id).
  */
 async function handleRemoveListColumn(
   client: SharePointClient,
@@ -681,11 +659,11 @@ async function handleRemoveListColumn(
 
 /**
  * Handler for `listItems` — GET items with $expand=fields.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.filter - optional OData $filter expression
- * @param params.top - optional max items
+ * @param client - Configured SharePoint client.
+ * @param params - Query params.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.filter - Optional OData $filter expression.
+ * @param params.top - Optional max items (default Graph paging).
  */
 async function handleListItems(
   client: SharePointClient,
@@ -733,10 +711,10 @@ async function handleListItems(
 
 /**
  * Handler for `getItem` — GET one item with $expand=fields.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.itemId - target item id
+ * @param client - Configured SharePoint client.
+ * @param params - Lookup params.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.itemId - Graph item id, from listItems.
  */
 async function handleGetItem(
   client: SharePointClient,
@@ -758,10 +736,10 @@ async function handleGetItem(
 
 /**
  * Handler for `createItem` — POST a new list item.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.fields - field name → value mapping for the new item
+ * @param client - Configured SharePoint client.
+ * @param params - New item fields.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.fields - Field name → value mapping.
  */
 async function handleCreateItem(
   client: SharePointClient,
@@ -780,12 +758,12 @@ async function handleCreateItem(
 }
 
 /**
- * Handler for `updateItem` — PATCH item fields.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.itemId - target item id
- * @param params.fields - field updates (replaces matching keys only)
+ * Handler for `updateItem` — PATCH item fields; `fields` replaces matching keys only.
+ * @param client - Configured SharePoint client.
+ * @param params - Fields to update.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.itemId - Graph item id, from listItems.
+ * @param params.fields - Field name → new value mapping.
  */
 async function handleUpdateItem(
   client: SharePointClient,
@@ -805,10 +783,10 @@ async function handleUpdateItem(
 
 /**
  * Handler for `deleteItem` — DELETE a list item.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.listId - target list id
- * @param params.itemId - target item id
+ * @param client - Configured SharePoint client.
+ * @param params - Target item.
+ * @param params.listId - Graph list id, from listLists.
+ * @param params.itemId - Graph item id, from listItems.
  */
 async function handleDeleteItem(
   client: SharePointClient,
@@ -828,9 +806,9 @@ async function handleDeleteItem(
 
 /**
  * Handler for `deletePage` — DELETE a SharePoint page.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
+ * @param client - Configured SharePoint client.
+ * @param params - Target page.
+ * @param params.pageId - Graph page id, from listPages.
  */
 async function handleDeletePage(
   client: SharePointClient,
@@ -846,13 +824,11 @@ async function handleDeletePage(
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Factory
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Factory ───────────────────────────────────────────────────────────────────────
 
 /**
  * Build the list / item / column / deletion tool definitions.
- * @param client - the initialized SharePoint client (or null when not configured)
+ * @param client - Configured SharePoint client, or null when not configured.
  */
 export function createListTools(client: SharePointClient | null): ToolDefinition[] {
   const withClient =

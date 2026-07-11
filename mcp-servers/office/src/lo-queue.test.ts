@@ -1,7 +1,5 @@
 /**
- * Tests for the LibreOffice serialization queue: tasks run one at a time, in order,
- * and a failing task does not break the chain.
- * @module mcp-office/lo-queue.test
+ * Tests the LibreOffice serialization queue: tasks run one at a time, in order; a failing task does not break the chain.
  */
 
 import { describe, it, expect } from 'vitest';

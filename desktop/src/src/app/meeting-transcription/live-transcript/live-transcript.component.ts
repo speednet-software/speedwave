@@ -14,9 +14,9 @@ import { TranscriptionService } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 /**
- * Seconds → `MM:SS`. (Segment timestamps are serde `Duration` `{secs,nanos}`;
- * the caller passes `.secs` — sub-second precision isn't shown.)
- * @param secs - whole seconds since the recording started.
+ * Seconds → `MM:SS`. Segment timestamps are serde `Duration` `{secs,nanos}`; the caller passes
+ * `.secs`, so sub-second precision isn't shown.
+ * @param secs - whole seconds since the recording started
  */
 function fmtTs(secs: number): string {
   return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
@@ -29,10 +29,8 @@ interface TranscriptLine {
 }
 
 /**
- * The live transcript view (right pane): renders the active session's segments
- * (the offline `final_segments` if the pass ran, else `live_segments`) as plain
- * timestamped lines, shows the finalize progress bar, and has a "Send to chat"
- * button behind a confirm dialog (the markdown leaves the machine).
+ * Live transcript view (right pane): segments (offline `final_segments` if run, else
+ * `live_segments`), finalize progress bar, and a "Send to chat" button behind a confirm dialog.
  */
 @Component({
   selector: 'app-live-transcript',

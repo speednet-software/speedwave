@@ -201,10 +201,7 @@ export class ServiceCardComponent {
     return this.svc().oauth_provider_label ?? 'provider';
   }
 
-  /**
-   * Semantic status dot key — drives both the tinted dot colour and a
-   * `data-status-dot` attribute used by tests and AXE.
-   */
+  /** Semantic status dot key — drives both the tinted dot colour and a `data-status-dot` attribute used by tests and AXE. */
   statusDotKey(): ServiceStatusDot {
     const oauth = this.oauthStatus();
     if (oauth === 'error' || oauth === 'expired') return 'error';

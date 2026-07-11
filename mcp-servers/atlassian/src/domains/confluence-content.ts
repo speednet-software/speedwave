@@ -1,6 +1,5 @@
 /**
- * Confluence page-level content — footer comments, labels, and attachments,
- * via the v2 API.
+ * Confluence page-level content — footer comments, labels, and attachments, via the v2 API.
  * @module mcp-atlassian/domains/confluence-content
  */
 
@@ -26,15 +25,14 @@ export interface ConfluenceContentClient {
 }
 
 /**
- * Create a Confluence page-content client.
+ * Create a {@link ConfluenceContentClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
  * @returns A {@link ConfluenceContentClient}.
  */
 export function createConfluenceContentClient(client: AtlassianClient): ConfluenceContentClient {
   /**
-   * Enforce the space allowlist for a page by resolving its space. A 404 on the
-   * space lookup means "no key" (allowlist denial); any other lookup failure is
-   * rethrown so it isn't misread as a scope decision.
+   * Enforce the space allowlist for a page by resolving its space. A 404 on the space lookup
+   * means "no key" (allowlist denial); any other lookup failure is rethrown, not a scope decision.
    * @param pageId - The Confluence page ID.
    */
   const enforcePage = async (pageId: string): Promise<void> => {
@@ -98,14 +96,13 @@ export function createConfluenceContentClient(client: AtlassianClient): Confluen
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Normalisers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
- * Map a v2 footer-comment object to {@link ConfluenceComment}.
+ * Map a v2 footer-comment object to {@link ConfluenceComment}; `pageId` is used as a fallback.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @param pageId - The Confluence page ID.
+ * @returns The normalised comment.
  */
 export function mapComment(raw: unknown, pageId: string): ConfluenceComment {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -135,9 +132,10 @@ export function mapLabel(raw: unknown): ConfluenceLabel {
 }
 
 /**
- * Map a v2 attachment object to {@link ConfluenceAttachment}.
+ * Map a v2 attachment object to {@link ConfluenceAttachment}; `pageId` is used as a fallback.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @param pageId - The Confluence page ID.
+ * @returns The normalised attachment.
  */
 export function mapAttachment(raw: unknown, pageId: string): ConfluenceAttachment {
   const o = (raw ?? {}) as Record<string, unknown>;

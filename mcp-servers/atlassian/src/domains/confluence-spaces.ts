@@ -1,6 +1,6 @@
 /**
- * Confluence spaces — listing (allowlist-filtered) and single-space lookup,
- * via the v2 API (`/wiki/api/v2/spaces`).
+ * Confluence spaces — listing (allowlist-filtered) and single-space lookup, via the v2 API
+ * (`/wiki/api/v2/spaces`).
  * @module mcp-atlassian/domains/confluence-spaces
  */
 
@@ -18,9 +18,9 @@ export interface ConfluenceSpacesClient {
 }
 
 /**
- * Create a Confluence spaces client.
+ * Create a {@link ConfluenceSpacesClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
- * @returns A {@link ConfluenceSpacesClient}.
+ * @returns A Confluence spaces client.
  */
 export function createConfluenceSpacesClient(client: AtlassianClient): ConfluenceSpacesClient {
   return {

@@ -26,48 +26,26 @@ fn detect_platform() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_platform() -> Option<String> {
-    use std::io::Read;
-    use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     // 5 s deadline; slow PowerShell startup (cold boot, AV scan) must not stall caller.
-    let timeout = Duration::from_secs(5);
-    // system_command applies CREATE_NO_WINDOW on Windows so this PowerShell
-    // probe (runs on every render_compose → add/switch project) does not flash
-    // a console window over the Desktop UI.
-    let mut child = crate::binary::powershell_command()
-        .args([
+    let output = crate::binary::run_powershell_capture(
+        &[
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             "(Get-TimeZone).Id",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        ],
+        Duration::from_secs(5),
+    )
+    .map_err(|e| log::warn!("Get-TimeZone failed: {e}"))
+    .ok()?;
 
-    let start = Instant::now();
-    loop {
-        match child.try_wait().ok()? {
-            Some(status) if status.success() => break,
-            Some(_) => return None,
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    log::warn!("Get-TimeZone timed out after {}s", timeout.as_secs());
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
+    if !output.status.success() {
+        return None;
     }
 
-    // Output ~30 bytes (single zone ID line); no pipe-buffer deadlock risk.
-    let mut buf = String::new();
-    child.stdout.as_mut()?.read_to_string(&mut buf).ok()?;
-    detect_windows(buf.trim())
+    detect_windows(String::from_utf8_lossy(&output.stdout).trim())
 }
 
 /// Extracts IANA name from `/etc/localtime` symlink; falls back to validated `$TZ` env value.
@@ -280,7 +258,10 @@ const WINDOWS_TO_IANA: &[(&str, &str)] = &[
 ];
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: unwrap on fixtures is the sanctioned boundary"
+)]
 mod tests {
     use super::*;
 

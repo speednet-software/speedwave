@@ -17,7 +17,7 @@ Move OAuth token refresh out of the SharePoint container into a new **`oauth`** 
 
 ## What it does NOT close
 
-Live compromise is **not** mitigated by isolation alone. An attacker with RCE in the SharePoint worker holds the bearer + URL and can call `refresh` legitimately for as long as the worker runs (and already has the in-memory access token). Partial defenses: a refresh rate limit (default ~1 per 30 min per service while the token is still valid), an append-only audit log, and the IdP's own access-token TTL plus user/admin revocation. The architectural gain is the offline-exfiltration and code-path-bug classes — not live compromise. `forget()` only deletes Speedwave's local copy; full revocation requires the user/admin acting at the Microsoft account or Azure AD side.
+Live compromise is **not** mitigated by isolation alone. An attacker with RCE in the SharePoint worker holds the bearer + URL and can call `refresh` legitimately for as long as the worker runs (and already has the in-memory access token). Partial defenses: a refresh rate limit (default ~1 per 30 min per service while the token is still valid), an append-only audit log, and the IdP's own access-token TTL plus user/admin revocation. The architectural gain is the offline-exfiltration and code-path-bug classes — not live compromise. `forget()` only deletes Speedwave's local copy; full revocation requires the user/admin acting at the Microsoft account or Azure AD side.[^1]
 
 ## Where it lives in code
 
@@ -29,7 +29,7 @@ Live compromise is **not** mitigated by isolation alone. An attacker with RCE in
 - SharePoint credential descriptor (`access_token`, `site_id` only) and OAuth state field allowlist — `crates/speedwave-runtime/src/consts.rs` (`credential_files`, `oauth_state_fields`)
 - OAuth request scopes SSOT — `crates/speedwave-runtime/src/consts.rs` (`SHAREPOINT_OAUTH_SCOPES`)
 - Spawn on project switch / compose-up when an OAuth service is enabled — `desktop/src-tauri/src/main.rs` (`ensure_oauth_running`). The Desktop app is the **sole** spawner; the CLI (a Desktop-dependent client) does not spawn the worker — it reads the Desktop-held lock/bearer-map from disk. A second CLI-side supervisor caused the dual-supervisor exit-137 cycle, removed per ADR-068 §"Not every exit 137 is OOM".
-- Device-code flow that seeds the state — `desktop/src-tauri/src/oauth_cmd.rs`
+- Device-code flow[^2] that seeds the state — `desktop/src-tauri/src/oauth_cmd.rs`
 - SharePoint token manager (now health-only, no token writes) — `mcp-servers/sharepoint/src/token-manager.ts`
 
 ## On-disk shape
@@ -40,14 +40,14 @@ A startup migration (`crates/speedwave-runtime/src/oauth_state_migration.rs`, al
 
 ## Shared refresh-retry helper
 
-On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer (built-in workers plus plugins via a vendored copy) calls a shared `authedRequest` helper in `mcp-shared` (`mcp-servers/shared/src/oauth-authed-request.ts`): it issues the HTTP request, and on an auth-failure status calls `oauth.refresh()`, re-reads `/tokens/access_token`, and retries once — so the refresh-retry logic is SSOT, not duplicated. The auth-failure trigger is `[401]` by default per RFC 6750's `invalid_token` response,[^1] and consumers may add non-standard statuses (a GLPI 11 instance is observed to return `400` for an expired token — observed instance behavior, not a documented contract; see ADR-069). A `5xx` is a server fault and never triggers refresh. SharePoint delegates both its reactive and proactive (JWT `exp`) refresh to this helper.
+On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer (built-in workers plus plugins via a vendored copy) calls a shared `authedRequest` helper in `mcp-shared` (`mcp-servers/shared/src/oauth-authed-request.ts`): it issues the HTTP request, and on an auth-failure status calls `oauth.refresh()`, re-reads `/tokens/access_token`, and retries once — so the refresh-retry logic is SSOT, not duplicated. The auth-failure trigger is `[401]` by default per RFC 6750's `invalid_token` response,[^3] and consumers may add non-standard statuses (a GLPI 11 instance is observed to return `400` for an expired token (unverified: observed instance behavior, not a documented contract; see ADR-069)). A `5xx` is a server fault and never triggers refresh. SharePoint delegates both its reactive and proactive (JWT `exp`[^4]) refresh to this helper.
 
 ## Rejected alternatives
 
 - **Keep SharePoint's `:rw` exception (ADR-009's original choice).** A `:rw` mount lets a compromised container rewrite the refresh token to one the attacker controls, persisting access past a user revoke, and any `/tokens` read path is a leak risk. Moving refresh host-side makes the gate systemic.
 - **Refresh via the hub.** Would force the hub to hold a bearer (zero-tokens regression) and reverse the one-way hub → worker call direction for no gain.
 - **A single global oauth worker.** Would require a model-supplied `project` parameter that a compromised caller could forge; the per-project model removes that parameter entirely.
-- **Confidential-client / `client_secret` flow.** Out of scope — no secret exists today (device-code is a public-client flow); migrating would need app re-registration, a new consent UI, and credential rotation.
+- **Confidential-client / `client_secret` flow.** Out of scope — no secret exists today (device-code is a public-client flow[^2]); migrating would need app re-registration, a new consent UI, and credential rotation.
 
 ## References
 
@@ -58,4 +58,10 @@ On-demand `refresh` is no longer re-implemented per worker. Every OAuth consumer
 - Microsoft Identity — refresh-token redemption: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#refresh-the-access-token>
 - Microsoft Identity — refresh-token revocation is a user/admin operation: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens#token-revocation>
 
-[^1]: RFC 6750 — a protected resource returns `401 Unauthorized` with `error="invalid_token"` when the access token is expired or otherwise invalid: <https://datatracker.ietf.org/doc/html/rfc6750#section-3.1>
+[^1]: Microsoft identity platform - refresh tokens can only be revoked by user action (change password, SSPR, explicit revoke) or admin action (password reset, revoke all refresh tokens); the client app cannot revoke them itself: <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens#token-revocation>
+
+[^2]: Microsoft identity platform - OAuth 2.0 device authorization grant: the client's token request carries only `client_id` and `device_code`, no client secret, confirming it is a public-client flow: <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
+
+[^3]: RFC 6750 - a protected resource returns `401 Unauthorized` with `error="invalid_token"` when the access token is expired or otherwise invalid: <https://datatracker.ietf.org/doc/html/rfc6750#section-3.1>
+
+[^4]: RFC 7519 (JSON Web Token) - the `exp` (expiration time) claim identifies the time on or after which the JWT must not be accepted for processing: <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1.4>

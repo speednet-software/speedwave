@@ -17,58 +17,31 @@ import {
 import { MAPPABLE_FIELDS } from './tools/helpers.js';
 import { TOOL_NAMES } from './tool-names.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Axios Retry Config Extension
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Axios Retry Config Extension ─────────────────────────────────────────────────────────────────
 
-/**
- * Extended Axios request configuration with retry counter.
- * @interface RetryConfig
- * @augments {InternalAxiosRequestConfig}
- */
+/** Extended Axios request configuration with retry counter. */
 interface RetryConfig extends InternalAxiosRequestConfig {
-  /**
-   * Number of retry attempts made for this request.
-   */
+  /** Number of retry attempts made for this request. */
   __retryCount?: number;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ────────────────────────────────────────────────────────────────────────────────────────
 
-/**
- * Redmine client configuration.
- * @interface RedmineConfig
- */
+/** Redmine client configuration. */
 export interface RedmineConfig {
-  /**
-   * Base URL of the Redmine instance.
-   */
+  /** Base URL of the Redmine instance. */
   url: string;
-  /**
-   * API key for authentication.
-   */
+  /** API key for authentication. */
   apiKey: string;
 }
 
-/**
- * Mappings for friendly names to Redmine IDs.
- * Allows users to reference status, priority, tracker, and activity by name instead of numeric ID.
- * @interface RedmineMappings
- */
+/** Mappings for friendly names to Redmine IDs (status/priority/tracker/activity), used instead of numeric IDs. */
 export interface RedmineMappings {
-  /**
-   * Status ID for "New" status.
-   */
+  /** Status ID for "New" status. */
   status_new?: number;
-  /**
-   * Status ID for "In Progress" status.
-   */
+  /** Status ID for "In Progress" status. */
   status_in_progress?: number;
-  /**
-   * Status ID for "Resolved" status.
-   */
+  /** Status ID for "Resolved" status. */
   status_resolved?: number;
   /**
    * Status ID for "Feedback" status.
@@ -156,11 +129,7 @@ export interface RedmineMappings {
   [key: string]: number | undefined;
 }
 
-/**
- * Redmine project configuration from /tokens/config.json.
- * Flat structure — no nested integrations.tracker or redmine keys.
- * @interface RedmineProjectConfig
- */
+/** Redmine project configuration from /tokens/config.json. Flat structure, no nested integrations.tracker or redmine keys. */
 export interface RedmineProjectConfig {
   /**
    * Redmine instance URL.
@@ -509,9 +478,7 @@ export interface RedmineProject {
   time_entry_activities?: Array<{ id: number; name: string; is_default?: boolean }>;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Payload Types for API requests
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Payload Types for API requests ───────────────────────────────────────────────────────────────
 
 /**
  * Redmine relation type defining valid relationship kinds between issues.
@@ -632,9 +599,7 @@ interface TimeEntryPayload {
   spent_on?: string;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Token Loading
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Token Loading ────────────────────────────────────────────────────────────────────────────────
 
 const REDMINE_STATUS_MAP: Record<string, number> = { active: 1, closed: 9, archived: 5 };
 
@@ -656,9 +621,7 @@ async function loadRedmineConfig(): Promise<RedmineProjectConfig | null> {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Input Validation
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Input Validation ─────────────────────────────────────────────────────────────────────────────
 
 /** Tags whose entire content (opening tag + body + closing tag) must be removed */
 const DANGEROUS_TAGS = ['script', 'style', 'iframe', 'object', 'embed', 'form', 'applet'];
@@ -713,8 +676,7 @@ const SAFE_TAGS = new Set([
 
 /**
  * Sanitize Textile markup to remove potentially dangerous content.
- * @param textile - The Textile markup to sanitize.
- * @returns Sanitized Textile markup.
+ * @param textile - Raw Textile markup to sanitize.
  */
 function sanitizeTextile(textile: string): string {
   let result = textile;
@@ -776,7 +738,7 @@ const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
 
 /**
  * Render a context object as "key=value" pairs, e.g. `{ issue_id: 1 }` -> `"issue_id=1"`.
- * @param context - Attempted resource identifier(s).
+ * @param context - Attempted resource identifier(s) to render.
  */
 function formatContextLabel(context: ErrorContext): string {
   return Object.entries(context)
@@ -785,9 +747,8 @@ function formatContextLabel(context: ErrorContext): string {
 }
 
 /**
- * Build a 404 error message, naming the attempted resource and a recovery tool per
- * entity type in the context (identical hints, e.g. issue_id/issue_to_id, dedupe to one line).
- * @param context - Attempted resource identifier(s).
+ * Build a 404 error message naming the attempted resource and a recovery tool per entity type (identical hints dedupe).
+ * @param context - Attempted resource identifier(s), e.g. `{ issue_id: 12345 }`.
  */
 function formatNotFoundError(context?: ErrorContext): string {
   if (!context) return 'Resource not found in Redmine.';
@@ -808,10 +769,9 @@ function formatNotFoundError(context?: ErrorContext): string {
 const ASSIGNEE_HINT_PREFIXES = ['assigned to', 'assignee'];
 
 /**
- * Check whether a lowercased message starts with `field` as a whole word, so a custom
- * field like "Qa status is invalid" (starts with "qa") never matches "status".
- * @param messageLower - Lowercased error message.
- * @param field - Lowercased field name to match.
+ * Check whether a lowercased message starts with `field` as a whole word, so "Qa status" never matches "status".
+ * @param messageLower - Lowercased message to check.
+ * @param field - Field-name prefix to match at the start.
  */
 function startsWithFieldName(messageLower: string, field: string): boolean {
   if (!messageLower.startsWith(field)) return false;
@@ -820,10 +780,9 @@ function startsWithFieldName(messageLower: string, field: string): boolean {
 }
 
 /**
- * Build a 422 validation error message, appending a recovery hint only when an individual
- * error string starts with a known field name (never a substring match anywhere in the blob).
- * @param errors - Raw Redmine validation errors (array of message strings, or other shape).
- * @param context - Attempted resource identifier, included verbatim when present.
+ * Build a 422 validation error message; appends a recovery hint only when an error string starts with a known field name.
+ * @param errors - The raw Redmine validation errors payload.
+ * @param context - Attempted resource identifier(s), e.g. `{ issue_id: 12345 }`.
  */
 function formatValidationError(errors: unknown, context?: ErrorContext): string {
   const base = `Validation error: ${JSON.stringify(errors)}`;
@@ -842,15 +801,9 @@ function formatValidationError(errors: unknown, context?: ErrorContext): string 
   return prefixed;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Class
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Client Class ─────────────────────────────────────────────────────────────────────────────────
 
-/**
- * Redmine API client.
- * Provides methods for interacting with Redmine issues, time entries, journals, users, and projects.
- * @class RedmineClient
- */
+/** Redmine API client for issues, time entries, journals, users, and projects. */
 export class RedmineClient {
   private client: AxiosInstance;
   private config: RedmineConfig;
@@ -938,9 +891,7 @@ export class RedmineClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Project Scope Enforcement
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Project Scope Enforcement ──────────────────────────────────────────────────────────────────
 
   private _scopedProjectIdPromise: Promise<number> | null = null;
 
@@ -956,7 +907,6 @@ export class RedmineClient {
   /**
    * Resolve and cache the configured project's numeric ID (promise dedup).
    * @param scope - The configured project identifier.
-   * @returns The numeric project ID.
    * @throws {ProjectScopeError} When the configured project doesn't exist (404).
    */
   private _resolveProjectNumericId(scope: string): Promise<number> {
@@ -983,9 +933,8 @@ export class RedmineClient {
   }
 
   /**
-   * Enforce project_id matches the configured scope.
+   * Enforce project_id matches the configured scope; returns scope if scoped, callerProjectId if unscoped.
    * @param callerProjectId - The caller-provided project_id (may be undefined).
-   * @returns The project_id to use (scope if scoped, callerProjectId if unscoped).
    * @throws {ProjectScopeError} When callerProjectId doesn't match scope.
    */
   private _enforceProjectId(callerProjectId?: string): string | undefined {
@@ -1002,7 +951,6 @@ export class RedmineClient {
   /**
    * Validate that an issue belongs to the scoped project before mutation.
    * @param issueId - The issue ID to validate.
-   * @returns The issue (for callers that need it).
    * @throws {ProjectScopeError} When the issue belongs to a different project.
    */
   private async _ensureIssueInScope(issueId: number): Promise<void> {
@@ -1011,12 +959,10 @@ export class RedmineClient {
     }
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Issue Operations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Issue Operations ───────────────────────────────────────────────────────────────────────────
 
   /**
-   * List issues from Redmine with optional filtering.
+   * List issues from Redmine with optional filtering (project/assignee/status/parent); `limit` defaults to 25.
    * @param options - Filter and pagination options.
    * @param options.project_id - Filter by project identifier.
    * @param options.assigned_to_id - Filter by assignee ('me', user ID, or username).
@@ -1024,8 +970,6 @@ export class RedmineClient {
    * @param options.parent_id - Filter by parent issue ID.
    * @param options.limit - Maximum number of results (default 25).
    * @param options.offset - Pagination offset (default 0).
-   * @returns Promise resolving to object with issues array and total_count.
-   * @throws {Error} When API request fails.
    */
   async listIssues(
     options: {
@@ -1054,12 +998,10 @@ export class RedmineClient {
   }
 
   /**
-   * Get a single issue by ID with full details.
+   * Get a single issue by ID.
    * @param issueId - The issue ID.
    * @param options - Options for including additional data.
-   * @param options.include - Array of additional data to include (journals, attachments, relations, children, watchers).
-   * @returns Promise resolving to the Redmine issue.
-   * @throws {Error} When API request fails or issue not found.
+   * @param options.include - Additional data to include (journals, attachments, relations, children, watchers).
    */
   async showIssue(issueId: number, options: { include?: string[] } = {}): Promise<RedmineIssue> {
     const params: Record<string, string> = {};
@@ -1088,8 +1030,6 @@ export class RedmineClient {
    * @param options - Search options.
    * @param options.project_id - Limit search to specific project.
    * @param options.limit - Maximum number of results (default 25).
-   * @returns Promise resolving to search results with IDs and total_count.
-   * @throws {Error} When API request fails.
    */
   async searchIssues(
     query: string,
@@ -1115,7 +1055,7 @@ export class RedmineClient {
   }
 
   /**
-   * Create a new issue in Redmine.
+   * Create a new issue in Redmine; `description` is sanitized Textile markup.
    * @param options - Issue creation options.
    * @param options.project_id - Project identifier (required).
    * @param options.subject - Issue subject/title (required).
@@ -1126,7 +1066,6 @@ export class RedmineClient {
    * @param options.assigned_to_id - Assigned user ID.
    * @param options.parent_issue_id - Parent issue ID (for subtasks).
    * @param options.estimated_hours - Estimated hours for completion.
-   * @returns Promise resolving to the created issue.
    * @throws {Error} When subject is empty or API request fails.
    */
   async createIssue(options: {
@@ -1167,7 +1106,7 @@ export class RedmineClient {
   }
 
   /**
-   * Update an existing issue in Redmine.
+   * Update an existing issue in Redmine; all `options` fields are optional partial updates.
    * @param issueId - The issue ID to update.
    * @param options - Update options (all optional).
    * @param options.project_id - Move issue to another project.
@@ -1180,8 +1119,6 @@ export class RedmineClient {
    * @param options.parent_issue_id - New parent issue ID.
    * @param options.estimated_hours - New estimated hours.
    * @param options.notes - Update notes/comment.
-   * @returns Promise resolving to the updated issue.
-   * @throws {Error} When API request fails.
    */
   async updateIssue(
     issueId: number,
@@ -1227,11 +1164,9 @@ export class RedmineClient {
   }
 
   /**
-   * Add a comment to an issue.
+   * Add a comment to an issue; `comment` is Textile markup, sanitized before send.
    * @param issueId - The issue ID.
    * @param comment - Comment text in Textile markup.
-   * @returns Promise that resolves when comment is added.
-   * @throws {Error} When API request fails.
    */
   async commentIssue(issueId: number, comment: string): Promise<void> {
     await this._ensureIssueInScope(issueId);
@@ -1240,21 +1175,17 @@ export class RedmineClient {
     });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Time Entry Operations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Time Entry Operations ──────────────────────────────────────────────────────────────────────
 
   /**
-   * List time entries with optional filtering.
+   * List time entries with optional filtering (issue/project/user_id incl. 'me', YYYY-MM-DD range); `limit` defaults to 25.
    * @param options - Filter options.
    * @param options.issue_id - Filter by issue ID.
    * @param options.project_id - Filter by project ID.
-   * @param options.user_id - Filter by user ID, or 'me' for the current authenticated user (passed to Redmine verbatim).
+   * @param options.user_id - Filter by user ID, or 'me' for the current authenticated user.
    * @param options.from - From date (YYYY-MM-DD format).
    * @param options.to - To date (YYYY-MM-DD format).
    * @param options.limit - Maximum number of results (default 25).
-   * @returns Promise resolving to object with time_entries array and total_count.
-   * @throws {Error} When API request fails.
    */
   async listTimeEntries(
     options: {
@@ -1289,7 +1220,7 @@ export class RedmineClient {
   }
 
   /**
-   * Create a new time entry (log time).
+   * Create a new time entry; one of `issue_id`/`project_id` required, `spent_on` defaults to today.
    * @param options - Time entry options.
    * @param options.issue_id - Issue ID (required if project_id not provided).
    * @param options.project_id - Project ID (required if issue_id not provided).
@@ -1297,8 +1228,6 @@ export class RedmineClient {
    * @param options.activity_id - Activity ID (Development, Testing, etc.).
    * @param options.comments - Time entry comments.
    * @param options.spent_on - Date when time was spent (YYYY-MM-DD format, default today).
-   * @returns Promise resolving to the created time entry.
-   * @throws {Error} When API request fails.
    */
   async createTimeEntry(options: {
     issue_id?: number;
@@ -1329,14 +1258,12 @@ export class RedmineClient {
   }
 
   /**
-   * Update an existing time entry.
+   * Update an existing time entry; all `options` fields are optional partial updates.
    * @param timeEntryId - The time entry ID to update.
    * @param options - Update options (all optional).
    * @param options.hours - New hours value.
    * @param options.activity_id - New activity ID.
    * @param options.comments - New comments.
-   * @returns Promise that resolves when update is complete.
-   * @throws {Error} When API request fails.
    */
   async updateTimeEntry(
     timeEntryId: number,
@@ -1366,15 +1293,11 @@ export class RedmineClient {
     await this.client.put(`/time_entries/${timeEntryId}.json`, { time_entry });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Journal Operations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Journal Operations ─────────────────────────────────────────────────────────────────────────
 
   /**
    * List all journals (comments and change history) for an issue.
    * @param issueId - The issue ID.
-   * @returns Promise resolving to array of journal entries.
-   * @throws {Error} When API request fails or issue not found.
    */
   async listJournals(issueId: number): Promise<RedmineJournal[]> {
     // Scope enforcement via showIssue() — do not refactor to skip showIssue without adding explicit scope check
@@ -1383,12 +1306,10 @@ export class RedmineClient {
   }
 
   /**
-   * Update an existing journal entry.
+   * Update an existing journal entry; `notes` is Textile markup, sanitized before send.
    * @param issueId - The issue ID.
    * @param journalId - The journal entry ID to update.
    * @param notes - New notes text in Textile markup.
-   * @returns Promise that resolves when update is complete.
-   * @throws {Error} When API request fails.
    */
   async updateJournal(issueId: number, journalId: number, notes: string): Promise<void> {
     await this._ensureIssueInScope(issueId);
@@ -1401,23 +1322,15 @@ export class RedmineClient {
    * Delete a journal entry.
    * @param issueId - The issue ID.
    * @param journalId - The journal entry ID to delete.
-   * @returns Promise that resolves when deletion is complete.
-   * @throws {Error} When API request fails.
    */
   async deleteJournal(issueId: number, journalId: number): Promise<void> {
     await this._ensureIssueInScope(issueId);
     await this.client.delete(`/issues/${issueId}/journals/${journalId}.json`);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // User Operations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── User Operations ────────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Get the current authenticated user's profile.
-   * @returns Promise resolving to the current user's data.
-   * @throws {Error} When API request fails or authentication is invalid.
-   */
+  /** Get the current authenticated user's profile. */
   async getCurrentUser(): Promise<RedmineUser> {
     const response = await this.client.get('/users/current.json');
     return response.data.user;
@@ -1426,8 +1339,6 @@ export class RedmineClient {
   /**
    * List users, optionally filtered by project membership.
    * @param projectId - Optional project ID to filter users by membership.
-   * @returns Promise resolving to array of users.
-   * @throws {Error} When API request fails.
    */
   async listUsers(projectId?: string): Promise<RedmineUser[]> {
     // When scoped, forces projectId = scope → always uses memberships endpoint
@@ -1441,11 +1352,8 @@ export class RedmineClient {
   }
 
   /**
-   * Resolve a user identifier to a user ID.
-   * Supports 'me' (current user), numeric ID string, or username.
+   * Resolve a user identifier ('me', numeric ID, or username) to a user ID, or null if not found.
    * @param identifier - User identifier ('me', user ID, or username).
-   * @returns Promise resolving to user ID or null if not found.
-   * @throws {Error} When API request fails.
    */
   async resolveUser(identifier: string): Promise<number | null> {
     if (identifier === 'me') {
@@ -1468,18 +1376,14 @@ export class RedmineClient {
     return null;
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Project Operations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Project Operations ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * List projects with optional filtering and pagination.
+   * List projects with optional status filter; when scoped, returns only the configured project.
    * @param options - Filter and pagination options.
    * @param options.status - Project status filter ('active', 'closed', 'archived', 'all').
    * @param options.limit - Maximum number of results (default 100).
    * @param options.offset - Pagination offset (default 0).
-   * @returns Promise resolving to object with projects array and total_count.
-   * @throws {Error} When API request fails.
    */
   async listProjects(
     options: {
@@ -1525,9 +1429,7 @@ export class RedmineClient {
    * Get a single project by ID or identifier with full details.
    * @param projectId - Project ID (numeric) or identifier (string slug).
    * @param options - Options for including additional data.
-   * @param options.include - Array of additional data to include (trackers, issue_categories, enabled_modules, time_entry_activities, issue_custom_fields).
-   * @returns Promise resolving to the Redmine project.
-   * @throws {Error} When API request fails or project not found.
+   * @param options.include - Additional data to include (trackers, categories, modules, activities, custom fields).
    */
   async showProject(
     projectId: string | number,
@@ -1554,12 +1456,10 @@ export class RedmineClient {
   }
 
   /**
-   * Search projects by text query (name, identifier, or description).
+   * Search projects by text query against name, identifier, or description; `options.limit` defaults to 25.
    * @param query - Search query string.
    * @param options - Search options.
    * @param options.limit - Maximum number of results (default 25).
-   * @returns Promise resolving to object with matching projects and total_count.
-   * @throws {Error} When API request fails.
    */
   async searchProjects(
     query: string,
@@ -1615,15 +1515,11 @@ export class RedmineClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Relation Operations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Relation Operations ────────────────────────────────────────────────────────────────────────
 
   /**
    * List all relations for a specific issue.
    * @param issueId - The issue ID.
-   * @returns Promise resolving to object with relations array.
-   * @throws {Error} When API request fails.
    */
   async listRelations(issueId: number): Promise<{ relations: IssueRelation[] }> {
     await this._ensureIssueInScope(issueId);
@@ -1632,14 +1528,12 @@ export class RedmineClient {
   }
 
   /**
-   * Create a relation between two issues.
+   * Create a relation between two issues; `relation_type` defaults to 'relates', `delay` applies only to precedes/follows.
    * @param options - Relation creation options.
    * @param options.issue_id - Source issue ID (required).
    * @param options.issue_to_id - Target issue ID (required).
    * @param options.relation_type - Type of relation (default: 'relates').
    * @param options.delay - Delay in days (only for precedes/follows).
-   * @returns Promise resolving to the created relation.
-   * @throws {Error} When API request fails or validation error.
    */
   async createRelation(options: {
     issue_id: number;
@@ -1673,8 +1567,6 @@ export class RedmineClient {
   /**
    * Delete a relation by ID.
    * @param relationId - The relation ID to delete.
-   * @returns Promise that resolves when deletion is complete.
-   * @throws {Error} When API request fails or relation not found.
    */
   async deleteRelation(relationId: number): Promise<void> {
     // Fetch-then-validate: check relation's source issue belongs to scoped project
@@ -1687,16 +1579,12 @@ export class RedmineClient {
     await this.client.delete(`/relations/${relationId}.json`);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Error Handling
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Format error objects into user-friendly error messages.
-   * Handles Axios errors with appropriate HTTP status code messages.
+   * Format error objects (Axios errors by HTTP status) into user-friendly messages.
    * @param error - The error object to format.
    * @param context - Attempted resource identifier(s), e.g. `{ issue_id: 12345 }`, included in 404/validation messages.
-   * @returns Formatted error message string.
    */
   static formatError(error: unknown, context?: ErrorContext): string {
     if (axios.isAxiosError(error)) {
@@ -1729,9 +1617,7 @@ export class RedmineClient {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Factory
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Client Factory ───────────────────────────────────────────────────────────────────────────────
 
 /**
  * Initialize the Redmine client; returns null (never throws) on config errors.

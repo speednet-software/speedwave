@@ -1,14 +1,6 @@
 /**
- * Accessibility sweep — runs axe-core against every reachable view.
- *
- * Mounts each top-level routed component in jsdom, waits for the
- * initial render, and asserts zero WCAG 2.1 AA violations. Any new
- * view must be added to VIEWS so the sweep remains comprehensive.
- *
- * Sweep matrix: each view is rendered in every (effective-mode × accent) pair
- * the app ships, so contrast regressions cannot land silently. `auto` mode is
- * covered by the ThemeService unit tests; here we only assert the deterministic
- * effective modes.
+ * Accessibility sweep: mounts each top-level routed component in jsdom and asserts zero WCAG
+ * 2.1 AA violations, across every (effective-mode × accent) pair; new views must join VIEWS.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';

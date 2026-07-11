@@ -1,6 +1,5 @@
-//! Stdout/stderr drain shared by every host MCP worker manager: reads
-//! the `{"port": N}` line, keeps draining both pipes, and appends them to
-//! a per-worker audit log. Drain handles must be joined by the caller.
+//! Stdout/stderr drain shared by every host MCP worker manager: reads the `{"port": N}` line,
+//! keeps draining both pipes, appends them to a per-worker audit log. Caller must join the handles.
 
 use std::io::BufRead;
 use std::path::Path;
@@ -12,9 +11,8 @@ use crate::log_file::{open_log_file, write_log_line};
 
 use super::PORT_READ_TIMEOUT;
 
-/// Parse a `{"port": N}` JSON line into a valid `u16`. Rejects `0`
-/// (invalid bind target) and values above `u16::MAX` so a malformed
-/// worker can't trick the manager into recording garbage.
+/// Parse a `{"port": N}` JSON line into a valid `u16`. Rejects `0` and values above `u16::MAX`
+/// so a malformed worker can't trick the manager into recording garbage.
 pub fn parse_port_line(line: &str) -> Option<u16> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let port = v.get("port")?.as_u64()?;
@@ -24,12 +22,8 @@ pub fn parse_port_line(line: &str) -> Option<u16> {
     u16::try_from(port).ok()
 }
 
-/// Spawn background threads to drain both stdout and stderr of the child,
-/// wait for the `{"port": N}` JSON line on stdout, and return the port plus
-/// the join handles for both drain threads.
-///
-/// `service_tag` is included in `log::debug`/`log::warn` output and in the
-/// log-file row prefix.
+/// Spawn background threads to drain stdout/stderr, wait for the `{"port": N}` line on stdout,
+/// return the port plus join handles. `service_tag` prefixes the `log::debug`/`warn` and log rows.
 pub fn drain_and_read_port(
     child: &mut Child,
     log_path: &Path,
@@ -100,7 +94,7 @@ pub fn drain_and_read_port(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test fixture setup")]
 pub(crate) mod test_support {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Stdio};
@@ -154,7 +148,11 @@ setTimeout(() => {}, 60000);
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::test_support::spawn_stdout_lines;
     use super::*;
@@ -240,7 +238,7 @@ mod tests {
             .contains("exited without announcing a port"));
     }
 
-    // ── test_support smoke tests ────────────────────────────────────────
+    // ── test_support smoke tests ──────────────────────────────────
 
     #[test]
     fn fake_worker_js_announces_a_port_and_is_picked_up_by_drain() {

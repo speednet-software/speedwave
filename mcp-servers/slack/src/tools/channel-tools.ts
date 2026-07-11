@@ -21,9 +21,7 @@ import {
   formatSlackError,
 } from '../client.js';
 
-//===============================================================================
-// Types
-//===============================================================================
+// ── Types ──────────────────────────────────────────────────────────────────
 
 interface SendChannelParams {
   channel: string;
@@ -45,9 +43,7 @@ interface GetThreadMessagesParams {
   cursor?: string;
 }
 
-//===============================================================================
-// Tool Definitions
-//===============================================================================
+// ── Tool Definitions ──────────────────────────────────────────────────────
 
 const sendChannelTool: Tool = {
   name: 'sendChannel',
@@ -334,14 +330,12 @@ const listChannelIdsTool: Tool = {
   ],
 };
 
-//===============================================================================
-// Tool Handlers
-//===============================================================================
+// ── Tool Handlers ─────────────────────────────────────────────────────────
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param params - Tool parameters
+ * Handler for `sendChannel` — sends a message to a channel or DM as the signed-in user.
+ * @param clients - The Slack client container.
+ * @param params - Message target and body.
  */
 export async function handleSendChannel(
   clients: SlackClients,
@@ -356,9 +350,9 @@ export async function handleSendChannel(
 }
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param params - Tool parameters
+ * Handler for `getChannelMessages` — reads one page of channel history, enriched with resolved author names.
+ * @param clients - The Slack client container.
+ * @param params - Query params.
  */
 export async function handleGetChannelMessages(
   clients: SlackClients,
@@ -374,9 +368,9 @@ export async function handleGetChannelMessages(
 }
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param params - Tool parameters
+ * Handler for `getThreadMessages` — reads one page of a thread's messages, enriched with resolved author names.
+ * @param clients - The Slack client container.
+ * @param params - Query params.
  */
 export async function handleGetThreadMessages(
   clients: SlackClients,
@@ -392,10 +386,10 @@ export async function handleGetThreadMessages(
 }
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param params - Tool parameters
- * @param params.types - Channel types to include (default: public_channel,private_channel)
+ * Handler for `listChannelIds` — lists all channels the signed-in user is a member of.
+ * @param clients - The Slack client container.
+ * @param params - Listing params.
+ * @param params.types - Channel types to include (default: public_channel,private_channel).
  */
 export async function handleListChannelIds(
   clients: SlackClients,
@@ -416,14 +410,11 @@ export async function handleListChannelIds(
   }
 }
 
-//===============================================================================
-// Tool Definitions Export
-//===============================================================================
+// ── Tool Definitions Export ───────────────────────────────────────────────
 
 /**
- * Required-param options for {@link withValidation}, driven by the tool's own
- * declared `inputSchema.required` so the guard can never drift from the schema.
- * @param tool - Tool definition to read `inputSchema.required`/`name` from.
+ * Required-param options for {@link withValidation}, driven by the tool's own declared `inputSchema.required` so the guard can never drift from the schema.
+ * @param tool - The tool whose schema drives the required-param set.
  */
 function requiredOf(tool: Tool): ResultValidationOptions {
   return { required: tool.inputSchema.required ?? [], toolName: tool.name };

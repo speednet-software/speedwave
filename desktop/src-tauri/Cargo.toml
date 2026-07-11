@@ -97,6 +97,8 @@ print_stderr = "deny"
 todo = "deny"
 unimplemented = "deny"
 wildcard_imports = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 [lints.rust]
 unsafe_code = "deny"

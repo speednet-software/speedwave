@@ -76,7 +76,6 @@ pub(crate) fn rewrite_container_alias_to_loopback(host: &str) -> Option<&'static
 // Tests
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -6,7 +6,7 @@
 
 ## Context
 
-Speedwave containers (claude, mcp-hub, all MCP workers, plugin workers) inherit no timezone information from the host. The Debian-slim base of `Containerfile.claude` and the alpine bases of `Containerfile.mcp-base` and `mcp-servers/hub/Containerfile` default to **UTC**. As a result, time-sensitive output produced inside the claude container is rendered in UTC — most visibly Claude Code's "your usage limit will reset at HH:MM" message, which appears 1–2 hours off for users in CET/CEST and similarly skewed for any zone other than UTC.
+Speedwave containers (claude, mcp-hub, all MCP workers, plugin workers) inherit no timezone information from the host. The Debian-slim base of `Containerfile.claude` and the alpine bases of `Containerfile.mcp-base` and `mcp-servers/hub/Containerfile` default to **UTC** (unverified: no primary Debian/Alpine source pins this as documented default behavior rather than an artifact of no `/etc/localtime` being set). As a result, time-sensitive output produced inside the claude container is rendered in UTC — most visibly Claude Code's "your usage limit will reset at HH:MM" message, which appears 1–2 hours off for users in CET/CEST and similarly skewed for any zone other than UTC.
 
 The fix surface has two halves:
 
@@ -63,7 +63,7 @@ The plugin contract (per CLAUDE.md plugin-contract table) gains an additive guar
 - Windows zone-ID mapping table must be refreshed when CLDR ships changes. CLDR's release schedule is two major releases per year (Spring and Fall), so the table must be revisited on roughly that cadence — though most releases ship no Windows-zone changes.[^7]
 - A user changing their host timezone after starting containers will not see the change reflected until the next compose render (`speedwave start` / project restart). Acceptable — Claude Code reset windows are session-scoped, and the alternative (live-reloading `TZ` into running containers) violates KISS.
 
-[^1]: IANA tz database — authoritative source of zone names: <https://www.iana.org/time-zones>
+[^1]: IANA tz database - authoritative source of zone names: <https://www.iana.org/time-zones>
 
 [^2]: glibc `TZ` env var format (`:Europe/Warsaw` colon-prefix variant rejected to prevent path leaks): <https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html>
 
@@ -71,8 +71,8 @@ The plugin contract (per CLAUDE.md plugin-contract table) gains an additive guar
 
 [^4]: CLDR `windowsZones.xml` (territory `001` default mapping): <https://github.com/unicode-org/cldr/blob/main/common/supplemental/windowsZones.xml>
 
-[^5]: Debian `tzdata` package — installed size 3,572 kB on bookworm: <https://packages.debian.org/bookworm/tzdata>
+[^5]: Debian `tzdata` package - installed size 3,572 kB on bookworm: <https://packages.debian.org/bookworm/tzdata>
 
-[^6]: Alpine `tzdata` package — installed size approximately 3.5 MiB: <https://pkgs.alpinelinux.org/package/edge/main/x86_64/tzdata>
+[^6]: Alpine `tzdata` package - installed size approximately 3.5 MiB: <https://pkgs.alpinelinux.org/package/edge/main/x86_64/tzdata>
 
-[^7]: CLDR release schedule — major releases every March (`-1`) and October (`-2`): <https://cldr.unicode.org/index/downloads>
+[^7]: CLDR release schedule - major releases every March (`-1`) and October (`-2`): <https://cldr.unicode.org/index/downloads>

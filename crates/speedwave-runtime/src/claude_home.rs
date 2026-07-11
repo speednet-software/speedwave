@@ -1,6 +1,5 @@
-//! Per-project Claude Code home directory (`<data_dir>/claude-home/<project>/`).
-//! Bind-mount target for Claude Code credentials/sessions/onboarding state;
-//! Speedwave only locates (compose mount) and clears it (`speedwave logout`).
+//! Per-project Claude Code home (`<data_dir>/claude-home/<project>/`): bind-mount target for
+//! credentials/sessions/onboarding state; Speedwave only locates/clears it (`speedwave logout`).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,9 +21,8 @@ pub fn has_anthropic_oauth_credentials(data_dir: &Path, project: &str) -> bool {
         .exists()
 }
 
-/// Removes Claude Code's credential files (`.claude/.credentials.json` and
-/// `.claude.json`) from the project's claude-home directory. Returns the count
-/// removed; missing files are not an error (idempotent), both are attempted.
+/// Removes Claude Code's credential files (`.claude/.credentials.json` and `.claude.json`) from
+/// the project's claude-home dir. Returns the count removed; missing files are not an error.
 pub fn remove_claude_credentials(data_dir: &Path, project: &str) -> io::Result<usize> {
     let home = claude_home_dir(data_dir, project);
     let targets = [
@@ -52,7 +50,10 @@ pub fn remove_claude_credentials(data_dir: &Path, project: &str) -> io::Result<u
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panics on failure are acceptable assertions"
+)]
 mod tests {
     use super::*;
 

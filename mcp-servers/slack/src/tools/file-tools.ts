@@ -97,7 +97,7 @@ const downloadFileTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */
@@ -117,7 +117,7 @@ export async function handleDownloadFile(
 }
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */

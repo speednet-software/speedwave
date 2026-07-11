@@ -1,6 +1,5 @@
 /**
- * Shared assertions for the two teaching-error shapes {@link GitLabClient.formatError}
- * produces most often, so test files assert the full canonical message consistently.
+ * Shared assertions for the two teaching-error shapes {@link GitLabClient.formatError} produces most often.
  * @module test-helpers
  */
 

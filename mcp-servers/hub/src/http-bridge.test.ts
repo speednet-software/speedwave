@@ -29,9 +29,7 @@ import {
 import { populateRegistryWithMockTools, _resetRegistryForTesting } from './test-helpers.js';
 import * as authTokens from './auth-tokens.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tests for HTTP Bridge (method delegation to workers, auth, session handling, errors)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tests for HTTP Bridge (method delegation to workers, auth, session handling, errors) ──────
 
 describe('http-bridge', () => {
   beforeAll(() => {
@@ -810,9 +808,8 @@ describe('http-bridge', () => {
     });
 
     it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', () => {
-      // Verifies the PR0 fix: a plugin slug like `my-cool-plugin` must look up
-      // `WORKER_MY_COOL_PLUGIN_URL` (the form compose injects), not the broken
-      // `WORKER_MY-COOL-PLUGIN_URL` which is not even a valid POSIX env name.
+      // Plugin slug `my-cool-plugin` must look up `WORKER_MY_COOL_PLUGIN_URL` (the form
+      // compose injects), not `WORKER_MY-COOL-PLUGIN_URL` — not a valid POSIX env name.
       const mutableRegistry = TOOL_REGISTRY as Record<
         string,
         Record<string, Record<string, unknown>>
@@ -1616,11 +1613,8 @@ describe('http-bridge', () => {
     });
 
     it('retries startup health checks with backoff when worker is not ready', async () => {
-      // All fetches fail (both ping and /health) until the last attempt's ping succeeds
-      // Each health check attempt: ping (fail) -> /health (fail) = 2 calls
-      // Last attempt: ping (success) = 1 call
-      // Total attempts: 4 (initial + 3 retries)
-      // 3 failed attempts * 2 calls + 1 success * 1 call = 7 calls
+      // All fetches fail (ping + /health, 2 calls each) until the 4th attempt's ping
+      // succeeds (1 call): 4 attempts total, 3 failed * 2 + 1 success * 1 = 7 calls.
       let callCount = 0;
       fetchMock.mockImplementation(() => {
         callCount++;
@@ -1691,9 +1685,8 @@ describe('http-bridge', () => {
     });
 
     it('STARTUP_RETRY_DELAYS_MS has an entry for each retry index', () => {
-      // Guard: if STARTUP_HEALTH_RETRIES is bumped, STARTUP_RETRY_DELAYS_MS must grow too.
-      // The nullish fallback (?? 4_000) in checkWorkerHealthAtStartup handles the drift,
-      // but the arrays should stay aligned by design.
+      // If STARTUP_HEALTH_RETRIES is bumped, STARTUP_RETRY_DELAYS_MS must grow too; the
+      // nullish fallback (?? 4_000) in checkWorkerHealthAtStartup handles drift regardless.
       expect(STARTUP_RETRY_DELAYS_MS.length).toBeGreaterThanOrEqual(STARTUP_HEALTH_RETRIES);
     });
 
@@ -2134,11 +2127,8 @@ describe('http-bridge', () => {
     });
 
     it('returns null when notifications/initialized is rejected (!ok response)', async () => {
-      // performMcpInitialize is exercised via callWorker's 400 session-recovery flow.
-      // Step 1: tools/call → 400 "not initialized" (triggers initialize handshake)
-      // Step 2: initialize → success
-      // Step 3: notifications/initialized → 500 (not ok) → performMcpInitialize returns null
-      // Step 4: ensureWorkerSession throws because performMcpInitialize returned null
+      // Exercised via callWorker's 400 session-recovery flow: tools/call -> 400 "not
+      // initialized" -> initialize succeeds -> notifications/initialized -> 500 -> null.
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
@@ -2379,9 +2369,8 @@ describe('http-bridge', () => {
     });
 
     it('returns null when initialize response contains a JSON-RPC error field', async () => {
-      // performMcpInitialize line 266: if (result.error) return null
-      // Triggered when the initialize response body has { error: {...} } in the JSON.
-      // We exercise this via callWorker's 400 recovery flow.
+      // performMcpInitialize returns null when initialize's JSON body has an `error` field;
+      // exercised via callWorker's 400 recovery flow.
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;
@@ -2427,9 +2416,8 @@ describe('http-bridge', () => {
     });
 
     it('swallows notifResponse.text() rejection gracefully', async () => {
-      // Line 288: await notifResponse.text().catch(() => undefined)
-      // When text() rejects, the .catch callback fires and returns undefined.
-      // This keeps the socket reusable even if draining the body fails.
+      // `await notifResponse.text().catch(() => undefined)`: when text() rejects, the
+      // socket stays reusable even though draining the body failed.
       let callCount = 0;
       fetchMock.mockImplementation((_url: string, options: { body: string }) => {
         callCount++;

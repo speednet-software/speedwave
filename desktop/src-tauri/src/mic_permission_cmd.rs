@@ -60,7 +60,10 @@ fn status_from_decision(d: StatusDecision) -> MicPermissionStatus {
 
 #[cfg(target_os = "macos")]
 // FFI boundary — `unsafe_code` is allowed only here; each block carries SAFETY docs.
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "AVFoundation FFI boundary; every block has a SAFETY comment"
+)]
 mod imp {
     use block2::RcBlock;
     use objc2::runtime::Bool;
@@ -152,7 +155,11 @@ pub fn microphone_permission_status() -> Result<MicPermissionStatus, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 

@@ -31,10 +31,10 @@ Global (top-level) fields: `active_project` (Desktop project switcher) and `sele
 
 `resolve_project_config()` always attaches `defaults::DEFAULT_FLAGS` to the Claude Code process. The constant holds four flags across six slice entries (two flags — `--mcp-config` and `--thinking-display` — each carry a value argument):
 
-- `--dangerously-skip-permissions` — safe here because Claude runs in an isolated container with `cap_drop: ALL`, read-only filesystem, unprivileged UID 1000, zero tokens, and an isolated per-project network (see ADR-009). `IS_SANDBOX=1` in `base_env()` pre-empts the root-user gate.
-- `--mcp-config <path>` — points Claude Code at the generated MCP hub config (`MCP_CONFIG_PATH` = `/home/speedwave/.claude/mcp-config.json`, created by `containers/entrypoint.sh`).
-- `--strict-mcp-config` — ignores any `.mcp.json` in the workspace; only the generated config is used.
-- `--thinking-display summarized` — forces thinking content to be returned in populated text form instead of empty signature-only blocks, so the chat UI sees the model's reasoning.
+- `--dangerously-skip-permissions` — safe here because Claude runs in an isolated container with `cap_drop: ALL`, read-only filesystem, unprivileged UID 1000, zero tokens, and an isolated per-project network (see ADR-009). `IS_SANDBOX=1` in `base_env()` pre-empts the root-user gate[^1].
+- `--mcp-config <path>` — points Claude Code at the generated MCP hub config (`MCP_CONFIG_PATH` = `/home/speedwave/.claude/mcp-config.json`, created by `containers/entrypoint.sh`)[^2].
+- `--strict-mcp-config` — ignores any `.mcp.json` in the workspace; only the generated config is used[^3].
+- `--thinking-display summarized` — forces thinking content to be returned in populated text form instead of empty signature-only blocks, so the chat UI sees the model's reasoning (unverified).
 
 ## Config resolution
 
@@ -56,3 +56,9 @@ The merge runs in `resolve_project_config()` (public entry point `resolve_claude
 - Resolution / merge — `resolve_project_config`, `resolve_claude_config`, `merge_env`, `merge_llm`, `merge_llm_repo` in `crates/speedwave-runtime/src/config.rs`.
 - Defaults, default flags, MCP config path — `crates/speedwave-runtime/src/defaults.rs` (`base_env`, `DEFAULT_FLAGS`, `MCP_CONFIG_PATH`).
 - MCP config generation — `containers/entrypoint.sh`.
+
+[^1]: Claude Code refuses `--dangerously-skip-permissions` when running as root/sudo unless `IS_SANDBOX=1` (or `CLAUDE_CODE_BUBBLEWRAP=1`) signals a sandboxed environment: https://github.com/anthropics/claude-code/issues/58150
+
+[^2]: `--mcp-config` loads MCP servers from a JSON file or string, per the official CLI reference: https://code.claude.com/docs/en/cli-reference
+
+[^3]: `--strict-mcp-config` restricts Claude Code to only the MCP servers supplied via `--mcp-config`, ignoring other MCP configuration sources, per the official CLI reference: https://code.claude.com/docs/en/cli-reference

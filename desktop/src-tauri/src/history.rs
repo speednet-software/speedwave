@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::consts;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ── Types ───────────────────────────────────────────────────────────────────────────────
 
 /// Summary of a single conversation (session file).
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -73,9 +71,7 @@ pub struct ConversationTranscript {
     pub messages: Vec<ConversationMessage>,
 }
 
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
+// ── Path helpers ────────────────────────────────────────────────────────────────────────
 
 fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
@@ -130,9 +126,7 @@ fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
     default
 }
 
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
+// ── Validation ──────────────────────────────────────────────────────────────────────────
 
 /// Validate that `id` looks like a lowercase UUID v4 hex string.
 /// Accepts: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12, hex digits).
@@ -160,9 +154,7 @@ fn validate_session_id_impl(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// JSONL parsing helpers
-// ---------------------------------------------------------------------------
+// ── JSONL parsing helpers ───────────────────────────────────────────────────────────────
 
 /// Extract displayable text from a JSONL message line.
 /// Returns `None` if the line should be skipped.
@@ -386,9 +378,8 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     };
 
     let model = message["model"].as_str().map(String::from);
-    // JSONL field names differ from TurnUsage; the chat SSOT remaps on parse.
-    // Sidechain (subagent) calls have their own context — never attach their
-    // usage, or the frontend resume seed would read a foreign context size.
+    // JSONL field names differ from TurnUsage; chat SSOT remaps on parse. Sidechain (subagent)
+    // calls have their own context — never attach their usage or resume seed reads a foreign size.
     let usage = if parsed["isSidechain"].as_bool() == Some(true) {
         None
     } else {
@@ -447,9 +438,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     })
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────────────────────
 
 /// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
 /// Safe for multi-byte UTF-8 content (operates on char boundaries, not bytes).
@@ -686,9 +675,7 @@ fn delete_conversation_impl(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Resume snapshot
-// ---------------------------------------------------------------------------
+// ── Resume snapshot ─────────────────────────────────────────────────────────────────────
 
 /// Cumulative session state recovered from a transcript. Seeds the
 /// `StreamParser` on resume so the first new turn reports a real delta.
@@ -846,12 +833,10 @@ fn compute_resume_snapshot_impl(
     Ok(snap)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
 

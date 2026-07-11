@@ -15,10 +15,8 @@ import { GitHubWorkflowRun } from '../types.js';
 import { withValidation } from './validation.js';
 
 /**
- * Maps a normalized workflow run to the compact summary returned by `listWorkflowRuns`
- * (drops `created_at`/`updated_at` — those are exposed by `getWorkflowRun`).
- * @param r - Normalized workflow run from the GitHub client
- * @returns Compact `{ id, name, status, conclusion, head_branch, head_sha, html_url }` summary
+ * Maps a normalized workflow run to the compact summary for `listWorkflowRuns` (drops `created_at`/`updated_at`, exposed by `getWorkflowRun`).
+ * @param r - Normalized workflow run
  */
 function runSummary(r: GitHubWorkflowRun): Omit<GitHubWorkflowRun, 'created_at' | 'updated_at'> {
   return {

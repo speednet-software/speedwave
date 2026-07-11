@@ -1,6 +1,5 @@
 /**
- * Jira issue tools — search (enhanced JQL), get/create/update, transitions,
- * assignment, the current account, and attachment upload/delete. 10 tools.
+ * Jira issue tools — search/CRUD, transitions, assignment, current account, attachments (10).
  * @module mcp-atlassian/tools/jira-issue-tools
  */
 
@@ -32,8 +31,8 @@ function workspaceRoot(): string {
 }
 
 /**
- * Read a file from the read-only workspace mount, rejecting any path that escapes
- * the workspace (traversal or symlink) so a tokened worker can't read `/tokens` etc.
+ * Read `filePath` from the read-only workspace mount, rejecting any path escaping it (traversal
+ * or symlink) so a tokened worker can't read `/tokens` etc.
  * @param filePath - Path relative to (or inside) the workspace root.
  * @returns The file bytes and its basename.
  */
@@ -444,7 +443,6 @@ const deleteAttachmentTool: Tool = {
 /**
  * Build the Jira issue tool definitions.
  * @param client - The Atlassian client (`null` when the service is not configured).
- * @returns Tool definitions for issue search/CRUD/transitions/assignment/attachments.
  */
 export function createJiraIssueTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [

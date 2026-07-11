@@ -16,9 +16,7 @@ import {
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient, GraphApiError } from '../client.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Parameter Normalization (accept both snake_case and camelCase)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Parameter Normalization (accept both snake_case and camelCase) ──────────────
 
 /**
  * Normalize upload parameters to accept both snake_case and camelCase
@@ -54,9 +52,7 @@ function normalizeDownloadParams(params: Record<string, unknown>): {
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Definitions
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Definitions ─────────────────────────────────────────────────────────────
 
 const listFileIdsTool: Tool = {
   name: 'listFileIds',
@@ -257,15 +253,13 @@ const uploadFileTool: Tool = {
   ],
 };
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Handlers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Handlers ─────────────────────────────────────────────────────────────────
 
 /**
- * List file IDs in a SharePoint directory
+ * List file IDs in a SharePoint directory.
  * @param client - SharePoint client instance
- * @param params - Tool parameters
- * @param params.path - File path
+ * @param params - request params
+ * @param params.path - optional SharePoint directory path (root when omitted)
  */
 export async function handleListFileIds(
   client: SharePointClient,
@@ -291,10 +285,10 @@ export async function handleListFileIds(
 }
 
 /**
- * Get full file metadata by ID
+ * Get full file metadata by ID.
  * @param client - SharePoint client instance
- * @param params - Tool parameters
- * @param params.file_id - File ID
+ * @param params - request params
+ * @param params.file_id - Graph id of the file
  */
 export async function handleGetFileFull(
   client: SharePointClient,
@@ -324,9 +318,9 @@ export async function handleGetFileFull(
 }
 
 /**
- * Handle file download from SharePoint to local path
+ * Handle file download from SharePoint to local path.
  * @param client - SharePoint client instance
- * @param params - Tool parameters
+ * @param params - raw tool params (accepts camelCase or snake_case field names)
  */
 export async function handleDownloadFile(
   client: SharePointClient,
@@ -361,9 +355,9 @@ export async function handleDownloadFile(
 }
 
 /**
- * Handle file upload from local path to SharePoint
+ * Handle file upload from local path to SharePoint.
  * @param client - SharePoint client instance
- * @param params - Tool parameters
+ * @param params - raw tool params (accepts camelCase or snake_case field names)
  */
 export async function handleUploadFile(
   client: SharePointClient,
@@ -402,9 +396,7 @@ export async function handleUploadFile(
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Definitions Export
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Definitions Export ──────────────────────────────────────────────────────
 
 /**
  * Create file-related tool definitions

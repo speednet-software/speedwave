@@ -2,9 +2,7 @@
 
 load setup
 
-# ---------------------------------------------------------------------------
-# CLI argument parsing
-# ---------------------------------------------------------------------------
+# ── CLI argument parsing ─────────────────────────────────────────────────────
 
 @test "speedwave without runtime shows informative error" {
     # When runtime is not available, CLI should exit with helpful message
@@ -69,9 +67,7 @@ load setup
     [[ "$output" == *"usage"* ]] || [[ "$output" == *"Usage"* ]] || [[ "$output" == *"zip-path"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Binary exists and is executable
-# ---------------------------------------------------------------------------
+# ── Binary exists and is executable ─────────────────────────────────────────
 
 @test "speedwave binary exists" {
     [ -f "$SPEEDWAVE_BIN" ] || skip "Binary not built yet (run cargo build -p speedwave-cli first)"

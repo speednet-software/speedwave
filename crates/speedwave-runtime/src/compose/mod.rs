@@ -167,7 +167,7 @@ pub fn host_bridges_from_disk() -> HostBridgesInfo {
     match plugin::plugins_base_dir() {
         Ok(dir) => host_bridges_from_disk_in(&dir),
         Err(e) => {
-            log::warn!("host_bridges_from_disk: cannot resolve plugins dir: {e}");
+            log::warn!("cannot resolve plugins dir for host bridges: {e}");
             HostBridgesInfo::default()
         }
     }
@@ -181,7 +181,7 @@ fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
     let plugins = match plugin::list_verified_from_dir(plugins_dir) {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("host_bridges_from_disk: cannot list verified plugins: {e}");
+            log::warn!("cannot list verified plugins for host bridges: {e}");
             return HostBridgesInfo::default();
         }
     };
@@ -310,11 +310,12 @@ pub fn render_compose_in(
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
     let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    crate::fs_perms::set_owner_only_dir(&ide_lock_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set owner-only perms on {}: {e}",
+            ide_lock_dir.display()
+        )
+    })?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
     // Speedwave proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
@@ -323,12 +324,18 @@ pub fn render_compose_in(
     std::fs::create_dir_all(&proxy_config_dir)?;
     let proxy_usage_dir = data_dir.join("usage").join(project_name).join("proxy");
     std::fs::create_dir_all(&proxy_usage_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&proxy_config_dir, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&proxy_usage_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    crate::fs_perms::set_owner_only_dir(&proxy_config_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set owner-only perms on {}: {e}",
+            proxy_config_dir.display()
+        )
+    })?;
+    crate::fs_perms::set_owner_only_dir(&proxy_usage_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set owner-only perms on {}: {e}",
+            proxy_usage_dir.display()
+        )
+    })?;
     yaml = yaml.replace("${PROXY_CONFIG_DIR}", &to_engine_path(&proxy_config_dir)?);
     yaml = yaml.replace("${PROXY_USAGE_DIR}", &to_engine_path(&proxy_usage_dir)?);
     yaml = yaml.replace(
@@ -728,7 +735,7 @@ pub(crate) fn inject_claude_env(
                     }
                 } else {
                     log::warn!(
-                        "inject_claude_env: claude service 'environment' field is not a sequence \
+                        "claude service 'environment' field is not a sequence \
                          (got {:?}) — env vars not injected",
                         environment
                     );
@@ -758,7 +765,7 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
                     // compose.template.yml uses sequence form uniformly; mapping form is intentionally skipped.
                     None => {
                         log::warn!(
-                            "inject_host_timezone: service 'environment' is not a sequence \
+                            "service 'environment' is not a sequence \
                              (got {:?}) — TZ not injected",
                             existing
                         );
@@ -926,7 +933,7 @@ fn apply_oauth_config_with_paths(
         if !bearer_file.exists() {
             // Lazily write the per-service bearer file (chmod 0o600).
             if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
-                log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
+                log::warn!("failed to write per-service oauth bearer for '{service_id}': {e}");
                 continue;
             }
         }
@@ -1055,7 +1062,7 @@ pub(crate) fn inject_env_into(
 ) {
     let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) else {
         log::warn!(
-            "inject_env_into: 'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
+            "'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
         );
         return;
     };
@@ -1063,7 +1070,7 @@ pub(crate) fn inject_env_into(
         .get_mut(serde_yaml_ng::Value::String(service.to_string()))
         .and_then(|s| s.as_mapping_mut())
     else {
-        log::warn!("inject_env_into: service '{service}' absent — cannot inject {env_name}");
+        log::warn!("service '{service}' absent — cannot inject {env_name}");
         return;
     };
 
@@ -1072,7 +1079,9 @@ pub(crate) fn inject_env_into(
         .entry(env_key)
         .or_insert_with(|| serde_yaml_ng::Value::Sequence(Vec::new()));
     let Some(env_seq) = env_entry.as_sequence_mut() else {
-        log::warn!("inject_env_into: service '{service}' 'environment' is not a sequence — cannot inject {env_name}");
+        log::warn!(
+            "service '{service}' 'environment' is not a sequence — cannot inject {env_name}"
+        );
         return;
     };
 
@@ -1172,7 +1181,11 @@ pub(crate) fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, valu
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use strum::IntoEnumIterator;
@@ -1544,9 +1557,8 @@ mod tests {
         );
     }
 
-    /// A project with a stale `anthropic_api_key` file but an active OpenRouter
-    /// provider must NOT get `ANTHROPIC_API_KEY` re-injected into `claude` (the
-    /// flat provider string masquerades as `anthropic` for downgrade compat).
+    /// A stale `anthropic_api_key` file with an active OpenRouter provider must NOT get
+    /// `ANTHROPIC_API_KEY` re-injected into `claude` (flat provider masquerades as `anthropic`).
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_no_anthropic_key_when_openrouter_active() {
@@ -1777,9 +1789,8 @@ mod tests {
         assert!(header_entry.contains("X-Subscription-ID: bar"));
     }
 
-    /// Migrated, configured Anthropic-OAuth `LlmConfig` for tests that only need
-    /// *some* renderable LLM config as an unrelated fixture (SSOT gate requires
-    /// a resolved active provider — see `LlmConfig::is_unconfigured`).
+    /// Migrated, configured Anthropic-OAuth `LlmConfig` for tests needing *some* renderable LLM
+    /// config (SSOT gate requires a resolved provider — see `LlmConfig::is_unconfigured`).
     fn configured_anthropic_llm() -> LlmConfig {
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
@@ -3368,12 +3379,8 @@ services:
         );
     }
 
-    /// Renders the REAL `containers/compose.template.yml` (not a hand-written
-    /// fixture) with every built-in worker enabled and runs the full
-    /// SecurityCheck on it. `test_rendered_compose_passes_security_check`
-    /// above renders with everything disabled, so it never actually reaches
-    /// any worker's volume mounts — this is what would have caught a bad
-    /// edit to the real template (e.g. atlassian's /workspace mode).
+    /// Renders the REAL `containers/compose.template.yml` (not a fixture) with every built-in
+    /// worker enabled and runs SecurityCheck — catches edits the all-disabled variant misses.
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_rendered_compose_with_all_workers_enabled_passes_security_check() {
@@ -4175,9 +4182,8 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_kill_switch_dangling_active_bails_no_provider_configured() {
-        // Dangling active (points at a missing entry) is unconfigured (SSOT
-        // gate) regardless of the proxy kill-switch: render must refuse rather
-        // than silently fall back to the Anthropic account default.
+        // Dangling active (points at a missing entry) is unconfigured (SSOT gate) regardless of
+        // the kill-switch: render must refuse, not fall back to the Anthropic account default.
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -4426,11 +4432,8 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Kill-switch off: this test asserts the legacy direct-injection path.
-        // Migration normalises the "ollama" alias to the generic "local" id
-        // (ADR-073), so the display label is "Local", not the v1 "Ollama" alias
-        // (that per-alias-string behavior is covered directly, unmigrated, by
-        // compose::llm::tests::legacy_in_ollama_uses_its_own_display_label).
+        // Kill-switch off: legacy direct-injection path. Migration normalises "ollama" to the
+        // generic "local" id (ADR-073); v1 label covered by llm::tests::legacy_in_ollama_label.
         let mut llm = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
@@ -4516,21 +4519,11 @@ services:
         );
     }
 
-    // test_lmstudio_default_url / test_llamacpp_default_url / test_llamacpp_custom_model_option_labels /
-    // test_lmstudio_custom_model_option_labels: relocated to compose::llm::tests as
-    // legacy_in_lmstudio_uses_its_own_default_port / legacy_in_llamacpp_uses_its_own_default_port /
-    // legacy_in_llamacpp_uses_its_own_display_label / legacy_in_lmstudio_uses_its_own_display_label.
-    // Migration collapses every LOCAL_PROVIDERS alias to the canonical "local" id
-    // (ADR-073) before it ever reaches the renderer, so the per-alias URL/label is
-    // only observable via the unmigrated, direct apply_llm_config_legacy_in call
-    // those tests already make.
+    // test_lmstudio/llamacpp_default_url + *_custom_model_option_labels: relocated to
+    // compose::llm::tests — migration collapses every LOCAL_PROVIDERS alias to "local" (ADR-073).
 
-    // test_unsupported_provider_rejected / test_custom_provider_rejected_after_removal:
-    // relocated to compose::llm::tests as legacy_in_rejects_unsupported_provider /
-    // legacy_in_rejects_custom_provider_after_removal — an unmigrated raw config
-    // now bails at the SSOT gate before ever reaching apply_llm_config_legacy_in's
-    // unsupported-provider check, so the direct-legacy-path variant is the only
-    // one still reachable through that code path.
+    // test_unsupported_provider_rejected / test_custom_provider_rejected_after_removal: relocated
+    // to compose::llm::tests — an unmigrated config now bails at the SSOT gate before that check.
 
     #[test]
     fn test_strip_trailing_v1() {
@@ -4992,6 +4985,7 @@ services:
         service: crate::host_mcp_process::lock::LockService,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         use crate::host_mcp_process::lock::{self, LockFile};
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("true")
             .spawn()
             .or_else(|_| {
@@ -5354,9 +5348,8 @@ services:
                 .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
             "Anthropic must route through the proxy passthrough, got: {env_anthropic:?}"
         );
-        // ADR-073: the proxy path sets this for every provider kind (prompt-cache
-        // only, OAuth-neutral) — no longer a local-only marker (see
-        // llm::tests::login_unset_keys_cover_local_proxy_env's OAUTH_NEUTRAL list).
+        // ADR-073: the proxy path sets this for every provider kind (prompt-cache only,
+        // OAuth-neutral), not just local — see login_unset_keys_cover_local_proxy_env's list.
         assert!(
             env_anthropic
                 .iter()
@@ -6239,8 +6232,8 @@ services:
     /// Regression guard: a stale `lock.json` with a dead PID is treated as absent (no `WORKER_OAUTH_URL`).
     #[test]
     fn test_oauth_config_skipped_when_worker_pid_is_dead() {
-        // Reap a real child so its PID is deterministically dead (not merely
-        // "probably unused") — avoids the 999999-might-exist flakiness.
+        // Reap a real child so its PID is deterministically dead (not merely "probably unused").
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("true")
             .spawn()
             .or_else(|_| {
@@ -6567,6 +6560,55 @@ services:
                 .filter(|l| l.contains("ide"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_render_compose_sets_owner_only_perms_on_generated_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode_of(&data_dir.path().join("ide-bridge")),
+            0o700,
+            "ide_lock_dir must be owner-only"
+        );
+        assert_eq!(
+            mode_of(&proxy::proxy_config_dir_in(data_dir.path(), "test-project")),
+            0o700,
+            "proxy_config_dir must be owner-only"
+        );
+        assert_eq!(
+            mode_of(
+                &data_dir
+                    .path()
+                    .join("usage")
+                    .join("test-project")
+                    .join("proxy")
+            ),
+            0o700,
+            "proxy_usage_dir must be owner-only"
         );
     }
 
@@ -8748,9 +8790,7 @@ services:
         );
     }
 
-    // ── Atlassian built-in security tests ───────────────────────────────
-    // Atlassian's /workspace mount is :ro (addAttachment only reads a file to
-    // stream it as a Jira attachment) — the opposite of SharePoint/Slack's :rw.
+    // ── Atlassian built-in security tests: /workspace is :ro (SharePoint/Slack use :rw) ──
 
     #[test]
     fn test_security_check_atlassian_correct_mounts_pass() {
@@ -9260,7 +9300,6 @@ services:
     // not apply_plugins directly (it reads the plugins filesystem).
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
         // A plugin without service_id should be toggled by slug.
         // When enabled by slug, it should appear in SPEEDWAVE_PLUGINS.
@@ -9268,10 +9307,8 @@ services:
             plugins: std::collections::HashMap::from([("my-skills".to_string(), true)]),
             ..Default::default()
         };
-        // The key lookup: service_id.unwrap_or(slug) = "my-skills"
-        let slug = "my-skills";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "my-skills";
         assert!(
             integrations.is_plugin_enabled(plugin_key),
             "Resource-only plugin should be enabled when slug is in plugins map"
@@ -9279,16 +9316,14 @@ services:
     }
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_disabled_by_slug_excluded() {
         // A plugin without service_id should be excluded when disabled.
         let integrations = ResolvedIntegrationsConfig {
             plugins: std::collections::HashMap::from([("my-skills".to_string(), false)]),
             ..Default::default()
         };
-        let slug = "my-skills";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "my-skills";
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Resource-only plugin should be excluded when disabled"
@@ -9296,13 +9331,11 @@ services:
     }
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_absent_from_config_is_disabled() {
         // A freshly installed plugin not in config should be disabled.
         let integrations = ResolvedIntegrationsConfig::default();
-        let slug = "new-plugin";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "new-plugin";
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Plugin not in config should be disabled by default"

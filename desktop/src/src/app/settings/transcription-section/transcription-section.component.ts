@@ -15,9 +15,8 @@ import type { MicPermissionStatus, RecommendedModelAck } from '../../models/tran
 import { formatBytes } from '../../shared/format-bytes';
 
 /**
- * Settings → Meeting transcription (ADR-056). One auto-selected model for this
- * hardware (large-v3 on GPU, large-v3-turbo on CPU) with a single download /
- * remove control. No toggle, no model list, no per-feature defaults.
+ * Settings → Meeting transcription (ADR-056): one auto-selected model for this hardware
+ * (large-v3 GPU / large-v3-turbo CPU), single download/remove control, no model list.
  */
 @Component({
   selector: 'app-transcription-section',

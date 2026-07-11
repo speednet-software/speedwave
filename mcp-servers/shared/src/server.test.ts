@@ -2177,9 +2177,7 @@ describe('server', () => {
       (req as any).ip = '10.0.1.2';
       rlLayer.handle(req, createMockResponse(), vi.fn());
 
-      // Advance just past the 5-min cleanup interval
-      // Timestamp is 5*60_001ms old, which is < 6*60_000ms window → still valid
-      // Cleanup fires: valid.length == 1 > 0 → hits.set(ip, valid) fires (line 197)
+      // Advance just past the 5-min cleanup interval: timestamp is 5*60_001ms old (< 6*60_000ms window, still valid).
       vi.advanceTimersByTime(5 * 60_000 + 1);
 
       // Verify the bucket was kept (request still passes, IP still tracked)

@@ -1,6 +1,6 @@
 /**
- * SSOT reactive refresh-retry every OAuth consumer shares: on an auth-failure
- * status, refresh once and retry. See ADR-060 (host refresh), ADR-069 (plugins).
+ * SSOT reactive refresh-retry every OAuth consumer shares: refresh once and retry on an
+ * auth-failure status. See ADR-060 (host refresh), ADR-069 (plugins).
  */
 import { join } from 'node:path';
 import { loadToken } from './security.js';
@@ -61,9 +61,8 @@ export interface AuthedRefreshContext {
 /** Options for {@link authedRequest}. */
 export interface AuthedRequestOptions extends AuthedRefreshContext {
   /**
-   * Issues the request with the given bearer. Called up to twice (initial +
-   * post-refresh retry). MUST apply the passed token as the request's bearer;
-   * `authedRequest` does not set the Authorization header itself.
+   * Issues the request with the given bearer (called up to twice: initial + post-refresh retry).
+   * MUST apply the passed token as the request's bearer; this fn does not set Authorization itself.
    */
   readonly send: (accessToken: string) => Promise<Response>;
   /** Proactively refresh when the token expires within this window (seconds). */
@@ -77,9 +76,9 @@ const STALE_READ_POLL_ATTEMPTS = 5;
 const STALE_READ_POLL_DELAY_MS = 100;
 
 /**
- * Refresh the caller's token via the oauth worker, then re-read the fresh value
- * the worker wrote into `/tokens/access_token`. Mutates `state.accessToken`.
- * @param ctx - the refresh context
+ * Refresh the caller's token via the oauth worker, then re-read the fresh value written
+ * into `/tokens/access_token`. Mutates `state.accessToken`.
+ * @param ctx - Refresh context (service id, token state, tokens dir override).
  */
 async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
   const before = ctx.state.accessToken;
@@ -107,9 +106,8 @@ async function refreshInto(ctx: AuthedRefreshContext): Promise<void> {
 
 /**
  * Execute an authenticated request with shared refresh-retry semantics.
- * @param opts - service id, mutable token state, refresh lock, and `send`
- * @returns the final {@link Response} (caller checks `response.ok`)
- * @throws {OAuthScopeMismatchError} when the IdP needs re-consent
+ * @param opts - Request options (service, token state, lock, send callback, retry thresholds).
+ * @throws \@{OAuthScopeMismatchError} when the IdP needs re-consent
  */
 export async function authedRequest(opts: AuthedRequestOptions): Promise<Response> {
   const failureStatuses = opts.authFailureStatuses ?? DEFAULT_AUTH_FAILURE_STATUSES;
@@ -166,11 +164,10 @@ export interface AuthedSdkCallOptions<T> extends AuthedRefreshContext {
 }
 
 /**
- * SDK-shaped sibling of {@link authedRequest} for clients that throw typed
- * errors instead of returning a `Response` (e.g. `@slack/web-api`): on an
- * auth error, refresh once via the oauth worker and retry once.
- * @param opts - refresh context plus `send` and the auth-error predicate
- * @throws {OAuthScopeMismatchError} when the IdP needs re-consent
+ * SDK sibling of {@link authedRequest} for clients throwing typed errors (e.g. `@slack/web-api`):
+ * refresh once on auth error and retry.
+ * @param opts - Call options (service, token state, lock, send callback, isAuthError predicate).
+ * @throws \@{OAuthScopeMismatchError} on re-consent needed.
  */
 export async function authedSdkCall<T>(opts: AuthedSdkCallOptions<T>): Promise<T> {
   try {

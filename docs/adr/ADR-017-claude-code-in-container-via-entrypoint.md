@@ -18,20 +18,20 @@ Claude Code is installed inside the container — at image build time and, as a 
 - A reusable installer script is the SSOT used by both the build-time Containerfile and the runtime fallback — `containers/install-claude.sh`, invoked from `containers/Containerfile.claude`.
 - The pinned version lives in one constant, `crates/speedwave-runtime/src/defaults.rs::CLAUDE_VERSION`. A test enforces it is a concrete semver, not "latest"/"stable".
 - At build time the version is passed as a `CLAUDE_VERSION` build arg; at runtime `render_compose` injects it as an environment variable (`containers/compose.template.yml` consumes `CLAUDE_VERSION`).
-- The official native installer downloads the binary from GCS and verifies its SHA256 against a version-pinned manifest; `DISABLE_AUTOUPDATER=1` prevents in-container auto-update after the pinned install.
+- The official native installer downloads the binary from GCS and verifies its SHA256 against a version-pinned manifest;[^1] `DISABLE_AUTOUPDATER=1` prevents in-container auto-update after the pinned install.[^2]
 
-**Accepted residual risk (CWE-494):** the bootstrap script is fetched over TLS (`--proto '=https' --tlsv1.2`) without hash verification — identical to rustup, nvm, and homebrew. Hash-pinning the bootstrap is operationally fragile (it changes independently of Claude Code versions). Mitigated by: official Anthropic installer, TLS transport, installer-side binary SHA256 check, and container isolation. See `containers/install-claude.sh`.
+**Accepted residual risk (CWE-494):** the bootstrap script is fetched over TLS (`--proto '=https' --tlsv1.2`) without hash verification — identical to rustup, nvm, and homebrew (unverified). Hash-pinning the bootstrap is operationally fragile (it changes independently of Claude Code versions). Mitigated by: official Anthropic installer, TLS transport, installer-side binary SHA256 check, and container isolation. See `containers/install-claude.sh`.
 
 ## Runtime behavior flags
 
 User-overridable defaults live in `crates/speedwave-runtime/src/defaults.rs::base_env()` (overridable via `claude.env.<VAR>` in `.speedwave.json` or `~/.speedwave/config.json`):
 
-- `CLAUDE_CODE_ENABLE_TELEMETRY=0` — disables upstream telemetry.
-- `DISABLE_AUTOUPDATER=1` — prevents in-container auto-update after the pinned install.
-- `IS_SANDBOX=1` — signals a sandboxed environment so `--dangerously-skip-permissions` is accepted regardless of effective UID. Both supported platforms (macOS Lima, Windows WSL2) run the container as UID 1000, so the root-user check already passes; this is defense-in-depth (see ADR-026).
-- `CLAUDE_CODE_NO_FLICKER=1` — enables the alt-screen / differential (focus-view) renderer, mitigating PTY write-side backpressure that froze long streaming sessions in the CLI.
+- `CLAUDE_CODE_ENABLE_TELEMETRY=0` — disables upstream telemetry.[^3]
+- `DISABLE_AUTOUPDATER=1` — prevents in-container auto-update after the pinned install.[^2]
+- `IS_SANDBOX=1` — signals a sandboxed environment so `--dangerously-skip-permissions` is accepted regardless of effective UID.[^4] Both supported platforms (macOS Lima, Windows WSL2) run the container as UID 1000, so the root-user check already passes; this is defense-in-depth (see ADR-026).
+- `CLAUDE_CODE_NO_FLICKER=1` — enables the alt-screen / differential (focus-view) renderer, mitigating PTY write-side backpressure that froze long streaming sessions in the CLI.[^5]
 
-Speedwave deliberately does **not** set `CLAUDE_CODE_EFFORT_LEVEL`. The env var outranks the user's in-session `/effort` and the persisted `settings.json`,[^effort] so pinning it (even to `auto`) blocks the user from changing effort — `/effort max` reports "Not applied: env override". Omitting it lets Claude Code use the model's own default effort while keeping `/effort` working and persisted to `settings.json` (see ADR-022). A compose test asserts the var is absent from the `claude` service environment.
+Speedwave deliberately does **not** set `CLAUDE_CODE_EFFORT_LEVEL`. The env var outranks the user's in-session `/effort` and the persisted `settings.json`,[^6] so pinning it (even to `auto`) blocks the user from changing effort — `/effort max` reports "Not applied: env override". Omitting it lets Claude Code use the model's own default effort while keeping `/effort` working and persisted to `settings.json` (see ADR-022). A compose test asserts the var is absent from the `claude` service environment.
 
 ## Persistent state
 
@@ -50,7 +50,17 @@ Claude Code's binary and user data persist across container rebuilds via a per-p
 - **Install on the host** — bypasses all container security controls (ADR-009) and gives Claude Code unrestricted host access.
 - **`npm install -g @anthropic-ai/claude-code`** (used in v1) — the npm package was deprecated in favor of the native installer; v2 uses the native installer only.
 
-[^effort]: Claude Code resolves settings with environment variables taking precedence over `settings.json`; `CLAUDE_CODE_EFFORT_LEVEL` is documented in the environment-variable reference. https://docs.claude.com/en/docs/claude-code/settings#environment-variables
+[^1]: Claude Code's release process publishes a `manifest.json` with per-platform SHA256 checksums, signed with an Anthropic GPG key; the native installer verifies the binary against it. https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing
+
+[^2]: `DISABLE_AUTOUPDATER=1` in the `env` key of `settings.json` disables the background auto-update check (`claude update` and `claude install` still work). https://code.claude.com/docs/en/setup#disable-auto-updates
+
+[^3]: `CLAUDE_CODE_ENABLE_TELEMETRY` controls telemetry collection. https://code.claude.com/docs/en/settings#environment-variables
+
+[^4]: `--dangerously-skip-permissions` is blocked when running as root or via sudo on Linux/macOS; the check is skipped automatically inside a recognized sandbox. https://code.claude.com/docs/en/sandboxing#troubleshooting
+
+[^5]: `CLAUDE_CODE_NO_FLICKER=1` enables fullscreen rendering, an alternative render path on the terminal's alternate screen buffer that eliminates flicker and keeps memory flat in long conversations. https://code.claude.com/docs/en/fullscreen
+
+[^6]: Claude Code resolves settings with environment variables taking precedence over `settings.json`; `CLAUDE_CODE_EFFORT_LEVEL` is documented in the environment-variable reference. https://code.claude.com/docs/en/settings#environment-variables
 
 ---
 

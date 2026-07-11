@@ -14,10 +14,8 @@ import {
 import { GitHubClient, isExpectedError } from '../client.js';
 
 /**
- * Splits a combined `owner/repo` string passed in `repo` when `owner` is missing,
- * so a `full_name` value round-tripped from `listRepos`/`getRepo` still resolves.
- * A value with empty segments or more than one slash (an impossible GitHub repo name)
- * is taught, not silently forwarded.
+ * Splits a combined `owner/repo` string passed in `repo` when `owner` is missing, so a `full_name`
+ * value round-tripped from `listRepos`/`getRepo` still resolves; an impossible shape is taught, not forwarded.
  * @param params - Raw params object (a copy is returned; input is untouched)
  */
 function normalizeOwnerRepo(
@@ -44,8 +42,7 @@ function normalizeOwnerRepo(
 }
 
 /**
- * Numeric-id param names for a tool: top-level integer/number inputs, excluding the
- * pagination `limit` (which is clamped, not rejected, when zero or out of range).
+ * Numeric-id param names for a tool: top-level integer/number inputs, excluding pagination `limit` (clamped, not rejected, out of range).
  * @param tool - The tool whose inputSchema drives the derivation
  */
 function numericIdParamNames(tool: Tool): string[] {
@@ -56,9 +53,8 @@ function numericIdParamNames(tool: Tool): string[] {
 }
 
 /**
- * Wraps a tool definition's handler with numeric-id forgiveness derived from its own
- * inputSchema: a `#`-prefixed or string form of each numeric-id param is coerced, and an
- * exotic value (`"4.5"`, `"-3"`, `"0x2A"`) is taught rather than passed to the API.
+ * Wraps a tool handler with numeric-id forgiveness from its own inputSchema: a `#`-prefixed or
+ * string form of each numeric-id param is coerced, and an exotic value (`"4.5"`, `"0x2A"`) is taught.
  * @param def - The tool definition to wrap
  */
 export function withNumericForgiveness(def: ToolDefinition): ToolDefinition {
@@ -77,7 +73,7 @@ export function withNumericForgiveness(def: ToolDefinition): ToolDefinition {
 }
 
 /**
- * Wrap a tool handler with client-presence, owner/repo forgiveness, and error handling.
+ * Wraps a tool handler with client-presence, owner/repo forgiveness, and error handling.
  * @param client - GitHub client instance (null when the service is not configured)
  * @param handler - Tool handler function
  */

@@ -113,9 +113,9 @@ const openDirectMessageTool: Tool = {
 };
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param _params - Tool parameters (none)
+ * Handler for `listDirectMessages` — lists the signed-in user's DM conversations with resolved member names.
+ * @param clients - The Slack client container.
+ * @param _params - Unused (no input parameters).
  */
 export async function handleListDirectMessages(
   clients: SlackClients,
@@ -139,9 +139,9 @@ export async function handleListDirectMessages(
 }
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param params - Tool parameters
+ * Handler for `openDirectMessage` — opens (or returns the existing) DM conversation with one or more users.
+ * @param clients - The Slack client container.
+ * @param params - Recipients.
  */
 export async function handleOpenDirectMessage(
   clients: SlackClients,
@@ -164,7 +164,7 @@ export async function handleOpenDirectMessage(
 
 /**
  * Tool factory (shared NOT_CONFIGURED gating).
- * @param clients - Slack client instances
+ * @param clients - The Slack client container.
  */
 export function createDmTools(clients: SlackClients): ToolDefinition[] {
   const gate = withClients(clients);

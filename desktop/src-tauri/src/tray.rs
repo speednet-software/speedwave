@@ -156,16 +156,16 @@ pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
         Ok(menu) => {
             if let Some(tray) = app.tray_by_id("main-tray") {
                 if let Err(e) = tray.set_menu(Some(menu)) {
-                    log::warn!("tray: failed to set menu: {e}");
+                    log::warn!("failed to set tray menu: {e}");
                 }
             }
         }
-        Err(e) => log::warn!("tray: failed to build menu: {e}"),
+        Err(e) => log::warn!("failed to build tray menu: {e}"),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::expect_used, reason = "test assertions may expect freely")]
 mod tests {
     use super::*;
 

@@ -37,9 +37,8 @@ const SEND_TO_CHAT_INSTRUCTIONS: Record<Language, string> = {
 };
 
 /**
- * Meeting-transcription state + Tauri-command facade. Mirrors the ADR-056
- * snapshot+seq delivery: `subscribeToTranscript` applies a snapshot, then
- * listens for events with `seq > lastSeq` idempotently.
+ * Meeting-transcription state + Tauri-command facade. Mirrors ADR-056 snapshot+seq delivery:
+ * `subscribeToTranscript` applies a snapshot, then applies events with `seq > lastSeq`.
  */
 @Injectable({ providedIn: 'root' })
 export class TranscriptionService {
@@ -179,8 +178,7 @@ export class TranscriptionService {
   }
 
   /**
-   * Sends the transcript to Claude with a summarization instruction on top
-   * (in the session language), so the chat knows what to do with it.
+   * Sends the transcript to Claude with a summarization instruction on top, in the session language.
    * @param sessionId - the session to send.
    */
   async sendToChat(sessionId: string): Promise<void> {
@@ -200,8 +198,8 @@ export class TranscriptionService {
   }
 
   /**
-   * Starts a model download tracked in the service signals (backend enforces
-   * single-flight per model; the local guard just fails fast).
+   * Starts a model download tracked in the service signals (backend enforces single-flight per
+   * model; the local guard just fails fast).
    * @param modelId - catalogue key.
    */
   async downloadModel(modelId: string): Promise<void> {
@@ -218,8 +216,8 @@ export class TranscriptionService {
   }
 
   /**
-   * Re-attaches progress tracking to a download the backend reports as still
-   * running (webview reloaded mid-download — the invoke promise is gone).
+   * Re-attaches progress tracking to a download the backend reports as still running (webview
+   * reloaded mid-download — the invoke promise is gone).
    * @param modelId - catalogue key the backend flagged as `downloading`.
    */
   async resumeDownloadTracking(modelId: string): Promise<void> {
@@ -298,8 +296,7 @@ export class TranscriptionService {
   }
 
   /**
-   * Idempotent event application: ignores `seq <= lastSeq` (already captured
-   * via the snapshot path).
+   * Idempotent event application: ignores `seq <= lastSeq` (already captured via the snapshot path).
    * @param ev - incoming event.
    */
   applyEvent(ev: TranscriptEvent): void {

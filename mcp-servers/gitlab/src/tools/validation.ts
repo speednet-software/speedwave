@@ -16,8 +16,8 @@ const NUMERIC_ID_PARAMS = ['mr_iid', 'issue_iid', 'pipeline_id', 'job_id'] as co
 
 /**
  * Wrap a tool handler with client-presence, IID/ID forgiveness, and error handling.
- * @param client - GitLab client instance (null when the service is not configured)
- * @param handler - Tool handler function
+ * @param client - GitLab client instance (null when the service is not configured).
+ * @param handler - Tool handler function.
  */
 export function withValidation<T>(
   client: GitLabClient | null,

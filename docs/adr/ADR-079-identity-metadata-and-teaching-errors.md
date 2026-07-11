@@ -18,7 +18,7 @@ A tool declares up to three `_meta` keys via mcp-shared's `META_KEYS` ([ADR-036]
 
 - `speedwave.pl/user-scoped` (boolean): the tool's result set, or an accepted parameter, depends on the authenticated caller's identity. This covers both read tools ("my X" queries) and write tools with an assignee-style parameter.
 - `speedwave.pl/current-user-tool` (string): the name of a sibling tool in the same worker that resolves the caller's identity without an explicit id (e.g. `getCurrentUser`).
-- `speedwave.pl/self-param` (string): a short hint naming the input parameter and value that let the caller reference themselves inline instead of a two-call round trip (e.g. Redmine's `"assigned_to: 'me'"`, GitLab's `"scope: 'assigned_to_me' | 'created_by_me'"`). It is free text for the rendered description, but its leading identifier must name a real parameter in the tool's `inputSchema`.
+- `speedwave.pl/self-param` (string): a short hint naming the input parameter and value that let the caller reference themselves inline instead of a two-call round trip (e.g. Redmine's `"assigned_to: 'me'"`[^2], GitLab's `"scope: 'assigned_to_me' | 'created_by_me'"`[^3]). It is free text for the rendered description, but its leading identifier must name a real parameter in the tool's `inputSchema`.
 
 A `user-scoped` tool is expected to declare at least one of `current-user-tool` or `self-param`, and both companions are validated at discovery in `discoverAndMergeService` (`mcp-servers/hub/src/tool-discovery.ts`): `dropDanglingCurrentUserTool` drops a `currentUserTool` pointer that names a tool absent from the service's discovered set, `dropDanglingSelfParam` drops a `self-param` whose leading parameter name is not an input parameter of the declaring tool (each logging a warning), and `warnMissingIdentityCompanion` warns once per tool when a user-scoped tool ends up with neither companion. The tool keeps serving: `renderDescriptionWithIdentity` (`mcp-servers/hub/src/search-tools.ts`) appends the "Results depend on the authenticated user." sentence, followed by the pointer-specific guidance for a correctly configured tool, or by a short misconfiguration hint ("No self-reference helper is configured for this tool") when neither companion is set. The identity sentence renders at both the `with_descriptions` and `full_schema` `search_tools` detail levels, and user-scoped tools are boosted for self-reference queries like "me".
 
@@ -53,5 +53,9 @@ This is the contract for new validation/teaching-error paths: missing or malform
 ## Footnotes
 
 [^1]: Model Context Protocol specification, "General fields, `_meta`": the `_meta` property's key-name format (optional dot-separated label prefix followed by a slash, then a name). <https://modelcontextprotocol.io/specification/2025-11-25/basic#_meta>
+
+[^2]: Redmine REST API, "Issues" wiki: `assigned_to_id` filter accepts `'me'` to fetch issues assigned to the logged-in user (API key or HTTP auth). <https://www.redmine.org/projects/redmine/wiki/Rest_Issues>
+
+[^3]: GitLab REST API, "Merge requests" docs: the `scope` parameter accepts `created_by_me`, `assigned_to_me`, `reviews_for_me`, or `all`. <https://docs.gitlab.com/api/merge_requests/>
 
 [ADR-036]: ADR-036-self-declaring-worker-policy.md

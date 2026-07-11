@@ -1,13 +1,6 @@
 /**
- * Tool Discovery - Dynamic tool fetching from workers
- * @module tool-discovery
- *
- * Fetches tool definitions from workers via JSON-RPC `tools/list`.
- * Merges worker tool data with _meta metadata to produce ToolMetadata.
- *
- * Workers are the SSOT for ALL tool metadata:
- * - Contract: name, description, inputSchema, inputExamples, keywords, example, outputSchema, annotations
- * - Policy: deferLoading, timeoutClass, timeoutMs, osCategory (via _meta field)
+ * Tool Discovery: fetches tool definitions from workers via JSON-RPC `tools/list`, merging worker
+ * data with `_meta`. Workers are the SSOT for both contract and policy fields.
  */
 
 import { randomUUID } from 'crypto';
@@ -20,8 +13,7 @@ import { parseResponse, buildWorkerHeaders } from './http-bridge.js';
 import { deriveWorkerEnv } from './worker-env.js';
 
 /**
- * Convert snake_case tool name to camelCase method name.
- * Workers use snake_case, hub uses camelCase.
+ * Convert snake_case tool name to camelCase (workers use snake_case, hub uses camelCase).
  * @param str - snake_case string to convert
  */
 export function toCamelCase(str: string): string {
@@ -29,9 +21,8 @@ export function toCamelCase(str: string): string {
 }
 
 /**
- * Perform MCP initialize handshake with a worker.
- * Sends `initialize` request followed by `notifications/initialized` notification.
- * Returns the Mcp-Session-Id if the worker set one, or undefined.
+ * Perform MCP initialize handshake with a worker: `initialize` request then
+ * `notifications/initialized`. Returns the Mcp-Session-Id if the worker set one.
  * @param workerUrl - Worker base URL
  * @param headers - Request headers (Content-Type, Accept, auth, etc.)
  * @returns Session ID from the worker, or undefined
@@ -90,9 +81,8 @@ export async function initializeWorker(
 export const MAX_PAGINATION_PAGES = 50;
 
 /**
- * Fetch all tools from a worker with cursor-based pagination.
- * Iterates `tools/list` until no `nextCursor` is returned or
- * MAX_PAGINATION_PAGES is reached.
+ * Fetch all tools from a worker with cursor-based pagination, iterating `tools/list` until
+ * `nextCursor` is empty or MAX_PAGINATION_PAGES is reached.
  * @param workerUrl - Worker base URL
  * @param headers - Request headers (Content-Type, Accept, auth, session, etc.)
  * @returns Array of all Tool definitions from the worker
@@ -145,7 +135,7 @@ export async function fetchAllTools(
 }
 
 /**
- * Fetch tool list from a worker service via MCP initialize handshake + paginated tools/list.
+ * Fetch tool list from a worker via MCP initialize + paginated tools/list; empty on failure.
  * @param service - Service name (e.g., 'redmine', 'gitlab')
  * @returns Array of Tool definitions from the worker, or empty array on failure
  */
@@ -182,8 +172,8 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
 }
 
 /**
- * Merge a worker Tool definition with its _meta to produce ToolMetadata.
- * Workers are the SSOT for all fields — both contract and policy (via _meta).
+ * Merge a worker Tool definition with its `_meta` to produce ToolMetadata.
+ * Workers are the SSOT for all fields — both contract and policy (via `_meta`).
  * @param tool - Worker Tool definition (including _meta with policy fields)
  * @param service - Service name (e.g., 'redmine')
  * @param methodName - camelCase method name (e.g., 'createIssue')
@@ -233,8 +223,7 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
 }
 
 /**
- * Validate that merged ToolMetadata has all required fields.
- * Returns an array of validation error messages (empty if valid).
+ * Validate merged ToolMetadata has required fields; returns error messages (empty if valid).
  * @param service - Service name
  * @param methodName - camelCase method name
  * @param metadata - Merged ToolMetadata to validate
@@ -270,8 +259,7 @@ export function validateMergeResult(
 }
 
 /**
- * Discover and merge tools for a service.
- * Fetches tool list from worker, merges with _meta, validates.
+ * Discover and merge tools for a service: fetch from worker, merge with `_meta`, validate.
  * Single unified path for all services (built-in and plugin).
  * @param service - Service name
  * @returns Record of camelCase method names to ToolMetadata

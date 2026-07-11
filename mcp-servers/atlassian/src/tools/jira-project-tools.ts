@@ -102,7 +102,6 @@ const listIssueTypesTool: Tool = {
 /**
  * Build the Jira project tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for projects.
  */
 export function createJiraProjectTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [listProjectsTool, getProjectTool, listIssueTypesTool];

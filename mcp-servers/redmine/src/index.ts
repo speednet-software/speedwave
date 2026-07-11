@@ -1,10 +1,4 @@
-/**
- * MCP Redmine Worker
- *
- * Isolated Redmine MCP server with per-service token isolation.
- * Exposes 23 tools: issue, time entry, journal, user, project, relation, and config operations.
- * @module mcp-redmine
- */
+/** Isolated Redmine MCP server, per-service token isolation, 23 tools across issue/time entry/journal/user/project/relation/config. */
 
 import { bootWorker, ts } from '@speedwave/mcp-shared';
 import { initializeRedmineClient, type RedmineClient } from './client.js';

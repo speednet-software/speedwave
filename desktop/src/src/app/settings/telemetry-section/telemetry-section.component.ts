@@ -20,8 +20,8 @@ import type {
 } from '../../models/telemetry';
 
 /**
- * Settings → Telemetry: point Claude Code at your own OTLP collector.
- * MDM-locked fields render read-only; the headers secret never leaves the host.
+ * Settings → Telemetry: point Claude Code at your own OTLP collector. MDM-locked fields render
+ * read-only; the headers secret never leaves the host.
  */
 @Component({
   selector: 'app-telemetry-section',
@@ -527,9 +527,9 @@ export class TelemetrySectionComponent implements OnInit {
   }
 
   /**
-   * A privacy toggle turning ON requires an explicit confirm.
-   * @param field - which privacy-gate signal to toggle.
-   * @param ev - the checkbox change event.
+   * A privacy toggle turning ON requires an explicit confirm; `field` selects which gate signal.
+   * @param field - the privacy gate signal to toggle
+   * @param ev - the change event from the toggle input
    */
   onPrivacyToggle(
     field: 'logUserPrompts' | 'logAssistantResponses' | 'logToolDetails' | 'logRawApiBodies',

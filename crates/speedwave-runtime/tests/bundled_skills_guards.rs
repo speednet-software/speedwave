@@ -1,7 +1,10 @@
 //! Guards for bundled code-review skills: no model pin, worker list matches dirs,
 //! shared blocks byte-identical, no repo-level dev copy.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

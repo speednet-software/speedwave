@@ -1,17 +1,6 @@
 /**
- * Atlassian HTTP client for the MCP worker.
- *
- * Thin wrapper over `axios` (no external Atlassian SDK). Provides:
- * - Basic auth (`Authorization: Basic base64(email:api_token)`).
- * - A **per-request** retry policy (NOT a global interceptor): only requests
- *   explicitly marked `retryable` (GET / idempotent reads) retry transient
- *   `5xx`; every request retries `429` while honouring `Retry-After`, with a
- *   bounded number of attempts and exponential backoff + jitter. Write
- *   operations pass `retryable: false` so a `5xx` mid-write is surfaced rather
- *   than blindly replayed.
- * - {@link AtlassianClient.formatError}: maps errors to user-facing messages and
- *   guarantees the `Authorization` header / base64 blob / raw token never leak.
- * @module mcp-atlassian/client
+ * Atlassian HTTP client (`axios` wrapper): Basic auth, per-request (not global) retry — only `retryable: true`
+ * calls retry `5xx`, all retry `429`; {@link AtlassianClient.formatError} guarantees no credential leaks.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -38,21 +27,13 @@ const BASE_DELAY_MS = 1000;
 /** Cap on any single backoff wait, ms (also caps a `Retry-After` we honour). */
 const MAX_DELAY_MS = 20_000;
 
-/**
- * A `type/subtype` MIME with optional parameters, restricted to token chars so
- * no CR/LF/quote/backslash can break out of the multipart part header.
- */
+/** A `type/subtype` MIME, restricted to token chars so no CR/LF/quote/backslash breaks the multipart header. */
 const MIME_TYPE_RE =
   /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(?:[ \t]*;[ \t]*[A-Za-z0-9!#$&^_.+-]+=(?:"[^"\r\n\\]*"|[A-Za-z0-9!#$&^_.+-]+))*$/;
 
 /** Per-request options layered on top of `AxiosRequestConfig`. */
 interface RequestOptions {
-  /**
-   * Whether transient `5xx` errors should be retried. Use `true` only for GET /
-   * idempotent reads; write operations must pass `false` (the default) so a
-   * server error mid-write is not blindly replayed. `429` is retried regardless
-   * (it means "you sent too fast", not "the write may have happened").
-   */
+  /** Retry transient `5xx`; `true` only for GET/idempotent reads, writes must pass `false` (default). `429` always retries. */
   retryable?: boolean;
 }
 
@@ -63,9 +44,9 @@ interface RequestOptions {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Parse a `Retry-After` header (delta-seconds or HTTP-date) to ms, clamped.
+ * Parse a `Retry-After` header (delta-seconds or HTTP-date) to ms, clamped to {@link MAX_DELAY_MS}; `null` if unparseable.
  * @param header - The raw `Retry-After` header value (string, or anything).
- * @returns Milliseconds to wait (clamped to {@link MAX_DELAY_MS}), or `null` if unparseable.
+ * @returns Milliseconds to wait, or `null` if unparseable.
  */
 function parseRetryAfter(header: unknown): number | null {
   if (typeof header !== 'string' || header.trim() === '') return null;
@@ -77,7 +58,7 @@ function parseRetryAfter(header: unknown): number | null {
 }
 
 /**
- * Exponential backoff with full jitter for attempt `n` (1-based).
+ * Exponential backoff with full jitter for attempt `n` (1-based), in ms.
  * @param n - The retry attempt number, 1-based.
  * @returns A randomised delay in milliseconds.
  */
@@ -87,10 +68,8 @@ function backoff(n: number): number {
 }
 
 /**
- * Atlassian Cloud REST client (Jira v3 + Agile 1.0, Confluence v2 + v1).
- * Domain modules in `./domains/` call the low-level {@link get}/{@link post}/etc.
- * helpers; this class owns auth, retry policy, pagination and error formatting.
- * @class AtlassianClient
+ * Atlassian Cloud REST client (Jira v3 + Agile 1.0, Confluence v2 + v1). Domain modules in
+ * `./domains/` call the low-level {@link get}/{@link post}/etc.; this class owns auth, retry, error formatting.
  */
 export class AtlassianClient {
   private readonly http: AxiosInstance;
@@ -104,11 +83,8 @@ export class AtlassianClient {
   }
 
   /**
-   * Build the client from a resolved configuration.
+   * Build the client; throws if `config.siteUrl` is not `https://*.atlassian.net` (SSRF guard, not bypassable).
    * @param config - Resolved worker configuration (from `/tokens`).
-   * @throws {Error} If `config.siteUrl` is not an `https://*.atlassian.net`
-   *   origin (`readCredentials` already enforces this, but a directly-constructed
-   *   config must not bypass the SSRF-prevention guard).
    */
   constructor(config: AtlassianConfig) {
     if (!/^https:\/\/[^/]+\.atlassian\.net$/.test(config.siteUrl)) {
@@ -141,15 +117,12 @@ export class AtlassianClient {
     return this.config.confluenceSpaceKeys;
   }
 
-  //═══════════════════════════════════════════════════════════════════════════
-  // Core request with per-request retry
-  //═══════════════════════════════════════════════════════════════════════════
+  // ── Core request with per-request retry ─────────────────────────────────
 
   /**
-   * Issue an HTTP request with the per-request retry policy applied.
-   * @template T - Expected response body type.
+   * Issue an HTTP request with the per-request retry policy applied (see {@link RequestOptions}).
    * @param config - Axios request config (method/url/params/data/...).
-   * @param opts - {@link RequestOptions} (notably `retryable`).
+   * @param opts - Per-request options, notably `retryable`.
    * @returns The response body.
    */
   async request<T>(config: AxiosRequestConfig, opts: RequestOptions = {}): Promise<T> {
@@ -197,9 +170,7 @@ export class AtlassianClient {
   }
 
   /**
-   * POST. By default **not** retried on `5xx` (only `429`) — pass
-   * `{ retryable: true }` only for endpoints that are semantically idempotent
-   * (e.g. JQL/CQL search via POST). See {@link request}.
+   * POST; not retried on `5xx` by default (only `429`) — pass `{ retryable: true }` for idempotent endpoints (e.g. JQL/CQL search).
    * @param url - Path relative to the site base URL.
    * @param data - Optional request body.
    * @param opts - Per-request options (notably `retryable`).
@@ -231,15 +202,12 @@ export class AtlassianClient {
   }
 
   /**
-   * Upload a file as a Jira issue attachment (`POST .../attachments`, multipart).
-   * Builds the `multipart/form-data` body by hand (no `form-data` dependency) and
-   * sends the required `X-Atlassian-Token: no-check` header. Not retried (write).
-   * @template T - Expected response body type (Jira returns an array).
+   * Upload a Jira issue attachment (multipart, hand-built body, `X-Atlassian-Token: no-check`). Not retried.
+   * `contentType` rejected unless a well-formed `type/subtype` so it cannot break out of the header line.
    * @param issueIdOrKey - Target issue key or numeric ID.
    * @param filename - Attachment file name (CR/LF/quote/backslash are stripped).
    * @param data - Raw file bytes.
-   * @param contentType - MIME type for the file part; rejected unless it is a
-   *   well-formed `type/subtype` so it cannot break out of the header line.
+   * @param contentType - MIME type for the file part.
    * @returns The response body (array of created attachment metadata).
    */
   uploadAttachment<T>(
@@ -276,14 +244,9 @@ export class AtlassianClient {
     );
   }
 
-  //═══════════════════════════════════════════════════════════════════════════
-  // Connectivity
-  //═══════════════════════════════════════════════════════════════════════════
+  // ── Connectivity ─────────────────────────────────────────────────────────
 
-  /**
-   * Lightweight connectivity/credentials check (`GET /rest/api/3/myself`).
-   * @returns `{ success: true }` on 2xx, otherwise `{ success: false, error }`.
-   */
+  /** Lightweight connectivity/credentials check (`GET /rest/api/3/myself`); `{ success: false, error }` otherwise. */
   async testConnection(): Promise<ConnectionTestResult> {
     try {
       await this.get<unknown>('/rest/api/3/myself');
@@ -293,14 +256,11 @@ export class AtlassianClient {
     }
   }
 
-  //═══════════════════════════════════════════════════════════════════════════
-  // Error formatting (secret-safe)
-  //═══════════════════════════════════════════════════════════════════════════
+  // ── Error formatting (secret-safe) ──────────────────────────────────────
 
   /**
-   * Map an error to a concise, user-facing message. Guarantees no credential
-   * material (`Authorization` header value, base64 `email:token`, raw token)
-   * appears in the output even if it somehow reached the error object.
+   * Map an error to a concise, user-facing message. Guarantees no credential material
+   * (`Authorization` header, base64 `email:token`, raw token) appears even if it reached the error object.
    * @param error - Anything thrown by a client call.
    * @returns A safe, human-readable message.
    */
@@ -352,7 +312,7 @@ export class AtlassianClient {
   }
 
   /**
-   * Extract just the host from a URL string, for safe error messages.
+   * Extract just the host from a URL string, for safe error messages; `"Atlassian"` if unparseable.
    * @param url - A URL string (or anything).
    * @returns The host portion, or `"Atlassian"` if it isn't a parseable URL.
    */
@@ -366,9 +326,8 @@ export class AtlassianClient {
   }
 
   /**
-   * Defensive scrub: redact anything that looks like a credential.
-   * The `ATATT…` pattern must stay in sync with the `ATATT` rule in
-   * `crates/speedwave-runtime/src/log_sanitizer.rs` (`{20,}` suffix).
+   * Defensive scrub: redact anything that looks like a credential. The `ATATT…` pattern must
+   * stay in sync with the `ATATT` rule in `crates/speedwave-runtime/src/log_sanitizer.rs` (`{20,}` suffix).
    * @param message - A message that may contain credential material.
    * @returns The message with Basic-auth blobs and Atlassian tokens redacted.
    */
@@ -379,16 +338,11 @@ export class AtlassianClient {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Initialization
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Initialization ─────────────────────────────────────────────────────────────
 
 /**
- * Build an {@link AtlassianClient} from the `/tokens` mount and verify
- * connectivity. Returns `null` (without throwing) if credentials are missing,
- * invalid, or the connection test fails — the worker then starts in "not
- * configured" mode and every tool returns a clear error.
- * @returns The initialized client, or `null`.
+ * Build an {@link AtlassianClient} from `/tokens` and verify connectivity. Returns `null` (never throws)
+ * if credentials are missing/invalid or the connection test fails — worker starts "not configured".
  */
 export async function initializeAtlassianClient(): Promise<AtlassianClient | null> {
   try {

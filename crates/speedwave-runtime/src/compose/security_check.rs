@@ -322,9 +322,8 @@ impl SecurityRule {
         )
     }
 
-    /// Returns `true` for Atlassian-specific rules. The workspace mount is
-    /// :ro here (unlike SharePoint/Slack's :rw) — addAttachment only reads a
-    /// file from the workspace, it never writes to it.
+    /// Returns `true` for Atlassian-specific rules. The workspace mount is :ro here (unlike
+    /// SharePoint/Slack's :rw) — addAttachment only reads a file, never writes.
     pub fn is_atlassian(self) -> bool {
         matches!(
             self,
@@ -1149,9 +1148,8 @@ impl SecurityCheck {
         )
     }
 
-    /// Validates volumes for built-in mcp-atlassian service (not a plugin).
-    /// Unlike SharePoint/Slack, the workspace mount is :ro — addAttachment only
-    /// reads a file from the workspace to attach it to a Jira issue, never writes.
+    /// Validates volumes for built-in mcp-atlassian (not a plugin). Unlike SharePoint/Slack,
+    /// the workspace mount is :ro — addAttachment only reads the file, to attach it.
     fn check_builtin_atlassian_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1662,7 +1660,10 @@ pub(crate) fn get_services(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test-only module: unwraps assert setup succeeded"
+    )]
     use super::*;
 
     #[test]

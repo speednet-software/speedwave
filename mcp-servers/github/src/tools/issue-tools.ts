@@ -16,10 +16,8 @@ import { withValidation } from './validation.js';
 import { TOOL_NAMES } from '../tool-names.js';
 
 /**
- * Maps a normalized issue to the compact summary returned by `listIssues`
- * (flattens `user`/`labels`/`assignees` to plain strings; drops `body`/timestamps).
- * @param i - Normalized issue from the GitHub client
- * @returns Compact `{ number, title, state, user, labels, assignees, html_url }` summary
+ * Maps a normalized issue to the compact summary for `listIssues` (flattens `user`/`labels`/`assignees` to strings; drops `body`/timestamps).
+ * @param i - Normalized issue
  */
 function issueSummary(i: GitHubIssue): {
   number: number;

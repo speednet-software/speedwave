@@ -203,9 +203,8 @@ describe('DiffViewComponent', () => {
   });
 
   it('resets the user expand toggle when oldString or newString changes', () => {
-    // Truncate with a long diff, click expand to reveal full, then swap inputs:
-    // the new diff must start collapsed again per the OnChanges contract preserved
-    // by the effect.
+    // Truncate a long diff, expand it, then swap inputs: the new diff must
+    // start collapsed again per the OnChanges contract preserved by the effect.
     setInputs(
       Array.from({ length: 30 }, (_, i) => `old-${i}`).join('\n'),
       Array.from({ length: 30 }, (_, i) => `new-${i}`).join('\n'),

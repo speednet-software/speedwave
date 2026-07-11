@@ -1,15 +1,6 @@
 /**
- * Slack API Client module providing isolated client for mcp-slack worker
- * @module slack/client
- *
- * Isolated Slack client for mcp-slack worker. ONLY has access to the Slack
- * user access token (`/tokens/access_token`, RO mount) — refreshed by the
- * host-side oauth worker (ADR-060/071). All calls run as the signed-in user.
- *
- * Error Handling Convention:
- * - initializeSlackClients returns a `_tokensStatus:'missing'` container on
- *   config failures (graceful degradation), never throws
- * - Instance methods throw errors on API failures
+ * Isolated Slack client for mcp-slack worker (@module slack/client): only accesses the Slack user access token (`/tokens/access_token`, RO), refreshed by the host-side oauth worker (ADR-060/071). All calls run as the signed-in user.
+ * Error convention: `initializeSlackClients` returns a `_tokensStatus:'missing'` container on config failures (never throws); instance methods throw on API failures.
  */
 
 import { mkdir, writeFile } from 'fs/promises';
@@ -38,22 +29,14 @@ import {
   type AuthedTokenState,
 } from '@speedwave/mcp-shared';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ──────────────────────────────────────────────────────────────────
 
 /** Whether the Slack access token was loadable at startup. */
 export type SlackTokensStatus = 'present' | 'missing';
 
 /**
- * Container for the Slack user WebClient plus its refresh plumbing.
- *
- * Returned in **every** state, including when the token is absent — callers
- * check `_tokensStatus === 'missing'` rather than null. `user` is recreated
- * by {@link slackCall} whenever the rotating token changes on disk.
- *
- * `statusTracker` is optional only so tool-level unit tests can mock without
- * constructing a tracker; runtime always populates it.
+ * Container for the Slack user WebClient plus its refresh plumbing. Returned in **every** state, including when the token is
+ * absent — check `_tokensStatus === 'missing'` rather than null; `user` is recreated by {@link slackCall} on rotation. `statusTracker` is optional only for tool-level unit-test mocking; runtime always populates it.
  */
 export interface SlackClients {
   user: WebClient;
@@ -68,15 +51,7 @@ export interface SlackClients {
   _userDirectory?: UserDirectoryCache;
 }
 
-/**
- * Represents a Slack message with user, text, and timestamp information
- * @interface SlackMessage
- * @property {string} user - User ID who sent the message
- * @property {string} text - Message text content
- * @property {string} ts - Timestamp (unique message identifier)
- * @property {string} type - Message type (usually "message")
- * @property {string} [username] - Optional display username
- */
+/** A Slack message: user ID, text, `ts` (the unique message identifier), and type. */
 export interface SlackMessage {
   user: string;
   text: string;
@@ -104,16 +79,7 @@ export interface SlackFileMeta {
   size?: number;
 }
 
-/**
- * Represents a Slack channel with ID, name, and membership status
- * @interface SlackChannel
- * @property {string} id - Channel ID (e.g., C01234567)
- * @property {string} name - Channel name (without # prefix)
- * @property {boolean} is_channel - Whether it's a channel (vs DM/group)
- * @property {boolean} is_private - Whether it's a private channel
- * @property {boolean} is_member - Whether the user is a member
- * @property {number} [num_members] - Optional member count
- */
+/** A Slack channel: ID (e.g. C01234567), name without `#` prefix, and membership/privacy flags. */
 export interface SlackChannel {
   id: string;
   name: string;
@@ -123,14 +89,7 @@ export interface SlackChannel {
   num_members?: number;
 }
 
-/**
- * Represents a Slack user with ID, username, and contact information
- * @interface SlackUser
- * @property {string} id - User ID (e.g., U01234567)
- * @property {string} name - Username
- * @property {string} [real_name] - Optional real name
- * @property {string} [email] - Optional email address
- */
+/** A Slack user: ID (e.g. U01234567), username, and optional real name/email. */
 export interface SlackUser {
   id: string;
   name: string;
@@ -155,21 +114,11 @@ export interface SlackCurrentUser extends SlackUser {
   team_id?: string;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Factory
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Client Factory ────────────────────────────────────────────────────────
 
 /**
- * Initialize the Slack client from the OAuth access token.
- * Loads `access_token` from /tokens/ (written at sign-in by Desktop and on
- * every refresh by the host-side oauth worker).
- *
- * IMPORTANT: Returns a `'missing'` container (not throws) when the token is
- * absent. This enables "graceful degradation" — the server starts even
- * without config and tools return a clear "not configured" error.
- *
- * DO NOT change this to throw — it breaks container startup for unconfigured services.
- * @returns Initialized clients (status carried in `_tokensStatus`)
+ * Initialize the Slack client from `access_token` in /tokens/ (written at sign-in by Desktop, refreshed by the host-side oauth worker).
+ * Returns a `'missing'` container (never throws) when absent — graceful degradation so the server starts unconfigured. DO NOT change to throw.
  */
 export async function initializeSlackClients(): Promise<SlackClients> {
   const tokensMissing = (): SlackClients => ({
@@ -221,18 +170,15 @@ export async function initializeSlackClients(): Promise<SlackClients> {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Refresh wrapper
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Refresh wrapper ───────────────────────────────────────────────────────
 
 /** Slack platform errors that mean "token stale" → refresh + retry once. */
 const AUTH_EXPIRED_ERRORS = new Set(['token_expired', 'invalid_auth']);
 
 /**
  * True when a thrown `@slack/web-api` error indicates a stale access token.
- * Terminal states (`token_revoked`, `account_inactive`) deliberately return
- * false — a refresh cannot heal them.
- * @param err - error thrown by a WebClient call
+ * Terminal states (`token_revoked`, `account_inactive`) deliberately return false — a refresh cannot heal them.
+ * @param err - The thrown value to inspect.
  */
 export function isSlackAuthExpiredError(err: unknown): boolean {
   const slackError = (err as { data?: { error?: string } } | null | undefined)?.data?.error;
@@ -241,8 +187,8 @@ export function isSlackAuthExpiredError(err: unknown): boolean {
 
 /**
  * Run a WebClient call with rotating-token refresh-and-retry on stale errors.
- * @param clients - the client container
- * @param fn - the SDK call to execute
+ * @param clients - The Slack client container.
+ * @param fn - The WebClient call to run.
  */
 export async function slackCall<T>(
   clients: SlackClients,
@@ -262,9 +208,7 @@ export async function slackCall<T>(
   });
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Error Handling
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Error Handling ────────────────────────────────────────────────────────
 
 const AUTH_FAILURE_MESSAGE = withSetupGuidance(
   'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
@@ -300,10 +244,8 @@ const SLACK_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * Format Slack error messages consistently.
- * Sanitizes errors and provides user-friendly messages via {@link SLACK_ERROR_MESSAGES}.
- * @param {unknown} error - Error object from Slack API
- * @returns {string} Formatted, user-friendly error message
+ * Sanitizes a Slack API error and returns a user-friendly message via {@link SLACK_ERROR_MESSAGES}.
+ * @param error - The thrown value to format.
  */
 export function formatSlackError(error: unknown): string {
   // invalid_grant: refresh token dead (revocation or 30-day expiry) — only new sign-in helps.
@@ -336,9 +278,7 @@ export function formatSlackError(error: unknown): string {
   return e.message || 'Slack API error';
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Helpers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 // conversations.list may return far fewer entries than limit; iterate next_cursor until exhausted.
 const CHANNEL_LIST_PAGE_LIMIT = 1000;
@@ -347,11 +287,11 @@ const CHANNEL_LIST_PAGE_LIMIT = 1000;
 const CHANNEL_LIST_MAX_PAGES = 20;
 
 /**
- * One `conversations.list` page request.
- * @param clients - Slack client container
- * @param types - channel types filter
- * @param excludeArchived - drop archived channels
- * @param cursor - page cursor (undefined = first page)
+ * One `conversations.list` page request; `cursor` undefined requests the first page.
+ * @param clients - The Slack client container.
+ * @param types - Comma-separated conversation types to include.
+ * @param excludeArchived - Whether to exclude archived conversations.
+ * @param cursor - Pagination cursor, or undefined for the first page.
  */
 function listChannelsPage(
   clients: SlackClients,
@@ -371,20 +311,17 @@ function listChannelsPage(
 
 /**
  * Cursor from a list response, or undefined on the last page.
- * @param result - a conversations.list response
+ * @param result - A conversations.list response.
  */
 function nextCursorOf(result: ConversationsListResponse): string | undefined {
   return result.response_metadata?.next_cursor || undefined;
 }
 
 /**
- * Resolve channel name/id to channel ID
- * Supports: #channel-name, channel-name, or C123ABC (ID)
- * Paginates the channel list; returns as soon as the name matches.
- * @param {SlackClients} clients - Slack client container
- * @param {string} channel - Channel name or ID
- * @returns {Promise<string>} Channel ID
- * @throws {Error} If channel not found
+ * Resolve channel name/id to channel ID. Supports #channel-name, channel-name, or C123ABC (ID).
+ * Paginates the channel list; returns as soon as the name matches; throws if not found.
+ * @param clients - The Slack client container.
+ * @param channel - Channel name (with or without `#`) or channel ID.
  */
 async function resolveChannelId(clients: SlackClients, channel: string): Promise<string> {
   // If already looks like an ID, return as-is
@@ -423,18 +360,14 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
   );
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Implementations
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Implementations ──────────────────────────────────────────────────
 
 /**
- * Send message to channel (as the signed-in user)
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string} params.channel - Channel name or ID
- * @param {string} params.message - Message text to send
- * @returns {Promise<Object>} Result with ok status, timestamp, and channel ID
- * @throws {Error} If sending fails
+ * Send a message to a channel as the signed-in user; returns ok status, timestamp, and channel ID; throws if sending fails.
+ * @param clients - The Slack client container.
+ * @param params - Message target and body.
+ * @param params.channel - Channel name (with or without `#`) or channel ID.
+ * @param params.message - Message text.
  */
 export async function sendChannel(
   clients: SlackClients,
@@ -457,18 +390,15 @@ export async function sendChannel(
 }
 
 /**
- * Read message history from channel, with cursor pagination and an optional
- * timestamp window (`oldest`/`latest`) — iterate `next_cursor` to export the
- * full history.
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string} params.channel - Channel name or ID
- * @param {number} [params.limit=50] - Maximum messages per page (1-100)
- * @param {string} [params.oldest] - Only messages after this timestamp
- * @param {string} [params.latest] - Only messages before this timestamp
- * @param {string} [params.cursor] - Cursor from a previous page
- * @returns {Promise<SlackHistoryPage>} One page of messages
- * @throws {Error} If reading fails
+ * Read message history from a channel, with cursor pagination and an optional `oldest`/`latest` timestamp window.
+ * `limit` defaults to 50, clamped 1-100; iterate `next_cursor` to export the full history; throws if reading fails.
+ * @param clients - The Slack client container.
+ * @param params - Query params.
+ * @param params.channel - Channel name (with or without `#`) or channel ID.
+ * @param params.limit - Max messages per page (default 50, clamped 1-100).
+ * @param params.oldest - Oldest timestamp (inclusive) of the window.
+ * @param params.latest - Latest timestamp (exclusive) of the window.
+ * @param params.cursor - Pagination cursor from a previous page.
  */
 export async function readChannel(
   clients: SlackClients,
@@ -545,12 +475,12 @@ function mapFiles(files: RawFile[] | undefined): SlackFileMeta[] | undefined {
 
 /**
  * Maps a history/replies response onto the shared page shape.
- * @param result - response subset shared by history and replies
- * @param result.messages - raw messages
- * @param result.has_more - more pages available
- * @param result.response_metadata - pagination metadata
- * @param result.response_metadata.next_cursor - next page cursor
- * @param limitUsed - the (possibly clamped) `limit` actually sent to Slack
+ * @param result - Raw conversations.history/replies response.
+ * @param result.messages - Raw messages returned by Slack.
+ * @param result.has_more - Whether more pages are available.
+ * @param result.response_metadata - Pagination metadata.
+ * @param result.response_metadata.next_cursor - Cursor for the next page.
+ * @param limitUsed - The (possibly clamped) `limit` actually sent to Slack.
  */
 function toHistoryPage(
   result: {
@@ -585,25 +515,22 @@ function toHistoryPage(
 const SLACK_TS_RE = /^\d+\.\d{6}$/;
 
 /**
- * True when `value` looks like a real Slack `ts` (e.g. "1717000000.000100").
- * Guards against a weak model reformatting/rounding a copied timestamp.
- * @param value - candidate thread_ts value
+ * True when `value` looks like a real Slack `ts` (e.g. "1717000000.000100"); guards against a reformatted/rounded copy.
+ * @param value - The candidate timestamp string.
  */
 function looksLikeSlackTs(value: string): boolean {
   return SLACK_TS_RE.test(value);
 }
 
 /**
- * Read one page of a thread (`conversations.replies`) — the first item on the
- * first page is the thread parent, the rest are replies (oldest first).
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string} params.channel - Channel name or ID
- * @param {string} params.thread_ts - `ts` of the thread parent message
- * @param {number} [params.limit=50] - Maximum messages per page (1-100)
- * @param {string} [params.cursor] - Cursor from a previous page
- * @returns {Promise<SlackHistoryPage>} One page of thread messages
- * @throws {Error} If reading fails or thread_ts is not a genuine Slack timestamp
+ * Read one page of a thread (`conversations.replies`) — the first item on the first page is the thread parent, rest are replies (oldest first).
+ * `limit` defaults to 50, clamped 1-100; throws if reading fails or `thread_ts` is not a genuine Slack timestamp.
+ * @param clients - The Slack client container.
+ * @param params - Query params.
+ * @param params.channel - Channel name (with or without `#`) or channel ID.
+ * @param params.thread_ts - Thread parent's Slack timestamp.
+ * @param params.limit - Max messages per page (default 50, clamped 1-100).
+ * @param params.cursor - Pagination cursor from a previous page.
  */
 export async function readThread(
   clients: SlackClients,
@@ -669,11 +596,10 @@ interface SlackFileMetaResolved {
 }
 
 /**
- * Resolve a file's metadata via files.info (requires `files:read`).
- * Kept separate from the byte download so callers can gate on mimetype
- * (e.g. getFileContent refusing binaries) without ever fetching the bytes.
- * @param clients - Slack client container
- * @param fileId - file ID (`F…`)
+ * Resolve a file's metadata via files.info (requires `files:read`); kept separate from the byte download so callers can
+ * gate on mimetype (e.g. getFileContent refusing binaries) without ever fetching the bytes.
+ * @param clients - The Slack client container.
+ * @param fileId - Slack file ID.
  */
 async function resolveSlackFileMeta(
   clients: SlackClients,
@@ -699,12 +625,11 @@ async function resolveSlackFileMeta(
 const FILE_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 /**
- * Download a resolved file's bytes from url_private with the bearer header.
- * With a stale token Slack answers HTTP 200 with an HTML login page —
- * detected by content-type and routed through the refresh wrapper.
- * @param clients - Slack client container
- * @param meta - metadata from resolveSlackFileMeta
- * @param maxBytes - when set, a Content-Length above it rejects before buffering
+ * Download a resolved file's bytes from url_private with the bearer header. With a stale token Slack answers HTTP 200
+ * with an HTML login page — detected by content-type and routed through the refresh wrapper.
+ * @param clients - The Slack client container.
+ * @param meta - Resolved file metadata (url_private, mimetype, name).
+ * @param maxBytes - When set, rejects an over-cap Content-Length before buffering.
  */
 async function downloadSlackFileBytes(
   clients: SlackClients,
@@ -739,14 +664,11 @@ async function downloadSlackFileBytes(
 const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
 
 /**
- * Read the content of a text file shared on Slack (requires `files:read`).
- * Binary files are refused from metadata alone — no bytes are downloaded —
- * use downloadFile + the office integration for PDFs/documents.
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string} params.file - File ID (`F…`) from a message's `files[].id`
- * @returns {Promise<SlackFileContent>} File metadata + UTF-8 content
- * @throws {Error} On unknown file, binary content, or auth problems
+ * Read the content of a text file shared on Slack (requires `files:read`). Binary files are refused from metadata
+ * alone — no bytes are downloaded — use downloadFile + the office integration for PDFs/documents instead.
+ * @param clients - The Slack client container.
+ * @param params - Target file.
+ * @param params.file - Slack file ID.
  */
 export async function getFileContent(
   clients: SlackClients,
@@ -789,7 +711,7 @@ function workspaceDir(): string {
 
 /**
  * Reduce a filename to a safe basename (no separators, no leading dots).
- * @param name - raw filename from Slack's files.info
+ * @param name - Raw filename from Slack's files.info.
  */
 function sanitizeFilename(name: string): string {
   const base = name.split(/[\\/]/).pop() || 'file';
@@ -808,14 +730,11 @@ export interface SlackDownloadedFile {
 }
 
 /**
- * Download any file shared on Slack into the project workspace
- * (`/workspace/.speedwave/slack/<id>-<name>`), where filesystem reads and the
- * office integration (PDF/Word/Excel) can process it. Requires `files:read`.
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string} params.file - File ID (`F…`) from a message's `files[].id`
- * @returns {Promise<SlackDownloadedFile>} Metadata + workspace path
- * @throws {Error} On unknown file, oversized content, or auth problems
+ * Download any file shared on Slack into the project workspace (`/workspace/.speedwave/slack/<id>-<name>`), where
+ * filesystem reads and the office integration (PDF/Word/Excel) can process it. Requires `files:read`.
+ * @param clients - The Slack client container.
+ * @param params - Target file.
+ * @param params.file - Slack file ID.
  */
 export async function downloadFile(
   clients: SlackClients,
@@ -844,12 +763,10 @@ export async function downloadFile(
 }
 
 /**
- * List channels the user is a member of
- * @param {SlackClients} clients - Slack client container
- * @param {Object} [options] - Optional parameters
- * @param {string} [options.types] - Channel types to include (default: public_channel,private_channel)
- * @returns {Promise<Object>} Object containing array of channels
- * @throws {Error} If listing fails
+ * List channels the user is a member of; `options.types` defaults to `public_channel,private_channel`; throws if listing fails.
+ * @param clients - The Slack client container.
+ * @param options - Listing options.
+ * @param options.types - Comma-separated conversation types to include.
  */
 export async function getChannels(
   clients: SlackClients,
@@ -892,12 +809,10 @@ export async function getChannels(
 }
 
 /**
- * Get user by email address
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string} params.email - Email address to look up
- * @returns {Promise<Object>} Object containing user info or null if not found
- * @throws {Error} If lookup fails (except for user not found)
+ * Get a user by email address; returns `{ user: null }` if not found, throws on any other lookup failure.
+ * @param clients - The Slack client container.
+ * @param params - Lookup params.
+ * @param params.email - Email address to look up.
  */
 export async function getUsers(
   clients: SlackClients,
@@ -934,13 +849,9 @@ export async function getUsers(
 }
 
 /**
- * Resolve the signed-in user's identity via `auth.test` (ground truth for "me"),
- * enriched with `users.info` for the display name when that lookup succeeds.
- * @param {SlackClients} clients - Slack client container
- * @returns {Promise<SlackCurrentUser>} The signed-in user's identity
- * @throws {Error} If the `auth.test` call fails, or Slack reports `ok: false`
- *   (carries `.data.error` so formatSlackError classifies it like any other auth failure)
- * @throws {Error} If `ok: true` but no `user_id` is returned (malformed response)
+ * Resolve the signed-in user's identity via `auth.test` (ground truth for "me"), enriched with `users.info` for the display name when that lookup succeeds.
+ * Throws (with `.data.error` set) if `auth.test` fails or reports `ok: false`, or if `ok: true` but `user_id` is missing (malformed response).
+ * @param clients - The Slack client container.
  */
 export async function getCurrentUser(clients: SlackClients): Promise<SlackCurrentUser> {
   const auth = (await slackCall(clients, (c) => c.auth.test())) as AuthTestResponse;
@@ -991,12 +902,9 @@ export interface SlackDmSummary {
 }
 
 /**
- * List the signed-in user's open DM conversations (1:1 and group).
- * Requires `im:read` + `mpim:read`. No `is_member` filter — im objects
- * do not carry it (that filter is why getChannels cannot serve DMs).
- * @param {SlackClients} clients - Slack client container
- * @returns {Promise<Object>} Object containing the DM summaries
- * @throws {Error} On missing scopes or API failure
+ * List the signed-in user's open DM conversations (1:1 and group). Requires `im:read` + `mpim:read`. No `is_member` filter — im
+ * objects do not carry it (that filter is why getChannels cannot serve DMs). Throws on missing scopes or API failure.
+ * @param clients - The Slack client container.
  */
 export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSummary[] }> {
   interface RawDm {
@@ -1037,16 +945,11 @@ const USER_ID_RE = /^[UW][A-Z0-9]{8,}$/;
 const MAX_DM_PARTICIPANTS = 8;
 
 /**
- * Open (or return the existing) DM conversation with one or more users.
- * Entries may be user IDs (`U…`/`W…`) or exact e-mail addresses; plain
- * names are rejected with findUsers guidance. One user opens a 1:1 DM,
- * 2-8 a group DM. Requires `im:write`/`mpim:write`. Opening is silent —
- * the other side sees nothing until a message is sent.
- * @param {SlackClients} clients - Slack client container
- * @param {Object} params - Parameters
- * @param {string[]} params.users - User IDs or e-mail addresses
- * @returns {Promise<{id: string}>} The conversation ID
- * @throws {Error} On unknown users, bad input shape, or missing scopes
+ * Open (or return the existing) DM conversation with one or more users. Entries may be user IDs (`U…`/`W…`) or exact e-mail
+ * addresses (plain names rejected with findUsers guidance); 1 user opens a 1:1 DM, 2-8 a group DM (`im:write`/`mpim:write`); opening is silent until a message is sent.
+ * @param clients - The Slack client container.
+ * @param params - Recipients.
+ * @param params.users - 1-8 user IDs or e-mail addresses.
  */
 export async function openDm(
   clients: SlackClients,

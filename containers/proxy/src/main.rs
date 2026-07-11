@@ -77,15 +77,25 @@ async fn main() {
         }
     };
     let app = build_router(cfg);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:4000")
-        .await
-        .expect("failed to bind 0.0.0.0:4000");
-    axum::serve(listener, app).await.expect("server error");
+    let listener = match tokio::net::TcpListener::bind("0.0.0.0:4000").await {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!("failed to bind 0.0.0.0:4000: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = axum::serve(listener, app).await {
+        log::error!("server error: {e}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test fixture setup, failure aborts the test"
+    )]
     use super::*;
     use axum::body::Body;
     use axum::http::Request;

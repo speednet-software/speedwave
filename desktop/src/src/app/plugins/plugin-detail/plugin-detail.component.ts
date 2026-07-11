@@ -605,11 +605,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /**
-   * Confirms the uninstall and invokes `remove_plugin`. On success, signals
-   * the project banner to restart and navigates back to the plugins list —
-   * the current page would be a 404 since the plugin no longer exists.
-   */
+  /** Confirms uninstall, invokes `remove_plugin`; on success requests a restart and navigates back (current page would 404). */
   async onConfirmUninstall(): Promise<void> {
     if (!this.plugin || this.removing) return;
     this.removing = true;
@@ -693,9 +689,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     }
     this.success = successMsg;
     this.projectState.requestRestart();
-    // Refresh state (e.g. configured badge). `loadPlugin` swallows its error
-    // into `this.error`; downgrade to a caveat on the success line + log
-    // so a stale view is signalled rather than hidden under the success msg.
+    // Refresh state (e.g. configured badge); `loadPlugin` errors downgrade to a caveat on the success line + log, not a silent stale view.
     await this.loadPlugin(slug);
     if (this.error) {
       this.log.warn(`plugin reload after mutation failed: ${this.error}`);

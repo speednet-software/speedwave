@@ -1,7 +1,4 @@
-/**
- * Frontend mirror of the telemetry DTOs in `desktop/src-tauri/src/types.rs`
- * (backend is SSOT; snake_case matches the wire). See ADR-076.
- */
+/** Frontend mirror of the telemetry DTOs in `desktop/src-tauri/src/types.rs` (backend is SSOT; snake_case matches the wire). See ADR-076. */
 
 /** OTLP transport protocol; wire strings match Rust `OtlpProtocol` serde. */
 export type OtlpProtocol = 'grpc' | 'http/protobuf' | 'http/json';
@@ -48,8 +45,7 @@ export interface TelemetryConfigResponse {
 
 /**
  * Mirror of Rust `TelemetryConfigUpdate`; every field optional (omit = unchanged).
- * `headers`/`endpoint`/`resource_attributes`/interval fields are tri-state:
- * omit = keep, `null` = clear, value = set.
+ * `headers`/`endpoint`/`resource_attributes`/interval fields are tri-state: omit = keep, `null` = clear, value = set.
  */
 export interface TelemetryConfigUpdate {
   enabled?: boolean;

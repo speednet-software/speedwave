@@ -18,9 +18,7 @@ import {
   createMockBridges,
 } from './test-helpers.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tests for Code Executor (sandbox security and basic validation)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tests for Code Executor (sandbox security and basic validation) ──────────────────────────
 
 describe('executor', () => {
   beforeAll(() => {

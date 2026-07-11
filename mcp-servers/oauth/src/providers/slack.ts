@@ -1,9 +1,6 @@
 /**
- * Slack rotating-token provider (ADR-071).
- *
- * Slack diverges from RFC 6749: errors arrive as HTTP 200 `{ok:false, error}`,
- * and user tokens may be nested under `authed_user`. PKCE public client — the
- * refresh call carries `client_id` only, never a secret or `scope` param.
+ * Slack rotating-token provider (ADR-071); diverges from RFC 6749 (HTTP 200 `{ok:false, error}`
+ * errors, tokens nest under `authed_user`). PKCE public client — refresh sends `client_id` only.
  */
 
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
@@ -26,8 +23,8 @@ const REAUTH_ERROR_CODES = new Set([
 const SLACK_ERROR_SLUG = /^[a-z0-9_]{1,64}$/;
 
 /**
- * Pass a Slack error code through only if it looks like a Slack slug;
- * free-form values are redacted (stderr keeps a capped breadcrumb).
+ * Pass a Slack error code through only if it looks like a Slack slug; free-form values are
+ * redacted (stderr keeps a capped breadcrumb).
  * @param errorCode - the `error` field from a Slack `ok:false` envelope
  */
 export function redactSlackError(errorCode: string): string {
@@ -47,9 +44,8 @@ interface SlackTokenFields {
 }
 
 /**
- * Accepts both Slack shapes: flat (refresh responses) and nested under
- * `authed_user` (exchange-style). A flat token whose `token_type` is not
- * `'user'` is a bot token and must never be persisted for this integration.
+ * Accepts both Slack shapes: flat (refresh responses) and nested under `authed_user`
+ * (exchange-style). A flat token with `token_type` not `'user'` is a bot token — never persist.
  * @param json - parsed `ok:true` response body
  */
 function extractUserToken(
@@ -110,7 +106,7 @@ function parseScopes(raw: string | undefined, fallback: string[]): string[] {
 }
 
 /**
- * Refresh a rotating Slack user token via `oauth.v2.access`.
+ * Refresh a rotating Slack user token via `oauth.v2.access` (providerData: `clientId` only).
  * @param req - refresh request (providerData carries `clientId` only)
  */
 export async function refreshSlackToken(req: RefreshRequest): Promise<RefreshResult> {

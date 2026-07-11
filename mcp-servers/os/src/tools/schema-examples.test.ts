@@ -1,8 +1,6 @@
 /**
- * Schema/Example Alignment Tests
- *
- * Every OS tool ships inputExamples; each example input must satisfy the tool's
- * own inputSchema (required present, no unknown props, declared types).
+ * Every OS tool's inputExamples must satisfy its own inputSchema
+ * (required present, no unknown props, declared types).
  */
 
 import { describe, it, expect, vi } from 'vitest';

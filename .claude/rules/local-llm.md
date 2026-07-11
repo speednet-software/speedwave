@@ -7,6 +7,7 @@ paths:
   - 'containers/Containerfile.proxy'
   - 'containers/proxy/**'
   - 'desktop/src-tauri/src/llm_cmd.rs'
+  - 'desktop/src-tauri/src/llm_cmd/**'
   - 'desktop/src-tauri/src/containers_cmd.rs'
   - 'desktop/src-tauri/src/http_util.rs'
   - 'desktop/src/src/app/settings/llm-provider/**'

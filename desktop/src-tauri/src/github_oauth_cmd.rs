@@ -15,9 +15,7 @@ const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const PROGRESS_EVENT: &str = "github_oauth_progress";
 
-// ---------------------------------------------------------------------------
-// Serde DTOs — GitHub OAuth App device flow responses
-// ---------------------------------------------------------------------------
+// ── Serde DTOs — GitHub OAuth App device flow responses ─────────────────────
 
 #[derive(Deserialize)]
 struct GhDeviceCodeResponse {
@@ -45,9 +43,8 @@ struct GhTokenErrorResponse {
 
 static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 
-/// `None` = keep polling (`authorization_pending` / `slow_down`).
-/// Classifies a GitHub token-poll body into a [`PollAction`], or `Ok(())` when
-/// it carries an access token. Pure — the shared poll loop drives the effects.
+/// Classifies a GitHub token-poll body into a [`PollAction`], or `Ok(())` on an access token.
+/// `None` = keep polling (`authorization_pending`/`slow_down`). Pure — caller drives effects.
 fn classify_github_response(status: u16, bytes: &[u8]) -> Result<(), oauth_flow::PollAction> {
     use oauth_flow::PollAction;
     if serde_json::from_slice::<GhTokenResponse>(bytes).is_ok() {
@@ -146,9 +143,7 @@ impl DeviceCodeProvider for GithubProvider {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
+// ── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn start_github_oauth(
@@ -241,7 +236,11 @@ pub fn cancel_github_oauth() {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
 

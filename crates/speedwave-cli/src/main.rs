@@ -3,6 +3,7 @@
 use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
+use speedwave_runtime::engine_path;
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
@@ -16,8 +17,7 @@ mod paste_watcher;
 mod terminal_restore;
 
 /// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
-/// Split out from [`emit`] so the redaction is unit-testable without
-/// capturing stdout.
+/// Split out from [`emit`] so the redaction is unit-testable without stdout capture.
 fn sanitize_output_line(line: &str) -> String {
     speedwave_runtime::log_sanitizer::sanitize(line)
 }
@@ -29,7 +29,11 @@ fn redact_err(e: &impl std::fmt::Display) -> String {
 
 /// Single output sink for `out!`/`err!`; every line passes through the
 /// `log_sanitizer` SSOT before reaching the terminal.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI's single output sink — every other call site routes through out!/err!"
+)]
 fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
     let line = sanitize_output_line(&args.to_string());
     if to_stderr {
@@ -80,8 +84,7 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
 }
 
 /// Parses an optional `--project <value>` / `--project=<value>` flag from the
-/// argv `tail` (slice after the subcommand token). Any other token is a hard
-/// error; returns `Ok(None)` when the tail is empty.
+/// argv `tail` (slice after the subcommand token); `Ok(None)` when empty, any other token errors.
 fn parse_optional_project_tail(
     tail: &[String],
     subcommand: &str,
@@ -323,7 +326,7 @@ fn maybe_print_update_hint() {
 /// Re-exec the new binary with `update` to rebuild container images with the
 /// correct image tags; CWD is inherited from the caller.
 fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
-    let status = std::process::Command::new(exe)
+    let status = speedwave_runtime::binary::interactive_command(&exe.to_string_lossy())
         .arg("update")
         .env_remove(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
         .status()
@@ -407,9 +410,8 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
-/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
-/// re-exports the proxy base URL, then execs `claude auth login --claudeai` so
-/// the OAuth flow starts directly (no interactive prompt, no MCP session).
+/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env, re-exports
+/// the proxy base URL, then execs `claude auth login --claudeai` (no prompt, no MCP session).
 fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     let script = format!(
         "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
@@ -438,9 +440,8 @@ fn select_anthropic_in(
     selected || migrated
 }
 
-/// After a successful `speedwave login`, makes Anthropic active so a
-/// logout-emptied OR never-configured project is usable again. No-op when
-/// the project has no entry in `user_config` (nothing to attach `llm` to).
+/// After a successful `speedwave login`, makes Anthropic active so a logout-emptied OR
+/// never-configured project is usable again. No-op when `user_config` has no such project.
 fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
@@ -452,9 +453,8 @@ fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
     })
 }
 
-/// Printed by `speedwave --help` / `-h` / `help`. Must not require the
-/// runtime or any I/O so users can discover commands before Desktop is
-/// running (or while troubleshooting a broken setup).
+/// Printed by `speedwave --help` / `-h` / `help`. Must not require the runtime or any I/O so
+/// users can discover commands before Desktop is running (or while troubleshooting a broken setup).
 fn print_help() {
     out!(
         "\
@@ -600,16 +600,17 @@ fn main() -> anyhow::Result<()> {
     if let CliAction::Init(ref custom_name) = action {
         let cwd = std::env::current_dir()?;
         let canonical = std::fs::canonicalize(&cwd)?;
+        let raw_canonical = canonical.to_string_lossy();
+        let canonical_str = engine_path::strip_extended_length_prefix(&raw_canonical).to_string();
         let name = match custom_name {
             Some(n) => n.clone(),
-            None => canonical
+            None => PathBuf::from(&canonical_str)
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .ok_or_else(|| anyhow::anyhow!("Cannot determine directory name"))?,
         };
         validation::validate_project_name(&name)?;
 
-        let canonical_str = canonical.to_string_lossy().to_string();
         match speedwave_runtime::project::add_project(&name, &canonical_str) {
             Ok(()) => {
                 out!("Project '{}' registered at {}", name, canonical_str);
@@ -650,9 +651,8 @@ fn main() -> anyhow::Result<()> {
             Err(e) => {
                 let msg = redact_err(&e);
                 err!("Container update failed: {msg}");
-                // Roll back only when containers are torn down (compose_down+).
-                // Early failures leave old containers running; rollback there
-                // would needlessly recreate from a possibly stale snapshot.
+                // Roll back only when containers are torn down (compose_down+); early failures
+                // leave old containers running, so rollback there could recreate a stale snapshot.
                 if update::is_torn_down(&e) {
                     match update::rollback_containers(&runtime, &project_name) {
                         Ok(()) => err!("Rolled back to the previous container state."),
@@ -944,16 +944,15 @@ fn main() -> anyhow::Result<()> {
     // Idempotent; secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
-        log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
+        log::info!("legacy token cleanup sanitised {cleaned} project(s)");
     }
 
     // Self-heal legacy/partial oauth.json shape (ADR-060 addendum); idempotent.
     // Do not re-log the return value (CodeQL taints it).
     let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
-    // Host workers (oauth, mcp-os) are Desktop-owned; the CLI must NOT spawn its
-    // own. render_compose reads the Desktop-held lock + bearer-map from disk.
-    // Reconstruct host-bridge registrations from disk (ADR-074).
+    // Host workers (oauth, mcp-os) are Desktop-owned; the CLI must NOT spawn its own —
+    // render_compose reads the Desktop-held lock + bearer-map, reconstructed from disk (ADR-074).
     let host_bridges = compose::host_bridges_from_disk();
 
     let compose_yml = compose::render_compose(
@@ -1088,9 +1087,8 @@ fn main() -> anyhow::Result<()> {
     plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
         .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
 
-    // compose_up is idempotent (no --force-recreate). Wrapped in a per-project
-    // transaction so a concurrent Desktop process can't overwrite compose.yml
-    // between save and up (ADR-066).
+    // compose_up is idempotent (no --force-recreate); wrapped in a per-project transaction so a
+    // concurrent Desktop process can't overwrite compose.yml between save and up (ADR-066).
     runtime.transaction(&project_name, |runtime| -> anyhow::Result<()> {
         compose::save_compose(&project_name, &compose_yml)?;
         speedwave_runtime::runtime::compose_validate_with_retry(runtime, &project_name)?;
@@ -1154,8 +1152,8 @@ fn main() -> anyhow::Result<()> {
     std::process::exit(code);
 }
 
-/// Interactive exec argv carrying the instance marker so an orphaned
-/// in-container process can be reaped after the exec transport dies.
+/// Interactive exec argv carrying the instance marker so an orphaned in-container process
+/// can be reaped after the exec transport dies.
 fn stamped_exec_argv(instance_id: &str, tail: Vec<String>) -> Vec<String> {
     let mut argv = speedwave_runtime::session::instance_env_argv(instance_id);
     argv.extend(tail);
@@ -1182,9 +1180,8 @@ fn reap_instance(
     }
 }
 
-/// Picks the project an action operates on. An explicit `--project` override
-/// wins and must name a real project; otherwise falls back to the active then
-/// first configured project. The working directory is never consulted.
+/// Picks the project an action operates on. An explicit `--project` override wins and must
+/// name a real project; otherwise falls back to active then first configured (CWD never consulted).
 fn resolve_action_project(
     action: &CliAction,
     user_config: &config::SpeedwaveUserConfig,
@@ -1202,9 +1199,8 @@ fn resolve_action_project(
     }
 }
 
-/// Resolves the project when no explicit `--project` was given: the active
-/// project is authoritative, else the first configured project. The working
-/// directory is never consulted.
+/// Resolves the project when no explicit `--project` was given: the active project is
+/// authoritative, else the first configured project. The working directory is never consulted.
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
     user_config
         .active_project
@@ -1218,7 +1214,11 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
 
@@ -1306,9 +1306,8 @@ mod tests {
         );
     }
 
-    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded
-    /// tags immediately after — CLI-only users never see Desktop reconcile, so
-    /// without this they leak one tag generation per update.
+    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded tags
+    /// immediately after — CLI-only users never see Desktop reconcile and leak a tag generation.
     #[test]
     fn cli_prunes_superseded_images_after_build() {
         let src = include_str!("main.rs");
@@ -1790,9 +1789,8 @@ mod tests {
         assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
     }
 
-    /// Login must select Anthropic active BEFORE render_compose, so a
-    /// logout-emptied project escapes the no-provider guard (avoids the dead-loop
-    /// where the login terminal closes before `claude auth login` runs).
+    /// Login must select Anthropic active BEFORE render_compose, so a logout-emptied project
+    /// escapes the no-provider guard (else the terminal closes before `claude auth login` runs).
     #[test]
     fn login_selects_anthropic_before_render_compose() {
         let source = include_str!("main.rs");
@@ -1906,9 +1904,8 @@ mod tests {
             .is_unconfigured());
     }
 
-    /// Explicit logout (v2 shape, providers present, active cleared) must be
-    /// reactivated — the original no-op-when-absent behavior is preserved
-    /// when there IS an llm config, just no longer the only path.
+    /// Explicit logout (v2 shape, providers present, active cleared) must be reactivated —
+    /// the original no-op-when-absent behavior stays, just no longer the only path.
     #[test]
     fn select_anthropic_in_reactivates_explicit_logout() {
         let llm = config::LlmConfig {
@@ -2863,9 +2860,8 @@ mod tests {
         assert!(red.contains("REDACTED"), "not redacted: {red}");
     }
 
-    /// `PluginEnable`/`PluginDisable` must hold `with_config_lock` across their
-    /// load→mutate→save sequence, like `select_anthropic_after_login` does —
-    /// otherwise a concurrent config writer loses the plugin-enabled update.
+    /// `PluginEnable`/`PluginDisable` must hold `with_config_lock` across load→mutate→save,
+    /// like `select_anthropic_after_login` — else a concurrent writer loses the update.
     #[test]
     fn plugin_enable_disable_hold_config_lock_across_save() {
         let source = include_str!("main.rs");

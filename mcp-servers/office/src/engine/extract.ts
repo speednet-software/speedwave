@@ -1,9 +1,5 @@
 /**
- * Document → Markdown / plain-text extraction.
- * Best-output-wins engine chain: SheetJS for spreadsheet formats (native TS, reads
- * `.xls`/`.xlsb` that markitdown does not), `markitdown` as the primary for
- * `.docx`/`.pptx`/`.pdf`, then `pdftotext`/`pandoc`/the `python-docx` script as
- * fallback (see ADR-055 §"Deliberate duplication with example-plugin").
+ * Document → Markdown / plain-text extraction. Best-output-wins chain: SheetJS for spreadsheets (native TS, reads `.xls`/`.xlsb`), `markitdown` primary for `.docx`/`.pptx`/`.pdf`, else `pdftotext`/`pandoc`/`python-docx` fallback (ADR-055 §"Deliberate duplication with example-plugin").
  * @module mcp-office/engine/extract
  */
 
@@ -32,8 +28,7 @@ export function truncate(text: string, maxChars: number): { content: string; tru
 }
 
 /**
- * Render a parsed SheetJS workbook to Markdown: one `## SheetName` heading per sheet,
- * followed by the sheet's used range as a Markdown table.
+ * Render a parsed SheetJS workbook to Markdown: one `## SheetName` heading per sheet, followed by the sheet's used range as a Markdown table.
  * @param wb - The parsed workbook.
  * @returns A Markdown string covering every sheet.
  */

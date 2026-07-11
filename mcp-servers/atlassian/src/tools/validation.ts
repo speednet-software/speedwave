@@ -13,11 +13,10 @@ import { AtlassianClient } from '../client.js';
 import type { StorageBodyInput } from '../adf.js';
 
 /**
- * Wrap a tool handler with client-presence and error handling.
- * @template T - The tool's parsed input params type.
+ * Wrap a tool handler with client-presence and error handling; `handler` runs only when `client` is non-null.
  * @param client - The Atlassian client (or `null` when the service is unconfigured).
  * @param handler - The handler, invoked only when `client` is non-null.
- * @returns A handler suitable for a {@link ToolDefinition}.
+ * @returns A handler suitable for a tool definition.
  */
 export function withValidation<T>(
   client: AtlassianClient | null,
@@ -33,7 +32,7 @@ export function withValidation<T>(
 }
 
 /**
- * Map a Confluence body tool input to the domain {@link StorageBodyInput} shape.
+ * Map a Confluence body tool input to {@link StorageBodyInput}: `bodyStorage` (raw XHTML) takes precedence over `bodyText`.
  * @param p - The tool input fragment.
  * @param p.bodyStorage - Body as raw storage-representation XHTML (takes precedence).
  * @param p.bodyText - Body as plain text (used when `bodyStorage` is absent).

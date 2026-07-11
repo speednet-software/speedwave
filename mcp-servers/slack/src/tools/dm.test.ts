@@ -166,9 +166,8 @@ describe('dm-tools', () => {
     });
 
     it('forwards the users array to openDm verbatim (cap enforced in client)', async () => {
-      // The minItems/maxItems schema is a hint to the model; the runtime cap
-      // lives in openDm (client.ts), so the handler forwards as-is and surfaces
-      // a client-thrown cap violation as OPEN_FAILED.
+      // minItems/maxItems is a model hint only; the runtime cap lives in openDm (client.ts),
+      // so the handler forwards as-is and surfaces a cap violation as OPEN_FAILED.
       const tools = createDmTools(presentClients());
       vi.mocked(client.openDm).mockRejectedValue(
         new Error('A Slack DM holds at most 8 people; got 9.')

@@ -1,9 +1,5 @@
-//! Mixing two 16 kHz mono PCM streams (system loopback + microphone) into one,
-//! shared by the macOS and Windows capture backends (ADR-056 decision 15).
-//!
-//! `MixBuffer` accumulates samples by absolute index and pops once both have
-//! reached that point, or drains remaining once `finish()` is called. Overlapping
-//! samples are summed with 0.5/0.5 gain and clamped.
+//! Mixes two 16 kHz mono PCM streams (system + mic), shared by macOS/Windows (ADR-056 #15).
+//! Buffers by absolute index, pops once both catch up or on `finish()`; overlaps sum at 0.5/0.5.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -17,9 +13,8 @@ use super::audio::{
 /// past ±1 on their own; the clamp catches the rest).
 const MIX_GAIN: f32 = 0.5;
 
-/// Hard cap on buffered samples per side — ~1 minute at 16 kHz. A larger
-/// declared offset (e.g. a corrupt timestamp from the macOS CLI) is refused
-/// rather than allowed to drive an unbounded allocation.
+/// Hard cap on buffered samples per side — ~1 minute at 16 kHz. A larger declared offset
+/// (e.g. a corrupt timestamp) is refused rather than driving an unbounded allocation.
 const MAX_BUFFERED_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 60;
 
 /// How long `poll_mixed_chunk` polls a stalled buffer before treating the
@@ -111,9 +106,8 @@ impl MixBuffer {
         offset_ns.saturating_mul(SAMPLE_RATE_HZ as u64) / 1_000_000_000
     }
 
-    /// Pushes `samples` for `source`, declared to start at `offset_ns` from the
-    /// recording start. Samples are placed by index; those before `base` or past
-    /// `MAX_BUFFERED_SAMPLES` are dropped (the watermark is still bumped).
+    /// Pushes `samples` for `source`, starting at `offset_ns` from the recording start.
+    /// Placed by index; before `base` or past `MAX_BUFFERED_SAMPLES` is dropped (watermark bumped).
     pub fn push(&mut self, source: MixSource, offset_ns: u64, samples: &[f32]) {
         if samples.is_empty() {
             return;
@@ -176,8 +170,7 @@ impl MixBuffer {
         };
         let now_lagging = (gap > DEAD_GAP_SAMPLES)
             .then_some(lagging_side)
-            // A never-delivering system side is a normal quiet start (an idle
-            // Windows loopback emits no packets) — not a stall.
+            // A never-delivering system side is a quiet start (idle loopback), not a stall.
             .filter(|s| !(*s == MixSource::System && self.sys_filled == 0));
         if now_lagging == self.lagging {
             return;
@@ -252,9 +245,8 @@ impl MixBuffer {
     }
 }
 
-/// The shared `AudioStream::next_chunk` body for a mixed capture whose two
-/// sources feed `buf` from background threads. Polls for a full chunk; drains the
-/// tail and errors after `STALL_GIVE_UP`, or returns `Ok(None)` on a clean EOF.
+/// The shared `AudioStream::next_chunk` body for a mixed capture fed from background threads.
+/// Polls for a full chunk; drains the tail and errors after `STALL_GIVE_UP`, or `Ok(None)` on EOF.
 pub fn poll_mixed_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, CaptureError> {
     let want = CHUNK_SAMPLES;
     let mut waited = Duration::ZERO;
@@ -305,7 +297,7 @@ impl MixBuffer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -391,7 +383,7 @@ mod tests {
         b.push(MixSource::System, 0, &[1.0; 32]);
         b.push(MixSource::Mic, 0, &[0.0; 32]);
         let _ = b.pop(1, 32).unwrap(); // base now 32
-                                       // A late buffer for offset 0 (all in the past) — dropped, watermark bumped.
+                                       // Late buffer at offset 0 — dropped; watermark bumped.
         b.push(MixSource::System, 0, &[9.9; 16]);
         assert_eq!(b.pop(1, 1000), None);
         // A fresh in-future buffer (offset 2 ms = index 32) pops normally.
@@ -573,9 +565,8 @@ mod tests {
     #[test]
     fn poll_mixed_chunk_drains_the_tail_then_errors_on_stall() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // A sub-chunk tail on both sides, never finished, never more data: poll
-        // should drain it once the stall window elapses, then error on the next
-        // poll (nothing left, no clean EOF).
+        // A sub-chunk tail, never finished, never more data: poll drains it once the stall
+        // window elapses, then errors on the next poll (nothing left, no clean EOF).
         {
             let mut b = buf.lock().unwrap();
             b.push(MixSource::System, 0, &[1.0; 8]);

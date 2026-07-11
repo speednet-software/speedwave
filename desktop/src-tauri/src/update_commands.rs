@@ -5,17 +5,15 @@ use crate::types::BundleReconcileStatus;
 use crate::updater;
 use speedwave_runtime::{bundle, config};
 
-// ---------------------------------------------------------------------------
-// App update commands
-// ---------------------------------------------------------------------------
+// ── App update commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub(crate) async fn check_for_update(
     app: tauri::AppHandle,
 ) -> Result<updater::UpdateCheckOutcome, String> {
-    log::info!("check_for_update: starting");
+    log::info!("starting update check");
     updater::check_for_update(&app).await.map_err(|e| {
-        log::error!("check_for_update: error: {e}");
+        log::error!("update check failed: {e}");
         e
     })
 }
@@ -25,11 +23,11 @@ pub(crate) async fn install_update_and_reconcile(
     app: tauri::AppHandle,
     expected_version: String,
 ) -> Result<(), String> {
-    log::info!("install_update_and_reconcile: starting (expected_version={expected_version})");
+    log::info!("starting install and reconcile for update (expected_version={expected_version})");
     updater::verify_update_installable(&app, &expected_version)
         .await
         .map_err(|e| {
-            log::error!("install_update_and_reconcile: preflight failed: {e}");
+            log::error!("update install preflight failed: {e}");
             e
         })?;
 
@@ -37,9 +35,7 @@ pub(crate) async fn install_update_and_reconcile(
         let user_config = match config::load_user_config() {
             Ok(config) => config,
             Err(e) => {
-                log::warn!(
-                    "install_update_and_reconcile: failed to load user config, assuming no configured projects: {e}"
-                );
+                log::warn!("failed to load user config, assuming no configured projects: {e}");
                 config::SpeedwaveUserConfig::default()
             }
         };
@@ -61,9 +57,7 @@ pub(crate) async fn install_update_and_reconcile(
                 let retained = match reconcile::restore_projects(&running_projects, &rt) {
                     Ok(retained) => retained,
                     Err(restore_error) => {
-                        log::error!(
-                            "install_update_and_reconcile: failed to restore projects after stop error: {restore_error}"
-                        );
+                        log::error!("failed to restore projects after stop error: {restore_error}");
                         Vec::new()
                     }
                 };
@@ -117,24 +111,24 @@ pub(crate) async fn install_update_and_reconcile(
             restore_result.err(),
             clear_state_error.err(),
         );
-        log::error!("install_update_and_reconcile: install failed: {error}");
+        log::error!("update install failed: {error}");
         return Err(error);
     }
 
-    log::info!("install_update_and_reconcile: update installed, restarting");
+    log::info!("update installed, restarting");
     app.restart()
 }
 
 #[tauri::command]
 pub(crate) fn get_update_settings() -> Result<updater::UpdateSettings, String> {
-    log::debug!("get_update_settings");
+    log::debug!("fetching update settings");
     Ok(updater::load_update_settings())
 }
 
 #[tauri::command]
 pub(crate) fn set_update_settings(settings: updater::UpdateSettings) -> Result<(), String> {
     log::info!(
-        "set_update_settings: auto_check={}, interval={}h",
+        "saving update settings: auto_check={}, interval={}h",
         settings.auto_check,
         settings.check_interval_hours
     );
@@ -166,7 +160,6 @@ fn build_install_failure_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

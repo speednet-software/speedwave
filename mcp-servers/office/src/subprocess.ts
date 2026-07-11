@@ -1,8 +1,5 @@
 /**
- * Hardened `spawn` wrapper for the external tools the worker drives
- * (`markitdown`, `pdftotext`, `pandoc`, `weasyprint`, `soffice`, and the bundled
- * Python support-scripts). Adds wall-time timeout (SIGKILL), bounded stdout/stderr
- * capture, and a typed result; never runs anything through a shell.
+ * Hardened `spawn` wrapper for the worker's external tools (markitdown, pdftotext, pandoc, weasyprint, soffice, bundled Python scripts) — wall-time timeout (SIGKILL), bounded stdout/stderr capture, typed result; never runs through a shell.
  * @module mcp-office/subprocess
  */
 
@@ -183,14 +180,12 @@ export async function runOk(
 }
 
 /**
- * Invoke a bundled Python support-script (`scripts/<name>`) with the project's venv interpreter.
- * A non-zero exit with no parseable JSON on stdout renders via the same {@link runFailure} `runOk` uses (exit code + stderr), never a silently defaulted `{}`.
+ * Invoke a bundled Python support-script (`scripts/<name>`) with the venv interpreter. A non-zero exit with no parseable JSON renders via the same {@link runFailure} `runOk` uses, never a silently defaulted `{}`.
  * @param scriptName - Filename under `scripts/` (e.g. `"docx_build.py"`).
  * @param args - Arguments to pass after the script path.
  * @param opts - Run options.
  * @returns The parsed JSON object the script printed on stdout.
- * @throws {SubprocessError} On timeout, spawn failure, a non-zero exit (even one whose stdout claims `ok: true`),
- * or when stdout is not a JSON object with `ok: true`.
+ * @throws {SubprocessError} On timeout, spawn failure, non-zero exit (even if stdout claims `ok: true`), or non-JSON/non-`ok:true` stdout.
  */
 export async function runPythonScript(
   scriptName: string,

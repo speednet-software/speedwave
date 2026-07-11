@@ -1,7 +1,6 @@
 /**
- * SSOT for tool names referenced outside their own definition file: by client-built
- * teaching messages ({@link GitLabClient.formatError}) and by other tools' `_meta` fields.
- * @module tool-names
+ * SSOT for tool names referenced outside their own definition file: by client-built teaching
+ * messages ({@link GitLabClient.formatError}) and by other tools' `_meta` fields.
  */
 
 export const TOOL_NAMES = {

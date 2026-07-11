@@ -1505,9 +1505,8 @@ describe('ProjectStateService', () => {
     });
 
     it('restartContainers fires onRestartBegin before the Tauri invoke, and ready before restart-complete', async () => {
-      // Ordering invariant the chat resume relies on: the id snapshot happens at
-      // begin (before the invoke), and ready (which nulls the live id) precedes
-      // restart-complete (which reads the snapshot). A reorder breaks resume.
+      // Ordering invariant chat resume relies on: id snapshot at begin, then ready (nulls the
+      // live id) before restart-complete (reads the snapshot) — a reorder breaks resume.
       const order: string[] = [];
       service.onRestartBegin(async () => {
         order.push('begin');

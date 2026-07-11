@@ -22,7 +22,7 @@ Speedwave also publishes an MSI for managed enterprise deployments. MSI custom a
 Add a `reset_vm()` method to the `ContainerRuntime` trait (default no-op) and override it in `WslRuntime`. The override runs:
 
 1. `wsl.exe --terminate Speedwave` (10 s timeout, best-effort — failure is warn-logged and does not abort)
-2. `wsl.exe --unregister Speedwave` (25 s timeout — "no distribution" errors are treated as success; timeout and unexpected errors are surfaced to the caller as `Err`)
+2. `wsl.exe --unregister Speedwave`[^3] (25 s timeout — "no distribution" errors are treated as success (unverified); timeout and unexpected errors are surfaced to the caller as `Err`)
 
 The call is inserted in `setup_wizard::factory_reset()` between the macOS Lima VM teardown and `wipe_data_dir()`, so the WSL VHDX is still at its expected path when `wsl --unregister` runs. Errors from `reset_vm()` are logged as warnings and do not abort the data-dir wipe — the primary remediation must complete regardless.
 
@@ -41,11 +41,11 @@ The `/SD IDNO` flag causes unattended `uninstall.exe /S` installations to defaul
 
 A third macro, `NSIS_HOOK_PREINSTALL`, was added to the same `installer-hooks.nsh` file to fix a separate Windows upgrade failure: when a host MCP worker (`mcp-os`, `host_exec`, or `oauth`) holds an open handle to the bundled `$INSTDIR\nodejs\node.exe`, the installer fails with "Error opening file for writing". The fix is two-layered:
 
-1. **Windows Job Object** (`crates/speedwave-runtime/src/host_mcp_process/job_object.rs`) — every worker child is attached at spawn to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK`. When the parent (`Speedwave.exe`) exits — gracefully, on crash, or via Task Manager — the kernel closes the Job handle and terminates the worker. `BREAKAWAY_OK` is set because `host_exec` recipes legitimately need to spawn subprocesses that escape the job (UAC prompts, MSI subprocesses). Known limitation: a TOCTOU window exists between `std::process::Command::spawn` and `AssignProcessToJobObject`; the atomic fix (`PROC_THREAD_ATTRIBUTE_JOB_LIST` or `CREATE_SUSPENDED` + `ResumeThread`) requires bypassing `std::process::Command` and is deferred. The host MCP workers do not spawn grandchildren during their synchronous startup phase, so residual risk is low.
+1. **Windows Job Object** (`crates/speedwave-runtime/src/host_mcp_process/job_object.rs`) — every worker child is attached at spawn to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK`.[^7] When the parent (`Speedwave.exe`) exits — gracefully, on crash, or via Task Manager — the kernel closes the Job handle and terminates the worker. `BREAKAWAY_OK` is set because `host_exec` recipes legitimately need to spawn subprocesses that escape the job (UAC prompts, MSI subprocesses). Known limitation: a TOCTOU window exists between `std::process::Command::spawn` and `AssignProcessToJobObject`; the atomic fix (`PROC_THREAD_ATTRIBUTE_JOB_LIST` or `CREATE_SUSPENDED` + `ResumeThread`) requires bypassing `std::process::Command` and is deferred.[^8] The host MCP workers do not spawn grandchildren during their synchronous startup phase, so residual risk is low.
 
 2. **NSIS PRE-INSTALL hook** — backstop for workers spawned by versions before v0.11 (which have no Job Object), or for any orphan that slipped through the TOCTOU window. Materializes a PowerShell sweep script to `$PLUGINSDIR\speedwave-sweep.ps1` and invokes it with `powershell.exe -File`. The sweep:
    - Receives `$INSTDIR` via the `SPW_INSTDIR` environment variable (avoids PowerShell `-Command` argv concatenation, which would break on apostrophes in the profile path).
-   - Enumerates processes with `Get-CimInstance Win32_Process` (crosses sessions; crosses elevation when the installer runs elevated).
+   - Enumerates processes with `Get-CimInstance Win32_Process` (crosses sessions; crosses elevation when the installer runs elevated).[^9]
    - Filters by `ExecutablePath.StartsWith($INSTDIR\nodejs\, OrdinalIgnoreCase)` and `ExecutablePath.Equals($INSTDIR\Speedwave.exe, OrdinalIgnoreCase)` — strict literal-path comparison immune to wildcard metacharacters (`[`, `?`, `*`) that break `-like` on legal NTFS paths.
    - Polls the target files via `[System.IO.File]::Open(..., FileShare::None)` for up to 20 s (covers slow EDR / AV post-close handle holds).
    - Exits non-zero on failure; NSIS checks the exit code with `Pop $0` + `${If} $0 != 0` and emits `DetailPrint` diagnostics so AppLocker / WDAC / GPO failures show up in the install log.
@@ -85,12 +85,20 @@ The bundled Node.js subdir literal `"nodejs"` (the path component the PRE-INSTAL
 | `desktop/src-tauri/windows/installer-hooks.nsh`         | PRE-INSTALL sweep target (`$INSTDIR\nodejs\`) |
 | `crates/speedwave-runtime/src/binary.rs` / `bundle.rs`  | Bundle layout — must use `NODEJS_SUBDIR`      |
 
-[^1]: GitHub issue #613 — "WSL distro not removed on uninstall / factory reset": https://github.com/speednet-software/speedwave/issues/613
+[^1]: GitHub issue #613 - "WSL distro not removed on uninstall / factory reset": https://github.com/speednet-software/speedwave/issues/613
 
 [^2]: Tauri NSIS bundler `installerHooks` configuration key: https://v2.tauri.app/reference/config/#nsis
 
-[^4]: Tauri 2.x NSIS template MUI2 maintenance flow — Repair does not invoke uninstall hooks: https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi (stock MUI2 `MUI_PAGE_INSTFILES` Repair path). Verified by manual smoke test before merge.
+[^3]: WSL `--unregister` command reference: https://learn.microsoft.com/en-us/windows/wsl/basic-commands
 
-[^5]: ADR-031: Data Dir Env Var for Instance Isolation — `SPEEDWAVE_DATA_DIR` redirects `~/.speedwave` to a custom path: `docs/adr/ADR-031-data-dir-env-var-for-instance-isolation.md`
+[^4]: Tauri 2.x NSIS template MUI2 maintenance flow - Repair does not invoke uninstall hooks: https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi (stock MUI2 `MUI_PAGE_INSTFILES` Repair path). Verified by manual smoke test before merge.
 
-[^6]: NSIS `/SD` flag (Silent Default) — controls the default button when running in silent mode (`/S`): https://nsis.sourceforge.io/Reference/MessageBox
+[^5]: ADR-031: Data Dir Env Var for Instance Isolation - `SPEEDWAVE_DATA_DIR` redirects `~/.speedwave` to a custom path: `docs/adr/ADR-031-data-dir-env-var-for-instance-isolation.md`
+
+[^6]: NSIS `/SD` flag (Silent Default) - controls the default button when running in silent mode (`/S`): https://nsis.sourceforge.io/Reference/MessageBox
+
+[^7]: Windows Job Objects - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and `JOB_OBJECT_LIMIT_BREAKAWAY_OK` limit flags: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+
+[^8]: `PROC_THREAD_ATTRIBUTE_JOB_LIST` - assigns job objects to a child process atomically at creation via `UpdateProcThreadAttribute`, avoiding the spawn-then-assign race: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute
+
+[^9]: `Get-CimInstance` (PowerShell) - queries CIM/WMI classes such as `Win32_Process`: https://learn.microsoft.com/en-us/powershell/module/cimcmdlets/get-ciminstance?view=powershell-7.5

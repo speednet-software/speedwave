@@ -18,10 +18,10 @@ import { resolveParams } from './helpers.js';
 import { withRedmineErrors } from './error-handling.js';
 
 /**
- * Resolve `assigned_to` to `assigned_to_id` in place; returns a teaching error
- * result when the identifier matches no user, undefined on success/no-op.
- * @param client - Redmine client used for user resolution.
- * @param resolved - Params object mutated in place.
+ * Resolve `assigned_to` to `assigned_to_id` in place; returns a teaching error result when the
+ * identifier matches no user, undefined on success/no-op.
+ * @param client - Redmine client used for user resolution
+ * @param resolved - Params object mutated in place
  */
 async function resolveAssignedTo(
   client: RedmineClient,
@@ -482,7 +482,7 @@ const commentIssueTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param client - Redmine client instance
  */
 export function createIssueTools(client: RedmineClient | null): ToolDefinition[] {

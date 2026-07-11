@@ -48,9 +48,8 @@ final class AudioCaptureTests: XCTestCase {
     /// The header JSON line must be valid UTF-8 + JSON and carry the expected
     /// schema before the parent reads any binary chunks.
     func testHeaderShapeIsStable() throws {
-        // We can't easily intercept FileHandle.standardOutput in-process, but
-        // we can pre-serialize the same structure the writer uses and assert
-        // that the parser side will accept it. This guards the schema.
+        // Can't intercept FileHandle.standardOutput in-process; pre-serialize the
+        // same structure the writer uses and assert the parser side accepts it.
         let header: [String: Any] = [
             "sample_rate": 16000,
             "channels": 1,
@@ -68,15 +67,13 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertEqual(streams, ["app", "mic"])
     }
 
-    /// Chunk framing: 4-byte stream index, 4-byte nframes, 8-byte offset_ns,
-    /// then nframes × 4-byte little-endian floats. The Rust side parses this
-    /// shape — regression-guard the byte layout from the producer side.
+    /// Chunk framing: 4-byte stream index, 4-byte nframes, 8-byte offset_ns, then nframes ×
+    /// 4-byte LE floats. The Rust side parses this shape — regression-guard the byte layout.
     func testChunkFramingByteLayout() {
         let samples: [Float] = [0.0, 0.25, -0.25, 1.0]
         let bytesPerChunk = 4 + 4 + 8 + samples.count * MemoryLayout<Float32>.size
         XCTAssertEqual(bytesPerChunk, 32)
-        // Float32 little-endian sanity — Swift's native byte order on Apple
-        // Silicon and Intel is little-endian, but assert the contract anyway
+        // Float32 LE is native on Apple Silicon/Intel; assert the contract anyway
         // so a future port doesn't silently flip endianness.
         var v: Float32 = 1.0
         let raw = withUnsafeBytes(of: &v) { Array($0) }
@@ -88,11 +85,8 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertEqual(raw[3], 0x3f)
     }
 
-    /// Stream indices: 0 = app/system, 1 = mic. A frame's 4-byte LE prefix is
-    /// that index; the Rust reader treats it positionally. Encode both and
-    /// decode them back — if the LE encoding ever changes this fails. (Changing
-    /// the *meaning* of 0/1 also requires changing
-    /// crates/speedwave-runtime/src/transcription/audio_macos.rs.)
+    /// Stream indices: 0 = app/system, 1 = mic. A frame's 4-byte LE prefix is that index; the Rust
+    /// reader treats it positionally. Changing the *meaning* of 0/1 also requires changing audio_macos.rs.
     func testStreamIndexEncodingRoundTrips() {
         for idx: UInt32 in [0, 1] {
             var le = idx.littleEndian
@@ -111,8 +105,7 @@ final class AudioCaptureTests: XCTestCase {
     func testAudioSourceCases() {
         let cases: [AudioSource] = [.all, .micOnly(nil), .micOnly("UID-1")]
         XCTAssertEqual(cases.count, 3)
-        // Compile-time exhaustiveness — if a new variant lands the parser must
-        // learn it before this test will pass again.
+        // Compile-time exhaustiveness — a new variant must be learned here first.
         for c in cases {
             switch c {
             case .all, .micOnly: break

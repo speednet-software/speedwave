@@ -137,9 +137,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     });
 
-    // Resume-on-restart lives in ChatStateService (survives this component being
-    // destroyed on /settings). Register the overflow-prompt opener while mounted;
-    // when unmounted the service auto-resumes instead of asking.
+    // Resume-on-restart lives in ChatStateService (survives this component being destroyed on
+    // /settings); register the overflow-prompt opener while mounted, else the service auto-resumes.
     this.chat.setResumeDecider(() => this.promptResumeOrFresh());
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -166,8 +165,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private gitBranchLastReadAt = 0;
 
   /**
-   * Pulls the active project's git branch; silent on errors (chip hides) and
-   * a no-op within the TTL window.
+   * Pulls the active project's git branch; silent on errors (chip hides) and a no-op within the TTL window.
    * @param force - Skip the TTL check (used after a project switch).
    */
   private async refreshGitBranch(force = false): Promise<void> {
@@ -307,9 +305,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Delegates to the service, which owns resume so it keeps working
-   * even if this component unmounts mid-resume.
-   * @param sessionId - Session to resume.
+   * Delegates to the service, which owns resume so it keeps working even if this component unmounts mid-resume.
+   * @param sessionId - session UUID to resume.
    */
   async resumeConversation(sessionId: string): Promise<void> {
     this.ui.closeSidebar();

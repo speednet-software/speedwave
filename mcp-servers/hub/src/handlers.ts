@@ -1,8 +1,4 @@
-/**
- * Code Executor Handlers
- * Implementation of 2 meta-tools for Filesystem as API pattern
- * @module handlers
- */
+/** Code Executor Handlers: implementation of the 2 meta-tools for the Filesystem-as-API pattern. */
 
 import { ToolHandler, ToolsCallResult, teachingErrorResult } from '@speedwave/mcp-shared';
 import { searchTools, SearchToolsParams, DETAIL_LEVELS, DetailLevel } from './search-tools.js';
@@ -18,9 +14,8 @@ interface HandlerConfig {
 }
 
 /**
- * Convert data to JSON text for MCP response. Coerces undefined/null → null.
- * @param data - Data to convert to JSON string
- * @returns JSON string representation
+ * Convert data to JSON text for an MCP response. Coerces undefined/null → null.
+ * @param data - Data to convert to JSON string.
  */
 const toJsonText = (data: unknown): string =>
   typeof data === 'string' ? data : JSON.stringify(data ?? null);
@@ -57,12 +52,11 @@ function isMcpContentArray(data: unknown): data is McpContentItem[] {
 }
 
 /**
- * Validate and normalize timeout parameter
- * @param paramValue - The timeout_ms value from request params
- * @param configDefault - Default timeout from config
- * @param maxTimeout - Maximum allowed timeout (varies by operation type)
- * @returns Validated timeout value in milliseconds
- * @throws {Error} Error if timeout is invalid (negative, zero, or non-numeric)
+ * Validate and normalize the timeout_ms param, capped at maxTimeout.
+ * Throws if negative, zero, or non-numeric.
+ * @param paramValue - The timeout_ms value from request params.
+ * @param configDefault - Default timeout from config.
+ * @param maxTimeout - Maximum allowed timeout (varies by operation type).
  */
 function validateTimeout(paramValue: unknown, configDefault: number, maxTimeout: number): number {
   // Not provided → use config default (capped at max)
@@ -87,14 +81,12 @@ function validateTimeout(paramValue: unknown, configDefault: number, maxTimeout:
 
 /**
  * Factory to create code executor handlers.
- * @param config - Handler configuration including default timeout
- * @returns Object containing handler functions
+ * @param config - Handler configuration including default timeout.
  */
 export function createCodeExecutorHandlers(config: HandlerConfig) {
   /**
-   * search_tools - searches available tools by keyword with detail levels.
-   * @param params - Search parameters
-   * @returns MCP tool call result
+   * search_tools — searches available tools by keyword with detail levels.
+   * @param params - Search parameters.
    */
   const handleSearchTools: ToolHandler = async (
     params: Record<string, unknown>
@@ -148,9 +140,8 @@ export function createCodeExecutorHandlers(config: HandlerConfig) {
   };
 
   /**
-   * execute_code - executes user JavaScript in sandbox with tool imports.
-   * @param params - Code execution parameters
-   * @returns MCP tool call result
+   * execute_code — executes user JavaScript in a sandbox with tool imports.
+   * @param params - Code execution parameters.
    */
   const handleExecuteCode: ToolHandler = async (
     params: Record<string, unknown>

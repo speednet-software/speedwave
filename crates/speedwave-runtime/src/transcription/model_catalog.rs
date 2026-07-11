@@ -1,15 +1,5 @@
-//! SSOT catalogue of the Whisper transcription models the meeting-transcription
-//! feature downloads on demand (ADR-056; speaker diarization removed — ADR-075).
-//!
-//! Bumping a model = editing one const here. Nothing else hard-codes a model
-//! filename, URL, or hash. Mirrors the `defaults::ANTHROPIC_MODELS` pattern:
-//! the frontend reads this via the `list_transcription_models` Tauri command
-//! rather than hard-coding model names.
-//!
-//! URLs, sizes, and SHA256 values were established in ADR-056 spike 0C:
-//! Whisper GGML models come from `ggerganov/whisper.cpp` on Hugging Face
-//! (NOT `ggml-org/whisper.cpp`, which 401s anonymously). Sizes/SHA256 from
-//! the HF API; `small`/`medium` SHA256 additionally confirmed by download.
+//! SSOT catalogue of Whisper transcription models downloaded on demand (ADR-056; diarization
+//! removed — ADR-075). Bump 1 const; from `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
 
 /// Hugging Face repo path the Whisper GGML models are downloaded from.
 pub const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
@@ -19,12 +9,8 @@ pub fn whisper_model_url(file: &str) -> String {
     format!("https://huggingface.co/{WHISPER_HF_REPO}/resolve/main/{file}")
 }
 
-/// Where in the live/offline transcription pipeline a Whisper model is meant
-/// to be used. The default-download set for v1 (ADR-056 decision 8): `Small`
-/// for CPU-only live, `LargeV3Turbo` for live when a GPU/Metal backend was
-/// compiled in, `LargeV3` lazily for the higher-quality offline pass; `Medium`
-/// is the middle ground if Polish quality on `Small`/`Turbo` disappoints;
-/// `Tiny`/`Base` exist mainly for dev/tests and the smallest-footprint case.
+/// Where in the pipeline a model fits. v1 default set (ADR-056 decision 8): `Small` for CPU
+/// live, `LargeV3Turbo` on GPU/Metal, `LargeV3` for offline; `Medium`/`Tiny`/`Base` are fallbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRole {
@@ -88,9 +74,8 @@ impl WhisperModelInfo {
     }
 }
 
-/// Curated Whisper model catalogue (PL+EN multilingual models — the `.en`
-/// English-only models are deliberately omitted). **Order matters** — the
-/// frontend renders this list as-is. Sizes/SHA256 from ADR-056 spike 0C.
+/// Curated Whisper catalogue (PL+EN multilingual; `.en` English-only models omitted).
+/// **Order matters** — the frontend renders this list as-is. Sizes/SHA256 from ADR-056 spike 0C.
 pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
     WhisperModelInfo {
         key: "small",
@@ -210,7 +195,7 @@ pub fn whisper_model(key: &str) -> Option<&'static WhisperModelInfo> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -324,11 +309,8 @@ mod tests {
 
     #[test]
     fn a_realistic_model_set_fits_under_the_global_dome() {
-        // A realistic worst case: keep one full-precision model per role (no
-        // point keeping a `full` and its `q5_*` variant at once — that's the
-        // redundant case). This must fit under the dome in consts.rs with room
-        // to spare; if it doesn't, raise the dome (and revisit whether the
-        // catalogue is getting too large).
+        // A realistic worst case: one full-precision model per role (keeping `full` + `q5_*`
+        // both is redundant). Must fit under the consts.rs dome — raise it or trim otherwise.
         let total: u64 = WHISPER_MODELS
             .iter()
             .filter(|m| matches!(m.quantization, Quantization::Full))

@@ -1,12 +1,6 @@
 /**
- * Comprehensive tests for project-tools.ts
- *
- * Tests cover:
- * - list_project_ids: listing projects with search, membership, archived options
- * - get_project_full: getting full project data with optional includes
- * - search_code: searching code in projects
- * - Unconfigured client handling
- * - Error handling
+ * Tests for project-tools.ts: listProjectIds (search/membership/archived), getProjectFull
+ * (optional includes), searchCode, unconfigured-client handling, and error handling.
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';

@@ -1,6 +1,5 @@
-//! Bridges container `pbcopy` writes to the host clipboard via a watched
-//! file. Runs for the desktop process lifetime. Deduplicated (the same
-//! content is never re-copied) and capped at 64 KB per payload.
+//! Bridges container `pbcopy` writes to the host clipboard via a watched file, for the process
+//! lifetime. Deduplicated (same content never re-copied), capped at 64 KB/payload.
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::Read;
@@ -118,7 +117,7 @@ fn handle_bridge_write(app: &AppHandle, path: &Path, last_content: &mut String) 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
     use std::io::Write;

@@ -1,6 +1,5 @@
-//! Per-session services layered on the state-tree types (ADR-042).
-//! [`queue`] — `QueuedMessageService`, a one-slot queued message store
-//! per session (ADR-045).
+//! Per-session services layered on the state-tree types (ADR-042). [`queue`] provides
+//! `QueuedMessageService`, a one-slot queued message store per session (ADR-045).
 
 pub mod cli_lock;
 pub mod instance;

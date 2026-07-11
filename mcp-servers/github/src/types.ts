@@ -4,7 +4,6 @@
 
 /**
  * GitHub API client configuration.
- * @interface GitHubConfig
  */
 export interface GitHubConfig {
   /** GitHub access token — OAuth App user token (from device flow) or PAT (advanced fallback). */
@@ -14,9 +13,7 @@ export interface GitHubConfig {
 }
 
 /**
- * GitHub repository metadata.
- * Represents a repository with its core identifying properties.
- * @interface GitHubRepo
+ * GitHub repository metadata: core identifying properties.
  * @see https://docs.github.com/en/rest/repos/repos
  */
 export interface GitHubRepo {
@@ -40,7 +37,6 @@ export interface GitHubRepo {
 
 /**
  * GitHub Pull Request - a request to merge changes from one branch into another.
- * @interface GitHubPullRequest
  * @see https://docs.github.com/en/rest/pulls/pulls
  */
 export interface GitHubPullRequest {
@@ -72,7 +68,6 @@ export interface GitHubPullRequest {
 
 /**
  * GitHub Issue - a task, bug report, or feature request.
- * @interface GitHubIssue
  * @see https://docs.github.com/en/rest/issues/issues
  */
 export interface GitHubIssue {
@@ -100,7 +95,6 @@ export interface GitHubIssue {
 
 /**
  * GitHub Branch - a named pointer to a commit in the repository.
- * @interface GitHubBranch
  * @see https://docs.github.com/en/rest/branches/branches
  */
 export interface GitHubBranch {
@@ -114,7 +108,6 @@ export interface GitHubBranch {
 
 /**
  * GitHub commit information.
- * @interface GitHubCommit
  * @see https://docs.github.com/en/rest/commits/commits
  */
 export interface GitHubCommit {
@@ -128,7 +121,6 @@ export interface GitHubCommit {
 
 /**
  * GitHub Label - a tag used to categorize issues and pull requests.
- * @interface GitHubLabel
  * @see https://docs.github.com/en/rest/issues/labels
  */
 export interface GitHubLabel {
@@ -144,7 +136,6 @@ export interface GitHubLabel {
 
 /**
  * GitHub Release - a published release associated with a Git tag.
- * @interface GitHubRelease
  * @see https://docs.github.com/en/rest/releases/releases
  */
 export interface GitHubRelease {
@@ -168,7 +159,6 @@ export interface GitHubRelease {
 
 /**
  * GitHub Actions workflow run.
- * @interface GitHubWorkflowRun
  * @see https://docs.github.com/en/rest/actions/workflow-runs
  */
 export interface GitHubWorkflowRun {
@@ -194,7 +184,6 @@ export interface GitHubWorkflowRun {
 
 /**
  * GitHub Actions workflow run artifact - a file or archive produced by a run.
- * @interface GitHubWorkflowRunArtifact
  * @see https://docs.github.com/en/rest/actions/artifacts
  */
 export interface GitHubWorkflowRunArtifact {
@@ -211,10 +200,7 @@ export interface GitHubWorkflowRunArtifact {
 }
 
 /**
- * GitHub file content - the contents and metadata of a file in a repository.
- * Note: GitHub returns file content base64-encoded; the client decodes it to UTF-8 text when
- * the bytes round-trip losslessly, otherwise it returns the raw base64 (see `encoding`).
- * @interface GitHubFileContent
+ * GitHub file content: base64-encoded on the wire; client decodes to UTF-8 when bytes round-trip losslessly, else raw base64 (see `encoding`).
  * @see https://docs.github.com/en/rest/repos/contents
  */
 export interface GitHubFileContent {
@@ -232,7 +218,6 @@ export interface GitHubFileContent {
 
 /**
  * GitHub tree item - a file ("blob") or directory ("tree") in a repository tree.
- * @interface GitHubTreeItem
  * @see https://docs.github.com/en/rest/git/trees
  */
 export interface GitHubTreeItem {
@@ -250,7 +235,6 @@ export interface GitHubTreeItem {
 
 /**
  * GitHub pull request review - an approval, change request, or comment on a PR.
- * @interface GitHubReview
  * @see https://docs.github.com/en/rest/pulls/reviews
  */
 export interface GitHubReview {
@@ -270,7 +254,6 @@ export interface GitHubReview {
 
 /**
  * GitHub issue/PR comment - a general comment on an issue or pull request.
- * @interface GitHubComment
  * @see https://docs.github.com/en/rest/issues/comments
  */
 export interface GitHubComment {
@@ -288,7 +271,6 @@ export interface GitHubComment {
 
 /**
  * GitHub pull request review comment - a comment attached to a specific line of a diff.
- * @interface GitHubReviewComment
  * @see https://docs.github.com/en/rest/pulls/comments
  */
 export interface GitHubReviewComment {
@@ -310,7 +292,6 @@ export interface GitHubReviewComment {
 
 /**
  * GitHub commit comparison result - the diff between a base and head ref.
- * @interface GitHubCommitComparison
  * @see https://docs.github.com/en/rest/commits/commits#compare-two-commits
  */
 export interface GitHubCommitComparison {
@@ -328,7 +309,6 @@ export interface GitHubCommitComparison {
 
 /**
  * The GitHub user authenticated by the mounted token.
- * @interface GitHubUser
  * @see https://docs.github.com/en/rest/users/users#get-the-authenticated-user
  */
 export interface GitHubUser {

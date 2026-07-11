@@ -1,30 +1,17 @@
-//! Collapses + summarises multi-line `ANTHROPIC_LOG=debug` blocks emitted by
-//! Claude Code into single, human-readable log entries.
-//!
-//! Three stages:
-//!   1. [`Collator`] groups continuation lines into one logical block (any
-//!      line ending in `{` opens a block, the matching outer `}` closes it).
-//!   2. [`format_block`] extracts the fields that matter (method, URL,
-//!      status, model, duration, counts) and produces a 1–2 line summary.
-//!   3. Response fragments from the same `[log_id]` (Claude SDK emits three
-//!      separate blocks per response: `response start`, `response NNN Headers`,
-//!      `response parsed`) are merged into a single line per HTTP transaction.
-//!
-//! Unknown formats pass through verbatim — never lose information.
+//! Collapses multi-line `ANTHROPIC_LOG=debug` blocks into single entries: [`Collator`] groups by
+//! braces, [`format_block`] summarises; same-`[log_id]` fragments merge; unknowns pass through.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-/// Upper bound on buffered continuation lines for one unclosed block.
-/// Reached only on malformed input (mismatched braces); guards against an
-/// unbounded `Vec<String>` if a future SDK emits broken output.
+/// Upper bound on buffered continuation lines for one unclosed block. Reached only on malformed
+/// input (mismatched braces); guards against an unbounded `Vec<String>` on broken SDK output.
 const MAX_BUFFERED_LINES: usize = 10_000;
 
-/// Upper bound on response fragments pending merge. Reached only on
-/// pathological streams where the terminator never arrives (interrupted
-/// session, fragments with unseen ids). Evicts oldest on overflow.
+/// Upper bound on response fragments pending merge. Reached only on pathological streams where
+/// the terminator never arrives (interrupted session, unseen ids); evicts oldest on overflow.
 const MAX_PENDING_RESPONSES: usize = 256;
 
 /// State machine that joins multi-line HTTP debug blocks into single entries
@@ -130,9 +117,8 @@ impl Collator {
         self.handle_complete_line(joined)
     }
 
-    /// Drain any pending buffered block AND every still-unflushed response
-    /// accumulator. Call on EOF, or whenever the caller knows all in-flight
-    /// HTTP transactions have ended (e.g. on Claude Code's `RESULT:` line).
+    /// Drain any pending buffered block AND every still-unflushed response accumulator. Call on
+    /// EOF, or whenever the caller knows all in-flight HTTP transactions have ended.
     pub fn flush(&mut self) -> Option<String> {
         let block = self.drain_buffer();
         let mut tail = Vec::new();
@@ -212,9 +198,7 @@ impl Collator {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Brace depth helper
-// ---------------------------------------------------------------------------
+// ── Brace depth helper ─────────────────────────────────────────────────────
 
 /// Net change in brace depth for one line, ignoring braces inside `"…"` strings.
 fn brace_delta(line: &str) -> i32 {
@@ -241,9 +225,7 @@ fn brace_delta(line: &str) -> i32 {
     depth
 }
 
-// ---------------------------------------------------------------------------
-// Block summariser
-// ---------------------------------------------------------------------------
+// ── Block summariser ───────────────────────────────────────────────────────
 
 fn re(pat: &str) -> Regex {
     // Static patterns; panic on a malformed regex (`.expect()` is clippy-forbidden in prod).
@@ -457,7 +439,11 @@ fn count_object_placeholders(block: &str, section_key: &str) -> usize {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
 

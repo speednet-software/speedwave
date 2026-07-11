@@ -3,9 +3,7 @@ use speedwave_runtime::runtime::ensure_exec_healthy;
 use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Setup state — persisted to ~/.speedwave/setup_state.json for resume support
-// ---------------------------------------------------------------------------
+// ── Setup state — persisted to ~/.speedwave/setup_state.json for resume support ──
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct SetupState {
@@ -60,7 +58,8 @@ impl SetupState {
                 // Missing file is the normal first-run case; warn on anything else.
                 if !Self::is_missing_state_file(&e) {
                     log::warn!(
-                        "SetupState::load: {} unreadable/corrupt, restarting onboarding from scratch: {e}",
+                        "setup state file {} unreadable/corrupt, restarting onboarding from \
+                         scratch: {e}",
                         path.display()
                     );
                 }
@@ -87,16 +86,14 @@ impl SetupState {
         self.save_to(&path)
     }
 
-    /// Saves setup state to a specific file path (atomic write via rename).
+    /// Saves setup state to a specific file path: atomic, fsynced write via
+    /// [`speedwave_runtime::fs_perms::write_shared_file_atomic`].
     fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
+        speedwave_runtime::fs_perms::write_shared_file_atomic(path, &json)
     }
 
     /// `true` when all required setup steps completed. `cli_linked` is
@@ -110,9 +107,7 @@ impl SetupState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 2: Check and install container runtime
-// ---------------------------------------------------------------------------
+// ── Step 2: Check and install container runtime ──
 
 #[derive(Serialize, Deserialize)]
 pub enum RuntimeStatus {
@@ -135,9 +130,7 @@ pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 3: Initialize VM (macOS only — Lima)
-// ---------------------------------------------------------------------------
+// ── Step 3: Initialize VM (macOS only — Lima) ──
 
 // VM provisioning primitives live in the runtime SSOT `speedwave_runtime::provision`.
 
@@ -191,9 +184,7 @@ pub use speedwave_runtime::provision::TerminateOnChange;
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::ensure_wsl_distro_metadata;
 
-// ---------------------------------------------------------------------------
-// Step 4: Create project
-// ---------------------------------------------------------------------------
+// ── Step 4: Create project ──
 
 pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     project::add_project(name, dir)?;
@@ -205,13 +196,10 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Setup completeness check
-// ---------------------------------------------------------------------------
+// ── Setup completeness check ──
 
-/// `true` when all required setup steps completed AND the VM / WSL distro
-/// still exists (`cli_linked` excluded). Spawns `limactl list` / `wsl.exe
-/// --list` per call — safe for route guards, do not poll.
+/// `true` when required setup steps completed AND the VM/WSL distro exists (`cli_linked` excluded).
+/// Spawns `limactl list`/`wsl.exe --list` per call — safe for route guards, do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
     if !state.is_complete() {
@@ -220,9 +208,7 @@ pub fn is_setup_complete() -> bool {
     runtime::detect_runtime().is_installed()
 }
 
-// ---------------------------------------------------------------------------
-// Build container images
-// ---------------------------------------------------------------------------
+// ── Build container images ──
 
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
@@ -232,7 +218,7 @@ pub fn build_images() -> anyhow::Result<()> {
         let user_config = match config::load_user_config() {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("build_images: failed to load config, using defaults: {e}");
+                log::warn!("failed to load config, using defaults: {e}");
                 config::SpeedwaveUserConfig::default()
             }
         };
@@ -280,15 +266,13 @@ pub fn build_images() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Start containers for a project
-// ---------------------------------------------------------------------------
+// ── Start containers for a project ──
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
     // No provider is a valid state ("choose a provider" screen) — every
     // caller must skip starting rather than let render_compose bail.
     if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
-        log::info!("start_containers: '{project}' has no LLM provider — skipping");
+        log::info!("project '{project}' has no LLM provider — skipping container start");
         return defer_container_start_gated(project, true);
     }
 
@@ -369,9 +353,7 @@ fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow:
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Check Claude auth status inside the container
-// ---------------------------------------------------------------------------
+// ── Check Claude auth status inside the container ──
 
 /// Looks up the project's LLM provider name. `None` when the project is
 /// missing or `claude.llm.provider` is unset.
@@ -386,10 +368,8 @@ pub(crate) fn lookup_project_provider<'a>(
         .and_then(|l| l.provider.as_deref())
 }
 
-/// True when the project's sessions need the in-container Anthropic OAuth
-/// check: v2 (ADR-073) only for `AnthropicOauth`. An UNCONFIGURED project (no
-/// llm config, or a dangling active selection) does NOT force OAuth (R7/f1,f4)
-/// — the user is routed to provider configuration instead of an auth wall.
+/// True when sessions need the in-container OAuth check (ADR-073, `AnthropicOauth` only).
+/// Unconfigured projects (no llm config, dangling selection) skip it, routed to provider config
 pub(crate) fn project_needs_anthropic_auth(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -423,39 +403,36 @@ pub(crate) fn project_needs_anthropic_auth(
 
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
-        log::warn!(
-            "check_claude_auth: failed to load user config, defaulting to anthropic path: {e}"
-        );
+        log::warn!("failed to load user config, defaulting to anthropic path: {e}");
         speedwave_runtime::config::SpeedwaveUserConfig::default()
     });
     if !project_needs_anthropic_auth(&user_config, project) {
-        log::info!("check_claude_auth: non-OAuth provider — skipping Anthropic OAuth check");
+        log::info!("non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
     let rt = runtime::detect_runtime();
     let container_name = crate::chat::claude_container_name(project);
-    log::info!("check_claude_auth: container={container_name}");
+    log::info!("checking Claude auth in container {container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
-    log::info!("check_claude_auth: container healthy, checking auth");
+    log::info!("container {container_name} healthy, checking auth");
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;
-    log::info!("check_claude_auth: auth status exit={}", output.status);
+    log::info!(
+        "auth status check for {container_name} exited with {}",
+        output.status
+    );
     Ok(output.status.success())
 }
 
-// ---------------------------------------------------------------------------
-// Lima VM config migration — upgrade memory from older installs
-// ---------------------------------------------------------------------------
+// ── Lima VM config migration — upgrade memory from older installs ──
 
 /// Migrates the Lima VM config when it drifts from the SSOT (memory, cpus, or
 /// the VPN netplan drop-in). Re-exported from [`speedwave_runtime::provision`].
 #[cfg(target_os = "macos")]
 pub use speedwave_runtime::provision::ensure_lima_vm_config;
 
-// ---------------------------------------------------------------------------
-// Factory reset — stops containers, destroys VM, wipes setup state
-// ---------------------------------------------------------------------------
+// ── Factory reset — stops containers, destroys VM, wipes setup state ──
 
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
@@ -543,9 +520,7 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 7: Copy CLI binary to user PATH
-// ---------------------------------------------------------------------------
+// ── Step 7: Copy CLI binary to user PATH ──
 
 /// Resolves the CLI binary bundled in Tauri resources, with a dev fallback
 /// next to the exe.
@@ -697,9 +672,8 @@ fn parse_shell_env(shell: &str) -> UserShell {
     }
 }
 
-/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of
-/// `.bash_profile`/`.bash_login`/`.profile` (creates `.bash_profile` if none);
-/// unknown → `.profile`.
+/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of `.bash_profile`,
+/// `.bash_login`, `.profile` (creates `.bash_profile`); unknown → `.profile`.
 #[cfg(unix)]
 fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::path::PathBuf> {
     match shell {
@@ -770,7 +744,7 @@ pub fn link_cli() -> anyhow::Result<()> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     if !consts::data_dir().exists() {
-        log::info!("link_cli: data dir missing, skipping");
+        log::info!("data dir missing, skipping CLI link");
         return Ok(());
     }
 
@@ -786,7 +760,7 @@ pub fn link_cli() -> anyhow::Result<()> {
     // Write resources-dir marker so the external CLI can find build context.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
-            log::warn!("link_cli: could not write resources-dir marker: {e}");
+            log::warn!("could not write resources-dir marker: {e}");
         }
     }
 
@@ -799,8 +773,7 @@ pub fn link_cli() -> anyhow::Result<()> {
 }
 
 /// Resolves a `windows/<name>` script from the Tauri bundle on Windows: prefer
-/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev
-/// fallbacks. Shared by the sweep and firewall consumers.
+/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev fallbacks.
 #[cfg(target_os = "windows")]
 pub(crate) fn resolve_bundled_windows_script(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -838,9 +811,8 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
 #[cfg(target_os = "windows")]
 pub(crate) use speedwave_runtime::binary::system_powershell_path;
 
-/// Kills stale Speedwave / Node / CLI processes holding binaries about to be
-/// overwritten. Runs at every Desktop startup, fails open. SSOT for the kill
-/// predicate is `windows/sweep.ps1`.
+/// Kills stale Speedwave/Node/CLI processes holding binaries about to be overwritten.
+/// Runs at every Desktop startup, fails open. Kill predicate SSOT: `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
 fn run_pre_link_sweep() {
     let Some(sweep) = resolve_sweep_script() else {
@@ -918,7 +890,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
         // would kill a user's live `speedwave` session for nothing (ADR-048).
         let target = cli_dir.join(consts::cli_binary_filename(true));
         if files_identical(cli_source, &target) {
-            log::info!("link_cli: installed CLI already current — sweep/copy skipped");
+            log::info!("installed CLI already current — sweep/copy skipped");
         } else {
             // Kill any stale process holding the exe before overwrite (ADR-048).
             run_pre_link_sweep();
@@ -944,15 +916,16 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = speedwave_runtime::binary::powershell_command()
-            .args([
+        let status = speedwave_runtime::binary::run_powershell(
+            &[
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
                 &script,
-            ])
-            .status()?;
+            ],
+            std::time::Duration::from_secs(60),
+        )?;
         if !status.success() {
             anyhow::bail!("Failed to add CLI to PATH");
         }
@@ -1069,9 +1042,8 @@ mod tests {
 
     #[test]
     fn local_provider_branch_covers_ollama_lmstudio_llamacpp() {
-        // Guard: `check_claude_auth` skips Anthropic OAuth exactly for the three
-        // local providers. If `is_local_provider` expands or contracts, this
-        // test documents which set the auth-skip branch fires on.
+        // Guard: `check_claude_auth` skips Anthropic OAuth exactly for the three local providers.
+        // Documents which set the auth-skip branch fires on if `is_local_provider` changes.
         use speedwave_runtime::config::is_local_provider;
         assert!(is_local_provider(Some("ollama")));
         assert!(is_local_provider(Some("lmstudio")));
@@ -1116,9 +1088,8 @@ mod tests {
         }
     }
 
-    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth
-    /// check; every other kind (api key, local, openrouter, …) must skip it
-    /// or offline/key-based users get blocked on a claude.ai login.
+    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth check; every other kind
+    /// (api key, local, openrouter, …) must skip it or offline/key-based users hit a login wall.
     #[test]
     fn needs_anthropic_auth_by_v2_kind() {
         use speedwave_runtime::config::LlmProviderKind as K;
@@ -1600,11 +1571,8 @@ mod tests {
         );
     }
 
-    /// Verifies that init_vm persists both `runtime_ready` and `vm_ready` to
-    /// the state file. This is a regression test: previously init_vm only set
-    /// `vm_ready`, leaving `runtime_ready` false after the check_runtime →
-    /// init_vm flow, which caused `is_setup_complete()` to return false and
-    /// the "Setup complete! Redirecting..." screen to hang indefinitely.
+    /// Regression: init_vm must persist both `runtime_ready` and `vm_ready`; it once set only
+    /// `vm_ready`, leaving `is_setup_complete()` false and the "Setup complete!" screen hung.
     #[test]
     fn init_vm_sets_runtime_ready_and_vm_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1628,12 +1596,8 @@ mod tests {
         assert!(after.vm_ready, "init_vm must set vm_ready = true");
     }
 
-    /// Verifies that check_runtime sets vm_ready=true when the runtime is Ready.
-    ///
-    /// When the runtime is already available (ensure_ready() succeeds), the wizard
-    /// frontend skips init_vm entirely. Without vm_ready=true in the state file,
-    /// is_complete() returns false and the app redirects back to the setup wizard
-    /// after reload instead of to the main shell.
+    /// check_runtime must set vm_ready=true when Ready — the wizard then skips init_vm, so
+    /// without it is_complete() stays false after reload.
     #[test]
     fn check_runtime_ready_sets_vm_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1662,10 +1626,8 @@ mod tests {
         );
     }
 
-    /// Verifies that is_complete() returns false when vm_ready is false,
-    /// even if all other fields are set. This is the specific regression
-    /// that occurred when check_runtime(Ready) skipped init_vm without
-    /// setting vm_ready.
+    /// is_complete() must return false when vm_ready is false, even with other fields set —
+    /// regression from check_runtime(Ready) skipping init_vm without setting vm_ready.
     #[test]
     fn is_complete_false_without_vm_ready() {
         let state = SetupState {
@@ -1889,6 +1851,13 @@ mod tests {
         let loaded = SetupState::load_from(&path).expect("load should succeed");
         assert_eq!(loaded.current_step(), 1);
         assert!(loaded.runtime_ready);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "setup state is shared, not secret, content");
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -2513,17 +2482,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let fake_home = tmp.path().join("home");
         std::fs::create_dir_all(&fake_home).expect("create fake home");
-        // No .speedwave/ inside fake_home — guard should trigger.
-        // We can't call link_cli() directly because it uses dirs::home_dir()
-        // which returns the real home. Instead, verify the guard logic:
+        // No .speedwave/ in fake_home — guard should trigger. Can't call link_cli() directly
+        // (uses dirs::home_dir(), the real home), so verify the guard logic instead:
         let data_dir = fake_home.join(consts::DATA_DIR);
         assert!(
             !data_dir.exists(),
             "precondition: data dir should not exist"
         );
-        // The guard condition in link_cli():
-        //   if !home.join(consts::DATA_DIR).exists() { return Ok(()); }
-        // We verify the same condition holds and data dir stays absent.
+        // Guard in link_cli(): `if !home.join(consts::DATA_DIR).exists() { return Ok(()) }`.
+        // Verify the same condition holds and data dir stays absent.
         assert!(
             !data_dir.exists(),
             "data dir should not be created by guard check"
@@ -2677,10 +2644,8 @@ mod tests {
 
     #[test]
     fn decode_wsl_output_imported_from_runtime_works() {
-        // Smoke test: verify the re-exported decode_wsl_output handles
-        // UTF-16LE correctly. Full test coverage lives in speedwave-runtime.
-        // Build the input from `wsl_distro_name()` (derived from the data_dir
-        // basename) so the test is independent of the process-global data_dir.
+        // Smoke test for re-exported decode_wsl_output (full coverage in speedwave-runtime).
+        // Input built from `wsl_distro_name()`, independent of the process-global data_dir.
         let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
@@ -2789,10 +2754,8 @@ services:
 
     #[test]
     fn start_containers_security_check_passes_valid_compose() {
-        // A compose YAML with all security requirements should produce zero
-        // compose-level violations. `FileSecurityViolation`s are filtered out
-        // because they depend on the real host's `~/.speedwave/` perms — this
-        // test is about YAML semantics, not host filesystem state.
+        // A compose YAML with all security requirements should produce zero compose-level
+        // violations. `FileSecurityViolation`s are filtered; test covers YAML semantics only.
         let yaml = r#"
 version: "3"
 services:
@@ -2830,12 +2793,8 @@ networks:
         );
     }
 
-    /// Extracts the body of a top-level `pub fn <name>()` from source text by
-    /// counting braces. Used by structural tests to assert on function contents.
-    ///
-    /// Limitation: string literals containing `{` or `}` will throw off the
-    /// depth counter. This is acceptable for architectural guard tests — if a
-    /// future change adds brace-containing strings, the test may need updating.
+    /// Extracts the body of a top-level `pub fn <name>()` from source text by counting braces.
+    /// Limitation: string literals with `{`/`}` throw off the depth counter (acceptable here).
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source
             .split(fn_signature)
@@ -2862,11 +2821,8 @@ networks:
         &rest[..end]
     }
 
-    /// Structural test: verifies that `build_images()` handles
-    /// `SnapshotterRecoveryFailed` by calling `restart_container_engine()` and
-    /// retrying the build. This is a source-level test — if the recovery pattern
-    /// is removed or refactored away, this test will fail and force a conscious
-    /// decision about the new error-handling strategy.
+    /// Structural test: `build_images()` must handle `SnapshotterRecoveryFailed` by calling
+    /// `restart_container_engine()` and retrying — fails if that recovery path is removed.
     #[test]
     fn build_images_handles_snapshotter_recovery_with_engine_restart() {
         let source = include_str!("setup_wizard.rs");
@@ -2896,10 +2852,8 @@ networks:
         );
     }
 
-    /// Structural test: verifies that `build_images()` persists `BundleState`
-    /// (with `applied_bundle_id`) after a successful image build and syncs
-    /// claude-resources. Without this, `reconcile_bundle_update` sees
-    /// `bundle_changed=true` on the next startup and triggers a phantom rebuild.
+    /// Structural test: `build_images()` must persist `BundleState.applied_bundle_id` and sync
+    /// resources after a build, or `reconcile_bundle_update` phantom-rebuilds next startup.
     #[test]
     fn build_images_writes_bundle_state_after_success() {
         let source = include_str!("setup_wizard.rs");
@@ -2925,10 +2879,8 @@ networks:
         );
     }
 
-    /// Structural test: verifies that `start_containers()` calls
-    /// `ensure_exec_healthy` between the idempotent `compose_up` and the
-    /// `SetupState` save. Without this, `containers_started = true` could be
-    /// persisted while containers are broken or missing.
+    /// Structural: `start_containers()` must call `ensure_exec_healthy` between compose_up and
+    /// state save, else `containers_started = true` could persist while broken.
     #[test]
     fn start_containers_probes_exec_after_compose_up() {
         let source = include_str!("setup_wizard.rs");
@@ -2980,7 +2932,7 @@ networks:
     #[test]
     fn build_images_warns_on_config_load_failure() {
         let source = include_str!("setup_wizard.rs");
-        let snippet = "log::warn!(\"build_images: failed to load config";
+        let snippet = "log::warn!(\"failed to load config";
         assert!(
             source.contains(snippet),
             "build_images must log::warn before defaulting on config load error, \
@@ -2995,9 +2947,8 @@ networks:
         );
     }
 
-    /// Structural test: `ensure_wslconfig_vpn_compat` must be invoked from
-    /// `main.rs` at startup so existing WSL2 installs pick up the VPN-compat
-    /// keys without a fresh install.
+    /// Structural: `ensure_wslconfig_vpn_compat` must be invoked from `main.rs` at startup so
+    /// existing WSL2 installs pick up the VPN-compat keys without a fresh install.
     #[test]
     fn ensure_wslconfig_vpn_compat_called_from_main() {
         let source = include_str!("main.rs");
@@ -3008,9 +2959,8 @@ networks:
         );
     }
 
-    /// Structural test: `ensure_lima_vm_config()` must be called in `main.rs`
-    /// before `reconcile_bundle_update()` so the VM memory is migrated before
-    /// images are rebuilt.
+    /// Structural: `ensure_lima_vm_config()` must be called in `main.rs` before
+    /// `reconcile_bundle_update()` so VM memory is migrated before images are rebuilt.
     #[test]
     fn ensure_lima_vm_config_called_before_reconcile() {
         let source = include_str!("main.rs");
@@ -3057,10 +3007,8 @@ networks:
         );
     }
 
-    // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(), and
-    // reset_vm() errors must be non-fatal (log::warn and continue).
-    // These tests verify the non-fatal wrapper pattern used in factory_reset
-    // handles both Ok and Err from reset_vm() correctly.
+    // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(); errors must be non-fatal
+    // (log::warn and continue). These tests cover both Ok and Err from reset_vm().
     mod reset_vm_factory_reset_contract {
         use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 

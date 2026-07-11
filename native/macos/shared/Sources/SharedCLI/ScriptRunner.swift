@@ -76,10 +76,8 @@ public func appleScriptNotFoundNames(_ stderr: String, _ specifier: String) -> B
     !specifier.isEmpty && isAppleScriptNotFoundError(stderr) && stderr.contains(specifier)
 }
 
-/// Split a comma-separated address list into trimmed, non-empty addresses.
-/// Quote-aware: commas inside a double-quoted span (e.g. a "Last, First" display name) do not split.
-/// An unbalanced quote count falls back to a naive comma split of the original input,
-/// rather than risk swallowing recipients into one unterminated quoted span.
+/// Split a comma-separated address list into trimmed, non-empty addresses. Quote-aware: commas inside
+/// a double-quoted span don't split; an unbalanced quote count falls back to a naive comma split.
 public func splitAddressList(_ addresses: String) -> [String] {
     var entries: [String] = []
     var current = ""

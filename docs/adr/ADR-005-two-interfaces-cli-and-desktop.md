@@ -40,4 +40,8 @@ All container operations go through the `ContainerRuntime` trait in `crates/spee
 
 ---
 
-The Desktop chat UI follows the same approach as the vibe-kanban Claude Code GUI integration (`https://github.com/BloopAI/vibe-kanban`), driving Claude Code via `claude -p --output-format=stream-json` (see the Claude Code CLI reference at `https://code.claude.com/docs/en/cli-reference`).
+The Desktop chat UI follows the same approach as the vibe-kanban Claude Code GUI integration[^1], driving Claude Code via `claude -p --output-format=stream-json`[^2].
+
+[^1]: https://github.com/BloopAI/vibe-kanban - kanban-board tool that drives Claude Code (and other coding agents) in isolated workspaces.
+
+[^2]: https://code.claude.com/docs/en/cli-reference - documents `--print`/`-p` (print mode) and `--output-format` with the `stream-json` option.

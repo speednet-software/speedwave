@@ -1,6 +1,6 @@
 /**
- * SSOT for strict numeric-id normalization shared by github and gitlab: accepts a
- * positive-integer number or its string form (optionally prefixed, e.g. '#'/'!').
+ * SSOT for strict numeric-id normalization shared by github/gitlab: positive-integer number or its
+ * string form (optionally prefixed, e.g. '#'/'!').
  * @module shared/numeric-id
  */
 
@@ -25,8 +25,8 @@ export interface NumericIdOptions {
 
 /**
  * Build the teaching next-step string for a rejected numeric id.
- * @param paramName - Name of the parameter being normalized.
- * @param prefixes - Allowed strippable prefixes (may be empty).
+ * @param paramName - Name of the invalid parameter.
+ * @param prefixes - Single-character prefixes allowed on the string form.
  */
 function numericIdNextStep(paramName: string, prefixes: readonly string[]): string {
   if (prefixes.length === 0) {
@@ -37,11 +37,11 @@ function numericIdNextStep(paramName: string, prefixes: readonly string[]): stri
 }
 
 /**
- * Normalize one numeric id. A number must be a positive integer; a string must be
- * all digits after stripping one allowed prefix (rejects "4.5", "-3", "0x2A", "1e3").
- * @param value - Raw id value from tool params.
- * @param paramName - Name of the parameter (for the teaching error).
- * @param options - Optional strippable prefixes.
+ * Normalize one numeric id. A number must be a positive integer; a string must be all digits after
+ * stripping one allowed prefix (rejects "4.5", "-3", "0x2A", "1e3").
+ * @param value - The raw value to normalize.
+ * @param paramName - Name of the parameter (used in teaching-error output).
+ * @param options - Options controlling prefix stripping.
  */
 export function normalizeNumericId(
   value: unknown,
@@ -77,12 +77,11 @@ export type NumericIdParamsResult =
   | { ok: false; error: NumericIdError };
 
 /**
- * Normalize the named numeric-id params of a params object in place (on a copy).
- * Params that are absent or `undefined` are left untouched; present params are
- * validated via {@link normalizeNumericId} and replaced with their parsed number.
- * @param params - Raw params object (a shallow copy is returned; input is untouched).
- * @param paramNames - Keys that carry a numeric id.
- * @param options - Optional strippable prefixes.
+ * Normalize the named numeric-id params of a params object in place (on a copy). Params absent or
+ * `undefined` are left untouched; present params are validated via {@link normalizeNumericId}.
+ * @param params - The params object to normalize (not mutated).
+ * @param paramNames - Names of the params to validate as numeric ids.
+ * @param options - Options controlling prefix stripping, forwarded to {@link normalizeNumericId}.
  */
 export function normalizeNumericIdParams(
   params: Record<string, unknown>,

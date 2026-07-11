@@ -76,7 +76,7 @@ const getSpaceTool: Tool = {
 };
 
 /**
- * Build the Confluence space tool definitions.
+ * Build the Confluence space tool definitions; `client` is `null` when not configured.
  * @param client - The Atlassian client (`null` when not configured).
  * @returns Tool definitions for Confluence spaces.
  */

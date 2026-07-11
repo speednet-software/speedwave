@@ -16,7 +16,7 @@ export class ScopeError extends Error {
 }
 
 /**
- * Check if key is in allowlist (case-insensitive). Reject if missing or not in allowlist.
+ * Check key is in allowlist (case-insensitive; empty = unrestricted); throws {@link ScopeError}.
  * @param key - Project/space key to check (may be `undefined`).
  * @param allowlist - Configured allowed keys (empty = unrestricted).
  * @param kind - `'Jira project'` or `'Confluence space'`, for the error message.
@@ -66,7 +66,7 @@ export function assertConfluenceSpaceAllowed(
 }
 
 /**
- * Enforce allowlist for issue key. Numeric IDs rejected if allowlist is configured; callers must resolve key first.
+ * Enforce allowlist for an issue key; numeric IDs rejected when configured, resolve to key first.
  * @param issueIdOrKey - The Jira issue key (e.g. `PROJ-123`) or numeric ID.
  * @param allowlist - Configured allowed project keys (empty = unrestricted).
  */
@@ -80,7 +80,7 @@ export function assertJiraIssueKeyAllowed(
 }
 
 /**
- * Filter items by allowlist keys (case-insensitive). Empty allowlist = no filtering.
+ * Filter items by allowlist via `keyOf` (case-insensitive); empty allowlist = no filtering.
  * @param items - Items to filter.
  * @param keyOf - Extracts the project/space key from an item.
  * @param allowlist - Configured allowed keys (empty = unrestricted).

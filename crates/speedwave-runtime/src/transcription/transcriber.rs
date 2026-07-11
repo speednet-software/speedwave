@@ -96,10 +96,8 @@ pub enum TranscribeError {
     InvalidAudio(String),
 }
 
-/// A speech-to-text engine. `transcribe()` is the offline/finalize path (whole
-/// buffer); `feed()` is the live path (a growing decode window — tail segments
-/// may change as more context arrives). One transcriber per recording (Whisper
-/// state is single-threaded).
+/// A speech-to-text engine. `transcribe()` is the offline/finalize path (whole buffer); `feed()`
+/// is the live path (a growing decode window, tail segments may change). One per recording.
 pub trait Transcriber: Send {
     /// Transcribe `pcm` (16 kHz mono `f32`, `[-1, 1]`) in one shot.
     fn transcribe(
@@ -108,9 +106,8 @@ pub trait Transcriber: Send {
         opts: &TranscribeOptions,
     ) -> Result<Vec<Segment>, TranscribeError>;
 
-    /// Decode the current live window. Default = `transcribe(window)`;
-    /// `WhisperCppTranscriber` uses the same (the window policy lives in the
-    /// driver).
+    /// Decode the current live window. Default = `transcribe(window)`; `WhisperCppTranscriber`
+    /// uses the same (window policy lives in the driver).
     fn feed(
         &mut self,
         pcm_window: &[f32],
@@ -171,8 +168,7 @@ impl WhisperCppTranscriber {
         pcm: &[f32],
         opts: &TranscribeOptions,
     ) -> Result<Vec<Segment>, TranscribeError> {
-        // Near-silent input makes Whisper emit trained-in filler ("Dziękuję" /
-        // "Thank you") — skip it instead of transcribing hallucinations.
+        // Near-silent input makes Whisper emit trained-in filler ("Dziękuję"/"Thank you") — skip.
         if pcm.is_empty() || is_silent(pcm) {
             return Ok(Vec::new());
         }
@@ -188,10 +184,8 @@ impl WhisperCppTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        // Anti-hallucination: no cross-window context (a hallucinated segment
-        // would otherwise seed the next window), deterministic decoding, and
-        // whisper.cpp's blank/non-speech-token suppression. (`no_speech_thold`
-        // is a no-op in whisper.cpp; we gate on per-segment prob below instead.)
+        // Anti-hallucination: no cross-window context, deterministic decoding, blank/nst suppress.
+        // `no_speech_thold` is a no-op in whisper.cpp — we gate on per-segment prob below instead.
         params.set_no_context(true);
         params.set_temperature(0.0);
         params.set_suppress_blank(true);
@@ -367,12 +361,11 @@ impl Transcriber for MockTranscriber {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
 
-    // `WhisperCppTranscriber` has no `Debug` (it wraps a `WhisperContext`), so
-    // `unwrap_err()` won't compile — pattern-match the error out.
+    // `WhisperCppTranscriber` has no `Debug`, so `unwrap_err()` won't compile — pattern-match it.
     fn load_err(path: &Path, label: &str) -> TranscribeError {
         match WhisperCppTranscriber::load(path, label) {
             Ok(_) => panic!("expected load() to fail"),
@@ -536,9 +529,8 @@ mod tests {
 
     #[test]
     fn old_segment_json_with_a_speaker_field_still_deserializes() {
-        // Backward compat (ADR-075): pre-removal transcripts carried a
-        // `speaker` field on each segment. Removing it must not break loading
-        // existing `transcript.json` files — serde ignores the unknown key.
+        // Backward compat (ADR-075): pre-removal transcripts carried a `speaker` field on each
+        // segment; serde ignores the unknown key so existing transcript.json files still load.
         let legacy = r#"{"start":{"secs":1,"nanos":0},"end":{"secs":2,"nanos":0},
             "text":"hej","words":[],"speaker":3}"#;
         let seg: Segment = serde_json::from_str(legacy).unwrap();

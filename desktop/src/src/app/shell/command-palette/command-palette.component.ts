@@ -321,8 +321,7 @@ export class CommandPaletteComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Updates the search query from the input event and resets the active
-   * index to the first matching item.
+   * Updates the search query from the input event and resets the active index to the first matching item.
    * @param event - Native `input` event from the search field.
    */
   onQueryInput(event: Event): void {

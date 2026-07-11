@@ -52,7 +52,6 @@ fn stdout_is_vt_terminal() -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
