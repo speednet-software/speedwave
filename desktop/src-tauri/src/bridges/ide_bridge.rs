@@ -24,13 +24,8 @@ pub(crate) const IDE_BRIDGE_AUTH_HEADER: &str = "x-claude-code-ide-authorization
 /// Display name written into the IDE Bridge lock file.
 pub(crate) const IDE_BRIDGE_DISPLAY_NAME: &str = "Speedwave";
 
-// ---------------------------------------------------------------------------
-// Lock file schema — Claude Code derives the port from the FILENAME
-// (`12345.lock` → port 12345); no `wsUrl` / `port` field is required in
-// the JSON. PID must be alive *inside* the container — we hard-code 1
-// (init), the only PID guaranteed to be alive in the container PID
-// namespace.
-// ---------------------------------------------------------------------------
+// ── Lock file schema: no `wsUrl`/`port` field — Claude Code derives the port from the
+// FILENAME (`12345.lock`). PID hard-coded to 1 (init), the only PID always alive in-container. ──
 
 #[derive(Serialize, Deserialize)]
 pub struct IdeLockFile {
@@ -46,9 +41,7 @@ pub struct IdeLockFile {
     pub auth_token: String,
 }
 
-// ---------------------------------------------------------------------------
-// JSON-RPC 2.0 protocol types (MCP layer)
-// ---------------------------------------------------------------------------
+// ── JSON-RPC 2.0 protocol types (MCP layer) ─────────────────────────────────
 
 #[derive(Deserialize, Debug)]
 pub struct JsonRpcRequest {
@@ -105,9 +98,7 @@ pub(crate) fn jsonrpc_parse_error() -> JsonRpcResponse {
     jsonrpc_error(serde_json::Value::Null, -32700, "Parse error")
 }
 
-// ---------------------------------------------------------------------------
-// MCP tools/list — 12 IDE tools that Claude discovers via MCP
-// ---------------------------------------------------------------------------
+// ── MCP tools/list — 12 IDE tools that Claude discovers via MCP ─────────────
 
 fn mcp_tools_list() -> serde_json::Value {
     use serde_json::json;
@@ -223,9 +214,7 @@ fn mcp_tools_list() -> serde_json::Value {
     ]})
 }
 
-// ---------------------------------------------------------------------------
-// MCP tools/call — stub responses when no upstream IDE is configured
-// ---------------------------------------------------------------------------
+// ── MCP tools/call — stub responses when no upstream IDE is configured ──────
 
 fn mcp_tool_result(text: &str) -> serde_json::Value {
     use serde_json::json;
@@ -267,9 +256,7 @@ fn dispatch_tool_call(name: &str, _args: Option<&serde_json::Value>) -> serde_js
     }
 }
 
-// ---------------------------------------------------------------------------
-// JSON-RPC dispatcher (MCP method handler)
-// ---------------------------------------------------------------------------
+// ── JSON-RPC dispatcher (MCP method handler) ────────────────────────────────
 
 pub(crate) fn dispatch_method(
     method: &str,
@@ -338,9 +325,7 @@ pub(crate) fn handle_jsonrpc_message(text: &str) -> Option<JsonRpcResponse> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Upstream IDE — proxy target read from `~/.claude/ide/<port>.lock`
-// ---------------------------------------------------------------------------
+// ── Upstream IDE — proxy target read from `~/.claude/ide/<port>.lock` ───────
 
 #[derive(Clone)]
 pub struct UpstreamIde {
@@ -363,18 +348,15 @@ impl std::fmt::Debug for UpstreamIde {
 /// Parameters: `(event_kind, detail_message)`.
 pub type EventCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
-// ---------------------------------------------------------------------------
-// IdeBridge — thin facade on top of HostBridge in Endpoint mode
-// ---------------------------------------------------------------------------
+// ── IdeBridge — thin facade on top of HostBridge in Endpoint mode ───────────
 
 pub struct IdeBridge {
-    /// `Some` in production (created via `new()`); `None` in test-only
-    /// `new_with_paths()`, which exercises lock-file helpers without a
-    /// real listener.
+    /// `Some` in production (created via `new()`); `None` in test-only `new_with_paths()`,
+    /// which exercises lock-file helpers without a real listener.
     inner: Option<HostBridge>,
 
-    // Mirrored from `inner` (in production) or supplied by the caller
-    // (in `new_with_paths`). Tests read these directly via field access.
+    // Mirrored from `inner` (production) or supplied by the caller (`new_with_paths`).
+    // Tests read these directly via field access.
     _tcp_port: u16,
     lock_file_path: PathBuf,
     /// `_`-prefix: only read inside `#[cfg(test)] fn write_lock_file`.
@@ -435,9 +417,8 @@ impl IdeBridge {
         self.event_cb = Some(cb);
     }
 
-    /// Read the auth token from `~/.claude/ide/<port>.lock` and store the
-    /// proxy target. Existing WebSocket connections are signalled to
-    /// reconnect so they pick up the new upstream.
+    /// Read the auth token from `~/.claude/ide/<port>.lock` and store the proxy target.
+    /// Existing WebSocket connections are signalled to reconnect and pick up the new upstream.
     pub fn set_upstream(&self, ide_name: String, port: u16) -> anyhow::Result<()> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
         let lock_path = home
@@ -548,9 +529,7 @@ impl Drop for IdeBridge {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Event emission helper
-// ---------------------------------------------------------------------------
+// ── Event emission helper ────────────────────────────────────────────────────
 
 fn emit_event(cb: &Option<EventCallback>, kind: &str, detail: &str) {
     if let Some(cb) = cb {
@@ -558,10 +537,7 @@ fn emit_event(cb: &Option<EventCallback>, kind: &str, detail: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Connection handler: already authenticated by HostBridge → choose proxy
-// vs stub based on upstream selection.
-// ---------------------------------------------------------------------------
+// ── Connection handler: already authenticated by HostBridge → choose proxy vs stub ──────────
 
 async fn handle_authenticated_connection(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -801,11 +777,8 @@ async fn handle_with_stubs<S>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Legacy test-only helpers
-// ---------------------------------------------------------------------------
-// Pre-HostBridge `run_websocket_on_tcp` + lock-file writer, kept behind
-// `#[cfg(test)]` for legacy integration tests.
+// ── Legacy test-only helpers: pre-HostBridge `run_websocket_on_tcp` + lock-file writer,
+// kept behind `#[cfg(test)]` for legacy integration tests. ──────────────────────────────
 
 #[cfg(test)]
 fn find_available_port() -> anyhow::Result<u16> {
@@ -843,9 +816,8 @@ fn build_ide_lock_file(auth_token: &str) -> IdeLockFile {
     }
 }
 
-/// Test-only async accept loop equivalent to the pre-HostBridge code
-/// path. Several integration tests spin this up directly to exercise
-/// proxy/stub behaviour without HostBridge's lifecycle.
+/// Test-only async accept loop equivalent to the pre-HostBridge code path. Several integration
+/// tests spin this up directly to exercise proxy/stub behaviour without HostBridge's lifecycle.
 #[cfg(test)]
 pub(crate) async fn run_websocket_on_tcp(
     std_listener: std::net::TcpListener,
@@ -963,9 +935,7 @@ async fn handle_test_connection<S>(
     emit_event(&event_cb, "disconnected", "Claude WebSocket closed");
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test module")]
@@ -1409,11 +1379,8 @@ mod tests {
         assert!(super::constant_time_eq("", ""));
     }
 
-    // -----------------------------------------------------------------------
-    // WebSocket integration tests — exercise the legacy `run_websocket_on_tcp`
-    // entry point (HostBridge's accept loop is covered separately in
-    // `bridges::host_bridge::tests`).
-    // -----------------------------------------------------------------------
+    // ── WebSocket integration tests — exercise the legacy `run_websocket_on_tcp` entry
+    // point (HostBridge's accept loop is covered separately in `host_bridge::tests`). ──
 
     async fn start_test_bridge(
         token: &str,
@@ -1579,11 +1546,8 @@ mod tests {
         let _ = tx.send(());
     }
 
-    // -----------------------------------------------------------------------
-    // Upstream-proxy integration tests — a duplex pair plays the Claude side,
-    // a real TCP WebSocket server plays the IDE. Short ProxyTiming keeps the
-    // liveness/heartbeat machinery observable within test time.
-    // -----------------------------------------------------------------------
+    // ── Upstream-proxy integration tests: a duplex pair plays Claude, a real TCP WebSocket
+    // server plays the IDE. Short ProxyTiming keeps liveness/heartbeat observable in test time. ──
 
     fn short_proxy_timing() -> super::ProxyTiming {
         super::ProxyTiming {

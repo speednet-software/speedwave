@@ -1,6 +1,5 @@
 /**
- * PDF manipulation — merge, split, rotate, watermark, fill AcroForm, read metadata.
- * All operations run in the bundled Python venv via `scripts/pdf_ops.py` (pypdf).
+ * PDF manipulation — merge, split, rotate, watermark, fill AcroForm, read metadata. All operations run in the bundled Python venv via `scripts/pdf_ops.py` (pypdf).
  * @module mcp-office/engine/pdf-ops
  */
 
@@ -51,10 +50,10 @@ export async function mergePdf(
 }
 
 /**
- * Split a PDF into one output file per page range (`[[1,3],[5,5]]`, 1-indexed, inclusive).
+ * Split a PDF into one output file per page range (`[[1,3],[5,5]]`, 1-indexed, inclusive); each part is suffixed `-part1`, `-part2`, ….
  * @param userPath - Caller-supplied path to the `.pdf`, under `/workspace`.
  * @param ranges - List of `[start, end]` 1-indexed inclusive page ranges.
- * @param outName - Base name for the outputs (optional); each part is suffixed `-part1`, `-part2`, …
+ * @param outName - Base name for the outputs (optional).
  * @param overwrite - Permit overwriting existing outputs (default false).
  * @returns One {@link FileResult} per produced part.
  * @throws {ValidationError} If `ranges` is empty/malformed, or a range exceeds the page count.
@@ -171,8 +170,7 @@ export type FilledFormResult = FileResult & {
  * @param outName - Output filename/path (optional).
  * @param flatten - Whether to flatten the form so values become static content (default true).
  * @param overwrite - Permit overwriting an existing output (default false).
- * @returns The {@link FilledFormResult}: file info, `flattened`, and any `fieldWarnings`. If `flatten`
- *   was requested but could not be applied, `flattened` is false and a warning is written to stderr.
+ * @returns The {@link FilledFormResult}: file info, `flattened` (false if requested but not applied), and any `fieldWarnings`.
  * @throws {ValidationError} If `fields` is not a plain object.
  */
 export async function fillPdfForm(

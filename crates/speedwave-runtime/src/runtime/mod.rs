@@ -459,9 +459,8 @@ pub fn project_has_compose_file(project: &str) -> bool {
     project_has_compose_file_in(consts::data_dir(), project)
 }
 
-/// True when a host-side compose file is absent — a `compose_down` on it is a
-/// no-op (deferred no-provider project never rendered one), so skip the engine
-/// call that would fatally error and retry.
+/// True when a host-side compose file is absent — `compose_down` on it is a no-op (deferred
+/// no-provider project never rendered one), so skip the engine call that would fatally error.
 pub(crate) fn compose_down_is_noop(host_compose_file: &str) -> bool {
     !std::path::Path::new(host_compose_file).exists()
 }

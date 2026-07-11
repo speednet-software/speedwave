@@ -134,9 +134,8 @@ export class SessionStatsComponent {
   readonly inboundTokens = computed<number>(() => this.stats()?.usage?.input_tokens ?? 0);
 
   /**
-   * Tokens occupying the context window — from the last main-chain API call
-   * only. The per-turn `usage` sums cache reads across calls and must never
-   * feed this meter (it exceeds the window on any tool-use turn).
+   * Tokens occupying the context window, from the last main-chain API call only — the per-turn `usage`
+   * sums cache reads across calls and must never feed this meter (exceeds the window on tool-use turns).
    */
   readonly ctxTotal = computed<number>(() => {
     const usage = this.stats()?.context_usage;
@@ -144,8 +143,8 @@ export class SessionStatsComponent {
   });
 
   /**
-   * Context usage as integer percent (0–100); `null` when window unknown (local
-   * model, ADR-041 — segment hidden, not fabricated), 0 when known but unused.
+   * Context usage as integer percent (0–100); `null` when window unknown (local model, ADR-041 —
+   * segment hidden, not fabricated), 0 when known but unused.
    */
   readonly ctxPct = computed<number | null>(() => {
     const windowSize = this.stats()?.context_window_size;

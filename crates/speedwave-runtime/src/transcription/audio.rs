@@ -1,11 +1,5 @@
-//! The `AudioCapture` trait and its `FileAudioCapture` test/dev implementation.
-//!
-//! `AudioCapture` is the seam between the OS-specific capture backends (Windows
-//! WASAPI loopback, macOS CoreAudio process taps) and the rest of the engine —
-//! the same shape as `ContainerRuntime` → `LimaRuntime`/`WslRuntime`.
-//! `FileAudioCapture` "plays back" a 16 kHz mono WAV in fixed chunks so the
-//! orchestration (the transcriber, the driver) can be exercised without a real
-//! device — and doubles as the dev affordance ("transcribe a WAV file").
+//! The `AudioCapture` trait: the seam between OS-specific backends (Windows WASAPI, macOS
+//! CoreAudio taps) and the engine, plus `FileAudioCapture`, its WAV-backed test/dev impl.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,15 +8,12 @@ use std::time::Duration;
 /// backends resample their device-native rate down to this.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
-/// Chunk granularity `FileAudioCapture` delivers (and the rough cadence the
-/// real backends aim for — the macOS CLI's framed stdout protocol uses ~200 ms
-/// chunks, per ADR-056). Smaller = lower live latency but more per-chunk
-/// overhead; this is a reasonable default.
+/// Chunk granularity `FileAudioCapture` delivers (and the rough cadence real backends aim for —
+/// the macOS CLI's framed stdout protocol uses ~200 ms chunks, ADR-056). A reasonable default.
 pub const CHUNK_DURATION: Duration = Duration::from_millis(200);
 
-/// UI label for the default "system loopback + your microphone" source that
-/// every backend offers first (ADR-056 decision 15). Single source so all three
-/// backends — and the Angular test fixture — agree.
+/// UI label for the default "system loopback + your microphone" source every backend offers
+/// first (ADR-056 dec. 15). Single source so all backends and the Angular fixture agree.
 pub const DEFAULT_MIXED_SOURCE_LABEL: &str = "Whole meeting (system audio + your microphone)";
 
 /// What to capture.
@@ -78,11 +69,8 @@ impl CaptureCapabilities {
     }
 }
 
-/// One chunk of captured PCM: 16 kHz mono `f32` samples in `[-1.0, 1.0]`, plus
-/// the offset of this chunk's first sample from the start of the recording.
-/// (When the source is `Mixed`, the backend has already mixed or the engine
-/// requested a single mixed stream — multi-stream interleaving is a backend
-/// detail; the engine only ever sees one mono stream here.)
+/// One chunk of captured PCM: 16 kHz mono `f32` samples in `[-1.0, 1.0]`, plus the offset of
+/// this chunk's first sample from recording start. `Mixed` sources are already backend-mixed.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
     /// 16 kHz mono samples, `[-1.0, 1.0]`.
@@ -136,11 +124,8 @@ pub enum CaptureHealth {
     Cleared(CaptureWarning),
 }
 
-/// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns
-/// `Ok(None)` at end of stream (for `FileAudioCapture` that is end of file;
-/// for a live backend it doesn't normally end until `stop()` — represented by
-/// dropping the stream / the backend's own stop signal). Implementations are
-/// `Send` so the driver can pump them from a background task.
+/// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns `Ok(None)` at end of
+/// stream (EOF for a file; a live backend ends via dropping it). `Send` for background pumping.
 pub trait AudioStream: Send {
     /// Block for the next chunk. `Ok(None)` = stream finished. `Err(_)` = the
     /// capture broke (the driver flips the session to `Failed`).
@@ -204,27 +189,19 @@ pub trait AudioCapture: Send + Sync {
     /// What this backend can do on this host.
     fn capabilities(&self) -> CaptureCapabilities;
 
-    /// List the sources the user can pick from (running audio apps, input
-    /// devices, "System (everything)"). May be empty (no devices / nothing
-    /// playing yet).
+    /// List the sources the user can pick from (input devices, "System (everything)"). May be
+    /// empty (no devices / nothing playing yet).
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError>;
 
-    /// Start capturing `source`. Returns a stream of `AudioChunk`s. Validation
-    /// of `source` against `capabilities()` is the caller's job, but a backend
-    /// may also reject an unsupported source here with `CaptureError::Unsupported`.
+    /// Start capturing `source`. Validation against `capabilities()` is the caller's job, but a
+    /// backend may also reject an unsupported source with `CaptureError::Unsupported`.
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError>;
 }
 
 // --- FileAudioCapture: the dev/test backend ---------------------------------
 
-/// "Captures" from a WAV file by streaming it back in [`CHUNK_DURATION`] chunks.
-///
-/// It accepts the file path either at construction (for the dev "transcribe
-/// this file" affordance — the path is fixed) or via the `source` argument as
-/// a `Microphone { device: Some("<path>") }` overload (a convenience for tests
-/// that want to drive different fixtures through the same `Box<dyn AudioCapture>`).
-/// The WAV must be 16-bit-int or 32-bit-float PCM; any sample rate / channel
-/// count is accepted and converted to 16 kHz mono `f32` here.
+/// "Captures" from a WAV file by streaming it back in [`CHUNK_DURATION`] chunks (file path at
+/// construction or via `Microphone{device:Some("<path>")}`); any rate/format converts to 16 kHz.
 pub struct FileAudioCapture {
     /// Default path used when `start()` is called with a non-path source.
     default_path: Option<PathBuf>,
@@ -237,9 +214,8 @@ impl FileAudioCapture {
         Self { default_path: None }
     }
 
-    /// A `FileAudioCapture` bound to `path` — `start()` ignores its `source`
-    /// argument and replays this file. Test-only: production passes the path
-    /// per-call via `Microphone { device: Some(path) }`.
+    /// A `FileAudioCapture` bound to `path` — `start()` ignores its `source` and replays this
+    /// file. Test-only: production passes the path per-call via `Microphone{device:Some(path)}`.
     #[cfg(test)]
     pub fn for_file(path: impl AsRef<Path>) -> Self {
         Self {
@@ -322,9 +298,8 @@ impl AudioStream for FilePlaybackStream {
     }
 }
 
-/// Parses a WAV file into mono `f32` samples (no resampling). Returns the
-/// downmixed samples and the file's sample rate so callers can choose to
-/// resample or trust the rate.
+/// Parses a WAV file into mono `f32` samples (no resampling). Returns the downmixed samples and
+/// the file's sample rate so callers can choose to resample or trust it.
 pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureError> {
     let mut reader = hound::WavReader::open(path)
         .map_err(|e| CaptureError::Failed(format!("open WAV {}: {e}", path.display())))?;
@@ -371,9 +346,8 @@ pub fn bytes_to_f32_samples(raw: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Spawns a background thread draining a child's stderr into the log so the
-/// child can't deadlock on a full pipe. `target` distinguishes log lines per
-/// capture backend.
+/// Spawns a background thread draining a child's stderr into the log so it can't deadlock on a
+/// full pipe. `target` distinguishes log lines per capture backend.
 pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str) -> ChildStderr {
     use std::io::BufRead;
     let collected = ChildStderr::default();
@@ -436,9 +410,8 @@ pub fn kill_child_gracefully(child: &mut std::process::Child) {
     }
 }
 
-/// Linear-interpolation resampler. `src` is mono. Returns `src` unchanged when
-/// `from == to`. (Deliberately simple — the production capture backends use
-/// real resamplers; this is only on the file-input dev/test path.)
+/// Linear-interpolation resampler. `src` is mono; returns unchanged when `from == to`.
+/// Deliberately simple — production backends use real resamplers; this is dev/test-only.
 fn resample_linear(src: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || src.is_empty() {
         return src.to_vec();
@@ -527,9 +500,8 @@ mod tests {
         assert_eq!(z.feed(&five_secs), None, "disarmed for good after signal");
     }
 
-    /// Writes a 16-bit-int WAV to a temp dir from mono samples at `rate`, with
-    /// `channels` (the mono sample is duplicated across channels). Returns the
-    /// `TempDir` guard (keeps the file alive for the test) and the WAV path.
+    /// Writes a 16-bit-int WAV to a temp dir from mono samples at `rate`/`channels` (duplicated
+    /// across channels). Returns the `TempDir` guard (keeps the file alive) and the WAV path.
     fn write_temp_wav(
         samples_mono: &[f32],
         rate: u32,
@@ -632,9 +604,7 @@ mod tests {
         assert_eq!(total, 8_000);
     }
 
-    /// `start()` returns `Result<Box<dyn AudioStream>, CaptureError>` and
-    /// `Box<dyn AudioStream>` has no `Debug`, so `unwrap_err()` won't compile —
-    /// pattern-match the error out instead.
+    /// `Box<dyn AudioStream>` has no `Debug`, so `unwrap_err()` won't compile — pattern-match.
     fn start_err(cap: &dyn AudioCapture, source: AudioSource) -> CaptureError {
         match cap.start(source) {
             Ok(_) => panic!("expected start() to fail"),

@@ -12,10 +12,8 @@ fn open_privacy_subpane(anchor: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the macOS System Settings "Files and Folders" (Privacy & Security) pane
-/// so the user can grant CloudStorage TCC permissions to Speedwave.
-///
-/// On non-macOS platforms this is a no-op (returns Ok).
+/// Opens the macOS "Files and Folders" (Privacy & Security) pane so the user
+/// can grant CloudStorage TCC permissions to Speedwave. No-op on non-macOS.
 #[tauri::command]
 pub fn open_files_folders_pane() -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -26,9 +24,8 @@ pub fn open_files_folders_pane() -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the macOS System Settings "Microphone" privacy pane so the user can
-/// re-enable Speedwave's mic access (meeting transcription, ADR-056).
-/// No-op on non-macOS.
+/// Opens the macOS "Microphone" privacy pane so the user can re-enable
+/// Speedwave's mic access (meeting transcription, ADR-056). No-op on non-macOS.
 #[tauri::command]
 pub fn open_microphone_pane() -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -38,9 +35,8 @@ pub fn open_microphone_pane() -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the macOS System Settings "Audio Recording" (system-audio capture)
-/// privacy pane — the permission `NSAudioCaptureUsageDescription` gates.
-/// No-op on non-macOS.
+/// Opens the macOS "Audio Recording" (system-audio capture) privacy pane —
+/// the permission `NSAudioCaptureUsageDescription` gates. No-op on non-macOS.
 #[tauri::command]
 pub fn open_audio_capture_pane() -> Result<(), String> {
     #[cfg(target_os = "macos")]

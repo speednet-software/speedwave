@@ -8,9 +8,7 @@ use crate::http_util::read_body_limited;
 #[cfg(test)]
 use crate::http_util::MAX_RESPONSE_BODY_BYTES;
 
-// ---------------------------------------------------------------------------
-// Response DTOs
-// ---------------------------------------------------------------------------
+// ── Response DTOs ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct RedmineUser {
@@ -41,9 +39,7 @@ pub(crate) struct RedmineEnumerations {
     pub activities: Vec<RedmineEnumEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// Internal DTOs for Redmine JSON responses
-// ---------------------------------------------------------------------------
+// ── Internal DTOs for Redmine JSON responses ────────────────────────────
 
 #[derive(Deserialize)]
 struct RedmineCurrentUserWrapper {
@@ -92,13 +88,10 @@ struct RedmineActivitiesResponse {
     time_entry_activities: Vec<RawEnumEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// URL validation
-// ---------------------------------------------------------------------------
+// ── URL validation ───────────────────────────────────────────────────────
 
-/// Validates and normalizes a Redmine host URL for API use.
-/// Allows private on-premise IPs (RFC1918/ULA/CGNAT) with a warning; blocks
-/// loopback, link-local, embedded credentials, and non-HTTP schemes.
+/// Validates and normalizes a Redmine host URL for API use. Allows private on-premise IPs
+/// (RFC1918/ULA/CGNAT) with a warning; blocks loopback, link-local, creds, non-HTTP schemes.
 fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
@@ -153,17 +146,13 @@ fn validate_redmine_host_url(url: &str) -> Result<String, String> {
 
 // read_body_limited + MAX_RESPONSE_BODY_BYTES moved to `crate::http_util`.
 
-// ---------------------------------------------------------------------------
-// HTTP client helper
-// ---------------------------------------------------------------------------
+// ── HTTP client helper ───────────────────────────────────────────────────
 
 fn build_redmine_client() -> Result<reqwest::Client, String> {
     crate::http_util::build_hardened_client(None)
 }
 
-// ---------------------------------------------------------------------------
-// Core logic (separated from Tauri commands for testability)
-// ---------------------------------------------------------------------------
+// ── Core logic (separated from Tauri commands for testability) ─────────
 
 /// Core credential validation logic. Accepts a pre-validated base URL string.
 async fn do_validate_credentials(
@@ -238,9 +227,8 @@ async fn do_validate_credentials(
     })
 }
 
-/// Core enumeration fetch logic. Accepts a pre-validated base URL string.
-/// Fetches all 5 endpoints in parallel with `tokio::join!` — each endpoint
-/// handles its own errors independently (404/500 → empty vec).
+/// Core enumeration fetch logic. Accepts a pre-validated base URL string. Fetches all 5 endpoints
+/// in parallel with `tokio::join!` — each endpoint handles its own errors (404/500 → empty vec).
 async fn do_fetch_enumerations(
     base_url: &str,
     api_key: &str,
@@ -334,9 +322,7 @@ async fn do_fetch_enumerations(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
+// ── Tauri commands ───────────────────────────────────────────────────────
 
 /// Validates Redmine credentials by calling `/users/current.json`.
 /// Returns a `RedmineValidationResult` with the authenticated user's info on success.
@@ -423,9 +409,7 @@ async fn fetch_enum_endpoint<T: serde::de::DeserializeOwned>(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions use unwrap")]
@@ -754,8 +738,7 @@ mod tests {
     }
 
     // ── HTTP integration tests (mockito) ────────────────────────────────
-    // Mockito runs on 127.0.0.1, so these call do_* core fns directly, bypassing URL validation.
-    // Not covered: TLS cert errors (mockito is plain HTTP), connection timeout (see connection_refused test).
+    // Runs on 127.0.0.1, calling do_* core fns directly (bypassing URL validation); TLS/timeout not covered.
 
     #[tokio::test]
     async fn http_401_returns_invalid() {

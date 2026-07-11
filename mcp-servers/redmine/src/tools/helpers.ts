@@ -19,7 +19,7 @@ export class MappingError extends Error {
   public readonly availableValues: string[];
 
   /**
-   * Create a new MappingError
+   * Create a new MappingError.
    * @param field - The field name that failed mapping (e.g., 'status', 'priority')
    * @param value - The value that could not be mapped
    * @param availableValues - List of valid values for the field
@@ -36,7 +36,7 @@ export class MappingError extends Error {
 }
 
 /**
- * Get available values for a given field type from mappings
+ * Get available values for a given field type from mappings.
  * @param mappings - Parameter mappings
  * @param prefix - Field prefix (e.g., 'status_', 'priority_')
  */
@@ -48,10 +48,9 @@ function getAvailableValues(mappings: RedmineMappings, prefix: string): string[]
 
 /**
  * Resolve friendly names to IDs using project-specific mappings.
- * Throws MappingError if a friendly name is provided but no mapping exists.
  * @param params - Tool parameters
  * @param mappings - Parameter mappings
- * @throws {MappingError} If a friendly field name has no corresponding mapping
+ * @throws {MappingError} If a friendly field name has no corresponding mapping.
  */
 export function resolveParams(
   params: Record<string, unknown>,

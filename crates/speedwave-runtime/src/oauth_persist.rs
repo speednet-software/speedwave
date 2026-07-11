@@ -37,9 +37,8 @@ pub struct OAuthStateParams<'a> {
 /// malformed/hostile response; clamping keeps `now_ms + expires_in*1000` in range.
 const MAX_EXPIRES_IN_SECS: u64 = 10 * 365 * 24 * 60 * 60;
 
-/// Writes the OAuth state JSON to `path` (0o600, parent 0o700). The caller
-/// supplies an off-mount path from `plugin::oauth_state_file`. Rejects a
-/// non-positive `expires_in` (the SSOT mint guard) and clamps an absurd one.
+/// Writes OAuth state JSON to `path` (0o600, parent 0o700); caller supplies an off-mount path from
+/// `plugin::oauth_state_file`. Rejects non-positive `expires_in` (SSOT guard); clamps a huge one.
 pub fn write_oauth_state(path: &Path, params: &OAuthStateParams) -> Result<(), String> {
     if params.expires_in == 0 {
         return Err("oauth state: expires_in must be > 0".to_string());

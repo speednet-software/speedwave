@@ -11,10 +11,8 @@ pub struct CloudStorageDetectionResult {
     pub provider: Option<String>,
 }
 
-/// Detects whether `dir` is inside a known CloudStorage managed directory.
-///
-/// Used by `CreateProjectModal` to warn the user before they add a project
-/// from a CloudStorage location that may require TCC permission.
+/// Detects whether `dir` is inside a known CloudStorage managed directory. Used by
+/// `CreateProjectModal` to warn before adding a project that may require TCC permission.
 #[tauri::command]
 pub fn detect_cloudstorage_path(dir: String) -> Result<CloudStorageDetectionResult, String> {
     let path = std::path::Path::new(&dir);

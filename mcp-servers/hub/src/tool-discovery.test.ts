@@ -19,11 +19,7 @@ vi.mock('./auth-tokens.js', () => ({
   getAuthToken: vi.fn(() => null),
 }));
 
-/**
- * Create a mock fetch Response with proper headers support for parseResponse().
- * @param body - JSON body to return
- * @param options - Additional response options (ok, status, headers)
- */
+/** Create a mock fetch Response with proper headers support for parseResponse(). */
 function mockJsonResponse(
   body: unknown,
   options: { ok?: boolean; status?: number; sessionId?: string } = {}
@@ -44,12 +40,7 @@ function mockJsonResponse(
   };
 }
 
-/**
- * Create a mock fetch Response whose body is plain text (for non-2xx paths
- * that read the body via `.text()`).
- * @param text - Raw body text to return
- * @param options - Additional response options (ok, status)
- */
+/** Mock fetch Response whose body is plain text (non-2xx paths that read via `.text()`). */
 function mockTextResponse(text: string, options: { ok?: boolean; status?: number } = {}) {
   const { ok = true, status = 200 } = options;
   return {
@@ -61,11 +52,7 @@ function mockTextResponse(text: string, options: { ok?: boolean; status?: number
   };
 }
 
-/**
- * Mock fetch for the initialize / notifications/initialized / tools/list sequence.
- * @param tools - Tools to return from tools/list
- * @param sessionId - Optional session ID to return from initialize
- */
+/** Mock fetch for the initialize / notifications/initialized / tools/list sequence. */
 function createMcpMockFetch(tools: Tool[], sessionId?: string) {
   let callIndex = 0;
   return vi.fn().mockImplementation(() => {

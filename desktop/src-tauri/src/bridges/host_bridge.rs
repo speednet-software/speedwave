@@ -22,15 +22,13 @@ use tokio_tungstenite::WebSocketStream;
 use speedwave_runtime::consts;
 use speedwave_runtime::fs_perms as runtime_fs_perms;
 
-// ---------------------------------------------------------------------------
-// Public types — auth / origin / subprotocol
-// ---------------------------------------------------------------------------
+// ── Public types — auth / origin / subprotocol ─────────────────────────────
 
 /// How clients authenticate the WebSocket upgrade request.
 #[derive(Clone, Debug)]
 pub enum AuthScheme {
-    /// Token in a request header. Used by Node.js / Rust workers that can
-    /// set arbitrary headers on the WebSocket upgrade.
+    /// Token in a request header. Used by Node.js/Rust workers that can set
+    /// arbitrary headers on the WebSocket upgrade.
     Header(&'static str),
     /// Token in the URL query string (`?<name>=<token>`). For browser clients; risk in ADR-063.
     QueryParam(&'static str),
@@ -48,9 +46,8 @@ pub enum AuthMatch {
 pub enum OriginPolicy {
     /// Reject any request carrying `Origin`. Used by IDE Bridge.
     RejectIfPresent,
-    /// Accept `Origin` iff auth was `QueryParam`. Used by browser-based
-    /// plugin UIs that always set `Origin` and cannot set custom
-    /// headers on the WebSocket upgrade.
+    /// Accept `Origin` iff auth was `QueryParam`. Used by browser-based plugin UIs that
+    /// always set `Origin` and cannot set custom headers on the WebSocket upgrade.
     AcceptIfAuthIsQueryParam,
 }
 
@@ -60,9 +57,7 @@ pub struct SubprotocolPolicy {
     pub accepted: &'static [&'static str],
 }
 
-// ---------------------------------------------------------------------------
-// Pairing config
-// ---------------------------------------------------------------------------
+// ── Pairing config ──────────────────────────────────────────────────────────
 
 /// Pairing-mode config. See ADR-063.
 #[derive(Clone, Debug)]
@@ -79,17 +74,14 @@ pub struct PairingConfig {
 /// pending slot. See ADR-063.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoleCollisionPolicy {
-    /// Pre-handshake HTTP 409 — reject the new connection. Selected by
-    /// `plugin_host_bridge::translate_collision_policy` when a plugin
-    /// manifest sets `host_bridge.collision: reject`.
+    /// Pre-handshake HTTP 409 — reject the new connection. Selected when a plugin manifest
+    /// sets `host_bridge.collision: reject` (`plugin_host_bridge::translate_collision_policy`).
     Reject,
     /// Drop the older pending stream, accept the new one.
     EvictOlder,
 }
 
-// ---------------------------------------------------------------------------
-// Config builder
-// ---------------------------------------------------------------------------
+// ── Config builder ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub enum ConnectionMode {
@@ -100,9 +92,8 @@ pub enum ConnectionMode {
 pub type LockBodyBuilder =
     Arc<dyn Fn(LockBodyContext<'_>) -> serde_json::Value + Send + Sync + 'static>;
 
-/// Context passed to the lock-body builder when the bridge writes the
-/// lock file. Callers use this to embed the assigned port and token
-/// into the JSON payload without capturing them via closure state.
+/// Context passed to the lock-body builder when writing the lock file — embeds the assigned
+/// port and token into the JSON payload without capturing them via closure state.
 pub struct LockBodyContext<'a> {
     pub port: u16,
     pub auth_token: &'a str,
@@ -254,9 +245,7 @@ impl HostBridgeConfigBuilder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Endpoint mode — handler
-// ---------------------------------------------------------------------------
+// ── Endpoint mode — handler ─────────────────────────────────────────────────
 
 pub type ConnectionHandler = Arc<
     dyn Fn(WebSocketStream<tokio::net::TcpStream>, ConnectionContext) -> BoxFuture<'static, ()>
@@ -277,9 +266,7 @@ pub struct ConnectionContext {
     pub _shutdown: broadcast::Receiver<()>,
 }
 
-// ---------------------------------------------------------------------------
-// Pairing mode — events
-// ---------------------------------------------------------------------------
+// ── Pairing mode — events ───────────────────────────────────────────────────
 
 pub type PairingEventCallback = Arc<dyn Fn(PairingEvent) + Send + Sync + 'static>;
 
@@ -309,9 +296,7 @@ pub enum PairingEvent {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Internal auth state
-// ---------------------------------------------------------------------------
+// ── Internal auth state ─────────────────────────────────────────────────────
 
 pub(crate) struct AuthState {
     token: String,
@@ -326,9 +311,8 @@ impl AuthState {
         constant_time_eq(provided, &self.token)
     }
 
-    /// Token accessor. Production reads it indirectly via
-    /// `HostBridge::auth_token()`, which is the single source for both
-    /// the lock-file body and the watchdog rewrite path.
+    /// Token accessor. Production reads it indirectly via `HostBridge::auth_token()`, the single
+    /// source for both the lock-file body and the watchdog rewrite path.
     pub(crate) fn token(&self) -> &str {
         &self.token
     }
@@ -380,9 +364,7 @@ pub(crate) fn extract_query_param(query: &str, name: &str) -> Option<String> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Bridge
-// ---------------------------------------------------------------------------
+// ── Bridge ───────────────────────────────────────────────────────────────────
 
 pub struct HostBridge {
     config: HostBridgeConfig,
@@ -404,9 +386,8 @@ pub struct HostBridgeNewOptions {
 }
 
 impl HostBridge {
-    /// Bind a fresh 127.0.0.1 port, mint a UUID v4 token, and stash both
-    /// for later. The lock file is **not** written yet — callers can drop
-    /// the bridge without leaving a stale lock on disk.
+    /// Bind a fresh 127.0.0.1 port, mint a UUID v4 token, and stash both for later. The lock
+    /// file is **not** written yet — callers can drop the bridge without leaving a stale lock.
     pub fn new(config: HostBridgeConfig) -> anyhow::Result<Self> {
         Self::new_with_options(config, HostBridgeNewOptions::default())
     }
@@ -616,9 +597,8 @@ impl HostBridge {
     }
 }
 
-/// Binds the listener on `compose::host_bind_address()`. Retries once on
-/// `EADDRNOTAVAIL` (typical after `wsl --shutdown` invalidated the cached
-/// adapter IP) after re-detecting.
+/// Binds the listener on `compose::host_bind_address()`. Retries once on `EADDRNOTAVAIL`
+/// (typical after `wsl --shutdown` invalidated the cached adapter IP) after re-detecting.
 fn bind_with_retry(
     name: &str,
     preferred_port: Option<u16>,
@@ -697,9 +677,8 @@ impl std::fmt::Debug for HostBridge {
     }
 }
 
-/// `Clone` for the bridge config without callbacks — the accept loop
-/// only needs the static fields; the lock-body callback stays in
-/// `HostBridge` for the watchdog to re-use.
+/// `Clone` for the bridge config without callbacks — the accept loop only needs the static
+/// fields; the lock-body callback stays in `HostBridge` for the watchdog to re-use.
 impl HostBridgeConfig {
     fn clone_without_callbacks(&self) -> HostBridgeConfig {
         HostBridgeConfig {
@@ -721,9 +700,7 @@ enum StartHandler {
     Pairing(Option<PairingEventCallback>),
 }
 
-// ---------------------------------------------------------------------------
-// Endpoint accept loop
-// ---------------------------------------------------------------------------
+// ── Endpoint accept loop ─────────────────────────────────────────────────────
 
 async fn run_endpoint_loop(
     listener: TcpListener,
@@ -842,9 +819,7 @@ struct HandshakeOutcome {
     query: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Pairing accept loop
-// ---------------------------------------------------------------------------
+// ── Pairing accept loop ──────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct PairingState {
@@ -1126,9 +1101,7 @@ fn spawn_pending_slot_watcher(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Relay (Pairing mode)
-// ---------------------------------------------------------------------------
+// ── Relay (Pairing mode) ─────────────────────────────────────────────────────
 
 async fn run_relay(
     streams: Vec<WebSocketStream<tokio::net::TcpStream>>,
@@ -1218,9 +1191,7 @@ where
     ForwardOutcome::Continue
 }
 
-// ---------------------------------------------------------------------------
-// Handshake helpers (shared)
-// ---------------------------------------------------------------------------
+// ── Handshake helpers (shared) ───────────────────────────────────────────────
 
 fn validate_request_auth_single(
     req: &Request<()>,
@@ -1283,9 +1254,7 @@ fn make_ws_config(max_frame_bytes: Option<usize>) -> WebSocketConfig {
     cfg
 }
 
-// ---------------------------------------------------------------------------
-// Lock file I/O
-// ---------------------------------------------------------------------------
+// ── Lock file I/O ────────────────────────────────────────────────────────────
 
 pub(crate) fn write_lock_file_atomic(
     final_path: &Path,
@@ -1366,9 +1335,7 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(

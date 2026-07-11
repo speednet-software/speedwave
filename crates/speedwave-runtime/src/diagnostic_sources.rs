@@ -1,6 +1,5 @@
-//! SSOT registry of diagnostic sources. The `/logs` view and the diagnostics
-//! ZIP both derive their content from `DIAGNOSTIC_SOURCES`. Allowed divergence:
-//! a non-`displayable` source is ZIP-only.
+//! SSOT registry of diagnostic sources. The `/logs` view and the diagnostics ZIP both derive their
+//! content from `DIAGNOSTIC_SOURCES`. Allowed divergence: a non-`displayable` source is ZIP-only.
 
 use std::path::{Path, PathBuf};
 
@@ -128,9 +127,8 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
 /// added here too, or `nondisplayable_sources_match_zip_only_allowlist` fails.
 pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml"];
 
-/// Resolves a `SourceKind::File` source's path by key, gated to the current
-/// platform. Returns `None` for unknown keys, unavailable platforms, or
-/// non-File kinds.
+/// Resolves a `SourceKind::File` source's path by key, gated to the current platform. `None` for
+/// unknown keys, unavailable platforms, or non-File kinds.
 pub fn resolve_file_path(key: &str, data_dir: &Path, project: &str) -> Option<PathBuf> {
     DIAGNOSTIC_SOURCES
         .iter()

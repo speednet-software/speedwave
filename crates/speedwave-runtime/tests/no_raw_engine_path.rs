@@ -1,6 +1,5 @@
-//! Drift detector: every host→engine path must use the SSOT in `engine_path`
-//! (`to_engine_path` / `str_to_engine_path` / `vm_path_join`).
-//! Bypass a false positive with `// SSOT-allow: <reason>`.
+//! Drift detector: every host→engine path must use the SSOT in `engine_path` (`to_engine_path` /
+//! `str_to_engine_path` / `vm_path_join`). Bypass a false positive with `// SSOT-allow: <reason>`.
 
 #![expect(
     clippy::expect_used,
@@ -34,9 +33,8 @@ fn manifest_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// `.join(` on a binding signaling an engine-side path (e.g. `vm_root.join(`) —
-/// use `vm_path_join`. Chained `prepare_build_context(...).join(...)` caught by
-/// the `CHAINED_JOIN` rule.
+/// `.join(` on an engine-side path binding (e.g. `vm_root.join(`) — use `vm_path_join` instead.
+/// Chained `prepare_build_context(...).join(...)` is caught by the `CHAINED_JOIN` rule.
 const JOIN_ON_ENGINE_PATTERNS: &[&str] = &[
     "vm_root.join(",
     "wsl_path.join(",
@@ -44,9 +42,8 @@ const JOIN_ON_ENGINE_PATTERNS: &[&str] = &[
     "wsl_root.join(",
 ];
 
-/// A `prepare_build_context(...)` result joined inline on the SAME line — the
-/// literal original bug (`prepare_build_context(dir).join("Containerfile")`).
-/// Requires BOTH substrings so trait defs / plain calls don't trip it.
+/// A `prepare_build_context(...)` result joined inline on the SAME line (the original bug:
+/// `prepare_build_context(dir).join("Containerfile")`). Requires BOTH substrings to avoid drift.
 const CHAINED_JOIN_BOTH: &[&str] = &["prepare_build_context(", ".join("];
 
 /// Hand-rolled WSL translation: only `engine_path.rs` and `wsl.rs` may mint a

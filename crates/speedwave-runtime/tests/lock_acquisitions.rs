@@ -1,6 +1,5 @@
-//! Each LOCKED method on `LockedRuntime` acquires the per-project compose lock
-//! exactly once; passthrough methods do not. Own process, so `LOCK_ACQUISITIONS`
-//! starts at zero.
+//! Each LOCKED method on `LockedRuntime` acquires the per-project compose lock exactly once;
+//! passthrough methods do not. Own process, so `LOCK_ACQUISITIONS` starts at zero.
 
 #![expect(
     clippy::unwrap_used,

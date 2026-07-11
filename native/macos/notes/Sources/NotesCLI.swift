@@ -92,8 +92,7 @@ enum NotesCLIError: LocalizedError {
 
 // MARK: - Permission Helpers
 
-/// AppleScript command used by check_permission to verify Automation access.
-/// Must access actual data (not just app metadata like `name`) to trigger the
-/// macOS Automation permission prompt. `to name` does NOT require permission.
+/// AppleScript command used by check_permission to verify Automation access. Must access actual data
+/// (not just app metadata like `name`) to trigger the macOS Automation permission prompt.
 // SYNC: permissionCheckScript rationale must match mail/Sources/MailCLI.swift
 let permissionCheckScript = "tell application \"Notes\" to count of notes"

@@ -1,6 +1,5 @@
-//! Per-project compose lock wrapper around `ContainerRuntime`. SSOT for "any
-//! VM-side compose.yml read or write is serialised per project". Reentrancy via
-//! `HELD_LOCKS` thread-local lets `transaction()` nest inner compose ops.
+//! Per-project compose lock wrapper around `ContainerRuntime`. SSOT for "any VM-side compose.yml
+//! read or write is serialised per project". `HELD_LOCKS` thread-local lets `transaction()` nest.
 
 use super::ContainerRuntime;
 use std::cell::RefCell;
@@ -62,9 +61,8 @@ where
     })
 }
 
-/// Public wrapper for `ContainerRuntime`. Compose mutations lock via
-/// `with_acquired`; read-only queries (`ps`, `logs`) and non-compose ops
-/// are passthrough. See ADR-066.
+/// Public wrapper for `ContainerRuntime`. Compose mutations lock via `with_acquired`; read-only
+/// queries (`ps`, `logs`) and non-compose ops are passthrough. See ADR-066.
 pub struct LockedRuntime {
     inner: Box<dyn ContainerRuntime>,
 }
@@ -219,9 +217,8 @@ impl LockedRuntime {
         self.inner.vm_exec(cmd, args, stdin, timeout)
     }
 
-    /// Runs a multi-step compose transaction under the per-project lock.
-    /// Inner compose ops on the same project nest reentrantly without
-    /// re-acquiring. Use for snapshot+build+down+save+validate+up sequences.
+    /// Runs a multi-step compose transaction under the per-project lock. Inner compose ops on
+    /// the same project nest reentrantly. Use for snapshot+build+down+save+validate+up.
     pub fn transaction<F, T>(&self, project: &str, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(&LockedRuntime) -> anyhow::Result<T>,

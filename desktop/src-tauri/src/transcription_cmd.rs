@@ -1,9 +1,5 @@
-//! Tauri commands for the meeting-transcription feature (ADR-056).
-//!
-//! Thin layer over `speedwave_runtime::transcription`: stores live in Tauri
-//! managed state; events forwarded via per-session `transcript_event::<id>`
-//! Tauri event channels (subscribe returns `{event_name, snapshot}` so a late
-//! subscriber doesn't miss what already happened — ADR-043 delivery shape).
+//! Tauri commands for meeting transcription (ADR-056); thin layer over `transcription` module.
+//! Events forward via per-session `transcript_event::<id>` channels (ADR-043 delivery shape).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -46,9 +42,8 @@ fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("invalid transcript id: {e}"))
 }
 
-/// Truncates a UUID for log lines so CodeQL's "log sensitive" heuristics
-/// (which key off the `session_id` name) don't flag every diagnostic. The
-/// first 8 hex chars are enough to correlate.
+/// Truncates a UUID for log lines so CodeQL's "log sensitive" heuristics (keyed off the
+/// `session_id` name) don't flag every diagnostic; first 8 hex chars are enough to correlate.
 fn short_id(id: Uuid) -> String {
     let mut s = id.to_string();
     s.truncate(8);
@@ -156,10 +151,8 @@ pub async fn start_transcription(
             .map_err(|e| e.to_string())?
     };
 
-    // Create the session, then start capture.
-    // The audio.wav path lives under `<root>/<id>/`, so we need the id before
-    // creating the session — pick it now so the path is correct from the first
-    // persisted write (no fragile post-create patch).
+    // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
+    // path is then correct from the first persisted write (no fragile post-create patch).
     let session_id = Uuid::new_v4();
     let session_dir = store.session_dir(session_id);
     let audio_wav = session_dir.join("audio.wav");
@@ -216,9 +209,8 @@ pub async fn start_transcription(
     let drivers_for_cleanup = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
-            // Log only the first chunk of the id — UUIDs are not secrets, but
-            // CodeQL's heuristics flag any "session_id"-looking variable in a
-            // log line. The short form is enough to correlate diagnostics.
+            // Log only the id's first chunk — CodeQL flags any "session_id"-looking variable;
+            // UUIDs aren't secrets and the short form is enough to correlate.
             log::warn!(
                 "transcript driver for {} ended with error: {e}",
                 short_id(session_id)
@@ -248,9 +240,8 @@ pub async fn stop_transcription(
     drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Signal the driver to wind down and grab its finish-notifier (idempotent
-    // if the driver already exited — `await_finished` will then just suspend
-    // until the wind-down notify, or the timeout below trips).
+    // Signal the driver to wind down and grab its finish-notifier (idempotent if exited);
+    // `await_finished` then suspends until wind-down notify or the timeout below trips).
     let stop_handle = drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?
@@ -385,9 +376,8 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
     store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
-/// Picks the model for the offline pass: this build's model if downloaded, else
-/// the first downloaded Whisper model (the live one is guaranteed present here).
-/// `None` if somehow nothing is downloaded.
+/// Picks the model for the offline pass: this build's model if downloaded, else the first
+/// downloaded Whisper model (the live one is guaranteed present); `None` if none is downloaded.
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
     let best = transcription::best_model_for_this_build().key;
     if models.whisper_is_present_by_key(best) {
@@ -400,12 +390,8 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .map(|m| m.key)
 }
 
-/// Picks the model for the live pass:
-/// 1. `override_key` if given — must be downloaded, else an error.
-/// 2. The `recommended` model if it's downloaded.
-/// 3. Otherwise the first downloaded Whisper model (we don't auto-download a
-///    multi-GB file — the UI prompts for that).
-/// 4. If nothing is downloaded: an error with a download hint.
+/// Picks the model for the live pass: `override_key` (must be downloaded) → `recommended` (if
+/// downloaded) → first downloaded model → download-hint error (no auto-dl; UI prompts).
 fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, String> {
     if models.whisper_is_present_by_key(recommended) {
         return Ok(recommended.to_string());
@@ -750,10 +736,8 @@ mod tests {
         );
     }
 
-    /// Driving Tauri commands fully requires a `tauri::State` wrapper that
-    /// isn't trivial to fabricate in unit tests; instead, exercise the
-    /// underlying `TranscriptStore` calls that each command makes, plus the
-    /// validation helpers above (`parse_transcript_id` already covered).
+    /// Driving Tauri commands fully needs a `tauri::State` wrapper, not trivial to fabricate in
+    /// unit tests; instead exercise the underlying `TranscriptStore` calls each command makes.
     #[tokio::test]
     async fn store_round_trip_matches_what_the_commands_will_do() {
         let dir = tempfile::tempdir().unwrap();

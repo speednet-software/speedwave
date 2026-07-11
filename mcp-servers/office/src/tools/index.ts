@@ -1,11 +1,5 @@
 /**
- * Office worker tool definitions and handlers — ~25 tools across read/extract,
- * Markdown/HTML → document, charts, create/edit Office, Office→PDF / Office↔Office,
- * and PDF manipulation. Discoverability rests on `_meta['speedwave.pl/defer-loading']` +
- * `keywords`, cross-referencing descriptions, and the decision-map skill at
- * `containers/claude-resources/skills/integrations/office/SKILL.md` (ADR-055).
- * This worker is egress-less and credential-free with no user-identity concept — no
- * `user-scoped`/`current-user-tool`/`self-param` `_meta` on any tool.
+ * Office worker tool definitions and handlers — ~25 tools across read/extract, Markdown/HTML→document, charts, create/edit Office, Office→PDF/Office↔Office, and PDF manipulation (`_meta['speedwave.pl/defer-loading']` + `keywords` + the decision-map skill at `containers/claude-resources/skills/integrations/office/SKILL.md` drive discoverability, ADR-055). Egress-less, credential-free, no user-identity concept — no `user-scoped`/`current-user-tool`/`self-param` `_meta` on any tool.
  * @module mcp-office/tools
  */
 
@@ -66,8 +60,7 @@ const DEFERRED_LONG = {
 const DEFERRED = { [META_KEYS.DEFER_LOADING]: true } as const;
 
 /**
- * Wrap a handler so any thrown error is returned as an MCP `isError` result rather than
- * propagating as an unhandled rejection (which the hub would see as a dropped response).
+ * Wrap a handler so any thrown error is an MCP `isError` result, not an unhandled rejection (which the hub would see as a dropped response).
  * @param fn - The handler to wrap.
  */
 function guard(

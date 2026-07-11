@@ -1,8 +1,5 @@
 /**
- * MCP GitHub Worker
- *
- * Isolated GitHub MCP server with per-service token isolation.
- * Exposes the GitHub tools via `@octokit/rest` across multiple domains.
+ * MCP GitHub Worker: isolated GitHub MCP server with per-service token isolation.
  * @module mcp-github
  */
 

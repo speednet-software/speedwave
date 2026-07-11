@@ -40,9 +40,8 @@ fn manifest_root() -> PathBuf {
 /// The sanctioned module — the only place `Command::new` may appear.
 const SPAWN_SSOT: &str = "crates/speedwave-runtime/src/binary.rs";
 
-/// Files that still spawn raw for legitimate reasons pending the spawn-SSOT
-/// migration (interactive TTY, system probes, test-support runtimes). The
-/// migration wave shrinks this list to empty; new entries need PR justification.
+/// Files that still spawn raw for legitimate reasons (interactive TTY, system probes, test-support
+/// runtimes) pending the spawn-SSOT migration; new entries need PR justification.
 const ALLOWLISTED_FILES: &[&str] = &[
     // CLI self re-exec (`speedwave update`) — interactive, inherits the terminal.
     "crates/speedwave-cli/src/main.rs",

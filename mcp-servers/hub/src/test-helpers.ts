@@ -269,7 +269,7 @@ const MOCK_SERVICE_TOOLS: Record<string, Record<string, Partial<ToolMetadata>>> 
 };
 
 /**
- * Build a full ToolMetadata from partial mock data.
+ * Build a full ToolMetadata from partial mock data, merging with defaults.
  * @param service - Service name (e.g., 'redmine')
  * @param methodName - Tool method name (e.g., 'listIssueIds')
  * @param partial - Partial tool metadata to merge with defaults

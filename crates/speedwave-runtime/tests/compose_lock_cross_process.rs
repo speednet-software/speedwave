@@ -1,6 +1,5 @@
-//! Cross-process file-lock test — re-execs the test binary as parent+child
-//! per `tests/data_dir_integration.rs` pattern, asserts the second process
-//! blocks until the first releases.
+//! Cross-process file-lock test — re-execs the test binary as parent+child per
+//! `tests/data_dir_integration.rs`; asserts the child blocks until the parent releases.
 
 #![expect(
     clippy::expect_used,

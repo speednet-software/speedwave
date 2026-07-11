@@ -46,9 +46,8 @@ export type StreamChunk =
     }
   | {
       /**
-       * One-slot queued message (ADR-045) was drained server-side after the
-       * previous turn ended. Frontend clears `pendingQueue` on receipt — the
-       * queued payload is already in flight via stdin.
+       * One-slot queued message (ADR-045) was drained server-side after the previous turn ended.
+       * Frontend clears `pendingQueue` on receipt — the queued payload is already in flight via stdin.
        */
       chunk_type: 'QueueDrained';
       data: { session_id: string; text: string };
@@ -61,11 +60,8 @@ export interface AskUserOption {
 }
 
 /**
- * One question inside an AskUserQuestion control_request — mirrors
- * `crate::chat::AskUserQuestionItem` (and ultimately
- * `speedwave_runtime::stream::AskUserQuestionItem`). Up to 4 items per
- * `AskUserQuestion` chunk; an empty array is also tolerated and dropped
- * by the host at parse time.
+ * One question inside an AskUserQuestion control_request — mirrors `crate::chat::AskUserQuestionItem`
+ * (`speedwave_runtime::stream::AskUserQuestionItem`). Up to 4/chunk; empty array tolerated, dropped host-side.
  */
 export interface AskUserQuestionItem {
   question: string;
@@ -109,18 +105,17 @@ export interface TurnUsage {
 }
 
 /**
- * Context-window occupancy from one API call: input-only (fresh + cached +
- * cache-written), matching Claude Code's own `used_percentage` formula.
- * @param u - Per-call usage from the last main-chain API response.
+ * Context-window occupancy from one API call: input-only (fresh + cached + cache-written),
+ * matching Claude Code's own `used_percentage` formula.
+ * @param u - per-call usage from the last main-chain API response
  */
 export function contextTokensFrom(u: TurnUsage): number {
   return u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
 }
 
 /**
- * Per-turn metadata for an assistant message: model, token usage, and cost.
- * Populated from `Result` chunks. Missing fields hide their corresponding
- * rendered segment, not the whole row.
+ * Per-turn metadata for an assistant message: model, token usage, and cost. Populated from `Result`
+ * chunks. Missing fields hide their corresponding rendered segment, not the whole row.
  */
 export interface EntryMeta {
   model?: string;
@@ -129,10 +124,8 @@ export interface EntryMeta {
 }
 
 /**
- * One-slot queued message (ADR-045). Mirrors the Rust `QueuedMessage` type;
- * the composer surfaces `text` as the "queued: …" preview and exposes a
- * cancel button that drops the slot via the `cancel_queued_message`
- * Tauri command.
+ * One-slot queued message (ADR-045). Mirrors the Rust `QueuedMessage` type; the composer surfaces
+ * `text` as the "queued: …" preview and exposes a cancel button that drops the slot via `cancel_queued_message`.
  */
 export interface QueuedMessage {
   text: string;
@@ -156,13 +149,8 @@ export type MessageBlock =
   | { type: 'image'; media_type: string; alt?: string };
 
 /**
- * State for an interactive AskUserQuestion block within a message.
- *
- * One block carries up to 4 questions; the renderer walks them sequentially,
- * showing only `questions[current_index]` interactively while previous
- * indices are locked with the answered-label badge in `answers[i]`. When
- * every slot in `answers` is non-null the block is fully answered and
- * `current_index === questions.length`.
+ * State for an interactive AskUserQuestion block: up to 4 questions; renderer shows only
+ * `questions[current_index]`, prior indices show `answers[i]`; done when `current_index === questions.length`.
  */
 export interface AskUserQuestionBlock {
   tool_id: string;
@@ -225,10 +213,8 @@ export interface ChatMessage {
   blocks: MessageBlock[];
   timestamp: number;
   /**
-   * Retry-anchor UUID (ADR-046). User UUIDs commit immediately; assistant
-   * UUIDs stay `Pending` until the matching `Result` event commits them.
-   * Absent for legacy transcript messages and for local-LLM turns that
-   * omit `message.id` — those entries can't be used as retry targets.
+   * Retry-anchor UUID (ADR-046). User UUIDs commit immediately; assistant UUIDs stay `Pending` until
+   * the matching `Result` commits them. Absent for legacy transcripts and local-LLM turns lacking `message.id`.
    */
   uuid?: string;
   /** Status of the above UUID. Defaults to `Committed` when `uuid` is set. */
@@ -239,9 +225,8 @@ export interface ChatMessage {
    */
   meta?: EntryMeta;
   /**
-   * Epoch-ms timestamp of the most recent retry against this entry. Set on
-   * user entries whose turn has been retried via `retry_last_turn`. Surfaces
-   * as `· edited` in the metadata line of the assistant that follows.
+   * Epoch-ms timestamp of the most recent retry against this entry, set via `retry_last_turn`;
+   * surfaces as `· edited` in the metadata line of the assistant that follows.
    */
   edited_at?: number;
 }
@@ -259,9 +244,8 @@ export interface SessionStats {
   /** Project cost in USD from the proxy SSOT; `null` when unpriced (subscription) → "—". */
   total_cost: number | null;
   /**
-   * Per-turn sums from flat result.usage (every API call of the turn added
-   * together) — feeds `in:`/`out:` counters, NEVER context occupancy: cache
-   * reads repeat per call, so this total exceeds the window on tool-use turns.
+   * Per-turn sums from flat result.usage (every API call added together) — feeds `in:`/`out:` counters,
+   * NEVER context occupancy: cache reads repeat per call, exceeding the window on tool-use turns.
    */
   usage?: UsageInfo;
   /**
@@ -272,9 +256,8 @@ export interface SessionStats {
   model?: string;
   rate_limit?: RateLimitInfo;
   /**
-   * Context window in tokens; `null` for local providers when the discovery
-   * probe couldn't determine a value (ADR-041 "never guess"). UI hides the
-   * `used / max` ratio when this is null rather than fabricating a default.
+   * Context window in tokens; `null` for local providers when discovery couldn't determine a value
+   * (ADR-041 "never guess"). UI hides the `used / max` ratio rather than fabricating a default.
    */
   context_window_size: number | null;
   /** Cumulative output tokens across all turns in the session. */
@@ -305,9 +288,8 @@ export interface ConversationMessage {
   timestamp: string | null;
   blocks?: MessageBlock[];
   /**
-   * Stable JSONL uuid that anchors the retry-last-turn flow (ADR-046).
-   * `undefined` for synthesized entries (e.g. `result` lines) — those never
-   * become a retry target.
+   * Stable JSONL uuid that anchors the retry-last-turn flow (ADR-046); `undefined` for synthesized
+   * entries (e.g. `result` lines) — those never become a retry target.
    */
   uuid?: string;
   /** Per-message model id (assistant turns only); restores the resumed footer. */

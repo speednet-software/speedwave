@@ -77,11 +77,7 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   readonly isStreaming = input(false);
   /** Shows a centered spinner while a resumed transcript is being fetched. */
   readonly loadingTranscript = input(false);
-  /**
-   * Index of the most recent assistant entry in `messages`; `-1` when none.
-   * Used to gate the per-message Retry button (only the latest assistant
-   * message is retryable).
-   */
+  /** Index of the most recent assistant entry in `messages` (`-1` when none); gates the per-message Retry button. */
   readonly lastAssistantIndex = input(-1);
 
   readonly questionAnswered = output<{ toolId: string; questionIdx: number; value: string }>();
@@ -125,11 +121,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   }
 
   /**
-   * True when the user entry immediately preceding `messages[i]` was retried.
-   * Surfaces as `· edited` in the assistant's metadata row. Returns `false`
-   * for user entries, the first entry, or when the preceding entry has no
-   * `edited_at` timestamp.
-   * @param i - Zero-based index of the assistant entry in `messages`.
+   * True when the user entry preceding `messages[i]` was retried (surfaces as `· edited`); false for user entries, index 0, or no `edited_at`.
+   * @param i - Index into `messages()` to check.
    */
   isPrecedingUserEdited(i: number): boolean {
     if (i <= 0) return false;

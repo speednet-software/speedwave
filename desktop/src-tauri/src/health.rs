@@ -72,9 +72,8 @@ pub struct IdeBridgeHealth {
     pub port: Option<u16>,
     pub ws_url: Option<String>,
     pub detected_ides: Vec<DetectedIde>,
-    /// SSOT for "is an IDE actively connected to the bridge"; `None` when no
-    /// IDE is selected, the selected IDE is no longer detected, or config load
-    /// failed. Prefer `selected_ide.{port, ws_url}` over `port`/`ws_url` above.
+    /// SSOT for "is an IDE actively connected"; `None` when no IDE is selected, it's no longer
+    /// detected, or config load failed. Prefer `selected_ide.{port, ws_url}` over top-level.
     pub selected_ide: Option<DetectedIde>,
 }
 
@@ -141,9 +140,8 @@ fn is_lock_entry_alive(pid: u32, port: u16) -> bool {
     }
 }
 
-/// Check if the mcp-os process is alive AND listening on its port.
-/// Thin re-export of `speedwave_runtime::mcp_os_process::is_mcp_os_alive`
-/// (SSOT).
+/// Check if the mcp-os process is alive AND listening on its port. Thin re-export of
+/// `speedwave_runtime::mcp_os_process::is_mcp_os_alive` (SSOT).
 pub(crate) fn is_mcp_os_alive() -> bool {
     speedwave_runtime::mcp_os_process::is_mcp_os_alive()
 }
@@ -165,10 +163,8 @@ impl HealthMonitor {
     }
 }
 
-/// Parses compose ps JSON entries into `ContainerHealth` structs.
-///
-/// Handles field name differences across nerdctl versions: `Name`/`name`,
-/// `State`/`Status`/`state`/`status`.
+/// Parses compose ps JSON entries into `ContainerHealth` structs; handles field name differences
+/// across nerdctl versions: `Name`/`name`, `State`/`Status`/`state`/`status`.
 fn parse_container_entries(entries: &[serde_json::Value], project: &str) -> Vec<ContainerHealth> {
     entries
         .iter()
@@ -245,9 +241,8 @@ impl HealthMonitor {
     }
 }
 
-/// Pairs the detected-IDE list with the selected IDE and assembles the
-/// `IdeBridgeHealth` payload. `selected_ide` resolves to `Some` only when the
-/// selected entry is also currently detected, else `None`.
+/// Pairs the detected-IDE list with the selected IDE, assembling the `IdeBridgeHealth` payload;
+/// `selected_ide` is `Some` only when the selected entry is also currently detected.
 pub(crate) fn build_ide_bridge_health(
     detected_ides: Vec<DetectedIde>,
     selected: Option<&speedwave_runtime::config::SelectedIde>,
@@ -279,9 +274,8 @@ pub fn list_available_ides() -> Vec<DetectedIde> {
     lock_dir.map(|d| list_ides_in_dir(&d)).unwrap_or_default()
 }
 
-/// Returns true if `~/.claude/ide/<port>.lock` exists and points at a live
-/// (PID + TCP) IDE instance. Probes the single lock file for `port` rather
-/// than scanning the whole directory.
+/// True if `~/.claude/ide/<port>.lock` exists and points at a live (PID + TCP) IDE instance.
+/// Probes the single lock file for `port` rather than scanning the whole directory.
 pub fn is_ide_port_alive(port: u16) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
@@ -293,9 +287,8 @@ pub fn is_ide_port_alive(port: u16) -> bool {
     is_ide_lock_alive(&lock_path)
 }
 
-/// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening
-/// ports. Deduplicates by `(pid, ide_name)` keeping the most recent mtime, so
-/// multiple windows of one IDE (same pid) collapse to one entry.
+/// Scans `lock_dir/*.lock` for IDE lock files with live PIDs and listening ports. Deduplicates
+/// by `(pid, ide_name)` keeping the most recent mtime, so multiple windows collapse to one.
 fn list_ides_in_dir(lock_dir: &std::path::Path) -> Vec<DetectedIde> {
     let Ok(entries) = std::fs::read_dir(lock_dir) else {
         return Vec::new();

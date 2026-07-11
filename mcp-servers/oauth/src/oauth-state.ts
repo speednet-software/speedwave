@@ -1,16 +1,6 @@
 /**
- * Read / write per-service OAuth state files.
- *
- * `oauth.json` schema (ADR-060, post-OAuthProvider refactor):
- *   { provider, providerData, scopes, grantedScopes, refreshToken,
- *     expiresAt, lastRefreshAt }
- *
- * `provider` identifies the IdP implementation in `providers/registry.ts`;
- * `providerData` holds IdP-specific fields (Microsoft: clientId, tenantId).
- *
- * Files live at `<state_dir>/<service>.json`, mode 0o600. The Rust supervisor
- * creates `<state_dir>` with mode 0o700 so `writeRestrictedSecret` accepts
- * the parent (POSIX). The bearer-map file `.bearer-map.json` is read here too.
+ * Read/write per-service OAuth state (`oauth.json`, ADR-060 schema) at `<state_dir>/<service>.json`
+ * (mode 0o600, parent 0o700, Rust supervisor); `.bearer-map.json` is read here too.
  */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -38,11 +28,8 @@ export interface OAuthState {
 export type BearerMap = Record<string, string>;
 
 /**
- * Load OAuth state for one service from disk. Validates the structural shape
- * (`provider` non-empty string, `providerData` plain object of strings) so a
- * malformed file fails fast with a descriptive error instead of crashing the
- * dispatcher mid-refresh. Field-value semantics (e.g. Microsoft tenantId
- * format) are the provider's responsibility — see `OAuthProvider.requiredFields`.
+ * Load OAuth state for a service; validates only the structural shape (provider non-empty,
+ * providerData a plain string map). Returns null if no file exists.
  * @param stateDir - the per-project state dir
  * @param service - service id (e.g. 'sharepoint')
  * @returns parsed OAuthState, or null if no file exists
@@ -147,10 +134,8 @@ export async function saveOAuthState(
 const SERVICE_SLUG_RE = /^[a-z][a-z0-9-]{0,63}$/;
 
 /**
- * Load the bearer-map (one bearer per consumer service id).
- * Returns an empty map if the file does not exist (no consumers configured yet).
- * Each `service` value must match SERVICE_SLUG_RE — caller is expected to use
- * the result as part of a filesystem path.
+ * Load the bearer-map (one bearer per consumer service id); empty map if absent. Each `service`
+ * value must match SERVICE_SLUG_RE — caller uses the result as part of a filesystem path.
  * @param stateDir - the per-project oauth state dir
  */
 export async function loadBearerMap(stateDir: string): Promise<BearerMap> {

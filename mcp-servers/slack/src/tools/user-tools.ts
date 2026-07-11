@@ -139,7 +139,7 @@ const getCurrentUserTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */
@@ -156,7 +156,7 @@ export async function handleFindUsers(
 }
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */
@@ -173,7 +173,7 @@ export async function handleGetUsers(
 }
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param _params - Tool parameters (none)
  */
@@ -190,7 +190,7 @@ export async function handleGetCurrentUser(
 }
 
 /**
- * Tool handler function.
+ * Tool factory.
  * @param clients - Slack client instances (always non-null; checks
  *   `_tokensStatus === 'missing'` to surface the configuration error).
  */

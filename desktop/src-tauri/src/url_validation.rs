@@ -1,6 +1,5 @@
-// URL validation Tauri commands. The SSRF validator is the SSOT in
-// `speedwave_runtime::url_validation`; re-exported here so existing callsites
-// keep compiling. Only the Tauri-bound commands live here (runtime is Tauri-free).
+// URL validation Tauri commands. SSRF validator SSOT is `speedwave_runtime::url_validation`,
+// re-exported here (Tauri-bound commands only; runtime stays Tauri-free).
 
 pub(crate) use speedwave_runtime::url_validation::{
     is_private_on_premise, validate_collector_url, validate_url, PrivatePolicy,

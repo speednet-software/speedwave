@@ -1,7 +1,5 @@
-//! Speedwave Desktop — Tauri v2 backend.
-//!
-//! Thin `#[tauri::command]` wrappers delegating to module functions; each
-//! converts `anyhow::Result` into `Result<T, String>` for serializable errors.
+//! Speedwave Desktop — Tauri v2 backend. Thin `#[tauri::command]` wrappers delegating to module
+//! functions; each converts `anyhow::Result` into `Result<T, String>` for serializable errors.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -80,9 +78,8 @@ use reconcile::{
 // Re-export project-switch helpers consumed via `crate::` from containers_cmd.
 pub(crate) use project_cmd::{rebind_chat, rollback_and_emit_failed};
 
-/// Joins a cleanup thread handle with a watchdog that force-exits after
-/// `EXIT_CLEANUP_TIMEOUT_SECS`. Exits with code 1 if the cleanup thread
-/// panics; returns on normal completion.
+/// Joins a cleanup thread with a watchdog that force-exits after `EXIT_CLEANUP_TIMEOUT_SECS`.
+/// Exits with code 1 if the cleanup thread panics; returns on normal completion.
 pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
     let watchdog = std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_secs(
@@ -100,9 +97,8 @@ pub(crate) fn join_with_exit_watchdog(handle: std::thread::JoinHandle<()>) {
     drop(watchdog);
 }
 
-/// Stashes a cleanup `JoinHandle` into the shared slot so `RunEvent::Exit`
-/// can join it before the process exits. Drops the handle if the slot is
-/// already occupied or the mutex is poisoned.
+/// Stashes a cleanup `JoinHandle` into the shared slot so `RunEvent::Exit` can join it before exit.
+/// Drops the handle if the slot is already occupied or the mutex is poisoned.
 pub(crate) fn stash_cleanup_handle(
     slot: &Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     handle: std::thread::JoinHandle<()>,
@@ -142,9 +138,7 @@ use window::{
     show_main_window,
 };
 
-// ---------------------------------------------------------------------------
-// Extracted subsystem starters (reused by setup() and ensure_*_running())
-// ---------------------------------------------------------------------------
+// ── Extracted subsystem starters (reused by setup() and ensure_*_running()) ─
 
 /// Create, configure, and start IDE Bridge. Stores it in the shared state.
 /// Called from setup() on normal start and from ensure_ide_bridge_running().
@@ -398,9 +392,8 @@ pub(crate) fn oauth_reconcile_action(current: &[String], desired: &[String]) -> 
     }
 }
 
-/// Spawn the per-project `oauth` worker on demand. No-op if no project
-/// integration with `uses_oauth_refresh = true` is enabled, or if the worker
-/// is already running. Returns true if a new worker was started this call.
+/// Spawn the per-project `oauth` worker on demand. No-op if no `uses_oauth_refresh = true`
+/// integration is enabled, or the worker is already running. Returns true if newly started.
 pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bool {
     let mut map = match oauth_arc.lock() {
         Ok(g) => g,
@@ -539,9 +532,8 @@ where
     respawned
 }
 
-/// Trait abstracting the watchdog's view of a managed worker. Implemented by
-/// every host-side worker manager that is supervised by a watchdog —
-/// `OauthProcess` is the per-project one today.
+/// Trait abstracting the watchdog's view of a managed worker. Implemented by every host-side
+/// worker manager supervised by a watchdog — `OauthProcess` is the per-project one today.
 pub(crate) trait WatchdogWorker {
     fn is_alive(&self) -> bool;
     fn respawn(&mut self) -> anyhow::Result<u16>;
@@ -556,9 +548,8 @@ impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
     }
 }
 
-/// Shared watchdog loop for per-project host-side workers (oauth). Polls every
-/// 30 s, respawns dead workers via [`sweep_per_project_workers`], then recreates
-/// each respawned project's hub containers. Stops when `stop_flag` is set.
+/// Shared watchdog loop for per-project host-side workers (oauth). Polls every 30 s, respawns dead
+/// workers via [`sweep_per_project_workers`], recreates each respawned project's hub containers.
 fn start_per_project_watchdog<P>(
     workers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, P>>>,
     stop_flag: &'static std::sync::atomic::AtomicBool,
@@ -644,13 +635,10 @@ fn format_audit_failure_message(failures: &[(String, String)]) -> String {
     body
 }
 
-// ---------------------------------------------------------------------------
-// Application entry point
-// ---------------------------------------------------------------------------
+// ── Application entry point ─────────────────────────────────────────────────
 
-/// Logs a sanitized panic message via `log_fn`, falling back to `eprintln!`
-/// if `log_fn` itself panics — a panic during unwind aborts the process, so
-/// the (pipe-fragile) log sink must run isolated from the panic hook.
+/// Logs a sanitized panic message via `log_fn`, falling back to `eprintln!` if `log_fn` itself
+/// panics — a panic during unwind aborts, so the pipe-fragile log sink runs isolated from the hook.
 fn log_panic_with_fallback(sanitized: &str, log_fn: impl FnOnce()) {
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(log_fn)).is_err() {
         // Sanctioned panic-hook stderr fallback (logging.md) — the log
@@ -1353,10 +1341,8 @@ fn main() {
             }
         }
         tauri::RunEvent::Exit => {
-            // Join the stashed cleanup thread so `limactl stop` finishes before `.run()` returns.
-            // Fallback: macOS Cmd+Q bypasses earlier arms, so spawn cleanup inline if the slot is empty.
-            // Test `exit_arm_runs_cleanup_when_handle_slot_is_empty` asserts the literals
-            // `run_exit_cleanup(&cleanup_ctx_runevent)` and `hide_main_window(app_handle)` — update it on rename.
+            // Joins the stashed cleanup thread (Cmd+Q skips earlier arms; spawns inline if empty).
+            // Test `exit_arm_runs_cleanup_when_handle_slot_is_empty` pins both call sites.
             let handle = match exit_cleanup_handle_runevent.lock() {
                 Ok(mut slot) => slot.take(),
                 Err(e) => {
@@ -1376,9 +1362,7 @@ fn main() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test-only assertions")]
@@ -1398,9 +1382,8 @@ mod tests {
         assert!(ran.get(), "log_fn must run on the happy path");
     }
 
-    /// Regression guard: a panic inside `log_fn` (e.g. the fern/tauri-plugin-log
-    /// sink panicking on a broken pipe) must not propagate — it must be caught
-    /// and handled by the eprintln fallback instead of escalating to abort().
+    /// Regression guard: a panic inside `log_fn` (e.g. tauri-plugin-log on a broken pipe) must not
+    /// propagate — it is caught and handled by the eprintln fallback, not abort().
     #[test]
     fn log_panic_with_fallback_survives_a_panicking_log_fn() {
         log_panic_with_fallback("msg", || panic!("simulated log sink panic"));
@@ -1527,11 +1510,8 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // sweep_per_project_workers — covers the watchdog selection logic without
-    // spawning real subprocesses. The fake implements WatchdogWorker; the
-    // helper is reused by the oauth watchdog in production.
-    // ────────────────────────────────────────────────────────────────────
+    // ── sweep_per_project_workers: covers watchdog selection without real subprocesses ──
+    // The fake implements WatchdogWorker; the helper is reused by the oauth watchdog in production.
 
     struct FakeWorker {
         alive: bool,
@@ -1622,11 +1602,8 @@ mod tests {
     fn both_exit_paths_use_join_with_exit_watchdog() {
         let source = include_str!("main.rs");
         let occurrences: Vec<_> = source.match_indices("join_with_exit_watchdog").collect();
-        // Expected non-test occurrences:
-        //   1. fn join_with_exit_watchdog definition
-        //   2. ctrlc signal handler call site (blocks — safe on ctrlc's dedicated thread)
-        //   3. RunEvent::Exit call site (blocks — after Tauri finishes processing events)
-        // Total: at least 3 (fn def + 2 call sites) outside the test module.
+        // Expected non-test occurrences (at least 3, outside the test module): fn def, ctrlc
+        // handler call site (blocks — safe on ctrlc's dedicated thread), RunEvent::Exit call site.
         let non_test_count = occurrences
             .iter()
             .filter(|(idx, _)| {

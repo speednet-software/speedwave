@@ -1,15 +1,6 @@
 /**
- * GitLab API Client for MCP Worker
- * Isolated GitLab MCP server with per-service token isolation.
- * ONLY has access to GitLab tokens - no other service tokens.
- * Architecture:
- * - Token mounted RO from /tokens/token
- * - Host URL from /tokens/host_url file or GITLAB_URL env var
- * - Wraps `@gitbeaker/rest`; tool count is pinned by tools/metadata.test.ts
- * Security:
- * - Blast radius containment: only GitLab tokens if compromised
- * - Token never exposed in responses
- * - Read-only token mount
+ * GitLab API Client for MCP Worker: isolated, ONLY has GitLab tokens. Token from /tokens/token,
+ * host from /tokens/host_url or GITLAB_URL; wraps `@gitbeaker/rest` (tools pinned by metadata).
  */
 
 import { Gitlab } from '@gitbeaker/rest';
@@ -78,9 +69,7 @@ export function isTeachingError(error: unknown): boolean {
   return error instanceof TeachingError;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ───────────────────────────────────────────────────────────────────────────────────────
 
 /** GitLab API client configuration containing authentication token and host URL */
 export interface GitLabConfig {
@@ -153,14 +142,11 @@ export interface GitLabCommit {
   created_at: string;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Class
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Client Class ────────────────────────────────────────────────────────────────────────────────
 
 /**
- * GitLab API client providing methods for projects, merge requests, pipelines, commits, branches, and issues.
- * Wraps `@gitbeaker/rest` library with consistent error handling and type-safe response mapping.
- * Supports all major GitLab operations including CI/CD, code review, and repository management.
+ * GitLab API client for projects, merge requests, pipelines, commits, branches, and issues.
+ * Wraps `@gitbeaker/rest` with consistent error handling and type-safe response mapping.
  */
 export class GitLabClient {
   private gitlab: InstanceType<typeof Gitlab>;
@@ -169,9 +155,8 @@ export class GitLabClient {
   public readonly statusTracker = new ConnectionStatusTracker();
 
   /**
-   * Creates a new GitLab API client instance with authentication and host configuration.
-   * Initializes the underlying Gitbeaker client with provided credentials.
-   * @param config - Client configuration containing authentication token and GitLab host URL
+   * Creates a GitLab API client, initializing the underlying Gitbeaker client with credentials.
+   * @param config - Client configuration containing authentication token and GitLab host URL.
    */
   constructor(config: GitLabConfig) {
     this.config = config;
@@ -186,14 +171,11 @@ export class GitLabClient {
     return this.statusTracker.getHealth();
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Parameter Validation
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Parameter Validation ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Validates that required parameters are provided and throws descriptive errors if not.
-   * @param params - Object mapping parameter names to their values
-   * @throws {Error} Error with message listing missing required parameters
+   * Validates that required parameters are provided; throws listing all missing names.
+   * @param params - Object mapping parameter names to their values.
    */
   private validateRequired(params: Record<string, unknown>): void {
     const missing = Object.entries(params)
@@ -207,15 +189,11 @@ export class GitLabClient {
     }
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Response Mappers
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Response Mappers ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Maps GitLab API merge request response to standardized GitLabMergeRequest type.
-   * Normalizes field names from camelCase/snake_case variations and ensures type safety.
-   * @param mr - Raw merge request response object from GitLab API
-   * @returns Normalized merge request with consistent field names and types
+   * Maps a raw gitbeaker MR response to {@link GitLabMergeRequest}, normalizing field casing.
+   * @param mr - Raw merge request response object from GitLab API.
    */
   private mapMergeRequestResponse(mr: Record<string, unknown>): GitLabMergeRequest {
     // Warn if critical fields are missing (helps debug API response issues)
@@ -259,25 +237,12 @@ export class GitLabClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Error Handling
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Error Handling ────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Formats GitLab API errors into user-friendly messages with actionable recovery guidance.
-   * Handles various error types including authentication failures, permission denials,
-   * network errors, and provides specific instructions for remediation.
-   * @param error - The error object from GitLab API (typically from `@gitbeaker/rest`)
-   * @returns Human-readable error message with recovery suggestions (uses shared error helpers)
-   * @example
-   * ```typescript
-   * try {
-   *   await client.listProjects();
-   * } catch (error) {
-   *   console.error(GitLabClient.formatError(error));
-   *   // Output: "Authentication failed. Check your GitLab token. <setup guidance>"
-   * }
-   * ```
+   * Formats a GitLab API error (typically from `@gitbeaker/rest`) into a user-friendly message
+   * with actionable recovery guidance (auth/permission/not-found/5xx/network cases).
+   * @param error - The error object from GitLab API (typically from `@gitbeaker/rest`).
    */
   static formatError(error: unknown): string {
     // An already-translated teaching error is returned verbatim: its message is the guidance,
@@ -350,10 +315,7 @@ export class GitLabClient {
     return message || 'GitLab API error';
   }
 
-  /**
-   * Tests GitLab API connectivity by fetching the current authenticated user
-   * @returns Connection test result with success status and error details if failed
-   */
+  /** Tests GitLab API connectivity by fetching the current authenticated user. */
   async testConnection(): Promise<ConnectionTestResult> {
     try {
       await this.gitlab.Users.showCurrentUser();
@@ -382,9 +344,8 @@ export class GitLabClient {
   }
 
   /**
-   * Gets the identity of the currently authenticated GitLab user (the configured token owner).
-   * Resolves 'me'/'my' style queries (my MRs, my issues, my projects) without asking the user.
-   * @returns The authenticated user's id, username, name, email, and profile URL
+   * Gets the identity of the currently authenticated GitLab user (the configured token owner);
+   * resolves 'me'/'my' style queries (my MRs, my issues, my projects) without asking the user.
    */
   async getCurrentUser(): Promise<GitLabCurrentUser> {
     const user = (await this.gitlab.Users.showCurrentUser()) as Record<string, unknown>;
@@ -397,33 +358,18 @@ export class GitLabClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Projects
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Projects ──────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists GitLab projects accessible to the authenticated user with optional filtering.
-   * Returns projects sorted by last activity (most recent first). Only the first page
-   * of results is returned, limited by the `limit` parameter.
-   * @param options - Filter and pagination options
-   * @param options.search - Filter projects by name or path (case-insensitive partial match)
-   * @param options.limit - Maximum number of projects to return (default: 20, max: 100)
-   * @param options.page - Page number for pagination (default: 1)
-   * @param options.owned - If `true`, only return projects owned by the current user (excludes shared/member projects)
-   * @param options.membership - If `true`, only return projects the authenticated user is a member of
-   * @param options.archived - If `true`, include archived projects (default: false, GitLab excludes them)
-   * @returns Array of project objects with basic metadata (id, name, path, description, URL, default branch)
-   * @example
-   * ```typescript
-   * // Get all accessible projects
-   * const allProjects = await client.listProjects();
-   *
-   * // Search for projects by name
-   * const filtered = await client.listProjects({ search: 'speedwave' });
-   *
-   * // Get only owned projects
-   * const owned = await client.listProjects({ owned: true, limit: 10 });
-   * ```
+   * Lists GitLab projects accessible to the authenticated user, sorted by last activity
+   * (most recent first). Only the first page is returned, capped by `options.limit` (default 20).
+   * @param options - Filter and pagination options.
+   * @param options.search - Filter projects by name or path (case-insensitive partial match).
+   * @param options.limit - Maximum number of projects to return (default 20, max 100).
+   * @param options.page - Page number for pagination (default 1).
+   * @param options.owned - If true, only return projects owned by the current user.
+   * @param options.membership - If true, only return projects the authenticated user is a member of.
+   * @param options.archived - If true, include archived projects (default false).
    */
   async listProjects(
     options: {
@@ -460,22 +406,12 @@ export class GitLabClient {
   }
 
   /**
-   * Retrieves detailed information about a specific GitLab project.
-   * Optionally includes license and statistics data if requested.
-   * @param projectId - Project ID (numeric) or path with namespace (e.g., "acme/my-project")
-   * @param options - Additional data to include in the response
-   * @param options.license - If `true`, includes license information (name, URL, source URL)
-   * @param options.statistics - If `true`, includes project statistics (commit count, storage size, repository size, etc.)
-   * @returns Project object with full details, plus optional license/statistics if requested
-   * @example
-   * ```typescript
-   * // Get basic project info
-   * const project = await client.showProject('acme/my-project');
-   *
-   * // Get project with statistics
-   * const detailed = await client.showProject(123, { statistics: true });
-   * console.log(detailed.statistics.commit_count);
-   * ```
+   * Retrieves detailed information about a specific GitLab project, by numeric ID or
+   * "namespace/path"; optionally includes license and statistics data.
+   * @param projectId - Project ID (numeric) or path with namespace (e.g. "acme/my-project").
+   * @param options - Additional data to include in the response.
+   * @param options.license - If true, includes license information.
+   * @param options.statistics - If true, includes project statistics.
    */
   async showProject(
     projectId: string | number,
@@ -502,25 +438,11 @@ export class GitLabClient {
   }
 
   /**
-   * Searches for code snippets across GitLab repositories using blob search.
-   * Can search globally across all accessible projects or within a specific project.
-   * Returns file paths, line numbers, and matching code snippets.
-   * @param query - Search query string (supports literal text, not regex)
-   * @param options - Search scope options
-   * @param options.project_id - If provided, limits search to this project ID or path. If omitted, searches across all accessible projects
-   * @returns Array of search results containing file paths, matching lines, and context
-   * @example
-   * ```typescript
-   * // Search globally across all projects
-   * const results = await client.searchCode('formatError');
-   *
-   * // Search within specific project
-   * const projectResults = await client.searchCode('async function', {
-   *   project_id: 'acme/my-project'
-   * });
-   *
-   * // Results contain: { basename, data, path, filename, id, ref, startline }
-   * ```
+   * Searches for code (literal text, not regex) via GitLab blob search, globally or scoped to
+   * `options.project_id`; results contain file paths, matching lines, and context.
+   * @param query - Search query string (literal text, not regex).
+   * @param options - Search scope options.
+   * @param options.project_id - If provided, limits search to this project ID or path.
    */
   async searchCode(
     query: string,
@@ -545,20 +467,19 @@ export class GitLabClient {
     return results as unknown[];
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Merge Requests
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Merge Requests ────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists merge requests in a project with optional filtering
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param options - Filter options
-   * @param options.state - Filter by state: "opened", "closed", "merged", or "all"
-   * @param options.author_username - Filter by author's username
-   * @param options.reviewer_username - Filter by reviewer's username
-   * @param options.labels - Filter by comma-separated labels (e.g., "bug,feature")
-   * @param options.scope - Filter by identity: "assigned_to_me" (assignee, not reviewer), "created_by_me", or "all"
-   * @param options.limit - Maximum number of results to return (default: 20)
+   * Lists merge requests in a project, filterable by state, author/reviewer username,
+   * comma-separated labels, and identity scope (`assigned_to_me` = assignee, not reviewer).
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param options - Filter options.
+   * @param options.state - Filter by state: "opened", "closed", "merged", or "all".
+   * @param options.author_username - Filter by author's username.
+   * @param options.reviewer_username - Filter by reviewer's username.
+   * @param options.labels - Filter by comma-separated labels (e.g. "bug,feature").
+   * @param options.scope - Filter by identity scope.
+   * @param options.limit - Maximum number of results to return (default 20).
    */
   async listMergeRequests(
     projectId: string | number,
@@ -607,9 +528,9 @@ export class GitLabClient {
   }
 
   /**
-   * Gets detailed information about a specific merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
+   * Gets detailed information about a specific merge request by project and MR IID.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
    */
   async showMergeRequest(projectId: string | number, mrIid: number): Promise<GitLabMergeRequest> {
     this.validateRequired({ project_id: projectId, mr_iid: mrIid });
@@ -618,15 +539,15 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new merge request in a project
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param options - Merge request options
-   * @param options.source_branch - Source branch name (branch to merge from)
-   * @param options.target_branch - Target branch name (branch to merge into)
-   * @param options.title - Title of the merge request
-   * @param options.description - Description/body of the merge request (supports Markdown)
-   * @param options.labels - Comma-separated labels to apply (e.g., "bug,priority::high")
-   * @param options.remove_source_branch - Whether to remove source branch after merge (default: false)
+   * Creates a new merge request; `description` supports Markdown, `labels` is comma-separated.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param options - Merge request options.
+   * @param options.source_branch - Source branch name (branch to merge from).
+   * @param options.target_branch - Target branch name (branch to merge into).
+   * @param options.title - Title of the merge request.
+   * @param options.description - Description/body of the merge request (Markdown).
+   * @param options.labels - Comma-separated labels to apply.
+   * @param options.remove_source_branch - Whether to remove source branch after merge.
    */
   async createMergeRequest(
     projectId: string | number,
@@ -661,9 +582,9 @@ export class GitLabClient {
   }
 
   /**
-   * Approves a merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
+   * Approves a merge request.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
    */
   async approveMergeRequest(projectId: string | number, mrIid: number): Promise<void> {
     this.validateRequired({ project_id: projectId, mr_iid: mrIid });
@@ -671,14 +592,14 @@ export class GitLabClient {
   }
 
   /**
-   * Merges an approved merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
-   * @param options - Merge options
-   * @param options.squash - Whether to squash commits into a single commit (default: false)
-   * @param options.should_remove_source_branch - Whether to remove source branch after merge (default: false)
-   * @param options.auto_merge - Whether to merge when pipeline succeeds (default: false)
-   * @param options.sha - Expected SHA of source branch head (for conflict detection)
+   * Merges an approved merge request; `sha` (source branch head) guards against conflicts.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
+   * @param options - Merge options.
+   * @param options.squash - Whether to squash commits into a single commit.
+   * @param options.should_remove_source_branch - Whether to remove source branch after merge.
+   * @param options.auto_merge - Whether to merge when pipeline succeeds.
+   * @param options.sha - Expected SHA of source branch head (for conflict detection).
    */
   async mergeMergeRequest(
     projectId: string | number,
@@ -703,15 +624,15 @@ export class GitLabClient {
   }
 
   /**
-   * Updates properties of an existing merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
-   * @param options - Update options
-   * @param options.title - New title for the merge request
-   * @param options.description - New description/body (supports Markdown)
-   * @param options.target_branch - New target branch name
-   * @param options.state_event - State change action: "close" or "reopen"
-   * @param options.labels - Comma-separated labels (replaces existing labels)
+   * Updates properties of an existing merge request; `labels` replaces the existing set.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
+   * @param options - Update options.
+   * @param options.title - New title for the merge request.
+   * @param options.description - New description/body (Markdown).
+   * @param options.target_branch - New target branch name.
+   * @param options.state_event - State change action: "close" or "reopen".
+   * @param options.labels - Comma-separated labels (replaces existing labels).
    */
   async updateMergeRequest(
     projectId: string | number,
@@ -737,9 +658,9 @@ export class GitLabClient {
   }
 
   /**
-   * Gets file changes (diffs) in a merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
+   * Gets file changes (diffs) in a merge request.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
    */
   async getMrChanges(projectId: string | number, mrIid: number): Promise<unknown> {
     this.validateRequired({ project_id: projectId, mr_iid: mrIid });
@@ -747,10 +668,10 @@ export class GitLabClient {
   }
 
   /**
-   * Lists all commits in a merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
-   * @param limit - Maximum number of commits to return (default: 20)
+   * Lists all commits in a merge request (default limit 20).
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
+   * @param limit - Maximum number of commits to return.
    */
   async listMrCommits(
     projectId: string | number,
@@ -774,10 +695,10 @@ export class GitLabClient {
   }
 
   /**
-   * Lists all CI/CD pipelines associated with a merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
-   * @param limit - Maximum number of pipelines to return (default: 10)
+   * Lists all CI/CD pipelines associated with a merge request (default limit 10).
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
+   * @param limit - Maximum number of pipelines to return.
    */
   async listMrPipelines(
     projectId: string | number,
@@ -803,10 +724,10 @@ export class GitLabClient {
   }
 
   /**
-   * Lists comments/notes on a merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
-   * @param limit - Maximum number of notes to return (default: 20)
+   * Lists comments/notes on a merge request (default limit 20).
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
+   * @param limit - Maximum number of notes to return.
    */
   async listMrNotes(
     projectId: string | number,
@@ -822,25 +743,22 @@ export class GitLabClient {
   }
 
   /**
-   * Adds a comment/note to a merge request
-   * @param projectId - Project ID or path (e.g., "my-group/my-project" or 123)
-   * @param mrIid - Merge request IID (internal ID within the project)
-   * @param body - Comment text (supports Markdown)
+   * Adds a comment/note (Markdown supported) to a merge request.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param mrIid - Merge request IID (internal ID within the project).
+   * @param body - Comment text (supports Markdown).
    */
   async createMrNote(projectId: string | number, mrIid: number, body: string): Promise<unknown> {
     return await this.gitlab.MergeRequestNotes.create(projectId, mrIid, body);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Discussions
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Discussions ───────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Retrieves all discussion threads on a merge request including comments, code review notes, and resolvable threads
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param mrIid - Merge request internal ID (IID, not ID)
-   * @param limit - Maximum number of discussion threads to return (default: 20)
-   * @returns Array of discussion objects with notes, resolved status, and thread metadata
+   * Retrieves all discussion threads (comments, review notes, resolved status) on an MR.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param mrIid - Merge request internal ID (IID, not ID).
+   * @param limit - Maximum number of discussion threads to return.
    */
   async listMrDiscussions(
     projectId: string | number,
@@ -856,11 +774,10 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new discussion thread on a merge request for code review comments or general discussions
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param mrIid - Merge request internal ID (IID, not ID)
-   * @param body - Discussion comment text supporting markdown formatting
-   * @returns Created discussion object with thread ID and initial note
+   * Creates a new discussion thread (Markdown body) on a merge request.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param mrIid - Merge request internal ID (IID, not ID).
+   * @param body - Discussion comment text (Markdown).
    */
   async createMrDiscussion(
     projectId: string | number,
@@ -870,17 +787,14 @@ export class GitLabClient {
     return await this.gitlab.MergeRequestDiscussions.create(projectId, mrIid, body);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Branches
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Branches ──────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Retrieves list of branches in a project with commit details and protection status
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param options - Search and pagination options
-   * @param options.search - Filter branches by name pattern (supports wildcards)
-   * @param options.limit - Maximum number of branches to return (default: 20)
-   * @returns Array of branch objects with name, commit SHA, protection status, and merge status
+   * Lists branches with commit details and protection status; `search` supports wildcards.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param options - Search and pagination options.
+   * @param options.search - Filter branches by name pattern.
+   * @param options.limit - Maximum number of branches to return.
    */
   async listBranches(
     projectId: string | number,
@@ -896,21 +810,19 @@ export class GitLabClient {
   }
 
   /**
-   * Retrieves detailed information about a specific branch including commit history and protection rules
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param branchName - Name of the branch to retrieve (e.g., "main", "feature/new-feature")
-   * @returns Branch object with commit details, protection status, and can_push permission
+   * Retrieves branch details: commit history, protection rules, and can_push permission.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param branchName - Name of the branch to retrieve.
    */
   async getBranch(projectId: string | number, branchName: string): Promise<unknown> {
     return await this.gitlab.Branches.show(projectId, branchName);
   }
 
   /**
-   * Creates a new branch from an existing branch or commit reference
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param branchName - Name for the new branch (e.g., "feature/new-feature")
-   * @param ref - Source branch name or commit SHA to branch from (e.g., "main", "a1b2c3d4")
-   * @returns Created branch object with initial commit details
+   * Creates a new branch from an existing branch name or commit SHA (`ref`).
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param branchName - Name for the new branch.
+   * @param ref - Source branch name or commit SHA to branch from.
    */
   async createBranch(
     projectId: string | number,
@@ -921,10 +833,9 @@ export class GitLabClient {
   }
 
   /**
-   * Permanently deletes a branch from the repository (cannot delete protected branches)
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param branchName - Name of the branch to delete (e.g., "feature/old-feature")
-   * @throws {Error} if branch is protected or does not exist
+   * Permanently deletes a branch; throws if it is protected or does not exist.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param branchName - Name of the branch to delete.
    */
   async deleteBranch(projectId: string | number, branchName: string): Promise<void> {
     this.validateRequired({ project_id: projectId, branch_name: branchName });
@@ -932,26 +843,22 @@ export class GitLabClient {
   }
 
   /**
-   * Compares two branches or commits showing file differences and commit list between them
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param from - Source branch name or commit SHA (e.g., "main", "a1b2c3d4")
-   * @param to - Target branch name or commit SHA to compare against (e.g., "develop", "e5f6g7h8")
-   * @returns Comparison object with commits list, diffs array, and file change statistics
+   * Compares two branches or commits: commit list, diffs, and file change statistics.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param from - Source branch name or commit SHA.
+   * @param to - Target branch name or commit SHA to compare against.
    */
   async compareBranches(projectId: string | number, from: string, to: string): Promise<unknown> {
     return await this.gitlab.Repositories.compare(projectId, from, to);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Commits
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Commits ───────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Retrieves chronological commit history for a specific branch
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param branch - Branch name to fetch commits from (e.g., "main", "develop")
-   * @param limit - Maximum number of commits to return (default: 20)
-   * @returns Array of commit objects with SHA, message, author, and timestamp
+   * Retrieves chronological commit history for a specific branch (default limit 20).
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param branch - Branch name to fetch commits from.
+   * @param limit - Maximum number of commits to return.
    */
   async listBranchCommits(
     projectId: string | number,
@@ -981,10 +888,9 @@ export class GitLabClient {
   }
 
   /**
-   * Retrieves complete unified diff showing all file changes introduced by a specific commit
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param commitSha - Full or short commit SHA (e.g., "a1b2c3d4e5f6" or "a1b2c3d")
-   * @returns Array of diff objects with old/new paths, diff content, and change statistics
+   * Retrieves the complete unified diff of all file changes introduced by a specific commit.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param commitSha - Full or short commit SHA.
    */
   async getCommitDiff(projectId: string | number, commitSha: string): Promise<unknown> {
     this.validateRequired({ project_id: projectId, commit_sha: commitSha });
@@ -992,15 +898,14 @@ export class GitLabClient {
   }
 
   /**
-   * Retrieves commits with advanced filtering by branch, time range, and file path
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param options - Filter options for commit history
-   * @param options.ref - Branch or tag name to filter commits (default: default branch)
-   * @param options.since - ISO 8601 date string to show commits after (e.g., "2024-01-01T00:00:00Z")
-   * @param options.until - ISO 8601 date string to show commits before (e.g., "2024-12-31T23:59:59Z")
-   * @param options.path - File or directory path to filter commits that modified it (e.g., "src/app.ts")
-   * @param options.limit - Maximum number of commits to return (default: 20)
-   * @returns Array of commit objects matching the specified filters
+   * Retrieves commits filtered by branch/tag (`ref`), ISO 8601 date range, and file path.
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param options - Filter options for commit history.
+   * @param options.ref - Branch or tag name to filter commits.
+   * @param options.since - ISO 8601 date string to show commits after.
+   * @param options.until - ISO 8601 date string to show commits before.
+   * @param options.path - File or directory path to filter commits that modified it.
+   * @param options.limit - Maximum number of commits to return.
    */
   async listCommits(
     projectId: string | number,
@@ -1033,13 +938,12 @@ export class GitLabClient {
   }
 
   /**
-   * Searches commit history by message or title using case-insensitive text matching
-   * @param projectId - Project ID or path (e.g., "group/project" or 123)
-   * @param query - Search text to match in commit title or message (case-insensitive)
-   * @param options - Optional search filters
-   * @param options.ref - Branch or tag name to search within (default: default branch)
-   * @param options.limit - Maximum number of matching commits to return (default: 20)
-   * @returns Array of commit objects with messages matching the search query
+   * Searches commit title/message, case-insensitive (GitLab has no native commit search).
+   * @param projectId - Project ID or path (e.g. "group/project" or 123).
+   * @param query - Search text to match in commit title or message.
+   * @param options - Optional search filters.
+   * @param options.ref - Branch or tag name to search within.
+   * @param options.limit - Maximum number of matching commits to return.
    */
   async searchCommits(
     projectId: string | number,
@@ -1070,19 +974,16 @@ export class GitLabClient {
     }));
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Repository
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Repository ────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Gets repository file tree with optional recursion and path filtering
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Tree listing options
-   * @param options.path - Directory path to list (default: root directory)
-   * @param options.ref - Branch, tag, or commit SHA to list from (default: default branch)
-   * @param options.recursive - Include subdirectories recursively (default: false)
-   * @param options.limit - Maximum entries to return (default: 100)
-   * @returns Array of tree entries with path, type, mode, and ID
+   * Gets the repository file tree, optionally recursive and path-filtered (default limit 100).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Tree listing options.
+   * @param options.path - Directory path to list.
+   * @param options.ref - Branch, tag, or commit SHA to list from.
+   * @param options.recursive - Include subdirectories recursively.
+   * @param options.limit - Maximum entries to return.
    */
   async getTree(
     projectId: string | number,
@@ -1100,11 +1001,10 @@ export class GitLabClient {
   }
 
   /**
-   * Retrieves file content from repository with metadata
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param filePath - Full path to file in repository (e.g., "src/index.ts")
-   * @param ref - Branch, tag, or commit SHA to read from (default: "main")
-   * @returns File content (base64 encoded), encoding type, size, name, path, and ref
+   * Retrieves file content (base64-encoded) plus size/name/path metadata from the repository.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param filePath - Full path to file in repository.
+   * @param ref - Branch, tag, or commit SHA to read from.
    */
   async getFile(
     projectId: string | number,
@@ -1134,11 +1034,10 @@ export class GitLabClient {
   }
 
   /**
-   * Gets git blame information for a file showing commit and author per line
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param filePath - Full path to file in repository (e.g., "src/index.ts")
-   * @param ref - Branch, tag, or commit SHA to blame from (default: "main")
-   * @returns Array of blame ranges with commit SHA, author, and line ranges
+   * Gets git blame ranges (commit SHA, author, line ranges) for a file.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param filePath - Full path to file in repository.
+   * @param ref - Branch, tag, or commit SHA to blame from.
    */
   async getBlame(
     projectId: string | number,
@@ -1149,15 +1048,12 @@ export class GitLabClient {
     return blame;
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Artifacts
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Artifacts ─────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists all artifacts from jobs in a pipeline
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param pipelineId - Pipeline ID to list artifacts from
-   * @returns Array of jobs with artifacts including job ID, name, and artifact details
+   * Lists all artifacts from jobs in a pipeline.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param pipelineId - Pipeline ID to list artifacts from.
    */
   async listArtifacts(projectId: string | number, pipelineId: number): Promise<unknown[]> {
     const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId, perPage: 100, maxPages: 1 });
@@ -1172,12 +1068,11 @@ export class GitLabClient {
   }
 
   /**
-   * Gets a job's log as text, capped to its last N lines like {@link getJobLog}
-   * (direct CI artifact-zip download is not available through this client).
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param jobId - Job ID to fetch the log from
-   * @param tailLines - Number of last lines to return (default: 500, 0 = all lines)
-   * @returns Log text (capped), the full untruncated size in bytes, and a suggested filename
+   * Gets a job's log as text, capped to its last N lines like {@link getJobLog} (direct CI
+   * artifact-zip download is not available through this client).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param jobId - Job ID to fetch the log from.
+   * @param tailLines - Number of last lines to return (0 = all lines).
    */
   async downloadArtifact(
     projectId: string | number,
@@ -1197,29 +1092,26 @@ export class GitLabClient {
   }
 
   /**
-   * Deletes all artifacts and logs for a specific job
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param jobId - Job ID to erase artifacts from
+   * Deletes all artifacts and logs for a specific job.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param jobId - Job ID to erase artifacts from.
    */
   async deleteArtifacts(projectId: string | number, jobId: number): Promise<void> {
     // Erase removes the job log and artifacts
     await this.gitlab.Jobs.erase(projectId, jobId);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Issues
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Issues ────────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists issues in a project with optional filtering
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Issue filtering options
-   * @param options.state - Filter by state: "opened", "closed", or "all" (default: "all")
-   * @param options.labels - Comma-separated label names to filter by
-   * @param options.assignee_username - Filter by assignee username
-   * @param options.scope - Filter by identity: "assigned_to_me", "created_by_me", or "all"
-   * @param options.limit - Maximum issues to return (default: 20)
-   * @returns Array of issues matching the filter criteria
+   * Lists issues, filterable by state, comma-separated labels, assignee, and identity scope.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Issue filtering options.
+   * @param options.state - Filter by state: "opened", "closed", or "all".
+   * @param options.labels - Comma-separated label names to filter by.
+   * @param options.assignee_username - Filter by assignee username.
+   * @param options.scope - Filter by identity scope.
+   * @param options.limit - Maximum issues to return.
    */
   async listIssues(
     projectId: string | number,
@@ -1247,11 +1139,9 @@ export class GitLabClient {
   }
 
   /**
-   * Gets a single issue by its internal ID (IID)
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param issueIid - Issue internal ID (IID) shown in the UI (e.g., #42)
-   * @returns Issue details
-   * @throws {Error} if no issue with that IID exists in the project
+   * Gets a single issue by its internal ID (IID); throws {@link TeachingError} if not found.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param issueIid - Issue internal ID (IID) shown in the UI.
    */
   async getIssue(projectId: string | number, issueIid: number): Promise<unknown> {
     // Use Issues.all with specific project and iid filter
@@ -1269,15 +1159,14 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new issue in the project
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Issue creation options
-   * @param options.title - Issue title (required)
-   * @param options.description - Issue description in markdown format
-   * @param options.labels - Comma-separated label names to apply
-   * @param options.assignee_ids - Array of user IDs to assign the issue to
-   * @param options.milestone_id - Milestone ID to associate with
-   * @returns Created issue details
+   * Creates a new issue; `description` is Markdown, `labels` comma-separated.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Issue creation options.
+   * @param options.title - Issue title.
+   * @param options.description - Issue description in markdown format.
+   * @param options.labels - Comma-separated label names to apply.
+   * @param options.assignee_ids - Array of user IDs to assign the issue to.
+   * @param options.milestone_id - Milestone ID to associate with.
    */
   async createIssue(
     projectId: string | number,
@@ -1298,15 +1187,14 @@ export class GitLabClient {
   }
 
   /**
-   * Updates an existing issue
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param issueIid - Issue internal ID (IID) to update
-   * @param options - Issue update options
-   * @param options.title - New issue title
-   * @param options.description - New issue description in markdown
-   * @param options.labels - Comma-separated label names to apply (replaces existing)
-   * @param options.state_event - State transition: "close" or "reopen"
-   * @returns Updated issue details
+   * Updates an existing issue; `labels` replaces the existing set.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param issueIid - Issue internal ID (IID) to update.
+   * @param options - Issue update options.
+   * @param options.title - New issue title.
+   * @param options.description - New issue description in markdown.
+   * @param options.labels - Comma-separated label names to apply (replaces existing).
+   * @param options.state_event - State transition: "close" or "reopen".
    */
   async updateIssue(
     projectId: string | number,
@@ -1327,10 +1215,9 @@ export class GitLabClient {
   }
 
   /**
-   * Closes an issue (convenience method for updating state)
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param issueIid - Issue internal ID (IID) to close
-   * @returns Updated issue details with closed state
+   * Closes an issue (convenience wrapper for `updateIssue` with `state_event: 'close'`).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param issueIid - Issue internal ID (IID) to close.
    */
   async closeIssue(projectId: string | number, issueIid: number): Promise<unknown> {
     return await this.gitlab.Issues.edit(projectId, issueIid, {
@@ -1338,17 +1225,14 @@ export class GitLabClient {
     });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Labels
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Labels ────────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists all labels in a project with optional search
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Label filtering options
-   * @param options.search - Search term to filter label names
-   * @param options.limit - Maximum labels to return (default: 50)
-   * @returns Array of label objects with name, color, and description
+   * Lists all labels in a project, optionally filtered by name (default limit 50).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Label filtering options.
+   * @param options.search - Search term to filter label names.
+   * @param options.limit - Maximum labels to return.
    */
   async listLabels(
     projectId: string | number,
@@ -1364,13 +1248,12 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new label in the project
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Label creation options
-   * @param options.name - Label name (required)
-   * @param options.color - Label color in hex format (e.g., "#FF0000") (required)
-   * @param options.description - Label description for documentation
-   * @returns Created label details
+   * Creates a new label; `color` is hex format (e.g. "#FF0000").
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Label creation options.
+   * @param options.name - Label name.
+   * @param options.color - Label color in hex format.
+   * @param options.description - Label description for documentation.
    */
   async createLabel(
     projectId: string | number,
@@ -1385,20 +1268,16 @@ export class GitLabClient {
     });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Pipelines
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Pipelines ─────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists CI/CD pipelines for a project with optional filtering
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Pipeline filtering options
-   * @param options.status - Filter by status: "created", "waiting_for_resource", "preparing", "pending",
-   * "running", "success", "failed", "canceled", "skipped", "manual", "scheduled"
-   * @param options.ref - Filter by branch or tag name
-   * @param options.limit - Maximum pipelines to return (default: 5)
-   * @param options.page - Page number for pagination (default: 1)
-   * @returns Array of pipeline objects with status, ref, SHA, and timestamps
+   * Lists CI/CD pipelines, filterable by status and branch/tag ref (default limit 5).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Pipeline filtering options.
+   * @param options.status - Filter by pipeline status.
+   * @param options.ref - Filter by branch or tag name.
+   * @param options.limit - Maximum pipelines to return.
+   * @param options.page - Page number for pagination.
    */
   async listPipelines(
     projectId: string | number,
@@ -1443,10 +1322,9 @@ export class GitLabClient {
   }
 
   /**
-   * Gets detailed pipeline information including all jobs
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param pipelineId - Pipeline ID to retrieve
-   * @returns Object containing pipeline details and array of associated jobs
+   * Gets detailed pipeline information including all its jobs.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param pipelineId - Pipeline ID to retrieve.
    */
   async showPipeline(projectId: string | number, pipelineId: number): Promise<unknown> {
     this.validateRequired({ project_id: projectId, pipeline_id: pipelineId });
@@ -1456,11 +1334,10 @@ export class GitLabClient {
   }
 
   /**
-   * Retrieves CI/CD job log output with optional tail limiting
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param jobId - Job ID to get logs from
-   * @param tailLines - Number of last lines to return (default: 100, 0 = all lines)
-   * @returns Job log as string (last N lines if tailLines specified)
+   * Retrieves CI/CD job log, capped to the last `tailLines` lines (default 100, 0 = all).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param jobId - Job ID to get logs from.
+   * @param tailLines - Number of last lines to return (0 = all lines).
    */
   async getJobLog(
     projectId: string | number,
@@ -1478,10 +1355,9 @@ export class GitLabClient {
   }
 
   /**
-   * Retries a failed pipeline and all its failed jobs
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param pipelineId - Pipeline ID to retry
-   * @returns Updated pipeline details with new status
+   * Retries a failed pipeline and all its failed jobs.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param pipelineId - Pipeline ID to retry.
    */
   async retryPipeline(projectId: string | number, pipelineId: number): Promise<GitLabPipeline> {
     this.validateRequired({ project_id: projectId, pipeline_id: pipelineId });
@@ -1498,12 +1374,11 @@ export class GitLabClient {
   }
 
   /**
-   * Manually triggers a new pipeline for a branch or tag
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Pipeline trigger options
-   * @param options.ref - Branch or tag name to run pipeline on (required)
-   * @param options.variables - Array of CI/CD variables as {key, value} pairs
-   * @returns Newly created pipeline details
+   * Manually triggers a new pipeline for a branch/tag `ref`, with optional CI/CD variables.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Pipeline trigger options.
+   * @param options.ref - Branch or tag name to run pipeline on.
+   * @param options.variables - Array of CI/CD variables as key/value pairs.
    */
   async triggerPipeline(
     projectId: string | number,
@@ -1526,17 +1401,14 @@ export class GitLabClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Tags & Releases
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Tags & Releases ───────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists tags in a project, newest first, with optional search
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Tag listing options
-   * @param options.search - Filter tags by name pattern
-   * @param options.limit - Maximum tags to return (default: 20)
-   * @returns Array of tag objects with name, target commit, and message
+   * Lists tags in a project, newest first, optionally filtered by name (default limit 20).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Tag listing options.
+   * @param options.search - Filter tags by name pattern.
+   * @param options.limit - Maximum tags to return.
    */
   async listTags(
     projectId: string | number,
@@ -1553,13 +1425,12 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a new git tag pointing to a specific commit
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Tag creation options
-   * @param options.tag_name - Tag name (e.g., "v1.0.0") (required)
-   * @param options.ref - Branch name, commit SHA, or another tag to create tag from (required)
-   * @param options.message - Optional tag message for annotated tags
-   * @returns Created tag details
+   * Creates a new git tag (`tag_name`) pointing at `ref` (branch, commit SHA, or another tag).
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Tag creation options.
+   * @param options.tag_name - Tag name (e.g. "v1.0.0").
+   * @param options.ref - Branch name, commit SHA, or another tag to create tag from.
+   * @param options.message - Optional tag message for annotated tags.
    */
   async createTag(
     projectId: string | number,
@@ -1576,10 +1447,9 @@ export class GitLabClient {
   }
 
   /**
-   * Gets information about a specific tag
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param tagName - Tag name (e.g., "v1.0.0")
-   * @returns Tag information including name, target commit, and message
+   * Gets information (name, target commit, message) about a specific tag.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param tagName - Tag name (e.g. "v1.0.0").
    */
   async getTag(projectId: string | number, tagName: string): Promise<unknown> {
     this.validateRequired({ project_id: projectId, tag_name: tagName });
@@ -1587,10 +1457,9 @@ export class GitLabClient {
   }
 
   /**
-   * Deletes a git tag from the repository with audit trail
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param tagName - Tag name to delete (e.g., "v1.0.0")
-   * @returns Audit information about the deleted tag
+   * Deletes a git tag; returns the deleted tag's info as an audit trail.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param tagName - Tag name to delete.
    */
   async deleteTag(
     projectId: string | number,
@@ -1621,13 +1490,12 @@ export class GitLabClient {
   }
 
   /**
-   * Creates a release associated with a git tag
-   * @param projectId - Project ID or path (e.g., 123 or "group/project")
-   * @param options - Release creation options
-   * @param options.tag_name - Existing tag name to create release from (required)
-   * @param options.name - Release name (defaults to tag name if not provided)
-   * @param options.description - Release notes in markdown format
-   * @returns Created release details
+   * Creates a release from an existing `tag_name`; `name` defaults to the tag name.
+   * @param projectId - Project ID or path (e.g. 123 or "group/project").
+   * @param options - Release creation options.
+   * @param options.tag_name - Existing tag name to create release from.
+   * @param options.name - Release name (defaults to tag name if not provided).
+   * @param options.description - Release notes in markdown format.
    */
   async createRelease(
     projectId: string | number,
@@ -1646,9 +1514,7 @@ export class GitLabClient {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Initialization
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Initialization ──────────────────────────────────────────────────────────────────────────────
 
 /**
  * Initializes GitLab client from /tokens/token and /tokens/host_url (or GITLAB_URL, then https://gitlab.com).

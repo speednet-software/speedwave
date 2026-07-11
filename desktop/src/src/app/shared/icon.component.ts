@@ -1,12 +1,8 @@
 import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 
 /**
- * Catalog of icon names supported by `<app-icon>`.
- *
- * All glyphs are sourced from the terminal-minimal mockup
- * (`design-proposals/06-terminal-minimal.html`) — the canonical visual
- * reference. Add a new icon by copying the mockup `<path>` markup
- * verbatim into the `@switch` block below and extending this union.
+ * Catalog of icon names supported by `<app-icon>`. Glyphs come verbatim from the terminal-minimal
+ * mockup (`design-proposals/06-terminal-minimal.html`); add one by copying its `<path>` into `@switch` below.
  */
 export type IconName =
   | 'menu'
@@ -31,20 +27,8 @@ export type IconName =
   | 'chart';
 
 /**
- * Inline SVG icon — glyphs taken verbatim from the terminal-minimal mockup
- * (`design-proposals/06-terminal-minimal.html`). Mockup conventions:
- * - Primary nav / action icons use `stroke-width="1.75"`
- * - Interactive toggles / spinners use `stroke-width="2"`
- *
- * Usage:
- * ```html
- * <app-icon name="menu-alt" class="h-4 w-4 text-[var(--ink-mute)]" />
- * <app-icon name="chevron-right" strokeWidth="2" class="h-3 w-3" />
- * ```
- *
- * The host renders as `inline-flex` and the inner `<svg>` fills it via
- * `h-full w-full`. Tailwind sizing/colour applied to `<app-icon>` style
- * the icon as expected. `strokeWidth` defaults to 1.75 (mockup default).
+ * Inline SVG icon, glyphs from the terminal-minimal mockup: nav/action icons use `stroke-width="1.75"`
+ * (the `strokeWidth` default), toggles/spinners use `"2"`. Host is `inline-flex`; inner `<svg>` fills it via `h-full w-full`.
  */
 @Component({
   selector: 'app-icon',

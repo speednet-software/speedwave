@@ -18,9 +18,8 @@ pub async fn get_beta_enabled() -> Result<bool, String> {
     .map_err(|e| e.to_string())
 }
 
-/// Internal write path shared by the tray menu arm. Tray callers spawn this on
-/// the async runtime to avoid blocking the UI thread. No-op (no write, no
-/// event, no menu rebuild) when the value is already what's requested.
+/// Internal write path shared by the tray menu arm. Tray callers spawn this on the async runtime to
+/// avoid blocking the UI thread. No-op (no write/event/rebuild) when already at requested value.
 pub(crate) async fn apply_beta_toggle_inner(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let changed = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
         config::with_config_lock(|| {

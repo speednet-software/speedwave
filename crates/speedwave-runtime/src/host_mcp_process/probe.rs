@@ -1,6 +1,5 @@
-//! Liveness probes shared by every host MCP worker manager.
-//! `is_pid_alive` is a cross-platform PID check; `probe_tcp` is a
-//! TCP connect with optional retry+backoff.
+//! Liveness probes shared by every host MCP worker manager: `is_pid_alive` (cross-platform PID
+//! check) and `probe_tcp` (TCP connect with optional retry+backoff).
 
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
@@ -35,9 +34,8 @@ pub fn is_pid_alive(_pid: u32) -> bool {
     false
 }
 
-/// Probe `<bind_address>:port` over TCP with `attempts` tries and `backoff`
-/// between them. Returns true on the first successful connect. `port == 0`
-/// or an unparseable address always returns false.
+/// Probe `<bind_address>:port` over TCP with `attempts` tries and `backoff` between them.
+/// Returns true on first successful connect; `port == 0` or an unparseable address returns false.
 pub fn probe_tcp(bind_address: &str, port: u16, attempts: u32, backoff: Duration) -> bool {
     if port == 0 {
         return false;

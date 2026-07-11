@@ -1,17 +1,12 @@
 #!/usr/bin/env bats
-# Tests for containers/claude-resources/statusline.sh
-# Runs on the host (macOS) — no container required.
+# Tests for containers/claude-resources/statusline.sh, run on the host (macOS) — no container required.
 
 STATUSLINE="$BATS_TEST_DIRNAME/../../containers/claude-resources/statusline.sh"
 
-# Full rate-limited JSON for reuse across multiple tests.
-# resets_at values are Unix epoch seconds (not ISO strings).
-# 1775580120 = some future timestamp, 1776186000 = ~7 days later.
+# Full rate-limited JSON for reuse across tests; resets_at values are Unix epoch seconds (not ISO).
 FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":"claude-opus-4-6"},"context_window":{"used_percentage":38,"context_window_size":1000000},"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120},"seven_day":{"used_percentage":82,"resets_at":1776186000}}}'
 
-# ---------------------------------------------------------------------------
-# Happy path tests
-# ---------------------------------------------------------------------------
+# ── Happy path tests ────────────────────────────────────────────────────────────
 
 @test "empty stdin outputs default model name 'Claude'" {
     run bash "$STATUSLINE" < /dev/null
@@ -188,9 +183,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"│"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Color threshold tests
-# ---------------------------------------------------------------------------
+# ── Color threshold tests ───────────────────────────────────────────────────────
 
 @test "green below 50%" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":25,"context_window_size":1000000}}'
@@ -264,9 +257,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *$'\033[31m'* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Bar width tests
-# ---------------------------------------------------------------------------
+# ── Bar width tests ─────────────────────────────────────────────────────────────
 
 @test "CTX bar 40% has 2 filled, 3 empty" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":40,"context_window_size":1000000}}'
@@ -290,9 +281,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"░░░░░"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
+# ── Edge cases ──────────────────────────────────────────────────────────────────
 
 @test "completely empty JSON object does not crash" {
     run bash -c "echo '{}' | bash $STATUSLINE"
@@ -392,9 +381,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *'$12.345'* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Git branch tests
-# ---------------------------------------------------------------------------
+# ── Git branch tests ────────────────────────────────────────────────────────────
 
 @test "shows git branch when workspace is a git repo" {
     [[ -n "${GIT_DIR:-}" ]] && skip "git commands unreliable inside git hooks"
@@ -462,9 +449,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" =~ Test.*"$branch".*CTX ]]
 }
 
-# ---------------------------------------------------------------------------
-# Float handling tests
-# ---------------------------------------------------------------------------
+# ── Float handling tests ────────────────────────────────────────────────────────
 
 @test "used_percentage as float truncated to integer" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":38.7,"context_window_size":1000000}}'
@@ -488,9 +473,7 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" == *"12%"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Malformed / broken JSON error path tests
-# ---------------------------------------------------------------------------
+# ── Malformed / broken JSON error path tests ────────────────────────────────────
 
 @test "malformed JSON with extra braces does not crash" {
     run bash -c "echo '{\"rate_limits\":{\"five_hour\":{\"used_percentage\":12}}}}' | bash $STATUSLINE"
@@ -562,9 +545,7 @@ JSON
     [[ "$output" == *"82%"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Security tests
-# ---------------------------------------------------------------------------
+# ── Security tests ──────────────────────────────────────────────────────────────
 
 @test "script does not use curl" {
     ! grep -q 'curl' "$STATUSLINE"

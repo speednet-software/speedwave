@@ -3,11 +3,8 @@ import type { ChatMessage } from '../../models/chat';
 import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number';
 
 /**
- * Mono metadata line rendered below each assistant message:
- * `opus-4.7 · edited · 1,243 tok · cache: 4,012 · $0.018`.
- *
- * Missing data hides the corresponding segment, never the whole row, and
- * never renders NaN or `undefined`. Cost is always shown to 3 decimals.
+ * Mono metadata line below each assistant message (`opus-4.7 · edited · 1,243 tok · cache: 4,012 · $0.018`).
+ * Missing data hides the segment, never the whole row, never NaN/`undefined`; cost is always 3 decimals.
  */
 @Component({
   selector: 'app-message-metadata',

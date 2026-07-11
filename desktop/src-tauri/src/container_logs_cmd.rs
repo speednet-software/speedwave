@@ -54,13 +54,8 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     speedwave_runtime::log_sanitizer::sanitize(&combined[start..].join("\n"))
 }
 
-// ---------------------------------------------------------------------------
-// Unified `/logs` view — merge of every log source the app produces
-// ---------------------------------------------------------------------------
-//
-// Frontend `parseLogLine` recognises `<source-token> | <rest>` (`<source-token>`
-// matches `[\w.-]+`). Compose lines already match; host files are reformatted
-// via `prefix_lines` before concatenation. `get_all_logs` returns the result.
+// ── Unified `/logs` view — merge of every log source the app produces ──
+// Frontend `parseLogLine` expects `<source> | <rest>`; host files reformat via `prefix_lines`.
 
 /// Returns true when the line already carries a `<source-token> | …` prefix
 /// that the frontend parser will recognise.
@@ -88,9 +83,8 @@ fn has_source_prefix(line: &str) -> bool {
     i < bytes.len() && bytes[i] == b'|'
 }
 
-/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`) into the unbracketed
-/// form Angular's `LEVEL_RE` expects. Returns the line unchanged when it does
-/// not match the expected layout.
+/// Rewrites tauri-plugin-log's bracketed level (`[INFO]`) into the unbracketed form Angular's
+/// `LEVEL_RE` expects. Returns the line unchanged when it doesn't match the expected layout.
 fn rewrite_desktop_bracketed_level(line: &str) -> String {
     // ISO timestamp ends at the first space (it contains no spaces).
     let Some(space_idx) = line.find(' ') else {
@@ -116,11 +110,8 @@ fn rewrite_desktop_bracketed_level(line: &str) -> String {
     format!("{before} {level} {after}")
 }
 
-/// Reformats one log source so every non-empty line matches the frontend's
-/// `<source> | <rest>` contract. Empty lines are dropped; already-prefixed
-/// compose lines have their project prefix stripped (only when `project` is
-/// supplied); other lines get the `<source> | ` prefix. Desktop-log lines also
-/// have their bracketed level rewritten (`[INFO]` → `INFO`).
+/// Reformats one log source to the frontend's `<source> | <rest>` contract: drops empty lines,
+/// strips compose lines' project prefix (if given), prefixes others, rewrites desktop-log level
 pub(crate) fn prefix_lines(source: &str, raw: &str, project: Option<&str>) -> String {
     let mut out = String::with_capacity(raw.len() + raw.lines().count() * (source.len() + 4));
     for line in raw.split('\n') {
@@ -167,9 +158,8 @@ pub(crate) struct LogSources {
     pub lima: String,
 }
 
-/// Concatenates the per-source log buffers into a single newline-separated
-/// string in a deterministic source order. Chronological interleaving is the
-/// frontend's job (`sortLogLinesByTime` in `logs-view.component.ts`).
+/// Concatenates the per-source log buffers into one newline-separated string in deterministic
+/// source order. Chronological interleaving is the frontend's job (`sortLogLinesByTime`).
 pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let compose = prefix_lines("compose", &sources.compose, Some(project));
     let desktop = prefix_lines("desktop", &sources.desktop, None);
@@ -275,9 +265,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]

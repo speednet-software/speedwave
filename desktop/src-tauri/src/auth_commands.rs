@@ -1,14 +1,11 @@
-// Auth commands — extracted from main.rs
-//
-// Tauri command wrappers for API-key management and CLI auth command generation.
+// Auth commands — extracted from main.rs. Tauri command wrappers for API-key management and
+// CLI auth command generation.
 
 use crate::types::{check_project, AuthStatusResponse};
 
 use super::{auth, setup_wizard};
 
-// ---------------------------------------------------------------------------
-// Authentication commands (API key only — OAuth is done via CLI)
-// ---------------------------------------------------------------------------
+// ── Authentication commands (API key only — OAuth is done via CLI) ─────────
 
 #[tauri::command]
 pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
@@ -127,9 +124,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
-// CLI auth command generation
-// ---------------------------------------------------------------------------
+// ── CLI auth command generation ─────────────────────────────────────────────
 
 /// Shell-escape a string for use inside single quotes (POSIX standard).
 /// Each embedded single-quote becomes: close-quote, backslash-escaped quote, open-quote.
@@ -140,16 +135,14 @@ pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
 /// `\\?\` prefix stripper — re-export of the runtime SSOT.
 pub(crate) use speedwave_runtime::engine_path::strip_extended_length_prefix as strip_windows_extended_length_prefix;
 
-/// Escapes a string for safe interpolation inside a PowerShell single-quoted
-/// literal. PowerShell single-quote literals are literal — only embedded
-/// single quotes need doubling.
+/// Escapes a string for safe interpolation inside a PowerShell single-quoted literal — only
+/// embedded single quotes need doubling.
 pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Pure command assembly. `is_windows` selects PowerShell-shaped output
-/// (Set-Location, `;`, $env:, '' escape, \\?\ stripping) vs POSIX (cd, &&,
-/// export, '\'' escape).
+/// Pure command assembly. `is_windows` selects PowerShell-shaped output (Set-Location, `;`, $env:,
+/// '' escape, \\?\ stripping) vs POSIX (cd, &&, export, '\'' escape).
 pub(crate) fn build_auth_command_for_platform(
     project: &str,
     project_dir: &str,
@@ -205,9 +198,8 @@ pub(crate) fn build_auth_command_for_platform(
     }
 }
 
-/// Production entry point. Reads the host platform once via `cfg!()` and
-/// delegates to `build_auth_command_for_platform`. Keeping this wrapper
-/// preserves the existing call-site in `get_auth_command` unchanged.
+/// Production entry point. Reads the host platform once via `cfg!()` and delegates to
+/// `build_auth_command_for_platform`, keeping the `get_auth_command` call-site unchanged.
 fn build_auth_command(
     project: &str,
     project_dir: &str,
@@ -269,13 +261,8 @@ fn ensure_cli_installed_at(install: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Returns a CLI command string for the user to copy into their terminal
-/// to authenticate with Claude Code.
-///
-/// When the Desktop app's data directory differs from the default
-/// (`~/.speedwave`), the command includes a data-directory prefix:
-/// `export SPEEDWAVE_DATA_DIR=...` on POSIX shells, or
-/// `$env:SPEEDWAVE_DATA_DIR = '...'` on Windows PowerShell.
+/// Returns a CLI command to authenticate with Claude Code. Non-default data dir prefixes
+/// `export SPEEDWAVE_DATA_DIR=...` (POSIX) or `$env:SPEEDWAVE_DATA_DIR = '...'` (PowerShell).
 #[tauri::command]
 pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;

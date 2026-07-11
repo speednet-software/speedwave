@@ -11,10 +11,8 @@ pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 /// Official Anthropic marketplace the bundled plugins install from.
 pub const BUNDLED_PLUGIN_MARKETPLACE: &str = "claude-plugins-official";
 
-/// Official Anthropic plugins installed and enabled by default at container
-/// start (entrypoint runs `claude plugin install <name>@<marketplace>`).
-/// Versions are not pinned — users may add/update plugins freely; the install
-/// is idempotent. Users can disable any via `/plugin` (persists in settings.json).
+/// Official Anthropic plugins installed and enabled by default at container start (entrypoint
+/// runs `claude plugin install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`.
 pub const BUNDLED_PLUGINS: &[&str] = &[
     "frontend-design",
     "feature-dev",

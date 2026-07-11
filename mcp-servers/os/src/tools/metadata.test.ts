@@ -1,9 +1,4 @@
-/**
- * Metadata Validation Tests
- *
- * Validates that every OS worker tool has required metadata fields:
- * annotations, keywords, and example.
- */
+/** Validates that every OS worker tool has required metadata fields: annotations, keywords, and example. */
 
 import { describe, it, expect, vi } from 'vitest';
 import { META_KEYS, metaValue } from '@speedwave/mcp-shared';

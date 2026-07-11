@@ -1,28 +1,25 @@
-//! Cross-platform owner-only file/directory permission utilities (chmod 0o600/0o700 Unix / DACL Windows).
-//! SSOT for runtime supervisors + Desktop layer.
+//! Cross-platform owner-only file/directory permission utilities (chmod 0o600/0o700 Unix / DACL
+//! Windows). SSOT for runtime supervisors + Desktop layer.
 
 use std::io::Write;
 use std::path::Path;
 
 use tempfile::NamedTempFile;
 
-/// Restrict file permissions to owner-only access.
-/// - Unix: `chmod 0o600`
-/// - Windows: DACL with a single `GENERIC_ALL` ACE for the current user
+/// Restrict file permissions to owner-only access: Unix `chmod 0o600`; Windows DACL with a single
+/// `GENERIC_ALL` ACE for the current user.
 pub fn set_owner_only(path: &Path) -> Result<(), String> {
     set_owner_only_with_mode(path, 0o600)
 }
 
-/// Restrict directory permissions to owner-only access.
-/// - Unix: `chmod 0o700`
-/// - Windows: DACL with a single `GENERIC_ALL` ACE for the current user
+/// Restrict directory permissions to owner-only access: Unix `chmod 0o700`; Windows DACL with a
+/// single `GENERIC_ALL` ACE for the current user.
 pub fn set_owner_only_dir(path: &Path) -> Result<(), String> {
     set_owner_only_with_mode(path, 0o700)
 }
 
-/// SSOT for [`set_owner_only`] and [`set_owner_only_dir`]. Unix mode differs
-/// between files (`0o600`) and dirs (`0o700`); on Windows `SE_FILE_OBJECT`
-/// handles both, so the ACL helper is shared and `_mode` is ignored there.
+/// SSOT for [`set_owner_only`] and [`set_owner_only_dir`]. Unix mode differs between files
+/// (`0o600`) and dirs (`0o700`); Windows `SE_FILE_OBJECT` handles both, so `_mode` is unused.
 fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -40,8 +37,7 @@ fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
 }
 
 /// Restrict a file or directory to the current user only via a Windows DACL.
-/// **Returns `Err` on any Win32 failure** — caller must remove/quarantine the
-/// target.
+/// **Returns `Err` on any Win32 failure** — caller must remove/quarantine the target.
 #[cfg(windows)]
 #[expect(
     unsafe_code,
@@ -132,9 +128,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Flushes file data to stable media. macOS: `F_FULLFSYNC` with fallback to
-/// `fsync` then best-effort no-op on unsupported fs (SMB/NFS). Other Unix:
-/// `fsync`. Windows: no-op.
+/// Flushes file data to stable media. macOS: `F_FULLFSYNC` with fallback to `fsync` then
+/// best-effort no-op on unsupported fs (SMB/NFS). Other Unix: `fsync`. Windows: no-op.
 #[cfg(unix)]
 pub(crate) fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
@@ -172,9 +167,8 @@ pub(crate) fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Best-effort fsync of a directory so a contained rename is itself durable.
-/// Unix-only: opening a directory as a file and `fsync`-ing it commits the
-/// directory entry. Windows has no directory-fsync concept — no-op there.
+/// Best-effort fsync of a directory so a contained rename is itself durable. Unix-only: opening a
+/// directory as a file and fsync-ing it commits the entry; Windows has no directory-fsync concept.
 #[cfg(unix)]
 fn fsync_parent_dir(dir: &Path) {
     if let Ok(handle) = std::fs::File::open(dir) {
@@ -186,9 +180,8 @@ fn fsync_parent_dir(dir: &Path) {
 #[cfg(not(unix))]
 fn fsync_parent_dir(_dir: &Path) {}
 
-/// Write `content` to `path` with owner-only permissions via write-then-atomic-rename;
-/// the destination path never appears world-readable. Windows DACL failure returns
-/// `Err` (ADR-009). Existing directories at `path` are removed first.
+/// Writes `content` to `path` via write-then-atomic-rename, owner-only perms; destination never
+/// appears world-readable. Windows DACL failure returns `Err` (ADR-009); pre-existing dirs removed.
 pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     // Direct callers: `path` is the final name, so commit its directory entry.
     write_restricted_file_synced(path, content, true)
@@ -267,9 +260,8 @@ fn write_restricted_file_synced(
     Ok(())
 }
 
-/// Atomic variant of [`write_restricted_file`]: writes to a sibling `.tmp` file
-/// with owner-only perms, then `rename`s into place. Crash between write and
-/// rename leaves the destination untouched.
+/// Atomic variant of [`write_restricted_file`]: writes to a sibling `.tmp` file with owner-only
+/// perms, then `rename`s into place. Crash between write and rename leaves destination untouched.
 pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -323,9 +315,8 @@ pub fn write_shared_file_atomic(path: &Path, content: &str) -> anyhow::Result<()
     Ok(())
 }
 
-/// Creates `path` (if missing) and sets it to owner-only perms. Unix: `chmod
-/// 0o700`. Windows: DACL with a single `GENERIC_ALL` ACE for the current user.
-/// Idempotent.
+/// Creates `path` (if missing) and sets owner-only perms. Unix: `chmod 0o700`. Windows: DACL with a
+/// single `GENERIC_ALL` ACE for the current user. Idempotent.
 pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)?;
 
@@ -513,9 +504,8 @@ mod tests {
         );
     }
 
-    /// Atomicity smoke test: while the file is being written, the destination
-    /// path either does not exist or already contains the new content with the
-    /// restricted mode — never a partial write with default perms.
+    /// Atomicity smoke test: the destination either doesn't exist or already holds the new content
+    /// with the restricted mode — never a partial write with default perms.
     #[cfg(unix)]
     #[test]
     fn destination_never_observed_world_readable_under_overwrite() {
@@ -535,9 +525,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
-    /// `persist` requires the tempfile to live on the same filesystem as the
-    /// destination. The implementation uses `with_prefix_in(parent)` to ensure
-    /// this — guard against a regression that switches to system tempdir.
+    /// `persist` requires the tempfile on the same filesystem as the destination;
+    /// `with_prefix_in(parent)` ensures this — guard against a regression to system tempdir.
     #[test]
     fn tempfile_created_in_destination_parent() {
         let dir = tempfile::tempdir().unwrap();
@@ -656,9 +645,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
     }
 
-    /// Concurrent writes: two atomic writes racing produce one valid
-    /// destination (the second-to-complete wins via rename), never a
-    /// truncated file. The .tmp cleanup keeps the directory tidy.
+    /// Concurrent writes: two atomic writes racing produce one valid destination (rename picks a
+    /// winner), never a truncated file. The .tmp cleanup keeps the directory tidy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn atomic_concurrent_writes_leave_destination_valid() {
         let dir = tempfile::tempdir().unwrap();
@@ -761,9 +749,8 @@ mod tests {
         fsync_file_durable(&file).expect("fsync of an open writable file must succeed");
     }
 
-    /// Network-mount regression guard: a target that supports neither
-    /// `F_FULLFSYNC` nor plain `fsync` (ENOTSUP) must degrade to best-effort
-    /// `Ok`, NOT fail the write — else workers can't start on SMB/NFS homes.
+    /// Network-mount regression guard: a target supporting neither `F_FULLFSYNC` nor plain `fsync`
+    /// (ENOTSUP) must degrade to best-effort `Ok` — else workers can't start on SMB/NFS homes.
     #[cfg(target_os = "macos")]
     #[test]
     fn fsync_file_durable_best_effort_on_unsupported_fd() {
@@ -809,8 +796,7 @@ mod tests {
     }
 
     /// Source-ordering guard: the data fsync MUST precede `persist` in
-    /// `write_restricted_file_synced`, otherwise the rename can publish a torn
-    /// file. A future edit reordering these would reintroduce the torn-write bug.
+    /// `write_restricted_file_synced`, else the rename can publish a torn file.
     #[test]
     fn fsync_precedes_persist_in_source() {
         let src = include_str!("fs_perms.rs");

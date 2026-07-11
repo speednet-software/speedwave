@@ -1,6 +1,5 @@
 /**
- * Jira Agile (Software) — boards, sprints, board configuration, and moving
- * issues into a sprint. Uses the Agile REST API (`/rest/agile/1.0/*`).
+ * Jira Agile (Software) — boards, sprints, board config, moving issues (`/rest/agile/1.0/*`).
  * @module mcp-atlassian/domains/jira-agile
  */
 
@@ -43,7 +42,6 @@ export interface JiraAgileClient {
 /**
  * Create a Jira Agile client.
  * @param client - The shared Atlassian HTTP client.
- * @returns A {@link JiraAgileClient}.
  */
 export function createJiraAgileClient(client: AtlassianClient): JiraAgileClient {
   /**

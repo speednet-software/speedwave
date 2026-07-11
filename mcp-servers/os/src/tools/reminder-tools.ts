@@ -12,9 +12,7 @@ import {
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-//=============================================================================
-// Types
-//=============================================================================
+// ── Types ──────────────────────────────────────────────────────────────
 
 /** Input parameters for the listReminderLists tool (no params required). */
 type ListReminderListsParams = Record<string, never>;
@@ -57,9 +55,7 @@ interface CompleteReminderParams {
   id: string;
 }
 
-//=============================================================================
-// Tool Definitions
-//=============================================================================
+// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
@@ -311,9 +307,7 @@ const completeReminderTool: Tool = {
   ],
 };
 
-//=============================================================================
-// Handlers
-//=============================================================================
+// ── Handlers ──────────────────────────────────────────────────────────
 
 /**
  * Lists all reminder lists/groups available on this device.
@@ -407,9 +401,7 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
   return { success: true, data: result.parsed };
 }
 
-//=============================================================================
-// Export
-//=============================================================================
+// ── Export ────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {

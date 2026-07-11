@@ -681,11 +681,8 @@ describe('tool-registry', () => {
 
       await initializeRegistry();
 
-      // 'slack' is enabled but the mock returns {} → empty registry entry
-      // All other services (sharepoint, redmine, gitlab, os) are in SERVICE_NAMES
-      // but not enabled → they get an empty {} entry WITHOUT discovery being called.
-      // SERVICE_NAMES will only be the services from getAllServiceNames(),
-      // limited here by the fact that only 'slack' is in ENABLED_SERVICES.
+      // 'slack' is enabled but the mock returns {} → empty registry entry. All other
+      // services are in SERVICE_NAMES but not enabled → empty {} without discovery running.
       expect(TOOL_REGISTRY['slack']).toBeDefined();
     });
   });
@@ -725,9 +722,8 @@ describe('tool-registry', () => {
         deferLoading: false,
       };
 
-      // First call (startup): returns a tool immediately so no retry delays
-      // Second call (first refresh interval): resolves slowly — we advance timers
-      // to fire the interval a second time while first refresh is still "in progress"
+      // First call (startup) resolves immediately; second call (first refresh interval)
+      // resolves slowly — timers advance to fire the interval again mid-refresh.
       let resolveFirstRefresh: () => void;
       const firstRefreshPromise = new Promise<Record<string, ToolMetadata>>((resolve) => {
         resolveFirstRefresh = () => resolve({});

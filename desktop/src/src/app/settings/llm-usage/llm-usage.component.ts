@@ -336,7 +336,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * Fetches the aggregate; safe to call again (e.g. a future refresh button).
-   * @param project - Project to fetch usage for; defaults to the bound input.
+   * @param project - the project to fetch usage for; defaults to the current project signal
    */
   async refresh(project: string = this.project()): Promise<void> {
     this.clearRepoll();
@@ -364,12 +364,11 @@ export class LlmUsageComponent implements OnDestroy {
   }
 
   /**
-   * Re-polls on a bounded backoff while the aggregate is unpriced but still
-   * enrichable — OpenRouter cost lands async (deferred), like the footer.
+   * Re-polls on a bounded backoff while the aggregate is unpriced but still enrichable (OpenRouter cost lands async, like the footer).
    * Permanently-unpriced aggregates (local/subscription) never re-poll.
-   * @param project - Project to refetch usage for.
-   * @param summary - Latest summary; drives the unpriced/deferred check.
-   * @param attempt - Backoff index (0 on the first schedule).
+   * @param project - the project to re-poll usage for
+   * @param summary - the most recently fetched usage summary
+   * @param attempt - the current backoff attempt index
    */
   private scheduleDeferredRepoll(project: string, summary: UsageSummary, attempt = 0): void {
     const backoff = LlmUsageComponent.DEFERRED_REPOLL_MS;
@@ -412,7 +411,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * Thousands-separated integer for template rendering.
-   * @param n - Raw count.
+   * @param n - the token count to format
    */
   num(n: number): string {
     return formatTokens(n);
@@ -420,7 +419,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * Short token count for stat cards (`297k`, `1.2M`).
-   * @param n - Raw token count.
+   * @param n - the token count to format
    */
   short(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -430,7 +429,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * USD with 2 decimals (4 below 10 cents, where precision matters).
-   * @param n - Cost in dollars.
+   * @param n - the USD amount to format
    */
   usd(n: number): string {
     return formatUsd(n, n < 0.1 ? 4 : 2);
@@ -438,7 +437,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * Ratio as a percentage label (`42%`).
-   * @param ratio - 0–1 fraction.
+   * @param ratio - the ratio to format, in [0,1]
    */
   pct(ratio: number): string {
     return `${Math.round(ratio * 100)}%`;
@@ -446,7 +445,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * Share of input tokens from prompt cache, clamped to [0,1].
-   * @param bucket - Aggregate bucket (totals or a table row).
+   * @param bucket - the usage bucket to compute the cache hit rate for
    */
   cacheHitRate(bucket: UsageBucket): number {
     const denom =
@@ -459,7 +458,7 @@ export class LlmUsageComponent implements OnDestroy {
 
   /**
    * Mean output throughput (tok/s) over timed records, null when none.
-   * @param bucket - Aggregate bucket (totals or a table row).
+   * @param bucket - the usage bucket to compute throughput for
    */
   tokensPerSec(bucket: UsageBucket): number | null {
     // Falsy guard also covers payloads from a binary without this field.
@@ -470,7 +469,7 @@ export class LlmUsageComponent implements OnDestroy {
 
 /**
  * Flattens day → model maps into table rows, newest day first.
- * @param summary - Aggregate returned by the `get_llm_usage` command.
+ * @param summary - the usage summary to flatten
  */
 export function flattenRows(summary: UsageSummary): UsageRow[] {
   const rows: UsageRow[] = [];
@@ -484,9 +483,8 @@ export function flattenRows(summary: UsageSummary): UsageRow[] {
 }
 
 /**
- * Provider segment of a model string: `local/x/y` → `local`, bare Anthropic
- * model ids (`claude-…`) → `anthropic`.
- * @param model - Model string as logged by the callback.
+ * Provider segment of a model string: `local/x/y` → `local`, bare Anthropic model ids (`claude-…`) → `anthropic`.
+ * @param model - the model id to extract the provider from
  */
 export function providerOf(model: string): string {
   const slash = model.indexOf('/');
@@ -497,10 +495,9 @@ export function providerOf(model: string): string {
 const PERMANENTLY_UNPRICED_PROVIDERS: ReadonlySet<string> = new Set(['local', 'anthropic']);
 
 /**
- * True when some null-cost row may still be priced by a later enrichment pass
- * (deferred OpenRouter). Local and bare-Anthropic (subscription/unknown) rows
- * stay `null` forever, so a summary of only those never re-polls.
- * @param summary - Aggregate returned by the `get_llm_usage` command.
+ * True when some null-cost row may still be priced by a later enrichment pass (deferred OpenRouter).
+ * Local and bare-Anthropic (subscription/unknown) rows stay `null` forever, so a summary of only those never re-polls.
+ * @param summary - the usage summary to inspect
  */
 export function hasDeferrableUnpricedRows(summary: UsageSummary): boolean {
   for (const models of Object.values(summary.days)) {
@@ -514,10 +511,9 @@ export function hasDeferrableUnpricedRows(summary: UsageSummary): boolean {
 }
 
 /**
- * Builds the stacked daily-tokens series over the most recent
- * {@link DAILY_CHART_DAYS} days of recorded activity (oldest first).
+ * Builds the stacked daily-tokens series over the most recent {@link DAILY_CHART_DAYS} days of recorded activity (oldest first).
  * Segment heights are % of the tallest bar's total.
- * @param summary - Aggregate returned by the `get_llm_usage` command.
+ * @param summary - the usage summary to build the series from
  */
 export function dailySeries(summary: UsageSummary): DayBar[] {
   const days = Object.keys(summary.days).sort().slice(-DAILY_CHART_DAYS);
@@ -539,10 +535,9 @@ export function dailySeries(summary: UsageSummary): DayBar[] {
 }
 
 /**
- * Aggregates total tokens per provider into ordered share-bar segments
- * (largest first). Slivers are floored at 2% width so they stay visible;
+ * Aggregates total tokens per provider into ordered share-bar segments (largest first). Slivers are floored at 2% width so they stay visible;
  * legend percentages use the returned `total`, not the floored width.
- * @param summary - Aggregate returned by the `get_llm_usage` command.
+ * @param summary - the usage summary to aggregate
  */
 export function providerShares(summary: UsageSummary): {
   shares: ProviderShare[];
@@ -570,9 +565,8 @@ export function providerShares(summary: UsageSummary): {
 }
 
 /**
- * Folds the per-day hourly histogram into a Monday-first weekday × hour
- * grid. Intensity is linear against the busiest cell.
- * @param summary - Aggregate returned by the `get_llm_usage` command.
+ * Folds the per-day hourly histogram into a Monday-first weekday × hour grid. Intensity is linear against the busiest cell.
+ * @param summary - the usage summary to fold into the heatmap grid
  */
 export function heatmapRows(summary: UsageSummary): { rows: HeatCell[][]; max: number } {
   const grid: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0) as number[]);

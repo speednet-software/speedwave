@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# Verifies a draft GitHub Release contains every expected updater asset.
-# Idempotent, read-only. Safe to retry. Runs portable Bash (no Bash-4 builtins
-# like `mapfile`) so BATS tests work on macOS default bash 3.2.
-#
-# Expected asset names are derived from `assetNamePattern` in
-# .github/workflows/desktop-release.yml (tauri-apps/tauri-action pin).
-# If either changes, update both files in the same PR.
-#
-# `latest.json.version` MUST be bare semver (no `v` prefix) — if tauri-action
-# ever changes this, update the Python assertion below and the BATS fixture.
-#
-# Required env: VERSION REPO RID TAG_NAME GH_TOKEN (latter read by gh)
+# Verifies a draft Release has every updater asset. Idempotent/read-only/retry-safe; portable
+# Bash (no mapfile, bash 3.2). Names ← desktop-release.yml assetNamePattern; version bare semver.
 set -euo pipefail
 
 : "${VERSION:?VERSION required}"

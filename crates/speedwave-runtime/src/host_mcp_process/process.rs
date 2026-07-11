@@ -1,6 +1,5 @@
-//! Generic [`HostMcpProcess<S>`] — SSOT spawn/stop/respawn/cleanup
-//! lifecycle shared by host MCP worker managers (mcp-os, oauth) via a
-//! [`WorkerSpec`] impl per manager.
+//! Generic [`HostMcpProcess<S>`] — SSOT spawn/stop/respawn/cleanup lifecycle shared by host MCP
+//! worker managers (mcp-os, oauth) via a [`WorkerSpec`] impl per manager.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -12,9 +11,8 @@ use super::lock::{self, LockFile, LockService};
 use super::probe::probe_tcp;
 use super::{drain_and_read_port, is_node_process, kill_process};
 
-/// Worker-specific contract every per-manager `Spec` implements.
-/// `apply_env`, `pre_spawn`, `extra_cleanup_files` and `probe` capture
-/// the only places three existing managers actually differ.
+/// Worker-specific contract every per-manager `Spec` implements. `apply_env`, `pre_spawn`,
+/// `extra_cleanup_files` and `probe` capture the only places the three existing managers differ.
 pub trait WorkerSpec: Send + 'static {
     /// Service tag persisted in `lock.json` and used by all log labels.
     fn service(&self) -> LockService;
@@ -23,33 +21,28 @@ pub trait WorkerSpec: Send + 'static {
     /// hyphenated form of the service tag.
     fn log_tag(&self) -> &'static str;
 
-    /// File name of the unified lock file relative to `state_dir`.
-    /// Default `consts::PER_PROJECT_LOCK_FILE`; mcp-os singleton uses
-    /// `consts::MCP_OS_LOCK_FILE` in `data_dir`.
+    /// File name of the unified lock file relative to `state_dir`. Default
+    /// `consts::PER_PROJECT_LOCK_FILE`; mcp-os singleton uses `consts::MCP_OS_LOCK_FILE`.
     fn lock_file_name(&self) -> &'static str {
         crate::consts::PER_PROJECT_LOCK_FILE
     }
 
-    /// Inject worker-specific env vars on top of the SSOT
-    /// [`apply_child_env`] base policy. Receives the spawn context so
-    /// the impl can wire `<X>_AUTH_TOKEN`, `<X>_CONFIG_PATH`, etc.
+    /// Inject worker-specific env vars on top of the SSOT [`apply_child_env`] base policy;
+    /// receives the spawn context so the impl can wire `<X>_AUTH_TOKEN`, `<X>_CONFIG_PATH`, etc.
     fn apply_env(&self, cmd: &mut Command, ctx: &SpawnContext);
 
-    /// Hook invoked after `state_dir` creation and stale-PID cleanup,
-    /// before the Node spawn. Worker writes its disk state here (oauth
-    /// bearer map + per-service bearer files).
+    /// Hook invoked after `state_dir` creation and stale-PID cleanup, before the Node spawn.
+    /// Worker writes disk state here (oauth bearer map + per-service bearer files).
     fn pre_spawn(&self, _ctx: &SpawnContext) -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Liveness probe variant. mcp_os does pid+TCP via
-    /// `is_mcp_os_alive_in`; oauth is 3-attempt TCP with backoff
-    /// (retries matter — ADR-060).
+    /// Liveness probe variant. mcp_os does pid+TCP via `is_mcp_os_alive_in`; oauth is 3-attempt
+    /// TCP with backoff (retries matter — ADR-060).
     fn probe(&self) -> LivenessProbe;
 
-    /// Extra files removed alongside `lock.json` on
-    /// [`HostMcpProcess::cleanup_files`]. Per-service bearer files and
-    /// `oauth.json` are NOT in this list (they survive supervisor respawn).
+    /// Extra files removed alongside `lock.json` on [`HostMcpProcess::cleanup_files`]. Per-service
+    /// bearer files and `oauth.json` are NOT in this list — they survive supervisor respawn.
     fn extra_cleanup_files(&self, _ctx: &SpawnContext) -> Vec<PathBuf> {
         Vec::new()
     }
@@ -89,9 +82,8 @@ impl LivenessProbe {
     }
 }
 
-/// Context passed to every [`WorkerSpec`] hook. Carries the freshly
-/// minted auth-token, the state dir paths and the log file location —
-/// everything a hook needs without poking at globals.
+/// Context passed to every [`WorkerSpec`] hook: freshly minted auth-token, state dir paths, and
+/// log file location — everything a hook needs without poking at globals.
 pub struct SpawnContext<'a> {
     /// Per-worker state directory.
     pub state_dir: &'a Path,
@@ -105,15 +97,13 @@ pub struct SpawnContext<'a> {
     pub data_dir: &'a Path,
 }
 
-/// Generic host MCP worker process manager. The real managers
-/// (mcp_os, oauth) are type aliases over this struct with a
-/// concrete `WorkerSpec`.
+/// Generic host MCP worker process manager. The real managers (mcp_os, oauth) are type aliases
+/// over this struct with a concrete `WorkerSpec`.
 pub struct HostMcpProcess<S: WorkerSpec> {
     pub(crate) spec: S,
     pub(crate) child: Option<Child>,
-    /// Job Object handle — load-bearing `Drop` side effect (kill-on-close).
-    /// `_` prefix suppresses dead_code; field MUST live as long as `child`.
-    /// `None` on non-Windows and on attach failure. See `job_object` + ADR-048.
+    /// Job Object handle — load-bearing `Drop` side effect (kill-on-close). `_` prefix suppresses
+    /// dead_code; field MUST live as long as `child`. `None` off-Windows/attach failure; ADR-048.
     pub(crate) _job: Option<super::job_object::JobHandle>,
     pub(crate) drain_handles: Vec<JoinHandle<()>>,
     pub(crate) data_dir: PathBuf,
@@ -261,9 +251,8 @@ impl<S: WorkerSpec> HostMcpProcess<S> {
 }
 
 impl<S: WorkerSpec + Clone> HostMcpProcess<S> {
-    /// Stop the old worker and spawn a fresh one at the same script/spec.
-    /// Disarms the old instance's `Drop` so it cannot delete the
-    /// replacement's `lock.json` or spec-extras on scope exit.
+    /// Stop the old worker and spawn a fresh one at the same script/spec. Disarms the old
+    /// instance's `Drop` so it can't delete the replacement's lock.json/spec-extras on scope exit.
     pub fn respawn(&mut self) -> anyhow::Result<u16> {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
@@ -300,14 +289,12 @@ impl<S: WorkerSpec> Drop for HostMcpProcess<S> {
     }
 }
 
-/// The greppable phrase the live-worker-kill WARN line carries. SSOT shared
-/// with `resources::OOM_MESSAGE`, whose exit-137 guidance tells users to grep
-/// for it — the two must never drift (a test in `resources.rs` pins it).
+/// The greppable phrase the live-worker-kill WARN line carries. SSOT shared with
+/// `resources::OOM_MESSAGE`'s exit-137 guidance — must never drift (`resources.rs` pins it).
 pub(crate) const KILL_STALE_LOG_MARKER: &str = "killing a LIVE worker";
 
-/// Kill a stale node process recorded by a previous spawn. SSOT —
-/// replaces three identical `kill_stale_node` shims that used to live
-/// in each worker module.
+/// Kill a stale node process recorded by a previous spawn. SSOT — replaces three identical
+/// `kill_stale_node` shims that used to live in each worker module.
 pub fn kill_stale_node(pid: u32, service_tag: &str) {
     if !is_node_process(pid) {
         log::debug!("{service_tag}: stale PID {pid} is not a node process — skipping kill");
@@ -474,9 +461,8 @@ mod tests {
         );
     }
 
-    /// FakeEnv proves that apply_child_env composes with WorkerSpec::apply_env
-    /// — base policy runs first (env_clear + PATH/HOME), then the spec
-    /// adds worker-specific vars on top.
+    /// FakeEnv proves apply_child_env composes with WorkerSpec::apply_env — base policy runs
+    /// first (env_clear + PATH/HOME), then the spec adds worker-specific vars on top.
     #[test]
     fn spec_apply_env_runs_on_top_of_base_policy() {
         let env = FakeEnv::empty().with("PATH", "/usr/bin").with("HOME", "/h");

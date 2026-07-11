@@ -58,12 +58,8 @@ impl CloudStorageProvider {
     }
 }
 
-/// Detects whether `path` is inside a known CloudStorage managed directory.
-///
-/// Returns `Some(provider)` if the path is under a recognized CloudStorage
-/// root, `None` otherwise. macOS-only; other platforms always return `None`.
-/// Tokens match only at component boundaries (`~/Library/CloudStorage/<Token>...`
-/// or top-level `~/<Token>...`).
+/// Detects whether `path` is inside a known CloudStorage managed directory. `Some(provider)` if
+/// under a recognized root (macOS-only; else `None`); tokens match only at component boundaries.
 #[cfg(target_os = "macos")]
 pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider> {
     /// Returns true if `haystack` contains `needle` followed by a path
@@ -127,9 +123,8 @@ pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider>
     None
 }
 
-/// Windows: matches `path` against the `%OneDrive%` sync root (covers KFM —
-/// redirected Desktop/Documents live under it) plus Dropbox/Google Drive
-/// well-known component names.
+/// Windows: matches `path` against the `%OneDrive%` sync root (covers KFM — redirected
+/// Desktop/Documents live under it) plus Dropbox/Google Drive well-known component names.
 #[cfg(target_os = "windows")]
 pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider> {
     detect_cloudstorage_provider_windows(path, std::env::var_os("OneDrive").map(Into::into))
@@ -172,9 +167,8 @@ pub fn is_permission_error(err: &std::io::Error) -> bool {
     matches!(err.kind(), ErrorKind::PermissionDenied)
 }
 
-/// Probes whether `path` is readable, bounded by `PROBE_TIMEOUT`.
-/// A permission error is returned as the TCC failure; other errors and
-/// timeouts return `Ok(())` for the caller to handle normally.
+/// Probes whether `path` is readable, bounded by `PROBE_TIMEOUT`. A permission error is returned as
+/// the TCC failure; other errors and timeouts return `Ok(())` for the caller to handle normally.
 pub fn check_path_readable_with_timeout(path: &Path) -> Result<(), std::io::Error> {
     let path_owned = path.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -190,11 +184,8 @@ pub fn check_path_readable_with_timeout(path: &Path) -> Result<(), std::io::Erro
     }
 }
 
-/// Checks whether a path under a detected CloudStorage provider is readable.
-///
-/// Returns:
-/// - `Ok(())` if not a CloudStorage path, or if readable
-/// - `Err(provider)` if CloudStorage detected and TCC EPERM observed
+/// Checks whether a path under a detected CloudStorage provider is readable. `Ok(())` if not a
+/// CloudStorage path or readable; `Err(provider)` if CloudStorage detected and TCC EPERM observed.
 pub fn check_cloudstorage_readability(path: &Path) -> Result<(), CloudStorageProvider> {
     let Some(provider) = detect_cloudstorage_provider(path) else {
         return Ok(());

@@ -1,7 +1,6 @@
 /**
- * SSOT for the "assigned_to_me | created_by_me | all" identity-scope filter shared
- * by listMrIds/listMergeRequests and listIssues.
- * @module identity-scopes
+ * SSOT for the "assigned_to_me | created_by_me | all" identity-scope filter shared by
+ * listMrIds/listMergeRequests and listIssues.
  */
 
 export const IDENTITY_SCOPES = ['assigned_to_me', 'created_by_me', 'all'] as const;

@@ -16,9 +16,8 @@ import { DIFF_OUTPUT_SCHEMA } from './schemas.js';
 import { TOOL_NAMES } from '../tool-names.js';
 
 /**
- * Maps a normalized commit to the compact summary shape returned by the commit-list tools.
- * @param c - Normalized commit from the GitHub client
- * @returns Compact `{ sha, message, author, date, html_url }` summary
+ * Maps a normalized commit to the compact `{ sha, message, author, date, html_url }` summary returned by the commit-list tools.
+ * @param c - Normalized commit
  */
 function commitSummary(c: GitHubCommit): {
   sha: string;

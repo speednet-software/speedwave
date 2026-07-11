@@ -1,19 +1,6 @@
 /**
- * Page Tools — CRUD for SharePoint Pages (`microsoft.graph.sitePage`).
- *
- * 8 tools (PR4):
- *   listPages, getPage, createPage, updatePage,
- *   addWebPart, updateWebPart, removeWebPart, publishPage
- *
- * ADR-060 / PR3 site-policy invariant — by omission:
- *   None of these tools accepts `site_id` from the model. Every Graph call
- *   uses the cached `siteId` from `/tokens/site_id` (read at worker init).
- *
- * Scope requirement: `Sites.Manage.All` is requested at consent time (PR3).
- * `createPage` formally needs `Sites.ReadWrite.All`, a subset of Sites.Manage.All.
- *
- * Web part types: text web parts (via `innerHtml`) plus the 14 standard
- * web parts Graph documents — see `STANDARD_WEBPART_TYPES` in pages-client.ts.
+ * Page Tools — CRUD for SharePoint Pages (`microsoft.graph.sitePage`): listPages, getPage, createPage, updatePage, addWebPart, updateWebPart, removeWebPart, publishPage (PR4).
+ * ADR-060 site policy: no tool accepts `site_id`, all Graph calls use the cached `siteId`; scope is `Sites.Manage.All` (createPage needs the `Sites.ReadWrite.All` subset); web parts are text (`innerHtml`) plus the 14 standard types in `STANDARD_WEBPART_TYPES` (pages-client.ts).
  */
 
 import {
@@ -37,11 +24,8 @@ import {
 } from '../graph/pages-client.js';
 
 /**
- * A web part on a SharePoint page — projection of the Graph `webPart` resource.
- * Currently only `textWebPart` is exposed via the write tools (PR4 MVP).
- * `standardWebPart` (image, link, etc.) requires Graph-specific GUID-typed
- * payloads with a large web-part-type catalog and is deferred — see
- * https://learn.microsoft.com/en-us/graph/api/resources/standardwebpart.
+ * A web part on a page — projection of the Graph `webPart` resource. Only `textWebPart` is exposed via the write tools (PR4 MVP);
+ * `standardWebPart` needs Graph GUID-typed payloads and is deferred, see https://learn.microsoft.com/en-us/graph/api/resources/standardwebpart.
  */
 export interface WebPart {
   id: string;
@@ -79,9 +63,7 @@ export interface SitePage {
   canvasLayout?: CanvasLayout;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool schemas
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool schemas ──────────────────────────────────────────────────────────────────
 
 const listPagesTool: Tool = {
   name: 'listPages',
@@ -412,9 +394,7 @@ const generateTableOfContentsTool: Tool = {
   },
 };
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Handlers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Handlers ──────────────────────────────────────────────────────────────────────
 
 function pages(client: SharePointClient): PagesClient {
   return new PagesClient(client);
@@ -429,7 +409,7 @@ function wrapErr(code: string, error: unknown): ToolResult {
 
 /**
  * Handler for `listPages` — GET all pages in the configured site.
- * @param client - the SharePoint client
+ * @param client - Configured SharePoint client.
  */
 async function handleListPages(client: SharePointClient): Promise<ToolResult> {
   try {
@@ -452,9 +432,9 @@ async function handleListPages(client: SharePointClient): Promise<ToolResult> {
 
 /**
  * Handler for `getPage` — GET one page with expanded `canvasLayout`.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - SharePoint page id to fetch
+ * @param client - Configured SharePoint client.
+ * @param params - Lookup params.
+ * @param params.pageId - Graph page id, from listPages.
  */
 async function handleGetPage(
   client: SharePointClient,
@@ -471,12 +451,12 @@ async function handleGetPage(
 }
 
 /**
- * Handler for `createPage` — POST a new `microsoft.graph.sitePage`.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.title - display title
- * @param params.name - filename suffix (`.aspx` is appended by Graph)
- * @param params.canvasLayout - optional initial layout (omitted = empty page)
+ * Handler for `createPage` — POST a new `microsoft.graph.sitePage`; `name` gets `.aspx` appended by Graph.
+ * @param client - Configured SharePoint client.
+ * @param params - New page fields.
+ * @param params.title - Page title.
+ * @param params.name - Filename suffix.
+ * @param params.canvasLayout - Optional initial layout; omitted means an empty page.
  */
 async function handleCreatePage(
   client: SharePointClient,
@@ -524,9 +504,9 @@ interface UpdatePageParams {
 }
 
 /**
- * Handler for `updatePage` — PATCH a sitePage (any subset of metadata fields plus canvasLayout).
- * @param client - the SharePoint client
- * @param params - input parameters; pageId is required, every other field is optional
+ * Handler for `updatePage` — PATCH a sitePage; `pageId` is required, every other field optional.
+ * @param client - Configured SharePoint client.
+ * @param params - Fields to update.
  */
 async function handleUpdatePage(
   client: SharePointClient,
@@ -567,15 +547,15 @@ async function handleUpdatePage(
 }
 
 /**
- * Handler for `addWebPart` — POST a text or standard web part to a column.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
- * @param params.sectionIndex - 0-based horizontal section index in the current layout
- * @param params.columnIndex - 0-based column index within that section
- * @param params.innerHtml - HTML body for a text web part (mutually exclusive with `webPartType`)
- * @param params.webPartType - standard web part name (key of STANDARD_WEBPART_TYPES)
- * @param params.data - optional `webPartData` payload for standard web parts
+ * Handler for `addWebPart` — POST a text or standard web part to a column; `innerHtml` and `webPartType` are mutually exclusive.
+ * @param client - Configured SharePoint client.
+ * @param params - New web part fields.
+ * @param params.pageId - Graph page id, from listPages.
+ * @param params.sectionIndex - 0-based section index.
+ * @param params.columnIndex - 0-based column index.
+ * @param params.innerHtml - HTML body for a text web part (required when `webPartType` is omitted).
+ * @param params.webPartType - A key of STANDARD_WEBPART_TYPES (required when `innerHtml` is omitted).
+ * @param params.data - Optional webPartData payload for standard web parts.
  */
 async function handleAddWebPart(
   client: SharePointClient,
@@ -703,11 +683,11 @@ async function handleAddWebPart(
 
 /**
  * Handler for `updateWebPart` — PATCH a text web part directly by id.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
- * @param params.webPartId - Graph id of the web part to replace
- * @param params.innerHtml - new HTML body
+ * @param client - Configured SharePoint client.
+ * @param params - Fields to update.
+ * @param params.pageId - Graph page id, from listPages.
+ * @param params.webPartId - Graph web part id, from getPage's canvasLayout or addWebPart's response.
+ * @param params.innerHtml - New HTML body for the text web part.
  */
 async function handleUpdateWebPart(
   client: SharePointClient,
@@ -733,10 +713,10 @@ async function handleUpdateWebPart(
 
 /**
  * Handler for `removeWebPart` — DELETE a web part directly by id.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
- * @param params.webPartId - Graph id of the web part to remove
+ * @param client - Configured SharePoint client.
+ * @param params - Target web part.
+ * @param params.pageId - Graph page id, from listPages.
+ * @param params.webPartId - Graph web part id, from getPage's canvasLayout or addWebPart's response.
  */
 async function handleRemoveWebPart(
   client: SharePointClient,
@@ -756,9 +736,9 @@ async function handleRemoveWebPart(
 
 /**
  * Handler for `publishPage` — POST `/publish` to make a draft page visible.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
+ * @param client - Configured SharePoint client.
+ * @param params - Target page.
+ * @param params.pageId - Graph page id, from listPages.
  */
 async function handlePublishPage(
   client: SharePointClient,
@@ -776,14 +756,14 @@ async function handlePublishPage(
 
 /**
  * Handler for `generateTableOfContents` — scans text web parts for headings, injects ids for anchor resolution, renders a nested ToC as HTML.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
- * @param params.sectionIndex - 0-based section to host the ToC
- * @param params.columnIndex - 0-based column within that section
- * @param params.title - optional header rendered above the ToC
- * @param params.minLevel - lowest heading level to include (default 1)
- * @param params.maxLevel - highest heading level to include (default 3)
+ * @param client - Configured SharePoint client.
+ * @param params - ToC generation params.
+ * @param params.pageId - Graph page id, from listPages.
+ * @param params.sectionIndex - 0-based section index for the new ToC web part.
+ * @param params.columnIndex - 0-based column index for the new ToC web part.
+ * @param params.title - Optional `<h2>` rendered above the ToC.
+ * @param params.minLevel - Lowest heading level to include (default 1).
+ * @param params.maxLevel - Highest heading level to include (default 3).
  */
 async function handleGenerateTableOfContents(
   client: SharePointClient,
@@ -888,17 +868,17 @@ async function handleGenerateTableOfContents(
 
 /**
  * Handler for `addImageWebPart` — adds an image web part backed by a real driveItem from Site Assets or Documents.
- * @param client - the SharePoint client
- * @param params - input parameters
- * @param params.pageId - target page id
- * @param params.sectionIndex - 0-based horizontal section
- * @param params.columnIndex - 0-based column inside the section
- * @param params.sharepointPath - path relative to the drive root (e.g. `Shared Documents/hero.jpg`)
- * @param params.altText - optional alternative text
- * @param params.captionText - optional caption
- * @param params.overlayText - optional overlay text
- * @param params.alignment - "Left" | "Center" | "Right" (default Center)
- * @param params.fixAspectRatio - default false
+ * @param client - Configured SharePoint client.
+ * @param params - New image web part fields.
+ * @param params.pageId - Graph page id, from listPages.
+ * @param params.sectionIndex - 0-based section index.
+ * @param params.columnIndex - 0-based column index.
+ * @param params.sharepointPath - Path relative to the drive root (e.g. `Shared Documents/hero.jpg`); the file must already exist.
+ * @param params.altText - Optional accessibility alt text.
+ * @param params.captionText - Optional caption text.
+ * @param params.overlayText - Optional overlay text.
+ * @param params.alignment - Image alignment; defaults to Center.
+ * @param params.fixAspectRatio - Whether to fix the aspect ratio; defaults to false.
  */
 async function handleAddImageWebPart(
   client: SharePointClient,
@@ -1014,14 +994,11 @@ async function handleAddImageWebPart(
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Factory
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Factory ───────────────────────────────────────────────────────────────────────
 
 /**
- * Build the page tool definitions. When the client is null the tools return
- * a "not configured" error per the existing SharePoint convention.
- * @param client - the initialized SharePoint client (or null)
+ * Build the page tool definitions.
+ * @param client - Configured SharePoint client, or null when not configured.
  */
 export function createPageTools(client: SharePointClient | null): ToolDefinition[] {
   const withClient =

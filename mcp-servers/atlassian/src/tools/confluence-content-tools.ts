@@ -1,6 +1,5 @@
 /**
- * Confluence page-content tools — addPageComment, getPageComments,
- * addPageLabels, getPageLabels, listAttachments. 5 tools.
+ * Confluence page-content tools — comments, labels, attachment listing. 5 tools.
  * @module mcp-atlassian/tools/confluence-content-tools
  */
 
@@ -175,7 +174,6 @@ const listAttachmentsTool: Tool = {
 /**
  * Build the Confluence page-content tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for page comments/labels/attachments.
  */
 export function createConfluenceContentTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [

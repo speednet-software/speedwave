@@ -16,8 +16,8 @@ type FullPage = ConfluencePage & { version: number };
 /** Client for Confluence page operations. */
 export interface ConfluencePagesClient {
   /**
-   * Search content with CQL via the v1 search API. Returns matched pages
-   * normalised to v2 shape (best-effort — search results omit version/body).
+   * Search content with CQL (v1 API); results are best-effort normalised to v2 shape,
+   * omitting version/body.
    */
   search(params: { cql: string; limit?: number }): Promise<ConfluencePage[]>;
   /** Get a page by ID (v2), optionally including the storage-format body. */
@@ -36,8 +36,8 @@ export interface ConfluencePagesClient {
     parentId?: string;
   }): Promise<ConfluencePage>;
   /**
-   * Update a page (v2). The current version is fetched automatically and
-   * incremented. Only provided fields change.
+   * Update a page (v2); the current version is fetched and incremented automatically.
+   * Only provided fields change.
    */
   update(
     pageId: string,
@@ -48,7 +48,7 @@ export interface ConfluencePagesClient {
 }
 
 /**
- * Create a Confluence pages client.
+ * Create a {@link ConfluencePagesClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
  * @returns A {@link ConfluencePagesClient}.
  */
@@ -56,9 +56,10 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
   /** Resolve a space ID → space key, caching within the client instance. */
   const spaceKeyCache = new Map<string, string>();
   /**
-   * Resolve a space ID → key via the cache or {@link resolveConfluenceSpaceKey}.
+   * Resolve a space ID → key via the cache or {@link resolveConfluenceSpaceKey}; `pageId`
+   * is included in error context.
    * @param spaceId - The Confluence space ID from a page payload.
-   * @param pageId - The page the lookup is for, included in the error context.
+   * @param pageId - Optional page ID, included in error context.
    */
   const resolveSpaceKey = async (spaceId: string, pageId?: string): Promise<string | undefined> => {
     if (!spaceId) return undefined;
@@ -182,13 +183,11 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Normalisers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
- * Map a v2 page object to {@link ConfluencePage}. A full page response always
- * carries a version, so the result type narrows `version` to `number`.
+ * Map a v2 page object to {@link ConfluencePage}. A full page response always carries a version,
+ * so the result type narrows `version` to `number`.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised page.
  */
@@ -211,9 +210,8 @@ export function mapV2Page(raw: unknown): FullPage {
 }
 
 /**
- * Map a v2 child-page object to {@link ConfluencePage}. Child-listing responses
- * carry no `spaceId` or `version` detail, so `version` is `null` ("unknown") —
- * callers must re-fetch the page via `getPage` before updating it.
+ * Map a v2 child-page object to {@link ConfluencePage}. Child-listing responses carry no `spaceId`
+ * or `version` detail (`version` is `null`) — callers must re-fetch via `getPage` before updating.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised (partial) page.
  */
@@ -230,8 +228,8 @@ export function mapV2ChildPage(raw: unknown): ConfluencePage {
 }
 
 /**
- * Map a v1 `/content/search` result to {@link ConfluencePage} (best-effort).
- * Search results omit version detail, so `version` is `null` ("unknown").
+ * Map a v1 `/content/search` result to {@link ConfluencePage} (best-effort, `version` is `null`).
+ * Returns `null` if the result isn't a page.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised (partial) page, or `null` if the result isn't a page.
  */

@@ -19,11 +19,8 @@ import { LiveTranscriptComponent } from './live-transcript/live-transcript.compo
 import { SessionListComponent } from './session-list/session-list.component';
 
 /**
- * Meeting transcription tab (beta-gated by the route guard). Left pane =
- * recordings list; right pane = recording controls + the live transcript. Audio
- * is transcribed locally; the speech model is downloaded in Settings. "Send to
- * Claude" uses the network — the banner says so. When no model is downloaded
- * yet, a gate (like the Claude auth gate) points the user to Settings.
+ * Meeting transcription tab (beta-gated): recordings list + controls/live transcript. Transcription
+ * is local; only "Send to Claude" uses the network. No model yet → gate points to Settings.
  */
 @Component({
   selector: 'app-meeting-transcription',

@@ -44,10 +44,8 @@ function accelLabel(backends: Backend[]): string {
 }
 
 /**
- * Recording controls: language toggle (PL/EN — never auto-detected), audio
- * source picker (Whole meeting / System / Microphone), an acceleration badge,
- * and Start/Stop. Emits `started`/`stopped` so the parent can subscribe to /
- * detach from the session's live stream.
+ * Recording controls: language toggle (PL/EN, never auto-detected), audio source picker
+ * (Whole meeting / System / Microphone), acceleration badge, Start/Stop; emits `started`/`stopped`.
  */
 @Component({
   selector: 'app-recording-controls',

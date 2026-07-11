@@ -8,9 +8,8 @@ export interface OAuthDeviceCode {
 }
 
 /**
- * Shared OAuth connect UI for both device-code (built-in SharePoint/GitHub) and
- * authorization_code (plugins) flows. The parent owns the flow effects and
- * passes status/info in; this component is presentational + emits user intent.
+ * Shared OAuth connect UI for device-code (built-in SharePoint/GitHub) and authorization_code (plugins)
+ * flows. Parent owns the flow effects and passes status/info in; this component is presentational only.
  */
 @Component({
   selector: 'app-oauth-connect',

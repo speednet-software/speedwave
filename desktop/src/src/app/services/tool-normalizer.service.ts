@@ -8,9 +8,8 @@ export class ToolNormalizerService {
   private log = inject(LoggerService);
 
   /**
-   * Parses raw tool input JSON into a typed discriminated union for display.
-   * Recognizes: Bash, Read, Edit, Write, Glob, Grep, TodoWrite, WebSearch, WebFetch, Agent.
-   * Unknown tool names and unparseable JSON fall back to `{ kind: 'generic', raw_json }`.
+   * Parses raw tool input JSON into a typed discriminated union for display (Bash, Read, Edit,
+   * Write, Glob, Grep, TodoWrite, WebSearch, WebFetch, Agent); unrecognized falls back to `generic`.
    * @param toolName - The Claude tool name (e.g. "Bash", "Read").
    * @param inputJson - The raw JSON string of tool input parameters.
    * @param inputComplete - False while input is still streaming; suppresses the parse-failure warn.

@@ -1,6 +1,5 @@
-//! Runtime backstop for the static scanner (`no_raw_data_dir_in_tests.rs`):
-//! catches *transitive* data-dir leaks. Drives the `_in` variants with an
-//! explicit tempdir and never asserts on OnceLock state.
+//! Runtime backstop for the static scanner (`no_raw_data_dir_in_tests.rs`): catches *transitive*
+//! data-dir leaks. Drives the `_in` variants with an explicit tempdir, never asserts on OnceLock.
 
 #![expect(
     clippy::expect_used,
@@ -16,9 +15,8 @@ use speedwave_runtime::{compose, consts};
 /// validates refs in-memory and on read-back).
 const VALID_YAML: &str = "version: '3'\nnetworks:\n  default:\n    driver: bridge\nservices:\n  app:\n    image: nginx\n    networks:\n      - default\n";
 
-/// `SPEEDWAVE_DATA_DIR` basename must match `^[a-z][a-z0-9-]{0,63}$`
-/// (`consts::derive_instance_name_from`). `tempfile`'s own basenames start with
-/// a dot and mix case, so we nest a regex-valid child under an outer tempdir.
+/// `SPEEDWAVE_DATA_DIR` basename must match `^[a-z][a-z0-9-]{0,63}$` (`derive_instance_name_from`).
+/// `tempfile` basenames start with a dot and mix case, so nest a regex-valid child under an outer.
 fn regex_valid_data_dir() -> (tempfile::TempDir, PathBuf) {
     let outer = tempfile::tempdir().expect("tempdir");
     let child = outer.path().join("speedwave-prod-untouched");

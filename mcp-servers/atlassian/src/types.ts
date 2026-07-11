@@ -1,21 +1,11 @@
 /**
- * Atlassian MCP Worker — type definitions.
- *
- * DTOs are hand-written (no external SDK): only the fields Speedwave's tools
- * actually expose are modelled. Jira Cloud REST v3 + Agile 1.0; Confluence
- * Cloud REST v2 (spaces, pages, comments, label reads, attachments) plus v1 for
- * CQL search and bulk label-add (v2 has no equivalent for those two).
+ * Atlassian MCP Worker types (hand-written DTOs). Jira Cloud REST v3 + Agile 1.0; Confluence Cloud REST v2 + v1 (CQL search, bulk labels).
  * @module mcp-atlassian/types
  */
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Configuration
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Configuration ────────────────────────────────────────────────────
 
-/**
- * Resolved Atlassian worker configuration, built from the read-only `/tokens` mount.
- * @interface AtlassianConfig
- */
+/** Resolved Atlassian worker configuration, built from the read-only `/tokens` mount. */
 export interface AtlassianConfig {
   /** Atlassian Cloud site base URL, e.g. `https://your-domain.atlassian.net`. */
   siteUrl: string;
@@ -23,24 +13,15 @@ export interface AtlassianConfig {
   email: string;
   /** Atlassian Cloud API token (Basic-auth password). Never logged or returned. */
   apiToken: string;
-  /**
-   * Optional allowlist of Jira project keys. Empty = unrestricted.
-   * When non-empty, operations whose project key is not in this list are rejected.
-   */
+  /** Optional Jira project key allowlist; empty = unrestricted, non-matching keys rejected. */
   jiraProjectKeys: string[];
-  /**
-   * Optional allowlist of Confluence space keys. Empty = unrestricted.
-   * When non-empty, operations whose space key is not in this list are rejected.
-   */
+  /** Optional Confluence space key allowlist; empty = unrestricted, non-matching keys rejected. */
   confluenceSpaceKeys: string[];
 }
 
-// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT). Import directly
-// from the shared package; this worker no longer defines its own variant.
+// ConnectionTestResult moved to @speedwave/mcp-shared (SSOT); import directly, no local variant.
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Atlassian Document Format (minimal)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Atlassian Document Format (minimal) ─────────────────────────────────
 
 /** A single ADF node (recursive). Only the subset Speedwave produces is typed. */
 export interface AdfNode {
@@ -58,9 +39,7 @@ export interface AdfDoc {
   content: AdfNode[];
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Jira
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Jira ─────────────────────────────────────────────────────────────────
 
 /** Jira account (reporter/assignee/author), normalised. */
 export interface JiraUser {
@@ -155,9 +134,7 @@ export interface JiraAttachment {
   author?: JiraUser | null;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Jira Agile (boards / sprints)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Jira Agile (boards / sprints) ───────────────────────────────────────
 
 /** Jira Agile board, normalised. */
 export interface JiraBoard {
@@ -188,9 +165,7 @@ export interface JiraBoardConfiguration {
   column_names: string[];
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Confluence
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Confluence ───────────────────────────────────────────────────────────
 
 /** Confluence space, normalised (v2). */
 export interface ConfluenceSpace {
@@ -210,12 +185,7 @@ export interface ConfluencePage {
   /** Space key, resolved for scope-guard checks; may be absent if not resolvable. */
   space_key?: string;
   parent_id?: string | null;
-  /**
-   * Current version number. `null` when not known — child pages returned by
-   * `getChildren` don't carry a version, so it must be re-fetched (via `getPage`)
-   * before an update. A full page (from `getPage`/`createPage`/`updatePage`)
-   * always has a `number`.
-   */
+  /** `null` for `getChildren` results (re-fetch via `getPage` before an update). */
   version: number | null;
   /** Storage-representation body, when requested. */
   body_storage?: string;

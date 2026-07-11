@@ -1,13 +1,5 @@
 /**
- * Connection-test result types and helpers shared by MCP workers.
- *
- * Consolidates `ConnectionTestResult` interfaces previously duplicated across
- * GitLab, GitHub, and Atlassian workers. The shared shape is a superset:
- * `errorType` covers GitLab/GitHub's categorisation; Atlassian historically
- * omitted it and continues to work without setting the field.
- *
- * The classifier is HTTP-library-agnostic: it duck-types Axios-like errors
- * (`response.status`, `code`) so shared has zero runtime HTTP dependencies.
+ * Connection-test result types shared by MCP workers (GitLab/GitHub/Atlassian); `errorType` is optional (Atlassian back-compat).
  * @module shared/connection-test
  */
 
@@ -39,19 +31,9 @@ function isHttpLikeError(value: unknown): value is HttpLikeError {
 }
 
 /**
- * Classify an HTTP error into a {@link ConnectionTestResult}.
- *
- * Maps common HTTP/network failures to {@link ConnectionErrorType}:
- * - `401` → `auth`
- * - `403` → `permission`
- * - `404` → `not_found`
- * - `ECONNREFUSED` / `ENOTFOUND` / `ETIMEDOUT` / `ECONNABORTED` / no `response` → `network`
- * - Other → `unknown`
- *
- * Duck-types Axios errors by reading `response.status` and `code`. Works
- * unchanged with `node-fetch`, `undici`, and `gitbeaker` errors that follow
- * the same shape.
- * @param error - The HTTP/network error caught from an external API call.
+ * Classify an HTTP error into a {@link ConnectionTestResult}: 401→auth, 403→permission, 404→not_found,
+ * ECONNREFUSED/ENOTFOUND/ETIMEDOUT/ECONNABORTED/no `response`→network, else unknown. Duck-typed via `response.status`/`code`.
+ * @param error - The caught error, of unknown shape
  */
 export function classifyConnectionError(error: unknown): ConnectionTestResult {
   const message =

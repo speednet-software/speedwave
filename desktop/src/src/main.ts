@@ -14,9 +14,8 @@ const tauriNonce = document.getElementById('boot-overlay-style')?.nonce || '';
 bootstrapApplication(AppComponent, {
   providers: [
     provideZonelessChangeDetection(),
-    // `anchorScrolling: enabled` makes the router scroll an `id="..."`
-    // element into view when a navigation carries `fragment="..."` —
-    // required for the System health → IDE Bridge `connect →` deep link.
+    // `anchorScrolling: enabled` scrolls an `id="..."` element into view on a `fragment="..."`
+    // navigation — required for the System health → IDE Bridge `connect →` deep link.
     provideRouter(
       routes,
       withInMemoryScrolling({

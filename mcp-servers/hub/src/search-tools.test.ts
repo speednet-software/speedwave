@@ -871,9 +871,8 @@ describe('searchTools tokenized multi-word query', () => {
   });
 
   it('sorts a non-boosted tool after a boosted tool regardless of comparator call order', async () => {
-    // Both tools match the content token 'zzzsharedterm' at the same tier (Description),
-    // so only selfBoost decides order; 'aaa...' sorts first alphabetically, forcing the
-    // comparator to see the non-boosted tool as `a` and the boosted tool as `b`.
+    // Both tools match 'zzzsharedterm' at the same tier, so only selfBoost decides order;
+    // 'aaa...' sorts first alphabetically, forcing comparator to see non-boosted as `a`.
     const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
     mutableRegistry['redmine']['aaaPlainTool'] = buildMockToolMetadata('redmine', 'aaaPlainTool', {
       description: 'Handles zzzsharedterm but is not userScoped',

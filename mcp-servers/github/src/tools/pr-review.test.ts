@@ -1,9 +1,4 @@
-/**
- * Tests for GitHub PR Review Tools
- *
- * Coverage: listPrCommits, listPrReviews, createPrReview, listPrComments,
- *           createPrComment, createPrReviewComment (6 tools)
- */
+/** Tests for GitHub PR Review Tools: listPrCommits, listPrReviews, createPrReview, listPrComments, createPrComment, createPrReviewComment. */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';

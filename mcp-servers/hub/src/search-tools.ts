@@ -1,7 +1,6 @@
 /**
  * Progressive discovery — lazy tool definitions (names_only/with_descriptions/full_schema).
- * Tool metadata from tool-registry.ts (SSOT).
- * @module search-tools
+ * Tool metadata SSOT is tool-registry.ts.
  */
 
 import { ToolSearchResult, ToolMetadata } from './hub-types.js';
@@ -13,7 +12,7 @@ import {
   getDisabledOsCategories,
 } from './tool-registry.js';
 
-/** The valid detail levels for search_tools, in ascending verbosity (SSOT for schema and validation). */
+/** Valid detail levels for search_tools, ascending verbosity (SSOT for schema and validation). */
 export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
 
 /** One of the {@link DETAIL_LEVELS} values. */
@@ -80,10 +79,8 @@ interface ScoredTool {
 }
 
 /**
- * Get tools for a service as an array of ToolMetadata.
- * Uses TOOL_REGISTRY from tool-registry.ts as Single Source of Truth.
+ * Get tools for a service as ToolMetadata[], using TOOL_REGISTRY as SSOT; empty if missing.
  * @param service - Service name to get tools for (e.g., 'slack', 'redmine')
- * @returns Array of tool metadata, or empty array if service not found
  */
 function getToolsForService(service: string): ToolMetadata[] {
   const tools = TOOL_REGISTRY[service];
@@ -92,7 +89,7 @@ function getToolsForService(service: string): ToolMetadata[] {
 
 /**
  * Lowercase and split a query into whitespace-separated tokens, dropping empties.
- * @param query - Raw search query.
+ * @param query - Raw search query
  */
 function tokenize(query: string): string[] {
   return query
@@ -104,7 +101,7 @@ function tokenize(query: string): string[] {
 
 /**
  * Minimum matching-token count for a query of this length; 4+ tokens tolerate one miss.
- * @param tokenCount - Number of tokens in the query.
+ * @param tokenCount - Number of tokens in the query
  */
 function requiredMatchCount(tokenCount: number): number {
   return tokenCount >= 4 ? tokenCount - 1 : tokenCount;
@@ -119,7 +116,7 @@ interface LowercasedToolFields {
 
 /**
  * Lowercase the searchable name/description/keywords of a tool.
- * @param tool - Tool metadata to derive lowercased fields from.
+ * @param tool - Tool metadata to derive lowercased fields from
  */
 function lowercaseFields(tool: ToolMetadata): LowercasedToolFields {
   return {
@@ -130,10 +127,9 @@ function lowercaseFields(tool: ToolMetadata): LowercasedToolFields {
 }
 
 /**
- * Determine the best match tier for a tool against a single token, or undefined if
- * the token does not appear in name, keywords, or description.
- * @param fields - Lowercased searchable fields of the tool.
- * @param token - Lowercased query token.
+ * Best match tier for a token, or undefined if absent from name/keyword/description.
+ * @param fields - Lowercased searchable fields of the tool
+ * @param token - Lowercased query token
  */
 function tokenMatchTier(fields: LowercasedToolFields, token: string): MatchTier | undefined {
   const { nameLower, descriptionLower, keywordsLower } = fields;
@@ -146,14 +142,14 @@ function tokenMatchTier(fields: LowercasedToolFields, token: string): MatchTier 
 }
 
 /**
- * Score a tool against the content tokens of a query (self-reference tokens already
- * filtered out). Returns undefined below the required-match-count threshold.
- * @param tool - Tool metadata to test.
- * @param contentTokens - Lowercased query tokens with self-reference tokens removed.
+ * Score a tool against a query's content tokens (self-reference tokens already filtered out).
+ * Returns undefined below the required-match-count threshold.
+ * @param tool - Tool metadata to test
+ * @param contentTokens - Lowercased query tokens with self-reference tokens removed
  */
 function scoreTool(tool: ToolMetadata, contentTokens: string[]): MatchTier | undefined {
   if (contentTokens.length === 0) {
-    // Intended: a pure self-reference query ("me") lists userScoped tools across every enabled service, not just one.
+    // Intended: a pure self-reference query ("me") lists userScoped tools across enabled services.
     return tool.userScoped ? MatchTier.Description : undefined;
   }
 
@@ -174,8 +170,8 @@ function scoreTool(tool: ToolMetadata, contentTokens: string[]): MatchTier | und
 }
 
 /**
- * Search tools via tokenized, ranked matching (name/keyword/description); ranks
- * exact-name, then name-prefix, mid-name substring, keyword, description; self-reference queries boost userScoped tools.
+ * Search tools via tokenized, ranked matching: exact-name, name-prefix, substring, keyword,
+ * description (in that order); self-reference queries boost userScoped tools.
  * @param params - Search parameters including query, detailLevel, service filter, and includeDeferred flag
  */
 export async function searchTools(params: SearchToolsParams): Promise<SearchToolsResult> {
@@ -239,11 +235,11 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
 }
 
 /**
- * Build a single {@link ToolSearchResult} entry, including detail-level-gated fields
- * and the rendered identity sentence for userScoped tools.
- * @param service - Service name the tool belongs to.
- * @param tool - Tool metadata.
- * @param detailLevel - Requested detail level.
+ * Build a single {@link ToolSearchResult} entry: detail-level-gated fields plus the
+ * rendered identity sentence for userScoped tools.
+ * @param service - Service name the tool belongs to
+ * @param tool - Tool metadata
+ * @param detailLevel - Requested detail level
  */
 function buildSearchResult(
   service: string,
@@ -271,9 +267,9 @@ function buildSearchResult(
 }
 
 /**
- * Render a tool's served description, appending ONE canonical identity sentence when
- * userScoped. Never mutates the stored metadata — renders fresh on every call.
- * @param tool - Tool metadata (stored, read-only).
+ * Render a tool's served description, appending ONE canonical identity sentence when userScoped.
+ * Never mutates the stored metadata — renders fresh on every call.
+ * @param tool - Tool metadata (stored, read-only)
  */
 export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
   if (!tool.userScoped) return tool.description;
@@ -297,10 +293,10 @@ export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
 /**
  * Build the `hint` field for a zero-match search: names the invalid or disabled service
  * filter (with valid services listed) or suggests broadening the query.
- * @param service - The requested service filter, if any.
- * @param serviceFilterInvalid - Whether `service` was provided but unrecognized.
- * @param serviceDisabled - Whether `service` is known but not enabled for this project.
- * @param enabled - Set of currently enabled service names.
+ * @param service - The requested service filter, if any
+ * @param serviceFilterInvalid - Whether `service` was provided but unrecognized
+ * @param serviceDisabled - Whether `service` is known but not enabled for this project
+ * @param enabled - Set of currently enabled service names
  */
 function buildZeroMatchHint(
   service: string | undefined,
@@ -323,20 +319,13 @@ function buildZeroMatchHint(
 }
 
 /**
- * Get all tools for a service (used by executor)
+ * Get all tools for a service (used by executor); empty array if service not found.
  * @param service - Service name to get tools for
- * @returns Array of tool metadata for the service, or empty array if service not found
  */
 export function getServiceTools(service: string): ToolMetadata[] {
   return getToolsForService(service);
 }
 
-/**
- * Get specific tool metadata
- * Re-exported from tool-registry.ts for backward compatibility.
- * @param service - Service name containing the tool
- * @param toolName - Name of the tool to retrieve
- * @returns Tool metadata if found, undefined otherwise
- */
+/** Get specific tool metadata; re-exported from tool-registry.ts for backward compatibility. */
 export const getToolMetadata: (service: string, toolName: string) => ToolMetadata | undefined =
   getToolMetadataFromRegistry;

@@ -1,6 +1,5 @@
 #!/usr/bin/env bats
-# Tests for containers/entrypoint.sh
-# Runs on the host (macOS) — no container required.
+# Tests for containers/entrypoint.sh, run on the host (macOS) — no container required.
 # Stubs out 'curl' and 'claude' to avoid network calls.
 
 ENTRYPOINT="$BATS_TEST_DIRNAME/../../containers/entrypoint.sh"
@@ -71,9 +70,8 @@ EOF
     # OS_AVAILABLE_SUBS is normally injected by compose.rs from TOGGLEABLE_OS_SERVICES.
     export OS_AVAILABLE_SUBS="reminders,calendar,mail,notes"
 
-    # Per-test health marker under TEST_HOME so parallel runs (bats --jobs)
-    # and concurrent worktrees never collide on a shared /tmp path.
-    # Cleaned up by teardown's rm -rf "$TEST_HOME".
+    # Per-test health marker under TEST_HOME so parallel runs (bats --jobs) and concurrent
+    # worktrees never collide on a shared /tmp path. Cleaned up by teardown's rm -rf.
     export CLAUDE_READY_MARKER="$TEST_HOME/claude-ready"
 }
 
@@ -81,9 +79,7 @@ teardown() {
     rm -rf "$TEST_HOME" "$STUBS_DIR" "$RESOURCES_DIR"
 }
 
-# ---------------------------------------------------------------------------
-# CLAUDE_VERSION — required (no default)
-# ---------------------------------------------------------------------------
+# ── CLAUDE_VERSION — required (no default) ──────────────────────────────────────────────────────────
 
 @test "fails when CLAUDE_VERSION is not set" {
     unset CLAUDE_VERSION
@@ -92,9 +88,7 @@ teardown() {
     [[ "$output" == *"CLAUDE_VERSION"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Version skew between baked binary and pinned CLAUDE_VERSION
-# ---------------------------------------------------------------------------
+# ── Version skew between baked binary and pinned CLAUDE_VERSION ─────────────────────────────────────
 
 @test "warns when installed claude version differs from pinned CLAUDE_VERSION" {
     cat > "$STUBS_DIR/claude" << 'EOF'
@@ -125,9 +119,7 @@ EOF
     [[ "$output" != *"WARNING: image has Claude Code"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# CLAUDE_VERSION env var forwarded to install-claude.sh
-# ---------------------------------------------------------------------------
+# ── CLAUDE_VERSION env var forwarded to install-claude.sh ───────────────────────────────────────────
 
 @test "CLAUDE_VERSION env var is forwarded to install-claude.sh" {
     rm -f "$STUBS_DIR/claude"  # force install path
@@ -160,9 +152,7 @@ EOF
     rm -f "$version_file" "$patched"
 }
 
-# ---------------------------------------------------------------------------
-# Skip download when claude is already installed
-# ---------------------------------------------------------------------------
+# ── Skip download when claude is already installed ──────────────────────────────────────────────────
 
 @test "does not call curl when claude is already installed" {
     # curl stub exits 1 — test fails if it is called
@@ -170,9 +160,7 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Health check marker
-# ---------------------------------------------------------------------------
+# ── Health check marker ─────────────────────────────────────────────────────────────────────────────
 
 @test "creates /tmp/claude-ready health marker" {
     run bash "$ENTRYPOINT" true
@@ -180,10 +168,7 @@ EOF
     [ -f "$CLAUDE_READY_MARKER" ]
 }
 
-# ---------------------------------------------------------------------------
-# set -e kills the entrypoint when HOME is not writable: non-writable HOME
-# is a fatal error, never a silent half-set-up success.
-# ---------------------------------------------------------------------------
+# ── set -e kills the entrypoint when HOME is not writable: fatal error, never a silent half-setup ─
 
 @test "exits non-zero when HOME is not writable (mimics uid-mismatch EACCES)" {
     # root ignores DAC mode bits, so this assertion is only meaningful as a
@@ -197,9 +182,7 @@ EOF
     [ "$status" -ne 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Command passthrough
-# ---------------------------------------------------------------------------
+# ── Command passthrough ─────────────────────────────────────────────────────────────────────────────
 
 @test "executes the passed command" {
     run bash "$ENTRYPOINT" echo "hello-from-entrypoint"
@@ -213,9 +196,7 @@ EOF
     [[ "$output" == *"arg=myarg"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# CLAUDE.md symlink from resources
-# ---------------------------------------------------------------------------
+# ── CLAUDE.md symlink from resources ────────────────────────────────────────────────────────────────
 
 @test "symlinks CLAUDE.md from resources" {
     echo "# Speedwave System Context" > "${SPEEDWAVE_RESOURCES}/CLAUDE.md"
@@ -232,9 +213,7 @@ EOF
     [ ! -e "$HOME/.claude/CLAUDE.md" ]
 }
 
-# ---------------------------------------------------------------------------
-# Resource symlinking via SPEEDWAVE_RESOURCES
-# ---------------------------------------------------------------------------
+# ── Resource symlinking via SPEEDWAVE_RESOURCES ─────────────────────────────────────────────────────
 
 @test "symlinks skills entries when present in resources" {
     mkdir -p "$RESOURCES_DIR/skills"
@@ -278,9 +257,7 @@ EOF
     done
 }
 
-# ---------------------------------------------------------------------------
-# DISABLE_AUTOUPDATER
-# ---------------------------------------------------------------------------
+# ── DISABLE_AUTOUPDATER ─────────────────────────────────────────────────────────────────────────────
 
 @test "exports DISABLE_AUTOUPDATER=1" {
     run bash "$ENTRYPOINT" bash -c 'echo "AUTOUPDATER=$DISABLE_AUTOUPDATER"'
@@ -288,9 +265,7 @@ EOF
     [[ "$output" == *"AUTOUPDATER=1"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# PATH includes ~/.local/bin for Claude Code installed by install.sh
-# ---------------------------------------------------------------------------
+# ── PATH includes ~/.local/bin for Claude Code installed by install.sh ──────────────────────────────
 
 @test "adds HOME/.local/bin to PATH" {
     run bash "$ENTRYPOINT" bash -c 'echo "PATH=$PATH"'
@@ -314,9 +289,7 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Symlink claude from /usr/local/bin to ~/.local/bin
-# ---------------------------------------------------------------------------
+# ── Symlink claude from /usr/local/bin to ~/.local/bin ──────────────────────────────────────────────
 
 @test "symlinks claude from /usr/local/bin to ~/.local/bin" {
     # Create a temporary "fake /usr/local/bin" to satisfy the -x check
@@ -338,9 +311,7 @@ EOF
     rm -f "$patched"
 }
 
-# ---------------------------------------------------------------------------
-# bashrc PATH export
-# ---------------------------------------------------------------------------
+# ── bashrc PATH export ──────────────────────────────────────────────────────────────────────────────
 
 @test "bashrc PATH export is added" {
     run bash "$ENTRYPOINT" true
@@ -359,9 +330,7 @@ EOF
     [ "$count" -eq 1 ]
 }
 
-# ---------------------------------------------------------------------------
-# Resource symlinks: commands, agents, hooks
-# ---------------------------------------------------------------------------
+# ── Resource symlinks: commands, agents, hooks ──────────────────────────────────────────────────────
 
 @test "commands entries are symlinked into a real dir" {
     mkdir -p "$RESOURCES_DIR/commands"
@@ -399,9 +368,7 @@ EOF
     [ "$(readlink "$HOME/.claude/hooks/my-hook.sh")" = "$RESOURCES_DIR/hooks/my-hook.sh" ]
 }
 
-# ---------------------------------------------------------------------------
-# Default command keeps container alive (sleep infinity)
-# ---------------------------------------------------------------------------
+# ── Default command keeps container alive (sleep infinity) ──────────────────────────────────────────
 
 @test "default command is a TERM-trappable keep-alive loop (not interactive shell)" {
     # No-args branch must keep PID1 alive AND responsive to SIGTERM —
@@ -410,9 +377,7 @@ EOF
     ! grep -q 'exec sleep infinity' "$ENTRYPOINT"
 }
 
-# ---------------------------------------------------------------------------
-# MCP config: mcp-os is routed through hub, not directly from entrypoint
-# ---------------------------------------------------------------------------
+# ── MCP config: mcp-os is routed through hub, not directly from entrypoint ──────────────────────────
 
 @test "mcp-config has only speedwave-hub when MCP_OS vars are unset" {
     unset MCP_OS_URL
@@ -435,9 +400,7 @@ EOF
     [[ "$output" != *"speedwave-os"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Output styles: Speedwave.md symlink from resources
-# ---------------------------------------------------------------------------
+# ── Output styles: Speedwave.md symlink from resources ──────────────────────────────────────────────
 
 @test "symlinks output-styles/Speedwave.md file from resources" {
     mkdir -p "${SPEEDWAVE_RESOURCES}/output-styles"
@@ -460,10 +423,7 @@ EOF
     grep -q "My Custom Style" "${TEST_HOME}/.claude/output-styles/MyStyle.md"
 }
 
-# ---------------------------------------------------------------------------
-# ~/.claude.json pre-seed: always pre-accepts the /workspace trust dialog;
-# onboarding completes only when logged in (ADR-052).
-# ---------------------------------------------------------------------------
+# ── ~/.claude.json pre-seed: pre-accepts /workspace trust; onboarding completes only when logged in (ADR-052)
 
 @test "pre-accepts /workspace trust+project-onboarding but skips login onboarding when credentials are absent" {
     [ ! -e "${TEST_HOME}/.claude.json" ]
@@ -547,9 +507,7 @@ EOF
     [[ "$output" == *".claude.json unparseable — onboarding merge skipped"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Statusline: symlink from resources
-# ---------------------------------------------------------------------------
+# ── Statusline: symlink from resources ──────────────────────────────────────────────────────────────
 
 @test "symlinks statusline.sh from resources" {
     echo '#!/bin/bash' > "${SPEEDWAVE_RESOURCES}/statusline.sh"
@@ -577,10 +535,7 @@ EOF
     [ ! -e "${TEST_HOME}/.claude/statusline.sh" ]
 }
 
-# ---------------------------------------------------------------------------
-# settings.json: WRITABLE copy (NOT a symlink) — Claude Code writes it via
-# /effort and /model; the resources mount is read-only so a symlink → EROFS.
-# ---------------------------------------------------------------------------
+# ── settings.json: WRITABLE copy (not a symlink) — CC writes it via /effort, /model; RO mount → EROFS ─
 
 @test "seeds settings.json as a writable copy, not a symlink" {
     echo '{"statusLine":{"type":"command","command":"~/.claude/statusline.sh"}}' > "${SPEEDWAVE_RESOURCES}/settings.json"
@@ -705,9 +660,7 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# SPEEDWAVE_PLUGINS: symlink plugin resources
-# ---------------------------------------------------------------------------
+# ── SPEEDWAVE_PLUGINS: symlink plugin resources ─────────────────────────────────────────────────────
 
 @test "SPEEDWAVE_PLUGINS creates symlinks for all resource types" {
     local plugins_dir
@@ -969,9 +922,8 @@ EOF
     echo "# Skill" > "$RESOURCES_DIR/skills/my-skill.md"
     echo "# Command" > "$RESOURCES_DIR/commands/my-command.md"
 
-    # No SPEEDWAVE_PLUGINS set — dirs are always real dirs of per-entry symlinks
-    # (not whole-dir symlinks). This lets the integrations/ gate work and lets
-    # the entrypoint cleans up stale links on toggle-off.
+    # No SPEEDWAVE_PLUGINS set — dirs are always real dirs of per-entry symlinks (not whole-dir),
+    # so the integrations/ gate works and the entrypoint cleans up stale links on toggle-off.
     unset SPEEDWAVE_PLUGINS
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -1031,10 +983,7 @@ EOF
     rm -rf "$plugins_dir" "$patched"
 }
 
-# ---------------------------------------------------------------------------
-# Migration: ~/.claude/<resource_type> mode flips between runs.
-# claude-home is a persistent volume; the entrypoint normalizes stale layouts.
-# ---------------------------------------------------------------------------
+# ── Migration: ~/.claude/<resource_type> mode flips between runs; persistent volume needs stale-layout normalization
 
 @test "plugin mode replaces stale whole-directory symlink left from no-plugins run" {
     # No-plugins run leaves skills as a symlink to read-only resources; a later
@@ -1077,9 +1026,8 @@ EOF
 }
 
 @test "no-plugins mode preserves real directory of per-entry symlinks" {
-    # The directory layout is always a real dir of per-entry symlinks (whether
-    # or not plugins are loaded), so subsequent no-plugin runs must leave the
-    # directory intact and continue to expose core entries.
+    # The directory layout is always a real dir of per-entry symlinks (whether or not plugins are
+    # loaded), so subsequent no-plugin runs must leave it intact and keep exposing core entries.
     mkdir -p "$RESOURCES_DIR/skills/core-skill"
     echo "# Core" > "$RESOURCES_DIR/skills/core-skill/SKILL.md"
 
@@ -1103,9 +1051,7 @@ EOF
 }
 
 
-# ---------------------------------------------------------------------------
-# MCP hub wait — startup race claude↔hub fix
-# ---------------------------------------------------------------------------
+# ── MCP hub wait — startup race claude↔hub fix ──────────────────────────────
 
 @test "SPEEDWAVE_SKIP_HUB_WAIT=1 bypasses the hub readiness probe" {
     # Default in setup() — confirms no waiting when explicitly skipped.
@@ -1118,9 +1064,8 @@ EOF
 }
 
 @test "without SPEEDWAVE_SKIP_HUB_WAIT, hub probe runs but tolerates failure" {
-    # mcp-hub host does not resolve in test environment; probe must fail
-    # within bounded time and entrypoint must still succeed. Patch the
-    # attempts count down from 30 to 2 so the test is fast.
+    # mcp-hub host does not resolve in test env; probe must fail within bounded time and
+    # entrypoint must still succeed. Patch attempts from 30 to 2 so the test is fast.
     unset SPEEDWAVE_SKIP_HUB_WAIT
     local patched
     patched="$(mktemp)"
@@ -1135,9 +1080,7 @@ EOF
 }
 
 
-# ---------------------------------------------------------------------------
-# Per-integration gating of claude-resources via ENABLED_SERVICES
-# ---------------------------------------------------------------------------
+# ── Per-integration gating of claude-resources via ENABLED_SERVICES ─────────
 
 setup_integrations_fixture() {
     # Core skill (always-on) + three integration-bound skills.
@@ -1436,14 +1379,11 @@ setup_os_subservice_fixture() {
     [ ! -e "${TEST_HOME}/.claude/skills/os" ]
 }
 
-# ---------------------------------------------------------------------------
-# Keep-alive PID1 must exit 0 on SIGTERM (trap), not die killed (143) —
-# in the container PID1 would otherwise ignore TERM and eat the 10s timeout.
-# ---------------------------------------------------------------------------
+# ── Keep-alive PID1 must exit 0 on SIGTERM (trap), not die killed (143) — else PID1 eats the 10s timeout ─
 
 @test "SIGTERM during startup phase exits promptly via top trap" {
-    # Block startup on the hub probe (no SPEEDWAVE_SKIP_HUB_WAIT) so TERM
-    # lands mid-startup, before the ready marker exists.
+    # Block startup on the hub probe (no SPEEDWAVE_SKIP_HUB_WAIT) so TERM lands mid-startup,
+    # before the ready marker exists.
     unset SPEEDWAVE_SKIP_HUB_WAIT
     bash "$ENTRYPOINT" &
     pid=$!
@@ -1481,9 +1421,7 @@ setup_os_subservice_fixture() {
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Bundled official Anthropic plugins — install at start
-# ---------------------------------------------------------------------------
+# ── Bundled official Anthropic plugins — install at start ──────────────────
 
 # Stub: `plugin list --json` reports nothing installed (so the guard proceeds),
 # `plugin install` records the target; version query still works.
@@ -1611,10 +1549,7 @@ EOF
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Hook registration (ADR-078): hooks.json declarations merged into the settings
-# "hooks" key — symlinks under ~/.claude/hooks/ alone never execute.
-# ---------------------------------------------------------------------------
+# ── Hook registration (ADR-078): hooks.json merged into settings "hooks" key — symlinks under ~/.claude/hooks/ alone never execute ─
 
 # Writes a plugin with a UserPromptSubmit hooks.json + script into $1/<slug>.
 _make_hook_plugin() {

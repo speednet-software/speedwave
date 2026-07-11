@@ -1,8 +1,4 @@
-/**
- * Validation Helpers for OS Tool Parameters
- *
- * Shared validation utilities following the Speedwave MCP pattern.
- */
+/** Validation helpers for OS tool parameters, following the Speedwave MCP pattern. */
 
 import {
   withResultValidation,
@@ -24,8 +20,7 @@ function receivedMapFor(params: Record<string, unknown>, names: string[]): Recor
 }
 
 /**
- * Wraps a tool handler with parameter validation and error handling
- * (pretty-printed JSON output via the shared Family-A wrapper).
+ * Wraps a tool handler with validation + error handling (JSON via the shared Family-A wrapper).
  * @param handler - Function that executes the tool logic.
  */
 export function withValidation<T>(
@@ -74,9 +69,7 @@ export function requireFields(
   return { valid: true };
 }
 
-//=============================================================================
-// Input Validation — max length, control chars, types (SEC-012)
-//=============================================================================
+// ── Input Validation — max length, control chars, types (SEC-012) ────────
 
 /** Maximum allowed lengths per field category. */
 export const MAX_LENGTHS = { id: 512, short: 1_000, body: 100_000 } as const;
@@ -324,7 +317,7 @@ export interface ValidationSpec {
 }
 
 /**
- * Combine all validation steps in one call.
+ * Combine all validation steps in one call, per `spec`.
  * @param params - Tool input parameters to validate.
  * @param spec - Which validations to run and with what configuration.
  */

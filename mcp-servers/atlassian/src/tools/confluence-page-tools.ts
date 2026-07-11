@@ -1,6 +1,5 @@
 /**
- * Confluence page tools — searchPages (CQL), getPage, getPageByTitle,
- * createPage, updatePage, getPageChildren. 6 tools.
+ * Confluence page tools — search (CQL), get by ID/title, create, update, children. 6 tools.
  * @module mcp-atlassian/tools/confluence-page-tools
  */
 
@@ -233,7 +232,6 @@ const getPageChildrenTool: Tool = {
 /**
  * Build the Confluence page tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for Confluence pages.
  */
 export function createConfluencePageTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [

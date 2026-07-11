@@ -52,9 +52,8 @@ describe('refreshMicrosoftToken', () => {
   }
 
   it('returns ok on a well-formed 200 response', async () => {
-    // Microsoft NEVER echoes `offline_access` in the `scope` field of the
-    // token response — it is an OIDC scope, not an API permission. The
-    // refresh path treats its presence in req.scopes as satisfied implicitly.
+    // Microsoft never echoes `offline_access` in `scope` (it's an OIDC scope, not an API
+    // permission); refresh treats its presence in req.scopes as satisfied implicitly.
     mockFetchResponse({
       body: {
         access_token: 'a-new',
@@ -76,9 +75,8 @@ describe('refreshMicrosoftToken', () => {
   });
 
   it('does NOT flag offline_access as missing even when Microsoft omits it from the response', async () => {
-    // Production bug repro: Microsoft never returns offline_access in `scope`
-    // on a refresh response. Before the fix, this raised scope_mismatch and
-    // locked the worker out of read operations too.
+    // Regression: Microsoft never returns offline_access in `scope` on a refresh response —
+    // treating it as missing raised scope_mismatch and locked the worker out of reads too.
     mockFetchResponse({
       body: {
         access_token: 'a',
@@ -180,9 +178,8 @@ describe('refreshMicrosoftToken', () => {
   });
 
   it('returns network error when fetch is aborted (30s timeout)', async () => {
-    // AbortController fires after 30s on a hung Microsoft token endpoint —
-    // surfaces as the same `network` error path. Explicit test so the
-    // timeout contract is not lost in a future refactor.
+    // AbortController fires after 30s on a hung Microsoft token endpoint, surfacing as the
+    // same `network` error path — explicit test so the timeout contract survives refactors.
     const abortError = Object.assign(new Error('The operation was aborted.'), {
       name: 'AbortError',
     });
@@ -196,9 +193,8 @@ describe('refreshMicrosoftToken', () => {
   });
 
   it('actually fires the AbortController callback on the 30s timeout', async () => {
-    // Cover the `() => controller.abort()` arrow passed to setTimeout —
-    // production timer is 30s; use fake timers so the callback fires in ms.
-    // No file I/O in this module, so fake timers do not interfere.
+    // Covers the `() => controller.abort()` arrow passed to setTimeout (production timer is
+    // 30s); fake timers make the callback fire in ms, safe since this module does no file I/O.
     vi.useFakeTimers();
     try {
       let observedSignal: AbortSignal | undefined;

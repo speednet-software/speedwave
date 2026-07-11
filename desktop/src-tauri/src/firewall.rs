@@ -1,6 +1,5 @@
-//! Windows firewall rules (ADR-067) — Desktop runtime fallback.
-//! Ensures both firewall layers exist before any host listener binds the WSL
-//! adapter IP. Runs at most once per process; fail-open, never blocks startup.
+//! Windows firewall rules (ADR-067) — Desktop runtime fallback. Ensures both firewall layers
+//! exist before any host listener binds the WSL adapter IP. Runs once per process; fail-open.
 
 /// Outcome of one `firewall.ps1 -Mode ensure` invocation.
 #[cfg(any(target_os = "windows", test))]
@@ -42,9 +41,8 @@ mod windows_impl {
 
     static FIREWALL_RULE_ONCE: Once = Once::new();
 
-    /// Ensures the Hyper-V firewall rule exists. Runs at most once per process.
-    /// Called as the first statement of every host-listener starter so the rule
-    /// precedes any bind on the WSL adapter IP (ADR-067).
+    /// Ensures the Hyper-V firewall rule exists. Runs at most once per process; called as the
+    /// first statement of every host-listener starter so the rule precedes any bind (ADR-067).
     pub(crate) fn ensure_firewall_rule() {
         FIREWALL_RULE_ONCE.call_once(ensure_firewall_rule_inner);
     }
@@ -155,9 +153,8 @@ mod windows_impl {
         }
     }
 
-    /// Runs `firewall.ps1 -Mode <mode>` (non-elevated) with the program list and
-    /// classifies the exit. `Command::args` passes paths as OS argv, so spaces
-    /// need no quoting here.
+    /// Runs `firewall.ps1 -Mode <mode>` (non-elevated) with the program list and classifies the
+    /// exit. `Command::args` passes paths as OS argv, so spaces need no quoting here.
     fn run_firewall_mode(
         script: &std::path::Path,
         mode: &str,

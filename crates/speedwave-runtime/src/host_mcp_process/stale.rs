@@ -1,9 +1,8 @@
 //! Stale-process detection helpers shared by every host MCP worker
 //! manager.
 
-/// Check whether a PID belongs to a `node` process. Used as a safety
-/// gate before killing — if the OS recycled the PID into something
-/// else, we won't touch it.
+/// Check whether a PID belongs to a `node` process. Used as a safety gate before killing — if
+/// the OS recycled the PID into something else, we won't touch it.
 #[cfg(unix)]
 pub fn is_node_process(pid: u32) -> bool {
     let output = crate::binary::system_command("ps")
@@ -33,9 +32,8 @@ pub fn is_node_process(pid: u32) -> bool {
     }
 }
 
-/// Terminate a process by PID. SIGTERM then SIGKILL on Unix (500 ms
-/// grace), `taskkill /F` on Windows. Errors are ignored — the process
-/// may already be gone.
+/// Terminate a process by PID. SIGTERM then SIGKILL on Unix (500 ms grace), `taskkill /F` on
+/// Windows. Errors are ignored — the process may already be gone.
 #[cfg(unix)]
 pub fn kill_process(pid: u32) {
     let _ = crate::binary::system_command("kill")

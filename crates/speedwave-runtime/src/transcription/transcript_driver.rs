@@ -12,24 +12,19 @@ use crate::transcription::transcriber::{Segment, TranscribeOptions, Transcriber}
 use crate::transcription::transcript::TranscriptStatus;
 use crate::transcription::transcript_store::TranscriptStore;
 
-/// Live sliding-window length (seconds): how much trailing audio we re-feed
-/// to the transcriber to give it context. Longer = more accurate trailing
-/// words but more recompute per chunk.
+/// Live sliding-window length (seconds): trailing audio re-fed to the transcriber for context.
+/// Longer = more accurate trailing words but more recompute per chunk.
 const LIVE_WINDOW_SECS: f32 = 12.0;
 
 /// How often (in seconds of audio accumulated) the live transcriber re-decodes.
 const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
-/// Log a `warn` for every multiple of this many seconds of accumulated audio
-/// — long meetings keep the whole PCM buffer in RAM (`~115 MB / hour` at
-/// 16 kHz mono f32) and operators want a hint when something's running long.
+/// Log a `warn` for every multiple of this many seconds of accumulated audio — long meetings
+/// keep the whole PCM buffer in RAM (`~115 MB / hour` at 16 kHz mono f32), worth a hint.
 const PCM_WARN_STEP_SECS: f32 = 30.0 * 60.0;
 
-/// A stop signal shared with the driver task; flip it to `true` to ask the
-/// driver to wind down at the next chunk boundary. Carries a `Notify` the
-/// driver host can pulse once `run()` has actually exited, so the Tauri
-/// `stop_transcription` callsite can `await` the wind-down instead of
-/// spin-polling.
+/// A stop signal shared with the driver task; flip to `true` to wind down at the next chunk
+/// boundary. Carries a `Notify` pulsed on `run()` exit, so callers `await` instead of spin-polling.
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
@@ -136,10 +131,8 @@ impl TranscriptDriver {
         }
     }
 
-    /// Runs the driver to completion (until the audio stream ends or `stop`
-    /// is tripped). Writes a WAV at `audio_wav_path` along the way. On any error
-    /// the session is flipped to `Failed{reason}` and the (partial) WAV is
-    /// closed before the error propagates.
+    /// Runs the driver to completion (until the stream ends or `stop` trips), writing a WAV at
+    /// `audio_wav_path`. On error the session flips to `Failed{reason}` and the WAV is closed.
     pub fn run(mut self, audio_wav_path: &Path) -> Result<(), DriverError> {
         let mut wav = WavWriter::create(audio_wav_path)?;
         // Mark the session as Recording (a no-op transition from new()).
@@ -172,9 +165,8 @@ impl TranscriptDriver {
         }
     }
 
-    /// The capture→transcribe loop. Returns `Ok` when the stream ends or `stop`
-    /// is tripped; `Err` on a capture, transcribe, WAV, or store failure (the
-    /// caller flips the session to `Failed`).
+    /// The capture→transcribe loop. `Ok` when the stream ends or `stop` trips; `Err` on a
+    /// capture, transcribe, WAV, or store failure (caller flips the session to `Failed`).
     fn pump_loop(&mut self, wav: &mut WavWriter) -> Result<(), DriverError> {
         loop {
             if self.stop.is_stopped() {
@@ -212,10 +204,8 @@ impl TranscriptDriver {
         }
     }
 
-    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and appends only
-    /// segments older than [`LIVE_COMMIT_HOLDBACK`] — the window tail is still
-    /// unstable between passes, so the live view stays append-only and never
-    /// flickers. `flush` commits the held-back tail before finalize.
+    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm`, appending segments older than
+    /// [`LIVE_COMMIT_HOLDBACK`] (unstable tail → append-only). `flush` commits the held-back part.
     fn decode_window(&mut self, flush: bool) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -272,9 +262,7 @@ fn uncommitted(segs: &[Segment], published_until: Duration) -> Vec<Segment> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Higher-quality offline pass (runs after stop, on the recorded WAV)
-// ---------------------------------------------------------------------------
+// ── Higher-quality offline pass (after stop, on the recorded WAV) ──────
 
 /// Inputs for the offline finalize pass — built by the caller (Tauri layer)
 /// after `stop_transcription`, once it has loaded the higher-quality model.
@@ -292,21 +280,16 @@ pub struct FinalizeConfig {
     pub transcribe_opts: TranscribeOptions,
 }
 
-/// Offline-pass decode window (seconds). The recording is transcribed in
-/// windows of this length so the progress bar can move per-window; a short
-/// overlap (below) keeps utterances that straddle a boundary intact.
+/// Offline-pass decode window (seconds); transcribed per-window so the progress bar can move.
+/// A short overlap (below) keeps utterances that straddle a boundary intact.
 const FINALIZE_WINDOW_SECS: f32 = 30.0;
 
-/// Overlap (seconds) between consecutive offline-pass windows. Segments that
-/// start inside the overlap of the *next* window are dropped from the previous
-/// window's output to avoid duplicates.
+/// Overlap (seconds) between consecutive offline-pass windows. Segments starting inside the
+/// *next* window's overlap are dropped from the previous window's output to avoid duplicates.
 const FINALIZE_WINDOW_OVERLAP_SECS: f32 = 3.0;
 
-/// Runs the offline pass: load the recorded WAV, transcribe it with the
-/// higher-quality model, install the result as `final_segments`, and mark the
-/// session `Done`. On failure the session is flipped to `Failed{reason}` and
-/// the error returned — the caller can still fall back to the live transcript
-/// (it's untouched).
+/// Runs the offline pass: load the recorded WAV, transcribe with the higher-quality model,
+/// install `final_segments`, mark `Done`. On failure flips to `Failed`; live transcript untouched.
 pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,
@@ -327,9 +310,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         DriverError::Transcribe(reason)
     };
 
-    // A capture that produced no samples (mic denied + nothing playing, a dead
-    // tap) leaves an empty or header-only WAV. Both mean the same actionable
-    // thing to the user, not a cryptic "Failed to read enough bytes".
+    // A capture that produced no samples (mic denied + nothing playing, a dead tap) leaves an
+    // empty/header-only WAV — surface one actionable reason, not a cryptic hound read error.
     const NO_AUDIO: &str =
         "no audio was captured — check that audio was playing and that microphone / \
          system-audio recording permission is granted";
@@ -348,11 +330,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
     };
 
-    // 2) + 3) Transcribe in ~30 s windows with a short overlap, stitching the
-    //    results and emitting real per-window progress. Chunking (vs one
-    //    whole-recording call) loses a little cross-utterance context but lets
-    //    the progress bar actually move; the overlap + de-dup keeps boundaries
-    //    clean. Progress here fills the 5%..60% band.
+    // 2) + 3) Transcribe in ~30 s windows with overlap, stitching + emitting per-window progress
+    //    (loses a little cross-utterance context but moves the bar); fills the 5%..60% band.
     let _ = store.finalize_progress(id, 0.05);
     let final_segs =
         match transcribe_chunked(transcriber.as_mut(), &pcm, &transcribe_opts, |frac| {
@@ -375,11 +354,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     Ok(())
 }
 
-/// Transcribes `pcm` (16 kHz mono) in `FINALIZE_WINDOW_SECS` windows with a
-/// `FINALIZE_WINDOW_OVERLAP_SECS` overlap, stitching the per-window segments
-/// into one absolute-timestamped list. Calls `progress` with a 0.0→1.0 fraction
-/// after each window so a UI bar can move. Segments whose start falls inside the
-/// *next* window's overlap are dropped to de-dup the boundary.
+/// Transcribes `pcm` in `FINALIZE_WINDOW_SECS` windows with `FINALIZE_WINDOW_OVERLAP_SECS`
+/// overlap, stitched to one absolute list; `progress` fires 0.0→1.0/window; overlap segs dropped.
 fn transcribe_chunked(
     transcriber: &mut dyn Transcriber,
     pcm: &[f32],
@@ -408,9 +384,8 @@ fn transcribe_chunked(
         let is_last = end >= total;
         let window = &pcm[start..end];
         let window_start = Duration::from_secs_f64(start as f64 / rate as f64);
-        // Window-relative-end below which we *keep* segments: everything for the
-        // last window; up to where the next window starts (its overlap zone) for
-        // earlier windows, so straddling segments come from exactly one window.
+        // Window-relative-end below which segments are *kept*: everything on the last window,
+        // else up to where the next window starts, so straddling segments come from one window.
         let keep_until = if is_last {
             Duration::from_secs_f64(window.len() as f64 / rate as f64)
         } else {
@@ -557,9 +532,8 @@ mod tests {
 
     #[test]
     fn happy_path_with_file_capture_mock_transcriber() {
-        // 20 s of audio at 16 kHz → at LIVE_DECODE_EVERY_SECS=5 s, ~3 decodes
-        // (plus the final flush). MockTranscriber emits one segment per
-        // `seg_secs`, so we get sensible live_segments to inspect.
+        // 20 s at 16 kHz → at LIVE_DECODE_EVERY_SECS=5 s, ~3 decodes + final flush.
+        // MockTranscriber emits one segment per `seg_secs`, giving live_segments to inspect.
         let (_fixture_guard, fixture) = make_fixture_wav(20.0);
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
@@ -605,11 +579,8 @@ mod tests {
 
     #[test]
     fn live_segments_stay_monotonic_and_unique_across_re_decodes() {
-        // 30 s of audio at 16 kHz: with LIVE_DECODE_EVERY_SECS=5, the sliding
-        // window re-decodes ~6 times and (since the recording exceeds
-        // LIVE_WINDOW_SECS) the window slides forward. Append-only commits must
-        // keep timestamps monotonic and never duplicate the earlier segments.
-        // MockTranscriber emits one segment per 2 s.
+        // 30 s at 16 kHz: LIVE_DECODE_EVERY_SECS=5 re-decodes ~6 times, sliding past
+        // LIVE_WINDOW_SECS; append-only commits must stay monotonic and never duplicate.
         let (_fixture_guard, fixture) = make_fixture_wav(30.0);
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
@@ -694,9 +665,8 @@ mod tests {
             // Decode 2 (horizon ≈ 5): both ripe segments commit, with the
             // corrected tail text.
             vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")],
-            // Decode 3 (window starts at 3 s, window-relative times): the
-            // committed audio re-decodes (filtered out); "i psa" (rel 9-11,
-            // abs 12-14) is younger than the holdback → held.
+            // Decode 3 (window starts at 3 s): committed audio re-decodes (filtered out);
+            // "i psa" (rel 9-11, abs 12-14) is younger than the holdback → held.
             vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
             // Final flush publishes the held-back tail.
             vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
@@ -1157,10 +1127,8 @@ mod tests {
 
     #[test]
     fn transcribe_chunked_stitches_overlapping_windows_without_duplicates() {
-        // 70 s of audio, 30 s windows, 3 s overlap, 27 s step → 3 windows
-        // (0..30, 27..57, 54..70). MockTranscriber emits one 5 s segment per
-        // window-slice. Segments must be monotonic, recording-absolute, and the
-        // overlap zones must not be double-counted.
+        // 70 s, 30 s windows, 3 s overlap, 27 s step → 3 windows (0..30, 27..57, 54..70).
+        // Segments must be monotonic, recording-absolute, and overlap zones not double-counted.
         let pcm = vec![0.01f32; 70 * 16_000];
         let mut tr = MockTranscriber {
             seg_secs: 5.0,

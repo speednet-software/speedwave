@@ -35,9 +35,8 @@ pub(crate) fn global_plugin_bridges() -> Option<&'static SharedPluginBridges> {
     GLOBAL_PLUGIN_BRIDGES.get()
 }
 
-/// Collect compose-injection registrations for every running plugin
-/// bridge. Returns an empty `HostBridgesInfo` when nothing is registered
-/// yet (e.g. CLI-only contexts).
+/// Collect compose-injection registrations for every running plugin bridge.
+/// Returns an empty `HostBridgesInfo` when nothing is registered (e.g. CLI-only).
 pub(crate) fn current_bridges_info() -> HostBridgesInfo {
     let registrations = global_plugin_bridges()
         .and_then(|handle| handle.lock().ok())
@@ -84,8 +83,7 @@ pub(crate) struct ExitCleanupContext {
 }
 
 /// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
-/// Generic per-project host-worker teardown (best-effort) — one body for
-/// every `HashMap<project, HostMcpProcess<S>>` registry.
+/// Generic best-effort teardown — one body for every `HashMap<project, HostMcpProcess<S>>`.
 fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
     map: &Arc<Mutex<HashMap<String, speedwave_runtime::host_mcp_process::HostMcpProcess<S>>>>,
     project: &str,
@@ -121,9 +119,8 @@ const RECONCILE_REBUILDING: u8 = 2;
 
 static BUNDLE_RECONCILE_PHASE: AtomicU8 = AtomicU8::new(RECONCILE_IDLE);
 
-/// Tracks whether container images are ready for use. `Checking` covers the
-/// short bundle-manifest comparison at reconcile start; waiters treat it like
-/// `Building` so container starts cannot race a rebuild decision.
+/// Tracks whether container images are ready. `Checking` covers the bundle-manifest
+/// comparison at reconcile start; waiters treat it like `Building` to avoid a rebuild race.
 #[derive(Clone, Debug)]
 enum ImageReadiness {
     Ready,
@@ -135,11 +132,8 @@ enum ImageReadiness {
 static IMAGES_READY: std::sync::LazyLock<(Mutex<ImageReadiness>, Condvar)> =
     std::sync::LazyLock::new(|| (Mutex::new(ImageReadiness::Ready), Condvar::new()));
 
-/// Blocks the calling thread until container images are ready (or timeout).
-///
-/// - `Ready` → returns `Ok(())` immediately
-/// - `Checking`/`Building` → waits on Condvar until signaled, then re-checks
-/// - `Failed(msg)` → returns `Err(msg)` immediately
+/// Blocks the calling thread until container images are ready (or timeout): `Ready`
+/// returns immediately, `Checking`/`Building` wait on the Condvar, `Failed(msg)` errors.
 pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
     let (lock, cvar) = &*IMAGES_READY;
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -841,9 +835,8 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
     });
 }
 
-/// When running containers have a stale `WORKER_OS_URL`, regenerate compose and
-/// recreate them so the hub connects to the new mcp-os port. Runs in a background
-/// thread; serialised per-project by the compose lock.
+/// When running containers have a stale `WORKER_OS_URL`, regenerate compose and recreate
+/// them so the hub connects to the new mcp-os port. Background thread, per-project lock.
 pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
     let handle = app_handle.clone();
     std::thread::spawn(move || {
@@ -1114,9 +1107,7 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
     })
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
@@ -1928,9 +1919,8 @@ mod tests {
             ));
         }
 
-        /// Structural: the bundle-unchanged branch must restore pending projects
-        /// BEFORE clearing them from state — clearing first would strand them
-        /// stopped after a no-op update (ADR-072).
+        /// Structural: bundle-unchanged branch must restore pending projects BEFORE clearing
+        /// them from state — clearing first strands them stopped after a no-op update (ADR-072).
         #[test]
         fn unchanged_bundle_branch_restores_before_clearing_pending() {
             let source = include_str!("reconcile.rs");
@@ -2481,9 +2471,8 @@ mod tests {
         }
     }
 
-    /// Verifies that `run_exit_cleanup` is idempotent: the first call returns
-    /// `Some(JoinHandle)` and the second `None` (the `CLEANUP_ONCE` guard).
-    /// Process-wide `static`, so `#[serial]` must order it after other callers.
+    /// Verifies `run_exit_cleanup` is idempotent: first call returns `Some(JoinHandle)`, second
+    /// `None` (`CLEANUP_ONCE` guard). Process-wide `static` — `#[serial]` orders it after others.
     #[test]
     #[serial]
     fn cleanup_once_idempotency() {

@@ -1,14 +1,12 @@
-//! Startup self-heal of legacy `oauth/<project>/<service>.json` whose IdP
-//! identity sits at top level instead of nested under `providerData`
-//! (ADR-060 §addendum). Shape-only, best-effort, idempotent.
+//! Startup self-heal of legacy `oauth/<project>/<service>.json` with IdP identity at top level
+//! instead of under `providerData` (ADR-060 §addendum); shape-only, best-effort, idempotent.
 
 use std::path::Path;
 
 use crate::consts;
 
-/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys,
-/// pinned to the descriptor SSOT by
-/// `identity_keys_match_oauth_state_provider_data_descriptors`.
+/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys, pinned to the
+/// descriptor SSOT by `identity_keys_match_oauth_state_provider_data_descriptors`.
 pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
 
 /// Run migration once at startup; returns the count of files rewritten.
@@ -17,9 +15,8 @@ pub fn run_oauth_state_migration_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
 
-/// Inner entry point parameterised by the data dir. Tests pass an explicit tmp
-/// dir to avoid the `consts::data_dir()` `OnceLock` cache shared across the
-/// `cargo test` binary.
+/// Inner entry point parameterised by the data dir. Tests pass an explicit tmp dir to avoid
+/// the `consts::data_dir()` `OnceLock` cache shared across the `cargo test` binary.
 fn run_with_data_dir(data_dir: &Path) -> usize {
     let oauth_root = data_dir.join(consts::OAUTH_SUBDIR);
     if !oauth_root.exists() {
@@ -139,9 +136,8 @@ fn needs_migration(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
         .any(|k| obj.get(*k).is_some_and(|v| v.is_string()))
 }
 
-/// Move top-level identity strings under a fresh `providerData` object and drop
-/// the top-level copies. Returns `true` if at least one key was moved. Does not
-/// touch an existing `providerData` — callers gate on [`needs_migration`].
+/// Move top-level identity strings under a fresh `providerData` object, dropping the top-level
+/// copies. Returns `true` if moved; never touches an existing `providerData` ([`needs_migration`]).
 fn nest_identity(obj: &mut serde_json::Map<String, serde_json::Value>) -> bool {
     let mut provider_data = serde_json::Map::new();
     for &key in IDENTITY_KEYS {
@@ -225,8 +221,7 @@ mod tests {
     }
 
     /// Drift guard: `IDENTITY_KEYS` must match the camelCase JSON keys of every
-    /// `OAuthStateProviderData`-tagged descriptor field, mapped through
-    /// `oauth_json_key_for`.
+    /// `OAuthStateProviderData`-tagged descriptor field, mapped through `oauth_json_key_for`.
     #[test]
     fn identity_keys_match_oauth_state_provider_data_descriptors() {
         let mut expected: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES

@@ -1,7 +1,6 @@
 /**
- * Allowed `auth_fields[].field_type` values. Mirrors `ALLOWED_AUTH_FIELD_TYPES`
- * in `crates/speedwave-runtime/src/plugin.rs`; kept in sync by the Rust test
- * `allowed_auth_field_types_match_ts_union`.
+ * Allowed `auth_fields[].field_type` values. Mirrors `ALLOWED_AUTH_FIELD_TYPES` in
+ * `crates/speedwave-runtime/src/plugin.rs`; kept in sync by the Rust test `allowed_auth_field_types_match_ts_union`.
  */
 export type PluginAuthFieldType = 'text' | 'password' | 'textarea';
 
@@ -51,9 +50,8 @@ export interface PluginSaveCredentialsEvent {
 }
 
 /**
- * Verification outcome for a plugin; `'verified'` is the only usable state.
- * Mirrors `VerificationStatus` in `crates/speedwave-runtime/src/plugin.rs`
- * (`#[serde(rename_all = "snake_case")]`).
+ * Verification outcome for a plugin; `'verified'` is the only usable state. Mirrors `VerificationStatus`
+ * in `crates/speedwave-runtime/src/plugin.rs` (`#[serde(rename_all = "snake_case")]`).
  */
 export type PluginVerificationStatus =
   | 'verified'
@@ -135,8 +133,7 @@ export interface PluginsResponse {
 
 /**
  * Phase strings emitted by the `plugin_install_status` event.
- * Mirror of `ALL_PLUGIN_INSTALL_PHASES` in
- * `crates/speedwave-runtime/src/plugin.rs`.
+ * Mirror of `ALL_PLUGIN_INSTALL_PHASES` in `crates/speedwave-runtime/src/plugin.rs`.
  */
 export const PLUGIN_INSTALL_PHASES = [
   'verifying',

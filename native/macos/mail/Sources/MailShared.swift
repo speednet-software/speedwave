@@ -16,9 +16,8 @@ func makeRecipientClauses(
         .joined(separator: "\n")
 }
 
-/// Runs a mailbox-scoped AppleScript. A -1728 "Can't get" failure maps to a mailbox
-/// teaching error only when `mailboxMissing` confirms the scoped mailbox is absent, so a
-/// per-message property read failure inside an existing mailbox surfaces its real cause.
+/// Runs a mailbox-scoped AppleScript. A -1728 "Can't get" failure maps to a mailbox teaching error
+/// only when `mailboxMissing` confirms it's absent — a per-message read failure keeps its real cause.
 func runMailScript(
     _ script: String,
     timeout: TimeInterval,

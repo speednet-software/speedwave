@@ -1,6 +1,5 @@
-//! Bridges container `pbcopy` writes to the host clipboard via a watched
-//! file. Runs for the desktop process lifetime. Deduplicated (the same
-//! content is never re-copied) and capped at 64 KB per payload.
+//! Bridges container `pbcopy` writes to the host clipboard via a watched file, for the process
+//! lifetime. Deduplicated (same content never re-copied), capped at 64 KB/payload.
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::Read;

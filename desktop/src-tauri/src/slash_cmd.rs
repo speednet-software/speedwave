@@ -7,9 +7,8 @@ use speedwave_runtime::runtime;
 use speedwave_runtime::slash;
 use std::path::PathBuf;
 
-/// Lists every slash command Claude Code exposes for `project_id`.
-/// Returns cached results when fresh, else a built-in fallback list;
-/// the `source` field marks which.
+/// Lists every slash command Claude Code exposes for `project_id`. Returns cached results when
+/// fresh, else a built-in fallback list; the `source` field marks which.
 #[tauri::command]
 pub(crate) async fn list_slash_commands(
     project_id: String,
@@ -32,9 +31,8 @@ pub(crate) async fn list_slash_commands(
     Ok(discovery)
 }
 
-/// Invalidates the cached slash discovery for a project. Useful after
-/// installing or removing a plugin — the next call to
-/// `list_slash_commands` will re-run discovery.
+/// Invalidates the cached slash discovery for a project. Useful after installing or removing a
+/// plugin — the next call to `list_slash_commands` will re-run discovery.
 #[tauri::command]
 pub(crate) fn invalidate_slash_cache(project_id: String) -> Result<(), String> {
     check_project(&project_id)?;
@@ -42,9 +40,7 @@ pub(crate) fn invalidate_slash_cache(project_id: String) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

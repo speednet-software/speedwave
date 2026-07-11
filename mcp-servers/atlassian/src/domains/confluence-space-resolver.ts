@@ -7,12 +7,12 @@ import { ts } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 
 /**
- * Resolve a Confluence space ID to its key. A 404 means the space has no
- * resolvable key (allowlist denial); any other lookup failure is rethrown,
- * carrying the space (and page, when known) ID for the caller to log/report.
+ * Resolve a Confluence space ID to its key. A 404 means no resolvable key (allowlist denial);
+ * any other failure is rethrown, carrying the space/page ID for the caller to log/report.
  * @param client - The shared Atlassian HTTP client.
  * @param spaceId - The Confluence space ID from a page payload.
  * @param pageId - The page the lookup is for, included in the error context.
+ * @returns The resolved space key, or `undefined` if not resolvable.
  */
 export async function resolveConfluenceSpaceKey(
   client: AtlassianClient,

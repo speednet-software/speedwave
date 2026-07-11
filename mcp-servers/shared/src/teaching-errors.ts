@@ -1,6 +1,5 @@
 /**
- * SSOT for TEACHING-style error composition: what was wrong, where to find a correct
- * value, and what to do next — so a weak model can self-correct without guessing.
+ * SSOT for TEACHING-style error composition: what was wrong, where to find a correct value, and what to do next — so a weak model can self-correct without guessing.
  * @module shared/teaching-errors
  */
 
@@ -29,8 +28,7 @@ function renderReceived(value: unknown): string {
 }
 
 /**
- * Summarize a received value, capping oversized or prompt-injected input at
- * {@link MAX_RECEIVED_LENGTH} with a trailing `...` marker.
+ * Summarize a received value, capping oversized or prompt-injected input at {@link MAX_RECEIVED_LENGTH} with a trailing `...` marker.
  * @param value - The received value to render compactly.
  */
 function summarizeReceived(value: unknown): string {
@@ -52,8 +50,7 @@ export interface TeachingErrorParams {
 }
 
 /**
- * Compose the teaching-style message body (no envelope): what was wrong, which
- * tool provides a correct value, and the suggested next step — in that order.
+ * Compose the teaching-style message body (no envelope): what was wrong, which tool provides a correct value, and the suggested next step — in that order.
  * @param params - What was wrong, where a correct value comes from, and what to do next.
  */
 function buildTeachingMessage(params: TeachingErrorParams): string {
@@ -67,8 +64,7 @@ function buildTeachingMessage(params: TeachingErrorParams): string {
 }
 
 /**
- * Build a teaching-style {@link errorResult}: states what was wrong, which tool
- * provides a correct value, and the suggested next step — in that order.
+ * Build a teaching-style {@link errorResult}: states what was wrong, which tool provides a correct value, and the suggested next step — in that order.
  * @param params - What was wrong, where a correct value comes from, and what to do next.
  */
 export function teachingErrorResult(params: TeachingErrorParams): ReturnType<typeof errorResult> {
@@ -76,8 +72,7 @@ export function teachingErrorResult(params: TeachingErrorParams): ReturnType<typ
 }
 
 /**
- * Build a teaching-style {@link ToolResult} error envelope (Family A's
- * `{ success, error }` shape) with the same message text as {@link teachingErrorResult}.
+ * Build a teaching-style {@link ToolResult} error envelope (Family A's `{ success, error }` shape) with the same message text as {@link teachingErrorResult}.
  * @param params - What was wrong, where a correct value comes from, and what to do next.
  * @param code - Error code to attach (default `INVALID_PARAM`).
  */
@@ -92,9 +87,7 @@ export function teachingToolResult(
 }
 
 /**
- * Clamp a pagination page-size param to a positive integer. Missing, null, zero,
- * negative, NaN, or non-numeric input yields `def`; fractional input floors; `max`
- * omitted means no upper ceiling. The result is never below 1.
+ * Clamp a pagination page-size param to a positive integer. Missing, null, zero, negative, NaN, or non-numeric input yields `def`; fractional input floors; the result is never below 1.
  * @param value - Raw page-size value (e.g. from tool params).
  * @param def - Default to use when `value` is missing or not a usable number.
  * @param max - Optional upper bound; when omitted the value is only floored and clamped to >= 1.
@@ -108,8 +101,7 @@ export function clampPageSize(value: unknown, def: number, max?: number): number
 }
 
 /**
- * Build a MISSING_PARAM teaching {@link ToolResult}: names the missing param, the
- * received value, and the next step. Shared by slack / sharepoint required-param guards.
+ * Build a MISSING_PARAM teaching {@link ToolResult}: names the missing param, the received value, and the next step. Shared by slack / sharepoint required-param guards.
  * @param paramName - Name of the missing or invalid parameter.
  * @param received - The value actually received.
  * @param nextStep - What the caller should do instead.

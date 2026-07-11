@@ -20,9 +20,8 @@ struct OAuthProgressEvent {
     request_id: String,
 }
 
-/// Every `status` the host emits on an OAuth progress event. TS mirror:
-/// `OAuthProgressEvent['status']` in `models/integration.ts`; guarded by
-/// `progress_statuses_match_ts_union`.
+/// Every `status` the host emits on an OAuth progress event. TS mirror is
+/// `OAuthProgressEvent['status']` (`integration.ts`); test `progress_statuses_match_ts_union`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ProgressStatus {
     AwaitingRedirect,
@@ -166,9 +165,8 @@ pub(crate) fn superseded(registry: &FlowRegistry, my_generation: u64, request_id
 /// Canonical "device code expired" message — one wording across providers.
 pub(crate) const DEVICE_CODE_EXPIRED_MSG: &str = "Device code expired — please try again.";
 
-/// One step of the device-code polling decision, returned by the provider after
-/// it inspects a token-endpoint response. The loop turns this into the right
-/// `emit_progress` call + terminate, or keeps polling.
+/// One step of the device-code polling decision, returned by the provider after inspecting a
+/// token-endpoint response. The loop turns this into an `emit_progress` call + terminate, or polls.
 pub(crate) enum PollStep {
     /// Emit `(status, message)` and end the flow (success or terminal error).
     Emit {

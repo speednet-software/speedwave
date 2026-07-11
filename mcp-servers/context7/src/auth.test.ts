@@ -1,9 +1,6 @@
 /**
- * Context7 worker auth wiring tests.
- *
- * Verifies that mcp-context7 reads MCP_CONTEXT7_AUTH_TOKEN before starting,
- * loads the optional /tokens/api_key when present, and falls back to
- * anonymous mode when the key is absent.
+ * Verifies mcp-context7 reads MCP_CONTEXT7_AUTH_TOKEN before starting, loads the optional
+ * /tokens/api_key when present, and falls back to anonymous mode when the key is absent.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -53,9 +50,7 @@ describe('context7 optional API key', () => {
       const result = await runWorker({
         MCP_CONTEXT7_AUTH_TOKEN: 'test-token',
         TOKENS_DIR: dir,
-        // Force the server to bind ephemerally and exit fast — we just want
-        // to observe the startup log, not actually serve traffic. The 4s
-        // timeout in runWorker will kill it.
+        // Binds ephemerally and exits fast; the 4s timeout in runWorker kills it before it serves traffic.
         PORT: '0',
       });
       // The worker keeps running until SIGTERM (timeout in runWorker). Look at
@@ -82,9 +77,8 @@ describe('context7 optional API key', () => {
   }, 10_000);
 
   it('trims trailing whitespace from api_key — end-to-end via loadToken', async () => {
-    // Whitespace is stripped by mcp-shared's `loadToken`. End-to-end this means
-    // a user who pastes "ctx7sk_xxx\n" into Settings doesn't end up sending
-    // "Bearer ctx7sk_xxx\n" (which Context7 rejects with 401).
+    // Whitespace stripped by mcp-shared's `loadToken`: a pasted "ctx7sk_xxx\n" must not become
+    // "Bearer ctx7sk_xxx\n" (Context7 rejects that with 401).
     const { loadToken } = await import('@speedwave/mcp-shared');
     dir = await mkdtemp(join(tmpdir(), 'mcp-context7-test-'));
     try {

@@ -33,9 +33,8 @@ fn manifest_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Lines containing one of these substrings, or a `// SSOT-allow:` marker on
-/// the same or previous line, are exempt. Production code outside these
-/// allowlists must use `host_bind_address()`.
+/// Lines containing one of these substrings, or a `// SSOT-allow:` marker on the same or previous
+/// line, are exempt. Production code outside these allowlists must use `host_bind_address()`.
 const PATTERNS: &[&str] = &[
     "TcpListener::bind(\"127.0.0.1",
     "TcpListener::bind((\"127.0.0.1",
@@ -69,9 +68,8 @@ fn has_allow_marker(line: &str, prev: Option<&&str>) -> bool {
     line.contains("// SSOT-allow:") || prev.is_some_and(|p| p.contains("// SSOT-allow:"))
 }
 
-/// Files known to bind/connect loopback for legitimate host-internal reasons
-/// (upstream IDE WebSocket, plugin local-UI URL, etc.). Reviewed at landing
-/// time; new entries require justification in the PR.
+/// Files known to bind/connect loopback for legitimate host-internal reasons (upstream IDE
+/// WebSocket, plugin local-UI URL, etc.); new entries require justification in the PR.
 const ALLOWLISTED_FILES: &[&str] = &[
     // Host→host: WS URL Tauri uses to dial the external IDE (VSCode/Cursor).
     "desktop/src-tauri/src/bridges/ide_bridge.rs",

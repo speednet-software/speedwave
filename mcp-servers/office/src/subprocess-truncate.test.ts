@@ -1,7 +1,6 @@
 /**
- * Tests for the subprocess output cap with a tiny `MAX_SUBPROCESS_OUTPUT_BYTES`, so a single
- * data chunk crosses the limit and the partial-chunk truncation path is exercised deterministically.
- * @module mcp-office/subprocess-truncate.test
+ * Tests the subprocess output cap with a tiny `MAX_SUBPROCESS_OUTPUT_BYTES` so a single data chunk
+ * crosses the limit, deterministically exercising the partial-chunk truncation path.
  */
 
 import { describe, it, expect, vi } from 'vitest';

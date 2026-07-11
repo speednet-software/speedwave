@@ -1,8 +1,4 @@
-/**
- * SSOT for tool names referenced outside their own definition file: by
- * {@link RedmineClient.formatError}'s 404 recovery hints.
- * @module tool-names
- */
+/** SSOT for tool names referenced outside their own definition file, by {@link RedmineClient.formatError}'s 404 recovery hints. */
 
 export const TOOL_NAMES = {
   LIST_ISSUE_IDS: 'listIssueIds',

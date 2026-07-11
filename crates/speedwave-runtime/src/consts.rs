@@ -151,9 +151,8 @@ pub const TAURI_WINDOWS_RESOURCES_SUBDIR: &str = "resources";
 /// serializes Desktop `ensure_ready` and CLI startup reinstalls.
 pub const NERDCTL_INSTALL_LOCK_FILE: &str = "nerdctl-install.lock";
 
-/// Filename (under `data_dir()`) of the nerdctl download-backoff marker; a
-/// failed in-distro download is recorded here so short-lived CLI processes
-/// don't restart the full download on every invocation.
+/// Filename (under `data_dir()`) of the nerdctl download-backoff marker; a failed in-distro
+/// download is recorded here so short-lived CLI processes don't restart it on every invocation.
 pub const NERDCTL_DOWNLOAD_BACKOFF_FILE: &str = "nerdctl-download-backoff.json";
 
 /// Minimum delay before retrying a failed in-distro nerdctl-full download.
@@ -299,9 +298,8 @@ pub const CONTAINERD_RESTART_READY_MAX_RETRIES: u32 = 6;
 /// ~15-45s; 120s covers slow machines without an indefinite UI hang).
 pub const LIMA_VM_START_TIMEOUT_SECS: u64 = 120;
 
-/// Max seconds for a `limactl start` that may provision: the first start under
-/// a newly bundled Lima downloads the guest nerdctl-full archive before boot.
-/// Budget equals the Desktop image-rebuild wait (`RECONCILE_WAIT_TIMEOUT`).
+/// Max seconds for a `limactl start` that may provision: the first start under a newly bundled Lima
+/// downloads the guest nerdctl-full archive before boot. Matches `RECONCILE_WAIT_TIMEOUT`.
 pub const LIMA_VM_PROVISION_START_TIMEOUT_SECS: u64 = 600;
 
 // Compile-time invariant: the provisioning window must extend the normal one.
@@ -2565,9 +2563,8 @@ mod tests {
         );
     }
 
-    // The desktop and proxy crates are standalone workspaces and cannot inherit
-    // the root `[workspace.lints]`; their `[lints]` tables must stay byte-equal
-    // (modulo whitespace) or one platform/binary silently runs weaker lints.
+    // desktop/proxy are standalone workspaces (cannot inherit root `[workspace.lints]`); their
+    // `[lints]` tables must stay byte-equal (mod. whitespace) or one binary runs weaker lints.
     #[test]
     fn lint_tables_are_aligned() {
         fn lint_table(src: &str, header: &str) -> Vec<String> {

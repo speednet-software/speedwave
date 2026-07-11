@@ -196,9 +196,8 @@ enum NotesClient {
     }
 }
 
-/// Runs a Notes-scoped AppleScript. A -1728 "Can't get" failure maps to a folder- or
-/// note-not-found teaching error only when the failure names the scoped `folder`/`noteId`;
-/// an unscoped miss (e.g. listFolders) propagates its real message.
+/// Runs a Notes-scoped AppleScript. A -1728 "Can't get" failure maps to a folder-/note-not-found
+/// teaching error only when it names the scoped `folder`/`noteId`; an unscoped miss propagates as-is.
 func runNoteScript(
     _ script: String,
     timeout: TimeInterval,

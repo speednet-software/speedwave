@@ -14,9 +14,8 @@ pub(crate) fn apply_llm_config_in(
     llm: &LlmConfig,
     project: &str,
 ) -> anyhow::Result<String> {
-    // Gate (SSOT: LlmConfig::is_unconfigured) — never-touched project, explicit
-    // logout, and dangling active (entry missing) all refuse to start. Logout
-    // gets distinct wording, checked first so it doesn't shadow the wider gate.
+    // Gate (SSOT: LlmConfig::is_unconfigured) — never-touched, explicit logout, and dangling
+    // active (entry missing) all refuse to start; logout gets distinct wording, checked first.
     if llm.is_logged_out() {
         anyhow::bail!(
             "No LLM provider selected. Run `speedwave login` to use your Anthropic \
@@ -52,9 +51,8 @@ pub(crate) fn apply_llm_config_in(
     apply_llm_config_legacy_in(data_dir, yaml, llm, project)
 }
 
-/// ADR-073 proxy path: every session talks to the proxy service; the
-/// provider kind picks the route and model prefix. `caller_token` authenticates
-/// `claude` to the proxy so co-resident workers can't relay through it.
+/// ADR-073 proxy path: every session talks to the proxy service; the provider kind picks the
+/// route/model prefix. `caller_token` authenticates `claude` so co-resident workers can't relay.
 fn apply_llm_config_proxy(
     yaml: &str,
     llm: &LlmConfig,
@@ -168,7 +166,7 @@ fn apply_llm_config_legacy_in(
     }
     match provider {
         "anthropic" => {
-            // Pins each ANTHROPIC_DEFAULT_*_MODEL alias to the SSOT-latest id with `[1m]` where supported.
+            // Pins each ANTHROPIC_DEFAULT_*_MODEL to the SSOT-latest id, `[1m]` where supported.
             let mut extra_env = crate::defaults::anthropic_default_models_env();
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
             // Provenance guard (mirrors the proxy path): a foreign id falls
@@ -491,9 +489,8 @@ mod tests {
 
     #[test]
     fn dangling_active_bails_no_provider_configured() {
-        // Dangling active (points at a missing entry) is unconfigured (SSOT
-        // gate): render must refuse rather than silently fall back to the
-        // Anthropic default for a config naming a provider id that doesn't exist.
+        // Dangling active (points at a missing entry) is unconfigured (SSOT gate): render must
+        // refuse rather than silently fall back to Anthropic for a nonexistent provider id.
         let tmp = tempfile::tempdir().unwrap();
         for proxy in [Some(true), Some(false), None] {
             let llm = crate::config::LlmConfig {
@@ -569,9 +566,8 @@ mod tests {
 
     #[test]
     fn unmigrated_legacy_v1_config_bails_until_migrated() {
-        // The flip side of the above: render_compose's contract requires
-        // migrate_llm to run first. A raw, never-migrated flat `provider` has
-        // no resolvable active provider and must bail, not silently render.
+        // Flip side of the above: render_compose requires migrate_llm to run first. A raw,
+        // never-migrated flat `provider` has no resolvable active provider and must bail.
         let tmp = tempfile::tempdir().unwrap();
         let llm = crate::config::LlmConfig {
             provider: Some("anthropic".to_string()),

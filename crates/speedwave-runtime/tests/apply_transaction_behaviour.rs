@@ -1,6 +1,5 @@
-//! Behavioural coverage for `update::apply_update_transaction` and
-//! `update::apply_rollback_transaction` via mocked `LockedRuntime` call
-//! recording. Own binary: `consts::data_dir()` `OnceLock` resolves once.
+//! Behavioural coverage for `update::apply_{update,rollback}_transaction` via mocked
+//! `LockedRuntime` call recording. Own binary: `consts::data_dir()` `OnceLock` resolves once.
 
 #![expect(
     clippy::unwrap_used,
@@ -115,9 +114,8 @@ fn apply_update_transaction_aborts_recreate_on_compose_down_failure() {
 #[test]
 #[serial_test::serial]
 fn apply_update_transaction_fails_after_down_when_recreate_fails() {
-    // The dangerous window: compose_down succeeds, compose_up_recreate fails.
-    // The transaction errors with the project torn down — exactly the state the
-    // CLI update path now auto-rolls-back from (a snapshot was saved first).
+    // The dangerous window: compose_down succeeds, compose_up_recreate fails — the transaction
+    // errors with the project torn down, exactly what the CLI update path auto-rolls-back from.
     let data_dir = shared_data_dir();
     let project = "tx-recreate-fail";
     let compose_dir = data_dir.join("compose").join(project);

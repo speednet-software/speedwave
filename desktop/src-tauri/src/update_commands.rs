@@ -5,9 +5,7 @@ use crate::types::BundleReconcileStatus;
 use crate::updater;
 use speedwave_runtime::{bundle, config};
 
-// ---------------------------------------------------------------------------
-// App update commands
-// ---------------------------------------------------------------------------
+// ── App update commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub(crate) async fn check_for_update(

@@ -1,7 +1,5 @@
-// Plugin management commands — Tauri backend for the Plugins UI.
-//
-// All `#[tauri::command]` functions here are registered in the main
-// `generate_handler!` macro via their fully-qualified paths.
+// Plugin management commands — Tauri backend for the Plugins UI. All `#[tauri::command]`
+// functions here are registered in the main `generate_handler!` macro via their FQ paths.
 
 use crate::types::check_project;
 use speedwave_runtime::config;
@@ -10,9 +8,7 @@ use speedwave_runtime::plugin;
 use std::collections::HashMap;
 use tauri::Emitter;
 
-// ---------------------------------------------------------------------------
-// DTOs
-// ---------------------------------------------------------------------------
+// ── DTOs ────────────────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, Clone)]
 pub(crate) struct PluginStatusEntry {
@@ -59,9 +55,7 @@ pub(crate) struct PluginsResponse {
     pub(crate) plugins: Vec<PluginStatusEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns the token directory path for a service, delegating to the runtime SSOT.
 fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, String> {
@@ -118,9 +112,7 @@ pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), St
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
+// ── Tauri commands ──────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
@@ -256,9 +248,8 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     Ok(PluginsResponse { plugins: entries })
 }
 
-/// Reads the off-mount OAuth state's `expiresAt` (ISO-8601), or `None` when the
-/// plugin is not authorized. OAuth credentials live off-mount, so the state
-/// file — not `/tokens` — is the readiness signal.
+/// Reads the off-mount OAuth state's `expiresAt` (ISO-8601), or `None` when not authorized.
+/// OAuth credentials live off-mount, so the state file — not `/tokens` — is the readiness signal.
 fn plugin_oauth_expires_at(project: &str, slug: &str) -> Option<String> {
     plugin_oauth_expires_at_in(speedwave_runtime::consts::data_dir(), project, slug)
 }
@@ -283,9 +274,8 @@ fn plugin_oauth_authorized_in(data_dir: &std::path::Path, project: &str, slug: &
     plugin_oauth_expires_at_in(data_dir, project, slug).is_some()
 }
 
-/// Keys present in the off-mount pre-auth seed (the saved client credentials).
-/// These mark an `oauth_flow` field as "configured" so Authorize can unlock
-/// before any authorization has happened.
+/// Keys present in the off-mount pre-auth seed (saved client credentials); marks an
+/// `oauth_flow` field "configured" so Authorize can unlock before authorization happens.
 fn oauth_seed_keys(project: &str, slug: &str) -> std::collections::HashSet<String> {
     oauth_seed_keys_in(speedwave_runtime::consts::data_dir(), project, slug)
 }
@@ -365,9 +355,8 @@ fn is_plugin_configured_in(
     true
 }
 
-/// Reads `plugin.json` from a ZIP without extracting, verifying signature,
-/// or building. Returns a lightweight summary so the install overlay knows
-/// which steps to render BEFORE invoking [`install_plugin`].
+/// Reads `plugin.json` from a ZIP without extracting, verifying signature, or building.
+/// Returns a lightweight summary so the install overlay knows which steps to render.
 #[tauri::command]
 pub async fn peek_plugin_manifest(
     zip_path: String,
@@ -577,9 +566,8 @@ pub fn set_plugin_enabled(
     set_plugin_enabled_in_config(&project, &service_id, enabled)
 }
 
-/// Writes the enabled flag for a plugin into the project config (no verify gate
-/// — callers gate as needed). Used by set_plugin_enabled and the OAuth success
-/// path (a freshly-authorized plugin auto-enables; see ADR-069).
+/// Writes the enabled flag for a plugin into the project config (no verify gate — callers
+/// gate as needed). Used by set_plugin_enabled and OAuth auto-enable-on-success (ADR-069).
 pub(crate) fn set_plugin_enabled_in_config(
     project: &str,
     plugin_key: &str,
@@ -658,8 +646,7 @@ pub fn save_plugin_credentials(
 }
 
 /// Writes OAuth client credentials to the host-only pre-auth seed file
-/// (`oauth/<project>/<slug>.seed.json`, 0o600). Read by `start_plugin_oauth`;
-/// never mounted into a worker.
+/// (`oauth/<project>/<slug>.seed.json`, 0o600). Read by `start_plugin_oauth`; never mounted.
 fn write_oauth_seed(
     project: &str,
     slug: &str,
@@ -882,9 +869,7 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
@@ -1095,9 +1080,8 @@ mod tests {
 
     #[test]
     fn validate_settings_against_schema_rejects_malformed_schema() {
-        // A schema that isn't a valid Draft-7 schema (e.g. `type` set
-        // to a non-string nonsense value). `jsonschema::draft7::new`
-        // should fail to compile it; we surface that as a clean error.
+        // Not a valid Draft-7 schema (`type` set to nonsense); `jsonschema::draft7::new`
+        // fails to compile it and we surface that as a clean error.
         let bogus_schema = serde_json::json!({ "type": 12345 });
         let payload = serde_json::json!({ "anything": true });
         let err =

@@ -1,6 +1,5 @@
-//! Windows Job Object kill-on-close: host MCP workers die with the parent.
-//! No-op stubs on non-Windows. See ADR-048 ("PRE-INSTALL orphan worker
-//! sweep") for the architectural rationale and TOCTOU known-limitation.
+//! Windows Job Object kill-on-close: host MCP workers die with the parent. No-op stubs elsewhere.
+//! See ADR-048 ("PRE-INSTALL orphan worker sweep") for rationale and the TOCTOU known-limitation.
 
 #[cfg(target_os = "windows")]
 // FFI boundary — `unsafe_code` is allowed only here; each block carries SAFETY docs.

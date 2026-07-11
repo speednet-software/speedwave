@@ -1,7 +1,5 @@
 //! Opt-in E2E: capture → live → finalize → markdown with a real Whisper model.
-//! Gated by env (normal `make test` skips it): `RUN_STT_E2E=1`,
-//! `STT_E2E_MODEL` (default "small"), `STT_E2E_WAV` (else a synthetic tone),
-//! `STT_E2E_EXPECT` (markdown substring assertion, requires STT_E2E_WAV).
+//! Gated by `RUN_STT_E2E=1`; see `STT_E2E_MODEL`/`STT_E2E_WAV`/`STT_E2E_EXPECT` env vars below.
 
 #![cfg(feature = "audio-transcription")]
 #![expect(
@@ -85,9 +83,8 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     );
     store.create(session).expect("create session");
 
-    // Live pass: FileAudioCapture replays the WAV (the production file path is
-    // passed per-call as a Microphone source) → driver writes audio.wav + live
-    // segments.
+    // Live pass: FileAudioCapture replays the WAV (passed per-call as a Microphone source) →
+    // driver writes audio.wav + live segments.
     let stream = FileAudioCapture::new()
         .start(AudioSource::Microphone {
             device: Some(wav.to_string_lossy().into_owned()),

@@ -143,10 +143,8 @@ export function sortLogLinesByTime(lines: LogLine[]): LogLine[] {
 }
 
 /**
- * Logs view — renders a full-width status bar above a filter toolbar and the
- * log stream. Status sections (overall, VM, containers, IDE bridge) wrap on
- * narrow widths; an expandable details row exposes per-container and
- * detected-IDE diagnostics without permanently stealing vertical space.
+ * Logs view: status bar (overall/VM/containers/IDE bridge, wraps on narrow widths) above a filter
+ * toolbar and log stream; an expandable details row adds per-container/IDE diagnostics on demand.
  */
 @Component({
   selector: 'app-logs-view',
@@ -643,10 +641,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * SSOT for "is an IDE actively connected": true only when the user has
-   * selected an IDE via `select_ide` and that IDE is still detected. The
-   * bridge daemon may be `running` (scanning) without any IDE routed
-   * through it — that is `disconnected`, not `connected`.
+   * SSOT for "is an IDE actively connected": true only once the user selected one via `select_ide`
+   * and it's still detected — a `running` (scanning) bridge daemon alone is `disconnected`.
    */
   readonly bridgeConnected = computed<boolean>(() => {
     const b = this.health()?.ide_bridge;
@@ -655,11 +651,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * Detail line for the bridge card — IDE name + port when connected, a count
-   * when bridges are detected but none selected, or `no IDE detected`. The
-   * "connect" call-to-action is rendered as a separate routerLink (see
-   * `bridgeShowConnectLink`) so users can jump straight to the
-   * `/integrations` table where the actual connection happens.
+   * Detail line for the bridge card — IDE name + port when connected, a count when detected but
+   * unselected, else `no IDE detected`. The connect CTA is a separate routerLink (`bridgeShowConnectLink`).
    */
   readonly bridgeDetail = computed<string>(() => {
     const b = this.health()?.ide_bridge;
@@ -672,10 +665,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * Whether to render the inline `connect →` anchor next to the bridge
-   * detail. Visible only when the daemon has at least one detected IDE but
-   * none has been selected — clicking the link takes the user to the
-   * `/integrations` view anchored at `#ide-bridge`.
+   * Whether to render the inline `connect →` anchor: visible only when at least one IDE is
+   * detected but none selected; links to the `/integrations` view anchored at `#ide-bridge`.
    */
   readonly bridgeShowConnectLink = computed<boolean>(() => {
     const b = this.health()?.ide_bridge;
@@ -812,18 +803,16 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Force a health refresh outside the regular cadence — used by the
-   * "Refresh" button in the toolbar. The polling loop and per-project
-   * refresh are owned by `SystemHealthService`.
+   * Force a health refresh outside the regular cadence, used by the toolbar "Refresh" button.
+   * The polling loop and per-project refresh are owned by `SystemHealthService`.
    */
   protected refreshHealth(): Promise<void> {
     return this.systemHealth.refresh();
   }
 
   /**
-   * Triggers a backend export of diagnostics. On success surfaces the output
-   * path through a confirmation dialog (mockup-aligned); failures are routed
-   * to the error banner so the toolbar stays calm.
+   * Triggers a backend export of diagnostics; on success shows the output path via a confirmation
+   * dialog, failures route to the error banner.
    */
   protected async exportDiagnostics(): Promise<void> {
     const project = this.projectState.activeProject();
@@ -867,12 +856,8 @@ export class LogsViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Render a parsed timestamp for the time column — always in the host's
-   * local timezone (`YYYY-MM-DD HH:MM:SS`), whatever offset the source wrote:
-   * an ISO stamp with `Z`/`±HH:MM` (nerdctl `--timestamps` is UTC; Speedwave
-   * loggers carry an offset) is parsed and re-rendered locally; a bare
-   * `HH:MM:SS[.ms]` (external tooling, no day/zone) is dated with today and
-   * kept as-is. The raw value stays in `[title]` on hover.
+   * Renders the time column in the host's local timezone (`YYYY-MM-DD HH:MM:SS`): an ISO stamp
+   * (`Z`/`±HH:MM`) is re-rendered locally, a bare `HH:MM:SS[.ms]` is dated with today; raw value stays in `[title]`.
    * @param raw - the parsed `time` field from a log line
    */
   protected formatTime(raw: string): string {

@@ -40,9 +40,8 @@ export interface BootWorkerOptions<C> {
 }
 
 /**
- * Boot a worker and return the actual listening port.
- * @template C - Service client type.
- * @param opts - Declarative boot configuration.
+ * Boot a worker from declarative options and return the actual listening port.
+ * @param opts - Declarative boot configuration
  */
 export async function bootWorker<C>(opts: BootWorkerOptions<C>): Promise<number> {
   const {

@@ -1,6 +1,5 @@
-//! Host addressing SSOT: container-side gateway IP + host-side bind address,
-//! cached behind a pluggable computer (Lima static on macOS, WSL-detected on
-//! Windows). See ADR-067.
+//! Host addressing SSOT: container-side gateway IP + host-side bind address, cached behind a
+//! pluggable computer (Lima static on macOS, WSL-detected on Windows). See ADR-067.
 
 /// Container-side `gateway_ip` + host-side `bind_address`. On Windows both
 /// equal the WSL vEthernet adapter IP (mirrored-mode 127.0.0.1 broken — WSL#11312).

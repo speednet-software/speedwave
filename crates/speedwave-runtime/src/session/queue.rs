@@ -13,10 +13,8 @@ pub struct QueueStats {
     pub occupied_slots: usize,
 }
 
-/// Concurrent one-slot-per-session queued message store.
-///
-/// Cloning the service is cheap (`Arc` clone) — pass it by value into
-/// async tasks that need to enqueue/take/cancel without lifetime gymnastics.
+/// Concurrent one-slot-per-session queued message store. Cloning is cheap (`Arc` clone) — pass
+/// by value into async tasks that need to enqueue/take/cancel without lifetime gymnastics.
 #[derive(Debug, Clone, Default)]
 pub struct QueuedMessageService {
     inner: Arc<DashMap<String, QueuedMessage>>,
@@ -34,9 +32,8 @@ impl QueuedMessageService {
         self.inner.insert(session_id.to_string(), msg)
     }
 
-    /// Remove and return the queued message for `session_id`, draining the
-    /// slot. Called from the turn-end handler so the next turn can start
-    /// from the queued payload.
+    /// Remove and return the queued message for `session_id`, draining the slot. Called from the
+    /// turn-end handler so the next turn can start from the queued payload.
     pub fn take(&self, session_id: &str) -> Option<QueuedMessage> {
         self.inner.remove(session_id).map(|(_, msg)| msg)
     }

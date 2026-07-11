@@ -1,6 +1,5 @@
 /**
- * Jira Agile tools — listBoards, getBoard, getBoardConfiguration, listSprints,
- * getSprint, moveIssuesToSprint. 6 tools.
+ * Jira Agile tools — boards, board configuration, sprints, moving issues into a sprint. 6 tools.
  * @module mcp-atlassian/tools/jira-agile-tools
  */
 
@@ -196,7 +195,6 @@ const moveIssuesToSprintTool: Tool = {
 /**
  * Build the Jira Agile tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for boards and sprints.
  */
 export function createJiraAgileTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [

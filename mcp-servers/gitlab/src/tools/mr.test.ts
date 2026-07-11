@@ -1,8 +1,6 @@
 /**
- * Tests for GitLab MR Tools
- *
- * Coverage: list_mr_ids, get_mr_full, create_merge_request, approve_merge_request,
- *           merge_merge_request, update_merge_request, get_mr_changes (7 tools)
+ * Tests for GitLab MR Tools. Coverage: list_mr_ids, get_mr_full, create_merge_request,
+ * approve_merge_request, merge_merge_request, update_merge_request, get_mr_changes (7 tools)
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';

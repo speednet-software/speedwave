@@ -20,11 +20,10 @@ const GRAPH_ID_RULE = GRAPH_ID_SPEC
   : 'a Microsoft Graph id';
 
 /**
- * Assert `value` is a string matching {@link GRAPH_ID_RE}; null on success, else
- * a teaching `ToolResult` naming the bad value and (when known) its source tool.
- * @param value - candidate id from the tool call
- * @param fieldName - parameter name to mention in the error message
- * @param sourceTool - name of the tool that returns a valid value for this field
+ * Assert `value` matches {@link GRAPH_ID_RE}; null on success, else a teaching `ToolResult`.
+ * @param value - The value to validate.
+ * @param fieldName - Name of the field, used in the error message.
+ * @param sourceTool - Optional name of the tool that produces a valid value.
  */
 export function validateGraphId(
   value: unknown,
@@ -45,7 +44,7 @@ export function validateGraphId(
 
 /**
  * Wrap handler with parameter validation (compact JSON output, indent 0).
- * @param handler - Tool handler function.
+ * @param handler - The tool handler to wrap.
  */
 export function withValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>

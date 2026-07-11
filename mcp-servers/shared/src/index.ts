@@ -1,30 +1,6 @@
 /**
- * Shared MCP infrastructure for Speedwave workers.
- * Eliminates code duplication across MCP services by providing
- * reusable server components, security utilities, and protocol handlers.
- *
- * Usage:
- * ```typescript
- * import {
- *   createMCPServer,
- *   loadToken,
- *   textResult,
- *   jsonResult,
- *   errorResult,
- * } from '@speedwave/mcp-shared';
- *
- * const server = createMCPServer({
- *   name: 'my-service',
- *   version: '1.0.0',
- *   port: 3001,
- *   tools: [
- *     { tool: myTool, handler: myHandler },
- *   ],
- * });
- *
- * server.start();
- * ```
- * @module speedwave/mcp-shared
+ * Shared MCP infrastructure for Speedwave workers: reusable server components, security
+ * utilities, and protocol handlers, eliminating duplication across MCP services.
  */
 
 // Types

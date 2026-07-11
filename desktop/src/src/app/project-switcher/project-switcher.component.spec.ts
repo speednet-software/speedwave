@@ -146,9 +146,8 @@ describe('ProjectSwitcherComponent', () => {
   });
 
   describe('add-project modal lifecycle', () => {
-    // The actual create / error-handling logic lives in CreateProjectModalComponent
-    // and is exercised by its own spec; here we only assert that the switcher
-    // opens, closes, and reacts to the `created` event correctly.
+    // Create/error-handling logic lives in CreateProjectModalComponent (own spec); here we only
+    // assert the switcher opens, closes, and reacts to the `created` event correctly.
 
     it('openAddForm() makes the modal visible and closes the dropdown', () => {
       ui.toggleProjectSwitcher();

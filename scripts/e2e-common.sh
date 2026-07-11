@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# e2e-common.sh — Shared configuration for E2E testing scripts.
-# Sourced by e2e-vm.sh and e2e-vm-setup.sh.
+# e2e-common.sh — Shared configuration for E2E testing scripts, sourced by e2e-vm.sh
+# and e2e-vm-setup.sh.
 
 # -- Load .env if present ------------------------------------------------------
 # shellcheck disable=SC1091
@@ -13,8 +13,7 @@ WINDOWS_HOST="${SPEEDWAVE_WINDOWS_HOST:?Set SPEEDWAVE_WINDOWS_HOST (e.g. user@ho
 WINDOWS_SSH_PORT="${SPEEDWAVE_WINDOWS_SSH_PORT:-22}"
 MACOS_HOST="${SPEEDWAVE_MACOS_HOST:?Set SPEEDWAVE_MACOS_HOST (e.g. user@host)}"
 
-# -- SSH Options ---------------------------------------------------------------
-# Base options shared by all scripts. e2e-vm.sh appends keepalive options for
+# ── SSH Options ── Base shared by all scripts; e2e-vm.sh appends keepalive options for
 # long-running test sessions.
 
 SSH_OPTS_BASE="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"

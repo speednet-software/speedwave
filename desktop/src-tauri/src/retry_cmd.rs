@@ -7,10 +7,8 @@ use tauri::AppHandle;
 use crate::chat::{validate_retry_uuid, ChatSession, SharedChatSession};
 use crate::history::validate_session_id;
 
-/// Errors surfaced to the frontend from `retry_last_turn`.
-///
-/// Serialised as a tagged enum (`{ "kind": "NoAssistantTurn" }` etc.) so the
-/// frontend can match on the kind field without inspecting messages.
+/// Errors surfaced to the frontend from `retry_last_turn`, serialised as a
+/// tagged enum (`{ "kind": "NoAssistantTurn" }` etc.) for kind-only matching.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", content = "message")]
 pub enum RetryError {
@@ -60,9 +58,8 @@ pub(crate) trait SessionDriver {
     fn start_with_retry(&mut self, session_id: &str, user_uuid: &str) -> Result<(), String>;
 }
 
-/// Real driver backed by [`ChatSession`]. Swaps the session out of its mutex
-/// so `stop()` (which can block on reader-thread drain) does not starve
-/// `send_message` and friends.
+/// Real driver backed by [`ChatSession`]. Swaps the session out of its mutex so
+/// `stop()` (blocks on reader-thread drain) does not starve `send_message` et al.
 struct ChatSessionDriver<'a> {
     session_arc: SharedChatSession,
     project_name: Option<String>,
@@ -96,9 +93,8 @@ impl SessionDriver for ChatSessionDriver<'_> {
     }
 }
 
-/// Tauri command — retry the last assistant turn in the active session.
-///
-/// The frontend passes the `session_id` and the `user_uuid` to rewind to (ADR-046).
+/// Tauri command — retry the last assistant turn in the active session, rewinding
+/// to the frontend-supplied `session_id`/`user_uuid` (ADR-046).
 #[tauri::command]
 pub async fn retry_last_turn(
     session_id: String,

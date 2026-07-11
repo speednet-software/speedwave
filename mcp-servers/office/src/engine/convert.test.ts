@@ -1,6 +1,5 @@
 /**
- * Tests for the convert engine: text-input materialization, the conversion matrix,
- * and the orchestration of pandoc / weasyprint / LibreOffice (all subprocesses mocked).
+ * Tests for the convert engine: text-input materialization, the conversion matrix, and the orchestration of pandoc / weasyprint / LibreOffice (all subprocesses mocked).
  * @module mcp-office/engine/convert.test
  */
 

@@ -1,6 +1,5 @@
-//! Drift detector: every `apt-get install` in a container image file must run
-//! with `DEBIAN_FRONTEND=noninteractive` — a debconf prompt (e.g. tzdata's
-//! timezone dialog on upgrade) hangs buildkit forever, since builds have no TTY.
+//! Drift detector: every `apt-get install` in a container image file must run with
+//! `DEBIAN_FRONTEND=noninteractive` — a debconf prompt hangs buildkit forever (no TTY).
 
 #![expect(
     clippy::expect_used,

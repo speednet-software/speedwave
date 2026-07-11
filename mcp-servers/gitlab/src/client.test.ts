@@ -1756,9 +1756,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // MR Related Methods
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── MR Related Methods ─────────────────────────────────────────────────────────────────────
 
   describe('listMrCommits', () => {
     it('should list MR commits with default limit', async () => {
@@ -1979,9 +1977,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Branches
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Branches ───────────────────────────────────────────────────────────────────────────────
 
   describe('listBranches', () => {
     it('should list branches with default options', async () => {
@@ -2081,9 +2077,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Commits
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Commits ────────────────────────────────────────────────────────────────────────────────
 
   describe('listCommits', () => {
     it('should list commits with default options', async () => {
@@ -2218,9 +2212,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Repository
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Repository ─────────────────────────────────────────────────────────────────────────────
 
   describe('getTree', () => {
     it('should get tree with default options', async () => {
@@ -2406,9 +2398,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Artifacts
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Artifacts ──────────────────────────────────────────────────────────────────────────────
 
   describe('listArtifacts', () => {
     it('should list artifacts from jobs with artifacts', async () => {
@@ -2521,9 +2511,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Issues
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Issues ─────────────────────────────────────────────────────────────────────────────────
 
   describe('listIssues', () => {
     it('should list issues with default options', async () => {
@@ -2768,9 +2756,7 @@ describe('GitLabClient', () => {
     });
   });
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Labels
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Labels ─────────────────────────────────────────────────────────────────────────────────
 
   describe('listLabels', () => {
     it('should list labels with default options', async () => {
@@ -4402,9 +4388,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         // no shortId, no short_id
         title: 'Commit',
         message: 'Message',
-        // no authorName, no author_name
-        // no authorEmail, no author_email
-        // no createdAt, no created_at
+        // no authorName/author_name, authorEmail/author_email, createdAt/created_at
       };
       mockGitlabInstance.MergeRequests.allCommits.mockResolvedValue([sparseCommit]);
 
@@ -4424,9 +4408,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         status: 'success',
         ref: 'main',
         sha: 'abc123',
-        // no webUrl, no web_url
-        // no createdAt, no created_at
-        // no updatedAt, no updated_at
+        // no webUrl/web_url, createdAt/created_at, updatedAt/updated_at
       };
       mockGitlabInstance.MergeRequests.allPipelines.mockResolvedValue([sparsePipeline]);
 
@@ -4444,7 +4426,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 'abc123',
         title: 'Commit',
         message: 'Message',
-        // no shortId, no short_id, no authorName, no author_name, no authorEmail, no author_email, no createdAt, no created_at
+        // missing: short(Id|_id), author(Name|Email)/author_(name|email), created(At|_at)
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 
@@ -4463,7 +4445,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 'abc123',
         title: 'Commit',
         message: 'Message',
-        // no shortId, no short_id, no authorName, no author_name, no authorEmail, no author_email, no createdAt, no created_at
+        // missing: short(Id|_id), author(Name|Email)/author_(name|email), created(At|_at)
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 
@@ -4482,7 +4464,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
         id: 'abc123',
         title: 'fix: something',
         message: 'fix: something',
-        // no shortId, no short_id, no authorName, no author_name, no authorEmail, no author_email, no createdAt, no created_at
+        // missing: short(Id|_id), author(Name|Email)/author_(name|email), created(At|_at)
       };
       mockGitlabInstance.Commits.all.mockResolvedValue([sparseCommit]);
 

@@ -17,9 +17,8 @@ final class RemindersTests: XCTestCase {
     }
 
     func testTagRegexCompilesAndMatches() {
-        // The static tagRegex is lazily compiled from a compile-time-constant
-        // pattern; this asserts the initializer succeeded (no fatalError) and
-        // that extractTags — its only consumer path — works end to end.
+        // Asserts the lazily-compiled static tagRegex initializer succeeded (no fatalError)
+        // and that extractTags, its only consumer, works end to end.
         XCTAssertEqual(extractTags(from: "[#a] [#b] text"), ["a", "b"])
         XCTAssertEqual(stripTags(from: "[#a] text"), "text")
     }

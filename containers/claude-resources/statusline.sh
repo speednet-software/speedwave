@@ -1,6 +1,6 @@
 #!/bin/bash
-# Speedwave statusline for Claude Code — reads JSON state from stdin, outputs
-# a single status-bar line (model, context usage, rate limits, cost).
+# Speedwave statusline for Claude Code — reads JSON state from stdin, outputs a single status-bar
+# line (model, context usage, rate limits, cost).
 
 set -f
 
@@ -119,9 +119,8 @@ if [[ -n "$INPUT" ]]; then
 fi
 model_name="${model_name:-Claude}"
 
-# Context fields live under "context_window" (CC ≥2.1.132, nested schema).
-# Scope the scan there — a whole-input scan would read rate_limits'
-# used_percentage as CTX whenever the context value is null (early session).
+# Context fields live under "context_window" (CC >=2.1.132); scope the scan there, or a
+# whole-input scan reads rate_limits' used_percentage as CTX whenever context is null.
 context_window_size=0
 used_pct=0
 cw_pattern='"context_window"[[:space:]]*:[[:space:]]*\{'
@@ -183,11 +182,8 @@ cost_cache="$USAGE_DIR/cost-cache.jsonl"
 # No usage-window filter here (the shell can't read the full JSONL cheaply);
 # prune_cost_cache_in drops orphans, so this may briefly exceed the dashboard.
 if [[ -r "$cost_cache" ]]; then
-    # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
-    # The number pattern accepts scientific notation (serde_json emits e.g. 2.5e-6).
-    # Dedup by response_id (last write wins, mirrors usage_cost::read_cost_cache_in):
-    # re-enrichment may append duplicate ids; sum the per-id map, not every line.
-    # `n` counts priced ids so an all-zero (free local) sidecar still shows $0.
+    # LC_ALL=C forces '.' as decimal point; pattern accepts scientific notation. Dedup by
+    # response_id (last write wins); `n` counts priced ids so an all-zero sidecar still shows $0.
     ssot_cost="$(LC_ALL=C awk '
         {
             id = ""
@@ -214,8 +210,7 @@ if [[ -r "$cost_cache" ]]; then
 fi
 
 # ── Git branch ───────────────────────────────────────────────────────────────
-# No [ -d .git ] check: in git worktrees .git is a file, not a dir.
-# STATUSLINE_WORKSPACE_DIR overrides the workspace path (tests).
+# No [ -d .git ] check (worktrees: .git is a file); STATUSLINE_WORKSPACE_DIR overrides for tests.
 
 WORKSPACE="${STATUSLINE_WORKSPACE_DIR:-/workspace}"
 git_branch=""

@@ -209,9 +209,7 @@ pub fn cancel_slack_oauth() {
     FLOW_STATE.cancel();
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ──────────────────────────────────────────────
 
 /// Translate the raw callback failure into actionable wording for the
 /// consent-screen dead ends (deny, pending admin approval).
@@ -380,9 +378,8 @@ async fn exchange_slack_code(
     })
 }
 
-/// Persists the outcome: oauth state (refresh token) FIRST, the mounted access
-/// token second — a crash in between leaves recoverable state, never a mounted
-/// token without refresh state.
+/// Persists the outcome: oauth state (refresh token) FIRST, the mounted access token second —
+/// a crash in between leaves recoverable state, never a mounted token without refresh state.
 fn persist_slack_tokens(project: &str, token: &SlackUserToken) -> Result<(), String> {
     persist_slack_tokens_in(speedwave_runtime::consts::data_dir(), project, token)
 }
@@ -443,9 +440,8 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// One-shot stub token endpoint: replies `status` + JSON `body`, returns
-    /// the raw request (headers + body) for assertions. Second occurrence of
-    /// this helper (first: plugin_oauth_cmd tests) — extract on the third.
+    /// One-shot stub token endpoint: replies `status` + JSON `body`, returns the raw request.
+    /// Second occurrence of this helper (first: plugin_oauth_cmd) — extract on the third.
     async fn stub_token_endpoint(
         status: u16,
         body: &'static str,
@@ -771,9 +767,8 @@ mod tests {
         assert!(state["providerData"].get("authedUserId").is_none());
     }
 
-    // State-before-token ordering: the refresh token must already be on disk
-    // when the mounted access token appears (ADR-071; source-order pin like
-    // plugin_oauth_cmd's auto-enable test).
+    // State-before-token ordering: the refresh token must already be on disk when the mounted
+    // access token appears (ADR-071; source-order pin like plugin_oauth_cmd's auto-enable test).
     #[test]
     fn persist_writes_oauth_state_before_access_token() {
         let src = include_str!("slack_oauth_cmd.rs");

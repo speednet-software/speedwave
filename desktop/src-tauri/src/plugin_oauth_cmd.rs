@@ -1,6 +1,5 @@
-// Plugin OAuth2 authorization_code flow (loopback redirect + PKCE). The
-// minted refresh token + client credentials stay host-side under oauth/; only
-// a short-lived access token reaches the plugin container. See ADR-069.
+// Plugin OAuth2 authorization_code flow (loopback redirect + PKCE, ADR-069). Minted refresh
+// token + client credentials stay host-side under oauth/; only access token reaches the plugin.
 
 use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
 use crate::oauth_loopback::{build_authorize_url, wait_for_callback, CallbackFailure};
@@ -227,9 +226,8 @@ pub fn cancel_plugin_oauth() {
     FLOW_STATE.cancel();
 }
 
-/// Delete a plugin's host-side OAuth state, seed, and access token. The worker
-/// `forget` tool derives service from a bearer the supervisor lacks, so the
-/// host clears the files directly.
+/// Delete a plugin's host-side OAuth state, seed, and access token. The worker `forget` tool
+/// derives service from a bearer the supervisor lacks, so the host clears the files directly.
 #[tauri::command]
 pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> {
     check_project(&project)?;
@@ -245,9 +243,7 @@ pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ──
 
 /// Reads the pre-auth seed (`oauth/<project>/<slug>.seed.json`).
 fn read_oauth_seed(project: &str, slug: &str) -> Result<HashMap<String, String>, String> {
@@ -257,9 +253,8 @@ fn read_oauth_seed(project: &str, slug: &str) -> Result<HashMap<String, String>,
     serde_json::from_str(&body).map_err(|e| format!("corrupt oauth seed: {e}"))
 }
 
-/// Exchanges the authorization code for tokens at the token endpoint.
-/// Returns `(authorize_url, token_url)`: static manifest URLs, or per-instance
-/// ones resolved + SSRF-validated from the seed's base. See ADR-069.
+/// Returns `(authorize_url, token_url)`: static manifest URLs, or per-instance ones resolved
+/// + SSRF-validated from the seed's base (ADR-069).
 fn resolve_endpoints(
     oauth: &PluginOAuthSpec,
     seed: &HashMap<String, String>,
@@ -379,9 +374,8 @@ fn persist_state(
     )
 }
 
-/// providerData map the worker's generic refresh reads — these keys are its
-/// contract (`GenericProviderData` in `mcp-servers/oauth/src/providers/generic.ts`).
-/// `token_url` is the RESOLVED absolute URL the refresh re-reads.
+/// providerData map the worker's generic refresh reads — contract is `GenericProviderData` in
+/// `mcp-servers/oauth/src/providers/generic.ts`; `token_url` is the RESOLVED absolute URL.
 fn build_provider_data(
     oauth: &PluginOAuthSpec,
     token_url: &str,

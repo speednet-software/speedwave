@@ -23,8 +23,8 @@ import { IconComponent } from '../../shared/icon.component';
 
 /**
  * Buckets a conversation into today/yesterday/older by relative day.
- * @param ts ISO timestamp of the conversation's last activity.
- * @param now Reference epoch in ms; defaults to `Date.now()`.
+ * @param ts - ISO timestamp of the conversation's last activity.
+ * @param now - Reference epoch in ms; defaults to `Date.now()`.
  */
 function bucketForTimestamp(ts: string | null | undefined, now: number = Date.now()): string {
   if (!ts) return 'older';

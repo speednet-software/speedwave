@@ -1,6 +1,5 @@
 /**
- * Shared types for the office worker — tool I/O shapes and the `spec`/`ops` DSL.
- * The DSL here is the normative contract (mirrors ADR-055); anything outside it is a tool error.
+ * Shared types for the office worker — tool I/O shapes and the `spec`/`ops` DSL, the normative contract (ADR-055); anything outside it is a tool error.
  * @module mcp-office/types
  */
 

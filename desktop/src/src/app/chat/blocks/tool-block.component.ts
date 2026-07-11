@@ -283,11 +283,7 @@ export class ToolBlockComponent {
     return marker.includes('stopped') || marker.includes('interrupted');
   });
 
-  /**
-   * Header glyph for non-running statuses. The running variant is rendered as
-   * an inline spin SVG directly in the template (matches the mockup) so this
-   * computed never returns a placeholder for it.
-   */
+  /** Header glyph for non-running statuses; the running variant is an inline spin SVG in the template, so this computed never returns a placeholder for it. */
   readonly statusGlyph = computed<string>(() => {
     if (this.isStopped()) {
       return '⊘';

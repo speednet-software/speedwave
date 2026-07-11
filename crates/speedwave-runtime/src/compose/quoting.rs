@@ -5,16 +5,14 @@
 /// Go parser rejects. Env values containing one MUST be emitted quoted.
 const YAML_PLAIN_UNSAFE_CHARS: &[char] = &['[', ']', '{', '}', ','];
 
-/// True when `entry` (a `KEY=VALUE` env line) would round-trip through every
-/// conformant YAML parser as a plain scalar. When false the caller must emit a
-/// quoted scalar — see [`harden_env_scalar_quoting`].
+/// True when `entry` (a `KEY=VALUE` env line) would round-trip through every conformant YAML
+/// parser as a plain scalar. When false, emit a quoted scalar (see [`harden_env_scalar_quoting`]).
 pub(crate) fn env_entry_needs_quoting(entry: &str) -> bool {
     entry.contains(YAML_PLAIN_UNSAFE_CHARS)
 }
 
-/// Re-quotes `environment:` sequence entries whose value carries a YAML flow
-/// indicator nerdctl's Go parser rejects. Scoped to `environment:` blocks by
-/// indentation; uses `serde_json::to_string` escaping; idempotent.
+/// Re-quotes `environment:` sequence entries whose value carries a YAML flow indicator nerdctl's
+/// Go parser rejects. Scoped to `environment:` blocks by indentation; uses serde_json; idempotent.
 pub(crate) fn harden_env_scalar_quoting(yaml: &str) -> anyhow::Result<String> {
     let mut out = String::with_capacity(yaml.len());
     // Indentation (column) of the active `environment:` key, if inside one.

@@ -34,11 +34,8 @@ impl fmt::Display for PrereqViolation {
     }
 }
 
-/// Checks OS-level prerequisites for container isolation.
-/// Returns an empty Vec if all prerequisites are met.
-///
-/// - **Windows**: Verifies WSL2 is available via `wsl.exe --status` (10s timeout).
-/// - **macOS**: No OS prerequisites (Lima runtime is bundled).
+/// Checks OS-level prerequisites for container isolation; empty Vec if all met. Windows verifies
+/// WSL2 via `wsl.exe --status` (10s timeout); macOS has none (Lima runtime is bundled).
 pub fn check_os_prereqs() -> Vec<PrereqViolation> {
     #[cfg(target_os = "windows")]
     {
@@ -79,9 +76,7 @@ fn check_wsl() -> Vec<PrereqViolation> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Non-blocking OS warnings (separate from blocking prereqs)
-// ---------------------------------------------------------------------------
+// ── Non-blocking OS warnings ────────────────────────────────────────────
 
 /// Returns non-blocking OS warnings (e.g. low memory, nested virtualization).
 /// Separate from `check_os_prereqs()` which returns blocking errors.
@@ -153,9 +148,7 @@ fn check_low_memory_with(host_ram_gib: u32) -> Vec<String> {
     }
 }
 
-/// Parses JSON output from `Get-CimInstance Win32_ComputerSystem` and extracts
-/// the `Model` and `Manufacturer` fields.
-///
+/// Parses JSON from `Get-CimInstance Win32_ComputerSystem` and extracts `Model`/`Manufacturer`.
 /// Returns `None` for malformed, missing, or non-string fields.
 #[cfg(any(target_os = "windows", test))]
 fn parse_vm_info(json: &str) -> Option<(String, String)> {
@@ -248,9 +241,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // parse_vm_info() tests
-    // -----------------------------------------------------------------------
+    // ── parse_vm_info() tests ───────────────────────────────
 
     #[test]
     fn test_parse_vm_info_valid_json() {
@@ -300,9 +291,7 @@ mod tests {
         assert_eq!(parse_vm_info(json), None);
     }
 
-    // -----------------------------------------------------------------------
-    // is_virtual_machine() tests
-    // -----------------------------------------------------------------------
+    // ── is_virtual_machine() tests ──────────────────────────
 
     #[test]
     fn test_is_vm_vmware_model() {
@@ -365,9 +354,7 @@ mod tests {
         assert!(is_virtual_machine("vmware virtual platform", ""));
     }
 
-    // -----------------------------------------------------------------------
-    // check_os_warnings() and NESTED_VIRT_WARNING_MSG tests
-    // -----------------------------------------------------------------------
+    // ── check_os_warnings() and NESTED_VIRT_WARNING_MSG tests ──────────
 
     #[test]
     fn test_nested_virt_warning_msg_contains_remediation() {
@@ -400,9 +387,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // check_low_memory_with() tests
-    // -----------------------------------------------------------------------
+    // ── check_low_memory_with() tests ───────────────────────
 
     #[test]
     fn low_memory_warning_below_minimum() {

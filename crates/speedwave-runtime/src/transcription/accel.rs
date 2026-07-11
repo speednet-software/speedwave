@@ -1,6 +1,5 @@
-//! Which whisper.cpp acceleration backends this binary was compiled with, and
-//! the matching "live" Whisper model. Backends are compile-time (ADR-056 §6);
-//! v1 = CPU everywhere + Metal on macOS.
+//! Which whisper.cpp acceleration backends this binary was compiled with, and the matching "live"
+//! Whisper model. Backends are compile-time (ADR-056 §6); v1 = CPU everywhere + Metal on macOS.
 
 use crate::transcription::model_catalog::{
     ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS,
@@ -50,9 +49,8 @@ pub fn has_gpu_backend() -> bool {
     compiled_backends().iter().any(|b| b.is_gpu())
 }
 
-/// The single best model to download for `backends`: `large-v3` on GPU, else
-/// `large-v3-turbo`. One model serves both the live and offline passes; on a
-/// weak CPU turbo may lag live, accepted (ADR-056).
+/// The single best model to download for `backends`: `large-v3` on GPU, else `large-v3-turbo`.
+/// One model serves both live and offline passes; a weak CPU may lag live (accepted, ADR-056).
 pub fn best_model_for_backends(backends: &[Backend]) -> &'static WhisperModelInfo {
     let want = if backends.iter().any(|b| b.is_gpu()) {
         ModelRole::Finalize

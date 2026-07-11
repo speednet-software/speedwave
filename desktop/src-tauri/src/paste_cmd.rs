@@ -12,9 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// data-dir literal stays in sync without a separate alignment entry.
 pub(crate) static PASTES_SUBDIR: LazyLock<String> = LazyLock::new(|| format!("{DATA_DIR}/pastes"));
 
-/// Defence-in-depth host-side cap. Renderer enforces a stricter 3 MB cap
-/// post-resample (`MAX_IMAGE_BYTES`); this catches a malicious renderer or
-/// future caller that bypasses the preprocessor.
+/// Defence-in-depth host-side cap. Renderer enforces a stricter 3 MB cap post-resample
+/// (`MAX_IMAGE_BYTES`); this catches a malicious renderer or future caller bypassing it.
 const MAX_PASTE_BYTES: usize = 10 * 1024 * 1024;
 
 fn extension_for(media_type: &str) -> Option<&'static str> {

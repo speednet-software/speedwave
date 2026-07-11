@@ -692,9 +692,8 @@ fn resolve_transient_credential(
     }
 }
 
-/// Probes `POST /v1/messages` with a 1-token request to detect whether the
-/// server implements the Anthropic Messages chat endpoint. Uses a real model id
-/// so a "model not found" 404 isn't mistaken for a missing endpoint. See ADR-041.
+/// Probes `POST /v1/messages` with a 1-token request to detect endpoint support.
+/// Uses a real model id so a 404 isn't mistaken for a missing endpoint (ADR-041).
 async fn probe_messages_endpoint(
     base: &url::Url,
     model: Option<&str>,

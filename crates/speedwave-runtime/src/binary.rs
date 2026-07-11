@@ -19,9 +19,8 @@ const PATH_SEP: char = ':';
 #[cfg(windows)]
 const ALWAYS_SYSTEM_COMMANDS: &[&str] = &["wsl.exe", "powershell.exe", "cmd.exe"];
 
-/// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive).
-/// Matches on the file name, so an absolute path (e.g. the
-/// `C:\Windows\System32\wsl.exe` that `reset_vm` builds) is recognised too.
+/// `true` if `cmd` is a never-bundled Windows OS command (case-insensitive). Matches on the file
+/// name, so an absolute path like `C:\Windows\System32\wsl.exe` from `reset_vm` is recognised too.
 #[cfg(windows)]
 fn is_always_system_command(cmd: &str) -> bool {
     let name = std::path::Path::new(cmd)
@@ -33,14 +32,8 @@ fn is_always_system_command(cmd: &str) -> bool {
         .any(|c| c.eq_ignore_ascii_case(name))
 }
 
-/// Resolves the path to a binary command via bundled resources or system PATH.
-///
-/// Resolution order (each step only if `SPEEDWAVE_RESOURCES_DIR` is set):
-/// 1. `<dir>/lima/bin/<cmd>` (macOS Lima bundle).
-/// 2. `<dir>/nerdctl-full/bin/<cmd>` (reserved layout, not populated in prod).
-/// 3. `<dir>/nodejs/bin/<cmd>` (Unix) or `<dir>/nodejs/<cmd>.exe` (Windows).
-/// 4. `<dir>/<cmd>` (native CLI helpers at the top of `Resources/`).
-/// 5. Otherwise the bare command name (system PATH lookup).
+/// Resolves a binary via bundled resources or system PATH: if `SPEEDWAVE_RESOURCES_DIR` is set,
+/// tries Lima bundle, nerdctl-full, nodejs, `Resources/`; else falls back to bare-name PATH lookup.
 pub fn resolve_binary(cmd: &str) -> String {
     if let Ok(resources_dir) = std::env::var(BUNDLE_RESOURCES_ENV) {
         let resources = PathBuf::from(&resources_dir);
@@ -101,14 +94,8 @@ pub fn resolve_binary(cmd: &str) -> String {
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Creates a `Command` for the given binary with bundled-binary resolution.
-///
-/// - Applies `CREATE_NO_WINDOW` on Windows.
-/// - For `limactl`, sets `LIMA_HOME` to the isolated Speedwave directory.
-/// - For bundled binaries, prepends their parent directory to `PATH`.
-///
-/// `container_exec()` bypasses this and uses raw `Command::new()` (TTY needs a
-/// console window on Windows).
+/// Creates a `Command` for `cmd` with bundled-binary resolution: `CREATE_NO_WINDOW` on Windows,
+/// `LIMA_HOME` for `limactl`, `PATH` prepend for bundled bins. `container_exec()` bypasses this.
 pub fn command(cmd: &str) -> Command {
     let resolved = resolve_binary(cmd);
     let mut command = Command::new(&resolved);
@@ -164,13 +151,8 @@ pub fn command(cmd: &str) -> Command {
     command
 }
 
-/// Creates a `Command` for a system binary (no bundled-binary resolution).
-///
-/// Use this for system utilities like `wsl.exe`, `powershell.exe`, `tasklist`,
-/// `taskkill`, `icacls`, etc. that are never bundled in the app resources.
-///
-/// Applies `CREATE_NO_WINDOW` on Windows to prevent console window flashing.
-/// For interactive TTY commands, use raw `Command::new()` instead.
+/// Creates a `Command` for a system binary never bundled (`wsl.exe`, `powershell.exe`, `tasklist`,
+/// `taskkill`, `icacls`). Applies `CREATE_NO_WINDOW`; TTY commands use raw `Command::new()`.
 pub fn system_command(program: &str) -> Command {
     let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -182,10 +164,8 @@ pub fn system_command(program: &str) -> Command {
     command
 }
 
-/// Creates a `Command` for an interactive TTY spawn (wsl / ssh / self re-exec).
-///
-/// Unlike `system_command` it omits `CREATE_NO_WINDOW` — a PTY needs a visible
-/// console window on Windows. No bundled resolution; `program` is used verbatim.
+/// Creates a `Command` for an interactive TTY spawn (wsl/ssh/self-reexec). Omits `CREATE_NO_WINDOW`
+/// (a PTY needs a visible window). No bundled resolution; `program` is used verbatim.
 pub fn interactive_command(program: &str) -> Command {
     let mut command = Command::new(program);
     apply_wsl_utf8(&mut command, program);
@@ -245,9 +225,8 @@ fn apply_wsl_utf8(command: &mut Command, program: &str) {
     }
 }
 
-/// Runs a command with a timeout, killing the process if it exceeds the deadline.
-/// Polls `child.try_wait()` every 200ms; does not capture stdout/stderr.
-/// Do not use with `Stdio::piped()` (pipe-buffer deadlock risk).
+/// Runs a command with a timeout, killing the process if it exceeds the deadline. Polls
+/// `child.try_wait()` every 200ms; no stdout/stderr capture. Avoid `Stdio::piped()` (deadlock).
 pub fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
@@ -276,9 +255,8 @@ pub fn run_with_timeout(
     }
 }
 
-/// Runs a command with a timeout, capturing stdout + stderr; kills on deadline.
-/// Concurrent reader threads drain the pipes, avoiding the buffer-fill deadlock
-/// `run_with_timeout` warns of. Forces piped stdio regardless of prior config.
+/// Runs a command with a timeout, capturing stdout + stderr; kills on deadline. Concurrent reader
+/// threads drain pipes, avoiding the `run_with_timeout` buffer-fill deadlock. Forces piped stdio.
 pub fn run_with_timeout_capture(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,

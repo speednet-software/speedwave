@@ -1,15 +1,4 @@
-/**
- * Redmine Tools Aggregator
- *
- * Exports all 23 tools organized by domain:
- * - Issue: 6 tools (list_issue_ids, get_issue_full, search_issue_ids, create_issue, update_issue, comment_issue)
- * - Time Entry: 3 tools (list_time_entries, create_time_entry, update_time_entry)
- * - Journal: 3 tools (list_journals, update_journal, delete_journal)
- * - User: 3 tools (list_users, resolve_user, get_current_user)
- * - Project: 3 tools (list_project_ids, get_project_full, search_project_ids)
- * - Relation: 3 tools (list_relations, create_relation, delete_relation)
- * - Config: 2 tools (get_mappings, get_config)
- */
+/** Redmine tools aggregator: exports all 23 tools across issue/time entry/journal/user/project/relation/config domains. */
 
 import { ToolDefinition } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
@@ -22,7 +11,7 @@ import { createRelationTools } from './relation-tools.js';
 import { createConfigTools } from './config-tools.js';
 
 /**
- * Tool handler function
+ * Aggregates tool definitions from every Redmine domain module.
  * @param client - Redmine client instance
  */
 export function createToolDefinitions(client: RedmineClient | null): ToolDefinition[] {

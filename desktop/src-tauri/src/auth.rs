@@ -8,11 +8,8 @@ fn api_key_path(project: &str) -> anyhow::Result<PathBuf> {
     Ok(secrets_dir.join("anthropic_api_key"))
 }
 
-/// Saves an Anthropic API key for a project. The key is stored in
-/// `~/.speedwave/secrets/<project>/anthropic_api_key` with chmod 600.
-///
-/// On Unix, the file is created with mode 0o600 atomically (no TOCTOU window).
-/// On Windows, default ACLs apply (user-private by default).
+/// Saves an Anthropic API key for a project at `~/.speedwave/secrets/<project>/anthropic_api_key`.
+/// Unix: created with mode 0o600 atomically (no TOCTOU window). Windows: default user-private ACLs.
 pub fn save_api_key(project: &str, api_key: &str) -> anyhow::Result<()> {
     let path = api_key_path(project)?;
 

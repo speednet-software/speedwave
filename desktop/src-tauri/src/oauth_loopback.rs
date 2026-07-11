@@ -1,23 +1,20 @@
-// Loopback-redirect plumbing shared by the authorization_code OAuth flows
-// (plugins — ADR-069, Slack — ADR-071): callback server, CSRF-checked query
-// parsing, and the PKCE authorize-URL builder.
+// Loopback-redirect plumbing shared by the authorization_code OAuth flows (plugins — ADR-069,
+// Slack — ADR-071): callback server, CSRF query parsing, and the PKCE authorize-URL builder.
 
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
-/// Why the callback wait ended without an authorization code. Cancellation is
-/// distinct so the UI gets the quiet `cancelled` terminal, not a red `error`
-/// (mirrors the device-code flow's direct `ProgressStatus::Cancelled`).
+/// Why the callback wait ended without an authorization code. Cancellation is distinct so the UI
+/// shows a quiet `cancelled` terminal, not a red `error` (mirrors device-code's `Cancelled`).
 #[derive(Debug)]
 pub(crate) enum CallbackFailure {
     Cancelled,
     Error(String),
 }
 
-/// Builds the authorize redirect URL with PKCE + state. `scope_param` is the
-/// query key for scopes — `"scope"` (RFC 6749) for plugins, `"user_scope"`
-/// for Slack (its `scope` would request forbidden bot scopes).
+/// Builds the authorize redirect URL with PKCE + state. `scope_param` is the scopes query key:
+/// `"scope"` (RFC 6749) for plugins, `"user_scope"` for Slack (`scope` grants forbidden scopes).
 pub(crate) fn build_authorize_url(
     authorize_url: &str,
     client_id: &str,
@@ -42,9 +39,8 @@ pub(crate) fn build_authorize_url(
     Ok(url.to_string())
 }
 
-/// Accepts one loopback connection, parses the callback, verifies `state`,
-/// returns the `code`. Honors cancellation and a fixed timeout. `secondary`
-/// covers dual-stack listeners (a `localhost` redirect may resolve to ::1).
+/// Accepts one loopback connection, parses the callback, verifies `state`, returns the `code`.
+/// Honors cancellation and a timeout; `secondary` covers dual-stack (`localhost` may resolve ::1).
 pub(crate) async fn wait_for_callback(
     listener: &tokio::net::TcpListener,
     secondary: Option<&tokio::net::TcpListener>,
@@ -121,9 +117,8 @@ async fn accept_any(
 /// plus headers can exceed one TCP segment, so read until CRLF, not once.
 pub(crate) const MAX_REQUEST_LINE_BYTES: usize = 16 * 1024;
 
-/// Reads the HTTP request line; returns the `/callback?…` query string, or
-/// `None` for a non-callback path. Reads until the first CRLF (bounded) so a
-/// fragmented or oversized request line is not silently truncated.
+/// Reads the HTTP request line; returns the `/callback?…` query string, or `None` for non-callback
+/// paths. Reads until the first CRLF (bounded), so an oversized line is never silently truncated.
 pub(crate) async fn read_callback_request(
     stream: &mut tokio::net::TcpStream,
 ) -> Result<Option<String>, String> {
@@ -321,9 +316,8 @@ mod tests {
         }
     }
 
-    /// A forged mismatched-state request arriving BEFORE the legitimate redirect
-    /// must not fail the flow: `wait_for_callback` keeps listening and returns
-    /// the real code.
+    /// A forged mismatched-state request arriving BEFORE the legitimate redirect must not fail the
+    /// flow: `wait_for_callback` keeps listening and returns the real code.
     #[tokio::test]
     async fn wait_for_callback_ignores_forged_state_then_accepts_real_code() {
         use tokio::io::AsyncWriteExt;

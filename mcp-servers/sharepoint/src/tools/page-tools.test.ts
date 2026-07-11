@@ -1,22 +1,5 @@
-/**
- * Tests for SharePoint page tools (PR4 / ADR-060).
- *
- * Web part write tools (addWebPart / updateWebPart / removeWebPart) target the
- * real Microsoft Graph endpoints under
- *   /sites/{site-id}/pages/{page-id}/microsoft.graph.sitePage/canvasLayout/...
- *
- * MVP scope: only `#microsoft.graph.textWebPart` (with `innerHtml`). Other web
- * part types — image, link, standardWebPart — require per-type Graph payloads
- * with GUID-typed discriminators (see standardWebPart resource) and are out of
- * scope for PR4.
- *
- * Covers:
- * - Metadata: tool names + critical schema invariants.
- * - Site-policy by omission: NO tool's input schema accepts `site_id`. The
- *   worker always derives it from `/tokens/site_id` (`client.getSiteId()`).
- * - Happy path for each of the 8 handlers (mocked Graph responses).
- * - Error paths: range errors, INVALID_ID, NOT_CONFIGURED for null client.
- */
+/** Tests for SharePoint page tools (PR4 / ADR-060). Web part writes target `/sites/{site-id}/pages/{page-id}/microsoft.graph.sitePage/canvasLayout/...`; MVP scope is `#microsoft.graph.textWebPart` only (other types need per-type GUID-discriminated payloads, out of scope for PR4).
+ * Covers: metadata/schema invariants, site-policy by omission (no tool accepts `site_id` — always derived via `client.getSiteId()`), happy path for all 8 handlers, and error paths (range, INVALID_ID, NOT_CONFIGURED). */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolsCallResult } from '@speedwave/mcp-shared';
 import { SharePointClient } from '../client.js';

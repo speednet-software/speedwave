@@ -1,15 +1,6 @@
 /**
- * GitHub API Client for MCP Worker
- * Isolated GitHub MCP server with per-service token isolation.
- * ONLY has access to GitHub tokens - no other service tokens.
- * Architecture:
- * - Token mounted RO from /tokens/token
- * - github.com only in v1 — no host_url file (unlike GitLab). baseUrl stays default (https://api.github.com).
- * - Exposes the GitHub tools via `@octokit/rest`
- * Security:
- * - Blast radius containment: only GitHub tokens if compromised
- * - Token never exposed in responses
- * - Read-only token mount
+ * GitHub API client for the isolated worker: token mounted RO from /tokens/token, github.com only (no host_url file, unlike GitLab).
+ * Blast radius containment — only GitHub tokens if compromised; token is never exposed in responses.
  */
 
 import { Octokit } from '@octokit/rest';
@@ -69,9 +60,7 @@ export type {
 } from './types.js';
 export type { ConnectionTestResult } from '@speedwave/mcp-shared';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Octokit composition (rate-limit throttling + transient-error retry)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Octokit composition (rate-limit throttling + transient-error retry) ──────────────────────────────────────────────────────────────────────
 
 const MyOctokit = Octokit.plugin(throttling, retry);
 
@@ -83,7 +72,6 @@ const MAX_PER_PAGE = 100;
 /**
  * `true` if `url` is a syntactically valid absolute `https://` URL.
  * @param url - Candidate URL string
- * @returns Whether the string parses as an `https:` URL
  */
 function isHttpsUrl(url: string): boolean {
   try {
@@ -94,10 +82,9 @@ function isHttpsUrl(url: string): boolean {
 }
 
 /**
- * Extracts the redirect target URL from an Octokit response (status 302).
+ * Extracts the redirect target URL from an Octokit response (status 302); `what` names the download for the error message.
  * @param res - Octokit response object (status 302)
  * @param what - What was being downloaded, for the error message
- * @returns The non-empty `https://` redirect URL
  */
 function extractRedirectUrl(res: unknown, what: string): string {
   const r = res as { url?: unknown; headers?: { location?: unknown } };
@@ -112,9 +99,8 @@ function extractRedirectUrl(res: unknown, what: string): string {
 }
 
 /**
- * Decodes the body of a `mediaType: { format: 'diff' }` response to a string.
+ * Decodes the body of a `mediaType: { format: 'diff' }` response to a UTF-8 string.
  * @param data - The `response.data` from a diff-format request
- * @returns The diff as a UTF-8 string
  */
 function decodeDiffData(data: unknown): string {
   if (typeof data === 'string') return data;
@@ -144,9 +130,8 @@ type ErrorCategory =
   | 'unknown';
 
 /**
- * Classifies an Octokit-style error into a coarse {@link ErrorCategory}.
+ * Classifies an Octokit-style error (or any thrown value) into a coarse {@link ErrorCategory}.
  * @param error - The thrown value (an Octokit RequestError or anything else)
- * @returns The matched error category
  */
 function classifyOctokitError(error: unknown): ErrorCategory {
   const err = (error || {}) as OctokitErrorLike;
@@ -193,8 +178,7 @@ export function isExpectedError(error: unknown): boolean {
 }
 
 /**
- * Runs `fn`; on a 404, rethrows with `notFoundMessage` instead of Octokit's generic text so the
- * caller learns which param was wrong and which tool supplies a correct value.
+ * Runs `fn`; on a 404, rethrows with `notFoundMessage` (naming the failing param + a fix-it tool) instead of Octokit's generic text.
  * @param fn - The Octokit call to run
  * @param notFoundMessage - Replacement message naming the failing param + a fix-it tool
  */
@@ -210,8 +194,7 @@ async function withNotFoundMessage<T>(fn: () => Promise<T>, notFoundMessage: str
 }
 
 /**
- * Runs `fn`; on a 422, rethrows with `validationMessage` prefixed to Octokit's own detail so the
- * caller sees both the tool's own param vocabulary and GitHub's raw reason.
+ * Runs `fn`; on a 422, prefixes `validationMessage` (naming the failing param) to Octokit's own detail so the caller sees both.
  * @param fn - The Octokit call to run
  * @param validationMessage - Replacement message prefix naming the failing param
  */
@@ -230,15 +213,11 @@ async function withValidationMessage<T>(
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Class
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Client Class ──────────────────────────────────────────────────────────────────────
 
 /**
- * GitHub API client providing methods for repos, pull requests, reviews, branches,
- * commits, repository content, Actions, issues, labels, and releases.
- * Wraps `@octokit/rest` (composed with throttling + retry plugins) with consistent
- * error handling and type-safe response mapping. github.com only in v1.
+ * GitHub API client for repos, pull requests, reviews, branches, commits, content, Actions, issues, labels, releases.
+ * Wraps `@octokit/rest` (throttling + retry plugins) with consistent error handling and type-safe mapping; github.com only in v1.
  */
 export class GitHubClient {
   private octokit: InstanceType<typeof MyOctokit>;
@@ -252,9 +231,7 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a new GitHub API client instance with authentication.
-   * Configures the underlying Octokit instance with rate-limit throttling
-   * (warns and retries up to twice) and transient-error retry.
+   * Creates a new authenticated GitHub API client; the Octokit instance retries transient errors and warns + retries rate limits up to twice.
    * @param config - Client configuration containing the authentication token and optional base URL
    */
   constructor(config: GitHubConfig) {
@@ -292,14 +269,11 @@ export class GitHubClient {
     });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Parameter Validation
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Parameter Validation ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Validates that required parameters are provided and throws descriptive errors if not.
+   * Validates that required parameters are provided; throws an `Error` listing every missing parameter name.
    * @param params - Object mapping parameter names to their values
-   * @throws {Error} Error with message listing missing required parameters
    */
   private validateRequired(params: Record<string, unknown>): void {
     const missing = Object.entries(params)
@@ -314,8 +288,7 @@ export class GitHubClient {
   }
 
   /**
-   * How many items the caller wants: a positive integer with no upper ceiling
-   * (missing/0/invalid falls back to {@link DEFAULT_LIMIT}).
+   * How many items the caller wants: a positive integer with no upper ceiling (missing/0/invalid falls back to {@link DEFAULT_LIMIT}).
    * @param limit - Caller-requested limit (optional)
    */
   private wantedCount(limit?: number): number {
@@ -334,19 +307,16 @@ export class GitHubClient {
    * Slices a result array down to the caller-requested count (default 100, no upper cap).
    * @param items - Items returned by the API
    * @param limit - Caller-requested limit (optional)
-   * @returns The first `limit` items
    */
   private slice<T>(items: T[], limit?: number): T[] {
     return items.slice(0, this.wantedCount(limit));
   }
 
   /**
-   * Paginates a list endpoint, stopping the fetch once `limit` items are collected
-   * (bounds requests to `ceil(limit / per_page)` instead of walking every page).
+   * Paginates `route`, stopping once `limit` items are collected (bounds requests to `ceil(limit / per_page)` instead of walking every page).
    * @param route - Octokit endpoint method to paginate
    * @param params - Request parameters (excluding `per_page`)
    * @param limit - Caller-requested limit (optional)
-   * @returns The collected items, capped at the wanted count
    */
   private async paginateUpTo(
     route: unknown,
@@ -374,14 +344,11 @@ export class GitHubClient {
     return items.slice(0, wanted);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Response Mappers
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Response Mappers ──────────────────────────────────────────────────────────────────────
 
   /**
    * Maps a raw GitHub repository response to the normalized {@link GitHubRepo} shape.
    * @param r - Raw repository object from the GitHub API
-   * @returns Normalized repository
    */
   private mapRepo(r: Record<string, unknown>): GitHubRepo {
     const owner = (r.owner || {}) as Record<string, unknown>;
@@ -400,7 +367,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub pull request response to the normalized {@link GitHubPullRequest} shape.
    * @param pr - Raw pull request object from the GitHub API
-   * @returns Normalized pull request
    */
   private mapPullRequest(pr: Record<string, unknown>): GitHubPullRequest {
     const head = (pr.head || {}) as Record<string, unknown>;
@@ -425,7 +391,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub issue response to the normalized {@link GitHubIssue} shape.
    * @param issue - Raw issue object from the GitHub API
-   * @returns Normalized issue
    */
   private mapIssue(issue: Record<string, unknown>): GitHubIssue {
     const user = (issue.user || {}) as Record<string, unknown>;
@@ -454,7 +419,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub branch response to the normalized {@link GitHubBranch} shape.
    * @param b - Raw branch object from the GitHub API
-   * @returns Normalized branch
    */
   private mapBranch(b: Record<string, unknown>): GitHubBranch {
     const commit = (b.commit || {}) as Record<string, unknown>;
@@ -468,7 +432,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub commit response to the normalized {@link GitHubCommit} shape.
    * @param c - Raw commit object from the GitHub API
-   * @returns Normalized commit
    */
   private mapCommit(c: Record<string, unknown>): GitHubCommit {
     const commit = (c.commit || {}) as Record<string, unknown>;
@@ -490,7 +453,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub label response to the normalized {@link GitHubLabel} shape.
    * @param l - Raw label object from the GitHub API
-   * @returns Normalized label
    */
   private mapLabel(l: Record<string, unknown>): GitHubLabel {
     return {
@@ -504,7 +466,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub release response to the normalized {@link GitHubRelease} shape.
    * @param r - Raw release object from the GitHub API
-   * @returns Normalized release
    */
   private mapRelease(r: Record<string, unknown>): GitHubRelease {
     return {
@@ -522,7 +483,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub Actions workflow run response to the normalized {@link GitHubWorkflowRun} shape.
    * @param w - Raw workflow run object from the GitHub API
-   * @returns Normalized workflow run
    */
   private mapWorkflowRun(w: Record<string, unknown>): GitHubWorkflowRun {
     return {
@@ -541,7 +501,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub Actions artifact response to the normalized {@link GitHubWorkflowRunArtifact} shape.
    * @param a - Raw artifact object from the GitHub API
-   * @returns Normalized artifact
    */
   private mapArtifact(a: Record<string, unknown>): GitHubWorkflowRunArtifact {
     const downloadUrl = String(a.archive_download_url || '');
@@ -558,7 +517,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub PR review response to the normalized {@link GitHubReview} shape.
    * @param r - Raw review object from the GitHub API
-   * @returns Normalized review
    */
   private mapReview(r: Record<string, unknown>): GitHubReview {
     const user = (r.user || {}) as Record<string, unknown>;
@@ -575,7 +533,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub issue/PR comment response to the normalized {@link GitHubComment} shape.
    * @param c - Raw comment object from the GitHub API
-   * @returns Normalized comment
    */
   private mapComment(c: Record<string, unknown>): GitHubComment {
     const user = (c.user || {}) as Record<string, unknown>;
@@ -591,7 +548,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub PR review comment response to the normalized {@link GitHubReviewComment} shape.
    * @param c - Raw review comment object from the GitHub API
-   * @returns Normalized review comment
    */
   private mapReviewComment(c: Record<string, unknown>): GitHubReviewComment {
     const user = (c.user || {}) as Record<string, unknown>;
@@ -609,7 +565,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub tree item to the normalized {@link GitHubTreeItem} shape.
    * @param t - Raw tree entry from the GitHub API
-   * @returns Normalized tree item
    */
   private mapTreeItem(t: Record<string, unknown>): GitHubTreeItem {
     return {
@@ -624,7 +579,6 @@ export class GitHubClient {
   /**
    * Maps a raw GitHub user response to the normalized {@link GitHubUser} shape.
    * @param u - Raw user object from the GitHub API
-   * @returns Normalized user
    */
   private mapUser(u: Record<string, unknown>): GitHubUser {
     return {
@@ -635,26 +589,12 @@ export class GitHubClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Error Handling
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Error Handling ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Formats GitHub API errors (Octokit `RequestError` shape) into user-friendly
-   * messages with actionable recovery guidance. Handles authentication failures,
-   * rate limiting, permission denials, not-found, validation errors, server errors,
-   * and network failures.
+   * Formats Octokit `RequestError`-shaped errors into user-friendly, actionable messages: auth failures,
+   * rate limiting, permission denials, not-found, validation errors, server errors, network failures.
    * @param error - The error object thrown by `@octokit/rest`
-   * @returns Human-readable error message with recovery suggestions (uses shared error helpers)
-   * @example
-   * ```typescript
-   * try {
-   *   await client.listRepos();
-   * } catch (error) {
-   *   console.error(GitHubClient.formatError(error));
-   *   // Output: "Authentication failed. Check your GitHub token. <setup guidance>"
-   * }
-   * ```
    */
   static formatError(error: unknown): string {
     // An already-translated teaching error is returned verbatim: its message is the guidance,
@@ -718,32 +658,23 @@ export class GitHubClient {
     }
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Users
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Users ──────────────────────────────────────────────────────────────────────
 
-  /**
-   * Gets the GitHub user authenticated by the mounted token — the account every
-   * `owner`/`assignee`/`creator`/`author` "me" question resolves against.
-   * @returns Normalized authenticated user
-   */
+  /** Gets the GitHub user authenticated by the mounted token — the account every `owner`/`assignee`/`creator`/`author` "me" question resolves against. */
   async getCurrentUser(): Promise<GitHubUser> {
     const res = await this.octokit.rest.users.getAuthenticated();
     return this.mapUser(res.data as Record<string, unknown>);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Repos
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Repos ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists repositories accessible to the authenticated user, or searches public/visible
-   * repositories when a `search` term is given.
+   * Lists repositories accessible to the authenticated user, or searches public/visible repos when `options.search` is given.
+   * `options.limit` defaults to 100 (any positive value honored); `options.affiliation` is a comma-separated list (e.g. "owner,collaborator").
    * @param options - Filter and pagination options
    * @param options.search - If provided, performs a repository search instead of listing the user's repos
    * @param options.limit - Maximum number of repositories to return (default 100 when omitted; any positive value honored)
    * @param options.affiliation - Comma-separated affiliations passed to GitHub (e.g. "owner,collaborator")
-   * @returns Array of normalized repositories
    */
   async listRepos(
     options: { search?: string; limit?: number; affiliation?: string } = {}
@@ -768,7 +699,6 @@ export class GitHubClient {
    * Retrieves detailed information about a specific repository.
    * @param owner - Repository owner login
    * @param repo - Repository name
-   * @returns Normalized repository
    */
   async getRepo(owner: string, repo: string): Promise<GitHubRepo> {
     this.validateRequired({ owner, repo });
@@ -777,7 +707,7 @@ export class GitHubClient {
   }
 
   /**
-   * Searches code across GitHub, optionally scoped to a single repository.
+   * Searches code across GitHub (GitHub code-search syntax), optionally scoped to `options.owner`/`options.repo` (both required together).
    * @param query - Code search query (GitHub code-search syntax)
    * @param options - Search scope and pagination options
    * @param options.owner - Repository owner to scope the search to (requires `repo`)
@@ -807,12 +737,10 @@ export class GitHubClient {
     });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Pull Requests
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Pull Requests ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists pull requests in a repository with optional filters.
+   * Lists pull requests in a repository, filterable by `options.state` ("open"/"closed"/"all", default "open"), `head`, and `base`.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Filter and pagination options
@@ -820,7 +748,6 @@ export class GitHubClient {
    * @param options.head - Filter by head ref (e.g. "user:branch" or "org:branch")
    * @param options.base - Filter by base branch name
    * @param options.limit - Maximum number of PRs to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized pull requests
    */
   async listPullRequests(
     owner: string,
@@ -846,7 +773,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
-   * @returns Normalized pull request
    */
   async getPullRequest(owner: string, repo: string, number: number): Promise<GitHubPullRequest> {
     this.validateRequired({ owner, repo, number });
@@ -858,7 +784,7 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a new pull request.
+   * Creates a new pull request from `params.head` into `params.base`, optionally as a draft.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Pull request creation parameters
@@ -867,7 +793,6 @@ export class GitHubClient {
    * @param params.base - Base branch the changes should be merged into
    * @param params.body - Optional PR description (Markdown)
    * @param params.draft - Whether to create the PR as a draft
-   * @returns Normalized created pull request
    */
   async createPullRequest(
     owner: string,
@@ -894,14 +819,13 @@ export class GitHubClient {
   }
 
   /**
-   * Merges a pull request.
+   * Merges a pull request using `options.merge_method` ("merge"/"squash"/"rebase", default "merge").
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
    * @param options - Merge options
    * @param options.merge_method - Merge strategy: "merge", "squash", or "rebase" (default "merge")
    * @param options.commit_title - Optional commit title for the merge commit
-   * @returns Merge result with the merge commit SHA and status message
    */
   async mergePullRequest(
     owner: string,
@@ -926,7 +850,7 @@ export class GitHubClient {
   }
 
   /**
-   * Updates properties of an existing pull request.
+   * Updates properties of an existing pull request: title, body, state ("open"/"closed"), base branch.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
@@ -935,7 +859,6 @@ export class GitHubClient {
    * @param params.body - New PR description (Markdown)
    * @param params.state - New state: "open" or "closed"
    * @param params.base - New base branch
-   * @returns Normalized updated pull request
    */
   async updatePullRequest(
     owner: string,
@@ -961,7 +884,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
-   * @returns The PR diff as a raw unified-diff string
    */
   async getPrDiff(owner: string, repo: string, number: number): Promise<string> {
     this.validateRequired({ owner, repo, number });
@@ -1014,9 +936,7 @@ export class GitHubClient {
     }));
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // PR Review
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── PR Review ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists the commits included in a pull request.
@@ -1025,7 +945,6 @@ export class GitHubClient {
    * @param number - Pull request number
    * @param options - Pagination options
    * @param options.limit - Maximum number of commits to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized commits
    */
   async listPrCommits(
     owner: string,
@@ -1049,7 +968,6 @@ export class GitHubClient {
    * @param number - Pull request number
    * @param options - Pagination options
    * @param options.limit - Maximum number of reviews to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized reviews
    */
   async listPrReviews(
     owner: string,
@@ -1067,8 +985,7 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a review on a pull request (approve, request changes, or comment),
-   * optionally with inline line comments.
+   * Creates a review on a pull request (`params.event`: "APPROVE"/"REQUEST_CHANGES"/"COMMENT"), optionally with inline `{ path, line, body }` comments.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
@@ -1076,7 +993,6 @@ export class GitHubClient {
    * @param params.body - Optional review body text
    * @param params.event - Review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
    * @param params.comments - Optional inline comments as `{ path, line, body }`
-   * @returns Normalized created review
    */
   async createPrReview(
     owner: string,
@@ -1107,7 +1023,6 @@ export class GitHubClient {
    * @param number - Pull request number
    * @param options - Pagination options
    * @param options.limit - Maximum number of comments to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized comments
    */
   async listPrComments(
     owner: string,
@@ -1130,7 +1045,6 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param number - Pull request number
    * @param body - Comment text (Markdown)
-   * @returns Normalized created comment
    */
   async createPrComment(
     owner: string,
@@ -1149,7 +1063,7 @@ export class GitHubClient {
   }
 
   /**
-   * Adds a review comment attached to a specific line of a pull request diff.
+   * Adds a review comment attached to a specific `params.path`/`params.line` of a pull request diff, on `params.commit_id`.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Pull request number
@@ -1158,7 +1072,6 @@ export class GitHubClient {
    * @param params.commit_id - SHA of the commit to comment on
    * @param params.path - File path the comment is attached to
    * @param params.line - Line number in the file
-   * @returns Normalized created review comment
    */
   async createPrReviewComment(
     owner: string,
@@ -1187,9 +1100,7 @@ export class GitHubClient {
     return this.mapReviewComment(res.data as Record<string, unknown>);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Branches
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Branches ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists branches in a repository.
@@ -1197,7 +1108,6 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param options - Pagination options
    * @param options.limit - Maximum number of branches to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized branches
    */
   async listBranches(
     owner: string,
@@ -1218,7 +1128,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param branch - Branch name
-   * @returns Normalized branch
    */
   async getBranch(owner: string, repo: string, branch: string): Promise<GitHubBranch> {
     this.validateRequired({ owner, repo, branch });
@@ -1230,14 +1139,13 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a new branch from a SHA or an existing branch.
+   * Creates `params.branch` from `params.from_sha` (takes precedence) or `params.from_branch`'s resolved head SHA.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Branch creation parameters
    * @param params.branch - Name for the new branch
    * @param params.from_sha - Commit SHA to branch from (takes precedence over `from_branch`)
    * @param params.from_branch - Existing branch to branch from (its head SHA is resolved if `from_sha` is omitted)
-   * @returns Normalized created branch
    */
   async createBranch(
     owner: string,
@@ -1271,7 +1179,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param branch - Branch name to delete
-   * @returns `{ deleted: true, branch }` on success
    */
   async deleteBranch(
     owner: string,
@@ -1289,7 +1196,6 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param base - Base ref
    * @param head - Head ref
-   * @returns Normalized commit comparison
    */
   async compareBranches(
     owner: string,
@@ -1314,12 +1220,10 @@ export class GitHubClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Commits
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Commits ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists commits in a repository with optional filters.
+   * Lists commits, filterable by `options.sha`/`path`/`author` and an ISO 8601 `since`/`until` window.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Filter and pagination options
@@ -1329,7 +1233,6 @@ export class GitHubClient {
    * @param options.since - ISO 8601 timestamp lower bound
    * @param options.until - ISO 8601 timestamp upper bound
    * @param options.limit - Maximum number of commits to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized commits
    */
   async listCommits(
     owner: string,
@@ -1367,7 +1270,6 @@ export class GitHubClient {
    * @param branch - Branch name
    * @param options - Pagination options
    * @param options.limit - Maximum number of commits to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized commits
    */
   async listBranchCommits(
     owner: string,
@@ -1380,13 +1282,12 @@ export class GitHubClient {
   }
 
   /**
-   * Searches commits across GitHub, optionally scoped to a single repository.
+   * Searches commits across GitHub (GitHub commit-search syntax), optionally scoped to `options.owner`/`options.repo` (both required together).
    * @param query - Commit search query (GitHub commit-search syntax)
    * @param options - Search scope and pagination options
    * @param options.owner - Repository owner to scope the search to (requires `repo`)
    * @param options.repo - Repository name to scope the search to (requires `owner`)
    * @param options.limit - Maximum number of results to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized commits
    */
   async searchCommits(
     query: string,
@@ -1408,7 +1309,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param ref - Commit SHA or ref
-   * @returns The commit diff as a raw unified-diff string
    */
   async getCommitDiff(owner: string, repo: string, ref: string): Promise<string> {
     this.validateRequired({ owner, repo, ref });
@@ -1421,18 +1321,15 @@ export class GitHubClient {
     return decodeDiffData(res.data);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Repository Content
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Repository Content ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Retrieves a repository tree (file/directory listing), optionally recursive.
+   * Retrieves a repository tree from `options.ref` (default: default branch), optionally recursive.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Tree options
    * @param options.ref - Branch, tag, or commit SHA to read the tree from (default: the repo's default branch)
    * @param options.recursive - Include nested directories recursively (default false)
-   * @returns Array of normalized tree items
    */
   async getTree(
     owner: string,
@@ -1464,15 +1361,13 @@ export class GitHubClient {
   }
 
   /**
-   * Retrieves the content of a file in a repository. Throws if the path is a directory.
+   * Retrieves file content from `options.ref` (default: default branch); throws if `path` is a directory.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param path - File path from the repository root
    * @param options - Read options
    * @param options.ref - Branch, tag, or commit SHA to read from (default: the repo's default branch)
-   * @returns Normalized file content: UTF-8 text when the bytes round-trip losslessly, otherwise
-   *   the raw base64 string (with `encoding: 'base64'`) so binary files are never corrupted
-   * @throws {Error} if the path resolves to a directory rather than a file
+   * @returns UTF-8 text when bytes round-trip losslessly, otherwise the raw base64 string (`encoding: 'base64'`) so binary files are never corrupted
    */
   async getFileContents(
     owner: string,
@@ -1522,8 +1417,7 @@ export class GitHubClient {
   }
 
   /**
-   * Creates or updates a file in a repository (commits the change).
-   * If `sha` is not provided, the existing file's SHA is fetched first (ignored if absent).
+   * Creates or updates a file (commits the change); if `params.sha` is omitted, the existing file's SHA is fetched first (ignored if absent).
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - File parameters
@@ -1532,7 +1426,6 @@ export class GitHubClient {
    * @param params.message - Commit message
    * @param params.branch - Branch to commit to (default: the repo's default branch)
    * @param params.sha - Blob SHA of the file being replaced (required by GitHub for updates)
-   * @returns `{ commit_sha, path, html_url }` of the resulting commit
    */
   async createOrUpdateFile(
     owner: string,
@@ -1590,19 +1483,16 @@ export class GitHubClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Actions
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Actions ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists GitHub Actions workflow runs for a repository.
+   * Lists GitHub Actions workflow runs, filterable by `options.branch` and `options.status` (e.g. "completed", "in_progress").
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Filter and pagination options
    * @param options.branch - Filter by branch
    * @param options.status - Filter by run status (e.g. "completed", "in_progress")
    * @param options.limit - Maximum number of runs to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized workflow runs
    */
   async listWorkflowRuns(
     owner: string,
@@ -1623,7 +1513,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param run_id - Workflow run ID
-   * @returns Normalized workflow run
    */
   async getWorkflowRun(owner: string, repo: string, run_id: number): Promise<GitHubWorkflowRun> {
     this.validateRequired({ owner, repo, run_id });
@@ -1632,14 +1521,11 @@ export class GitHubClient {
   }
 
   /**
-   * Gets the download URL for a workflow run's logs (a ZIP archive). The archive is
-   * not downloaded or parsed — only the short-lived redirect URL is returned.
-   * `request: { redirect: 'manual' }` stops Octokit from following the 302 (which
-   * would buffer the whole archive into memory); we only want the `Location` URL.
+   * Gets the download URL for a workflow run's logs ZIP; not downloaded/parsed, only the short-lived redirect URL is returned.
+   * `request: { redirect: 'manual' }` stops Octokit buffering the whole archive into memory to follow the 302.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param run_id - Workflow run ID
-   * @returns `{ download_url, note }` where `download_url` points to the logs ZIP
    */
   async getRunLogs(
     owner: string,
@@ -1664,7 +1550,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param run_id - Workflow run ID
-   * @returns `{ rerun: true }` on success
    */
   async rerunWorkflow(owner: string, repo: string, run_id: number): Promise<{ rerun: boolean }> {
     this.validateRequired({ owner, repo, run_id });
@@ -1673,14 +1558,13 @@ export class GitHubClient {
   }
 
   /**
-   * Triggers a `workflow_dispatch` event for a workflow.
+   * Triggers a `workflow_dispatch` event for `params.workflow_id` (file name or numeric ID) on `params.ref`, with optional `params.inputs`.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Trigger parameters
    * @param params.workflow_id - Workflow file name (e.g. "ci.yml") or numeric ID
    * @param params.ref - Git ref (branch or tag) to run the workflow on
    * @param params.inputs - Optional inputs map passed to the workflow
-   * @returns `{ triggered: true, workflow_id, ref }` on success
    */
   async triggerWorkflow(
     owner: string,
@@ -1705,7 +1589,6 @@ export class GitHubClient {
    * @param run_id - Workflow run ID
    * @param options - Pagination options
    * @param options.limit - Maximum number of artifacts to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized artifacts
    */
   async listWorkflowRunArtifacts(
     owner: string,
@@ -1723,14 +1606,11 @@ export class GitHubClient {
   }
 
   /**
-   * Gets the download URL for a workflow artifact (a ZIP archive). The archive is
-   * not downloaded or parsed — only the short-lived redirect URL is returned.
-   * `request: { redirect: 'manual' }` stops Octokit from following the 302 (which
-   * would buffer the whole archive into memory); we only want the `Location` URL.
+   * Gets the download URL for a workflow artifact ZIP; not downloaded/parsed, only the short-lived redirect URL is returned.
+   * `request: { redirect: 'manual' }` stops Octokit buffering the whole archive into memory to follow the 302.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param artifact_id - Artifact ID
-   * @returns `{ download_url, note }` where `download_url` points to the artifact ZIP
    */
   async downloadArtifact(
     owner: string,
@@ -1751,13 +1631,10 @@ export class GitHubClient {
     };
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Issues
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Issues ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists issues in a repository. GitHub's issues endpoint also returns pull requests;
-   * those are filtered out (any item with a `pull_request` key is excluded).
+   * Lists issues, filterable by state/labels/assignee/creator; GitHub's issues endpoint also returns PRs, which are filtered out (any item with a `pull_request` key).
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param options - Filter and pagination options
@@ -1766,7 +1643,6 @@ export class GitHubClient {
    * @param options.assignee - Filter by assignee login (or "none" / "*")
    * @param options.creator - Filter by creator login
    * @param options.limit - Maximum number of issues to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized issues (pull requests excluded)
    */
   async listIssues(
     owner: string,
@@ -1798,7 +1674,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Issue number
-   * @returns Normalized issue
    */
   async getIssue(owner: string, repo: string, number: number): Promise<GitHubIssue> {
     this.validateRequired({ owner, repo, number });
@@ -1810,7 +1685,7 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a new issue.
+   * Creates a new issue with optional body, labels, and assignees.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Issue creation parameters
@@ -1818,7 +1693,6 @@ export class GitHubClient {
    * @param params.body - Optional issue body (Markdown)
    * @param params.labels - Optional label names to apply
    * @param params.assignees - Optional assignee logins
-   * @returns Normalized created issue
    */
   async createIssue(
     owner: string,
@@ -1838,7 +1712,7 @@ export class GitHubClient {
   }
 
   /**
-   * Updates an existing issue.
+   * Updates an existing issue: title, body, state ("open"/"closed"), and replacement labels/assignees.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Issue number
@@ -1848,7 +1722,6 @@ export class GitHubClient {
    * @param params.state - New state: "open" or "closed"
    * @param params.labels - Replacement label names
    * @param params.assignees - Replacement assignee logins
-   * @returns Normalized updated issue
    */
   async updateIssue(
     owner: string,
@@ -1881,15 +1754,12 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param number - Issue number
-   * @returns Normalized issue with `state: "closed"`
    */
   async closeIssue(owner: string, repo: string, number: number): Promise<GitHubIssue> {
     return this.updateIssue(owner, repo, number, { state: 'closed' });
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Labels
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Labels ──────────────────────────────────────────────────────────────────────
 
   /**
    * Lists labels defined in a repository.
@@ -1897,7 +1767,6 @@ export class GitHubClient {
    * @param repo - Repository name
    * @param options - Pagination options
    * @param options.limit - Maximum number of labels to return (default 100 when omitted; any positive value honored)
-   * @returns Array of normalized labels
    */
   async listLabels(
     owner: string,
@@ -1914,15 +1783,13 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a new label. The `#` prefix on the color is stripped if present
-   * (GitHub expects a bare hex value).
+   * Creates a new label; a leading `#` on `params.color` is stripped (GitHub expects a bare hex value).
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Label creation parameters
    * @param params.name - Label name
    * @param params.color - Hex color (with or without leading `#`)
    * @param params.description - Optional label description
-   * @returns Normalized created label
    */
   async createLabel(
     owner: string,
@@ -1944,21 +1811,16 @@ export class GitHubClient {
     return this.mapLabel(res.data as Record<string, unknown>);
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Tags & Releases
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Tags & Releases ──────────────────────────────────────────────────────────────────────
 
   /**
-   * Creates a Git tag pointing at a commit. If `message` is provided, an annotated
-   * tag object is created first and the ref points at it; otherwise the ref points
-   * directly at the commit.
+   * Creates a Git tag at `params.sha`; if `params.message` is given, an annotated tag object is created first and the ref points at it.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Tag creation parameters
    * @param params.tag - Tag name (e.g. "v1.0.0")
    * @param params.sha - Commit SHA the tag should point at
    * @param params.message - Optional message for an annotated tag
-   * @returns `{ tag, sha, ref }` of the created tag ref
    */
   async createTag(
     owner: string,
@@ -2001,7 +1863,6 @@ export class GitHubClient {
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param tag - Tag name to delete
-   * @returns `{ deleted: true, tag }` on success
    */
   async deleteTag(
     owner: string,
@@ -2014,7 +1875,7 @@ export class GitHubClient {
   }
 
   /**
-   * Creates a release associated with a tag (creating the tag if it does not exist).
+   * Creates a release for `params.tag_name` (creating the tag at `params.target_commitish` if it does not exist yet), optionally draft/prerelease.
    * @param owner - Repository owner login
    * @param repo - Repository name
    * @param params - Release creation parameters
@@ -2024,7 +1885,6 @@ export class GitHubClient {
    * @param params.draft - Whether to create the release as a draft
    * @param params.prerelease - Whether to mark the release as a pre-release
    * @param params.target_commitish - Commitish the tag should point at if it does not exist yet
-   * @returns Normalized created release
    */
   async createRelease(
     owner: string,
@@ -2057,15 +1917,9 @@ export class GitHubClient {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Initialization
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Initialization ──────────────────────────────────────────────────────────────────────
 
-/**
- * Initializes the GitHub client with a token from /tokens/token.
- * Returns null (not throws) when token is missing or invalid (graceful degradation).
- * @returns Configured GitHubClient instance, or null if the token is not found / invalid
- */
+/** Initializes the GitHub client from /tokens/token; returns null (not throws) when the token is missing or invalid. */
 export async function initializeGitHubClient(): Promise<GitHubClient | null> {
   try {
     console.log(`${ts()} 📖 Loading GitHub token from: ${tokensDir()}/token`);

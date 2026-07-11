@@ -1,9 +1,5 @@
-//! SSOT for every memory/CPU/tmpfs/shm number Speedwave itself ships: the
-//! Claude + hub container limits here, per-worker limits on
-//! [`consts::McpServiceDescriptor`], plugin defaults/caps in `consts`. The
-//! compose renderer reads these instead of YAML literals; a drift test enforces
-//! `compose.template.yml == this table`. Per-plugin actual limits (signed
-//! external manifest) and the WSL2 VM (user-owned) stay outside by design.
+//! SSOT for memory/CPU/tmpfs/shm numbers Speedwave ships (Claude+hub here, per-worker limits in
+//! consts.rs); drift-tested vs compose.template.yml. Plugin/WSL2 VM limits stay outside by design.
 use std::process::ExitStatus;
 
 /// Fixed Claude container memory ceiling in GiB. See ADR-068.
@@ -31,9 +27,8 @@ pub const CLAUDE_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// MCP hub: on every MCP request's path, does real CPU work (sandboxed exec,
-/// PII regex, aggregation) → 1 full core. On a minimum-spec 4-vCPU VM,
-/// claude+playwright already claim all 4 (limits are ceilings — overcommit OK).
+/// MCP hub: on every MCP request's path, does real CPU work (sandboxed exec, PII regex,
+/// aggregation) → 1 full core; limits are ceilings, so overcommit on a 4-vCPU VM is fine.
 pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     mem_mib: 512,
     cpus: 1.0,
@@ -41,8 +36,8 @@ pub const HUB_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// Speedwave proxy (rust forwarder, ADR-073): 128 MiB, 0.5 core, 32 MiB /tmp.
-/// Measured ~3-4 MiB idle / ~37 MiB peak under concurrent 64k streams.
+/// Speedwave proxy (rust forwarder, ADR-073): 128 MiB, 0.5 core, 32 MiB /tmp; measured ~3-4 MiB
+/// idle / ~37 MiB peak under concurrent 64k streams.
 pub const PROXY_RESOURCES: ContainerResources = ContainerResources {
     mem_mib: 128,
     cpus: 0.5,
@@ -50,9 +45,8 @@ pub const PROXY_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-/// Default envelope for a lightweight API worker (slack, sharepoint, redmine,
-/// gitlab, atlassian, context7). Workers needing more override inline (github
-/// 256m, office, playwright). Shared so the default lives in one place.
+/// Default envelope for a lightweight API worker (slack, sharepoint, redmine, gitlab, atlassian,
+/// context7); workers needing more override inline (github 256m, office, playwright).
 pub const STANDARD_WORKER_RESOURCES: ContainerResources = ContainerResources {
     mem_mib: 128,
     cpus: 0.5,
@@ -60,9 +54,7 @@ pub const STANDARD_WORKER_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-// ---------------------------------------------------------------------------
-// Host RAM detection
-// ---------------------------------------------------------------------------
+// ── Host RAM detection ─────────────────────────────────────────────────────
 
 /// Converts raw bytes to GiB using floor division (never over-reports host RAM).
 #[cfg(any(target_os = "macos", test))]
@@ -70,8 +62,7 @@ fn bytes_to_gib(bytes: u64) -> u32 {
     (bytes / (1024 * 1024 * 1024)) as u32
 }
 
-/// Returns total physical RAM in GiB (floor); falls back to 16 on detection
-/// failure.
+/// Returns total physical RAM in GiB (floor); falls back to 16 on detection failure.
 pub fn host_total_memory_gib() -> u32 {
     host_total_memory_gib_impl().unwrap_or(16)
 }
@@ -101,24 +92,20 @@ fn host_total_memory_gib_impl() -> Option<u32> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Scaling formulas (pure functions — testable on any platform)
-// ---------------------------------------------------------------------------
+// ── Scaling formulas (pure functions — testable on any platform) ──────────
 
 /// Minimum supported host RAM; SSOT for the `check_low_memory` warn threshold
 /// and the always-on fit test. See ADR-068.
 pub const MIN_SUPPORTED_HOST_GIB: u32 = 16;
 
-/// Desired Lima VM memory in GiB: half of host RAM, clamped 4–32. Supported
-/// (≥16 GiB) hosts land on the ADR-068 8 GiB floor via `host/2`; smaller hosts
-/// must never get a VM above half their RAM (8 GiB host keeps a 4 GiB VM).
+/// Desired Lima VM memory in GiB: half of host RAM, clamped 4-32. Supported (≥16 GiB) hosts land
+/// on the ADR-068 8 GiB floor via `host/2`; smaller hosts never get a VM above half their RAM.
 pub fn desired_vm_memory_gib(host_ram_gib: u32) -> u32 {
     (host_ram_gib / 2).clamp(4, 32)
 }
 
-/// Host logical CPU count, or 8 on detection failure (→ 4 vCPU via `host/2`).
-/// Uses `available_parallelism` (cross-platform, no `unsafe`) — same primitive
-/// the build pool uses.
+/// Host logical CPU count, or 8 on detection failure (→ 4 vCPU via `host/2`); uses
+/// `available_parallelism` (cross-platform, no `unsafe`) — same primitive the build pool uses.
 pub fn host_logical_cpus() -> u32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as u32)
@@ -139,9 +126,7 @@ fn always_on_memory_mib() -> u32 {
     one(&CLAUDE_RESOURCES) + one(&HUB_RESOURCES)
 }
 
-// ---------------------------------------------------------------------------
-// OOM detection
-// ---------------------------------------------------------------------------
+// ── OOM detection ──────────────────────────────────────────────────────────
 
 /// Returns `true` if the exit status likely indicates an OOM kill: code 137 or
 /// signal 9. Heuristic only (also from host-side `kill -9`); see ADR-068.
@@ -173,9 +158,7 @@ pub const OOM_MESSAGE: &str = "\
     If this persists, please report at \
     https://github.com/speednet-software/speedwave/issues";
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
