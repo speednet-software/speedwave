@@ -479,7 +479,7 @@ fn resolve_from_marker(home: &std::path::Path) -> Option<PathBuf> {
 pub fn write_resources_marker(resources_dir: &std::path::Path) -> anyhow::Result<()> {
     let marker_dir = crate::consts::data_dir();
     let marker = marker_dir.join(crate::consts::RESOURCES_MARKER);
-    std::fs::create_dir_all(&marker_dir)?;
+    std::fs::create_dir_all(marker_dir)?;
     crate::fs_perms::write_shared_file_atomic(&marker, &resources_dir.to_string_lossy())
 }
 
