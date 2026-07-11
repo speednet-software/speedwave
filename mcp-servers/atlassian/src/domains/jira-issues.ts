@@ -3,6 +3,7 @@
  * @module mcp-atlassian/domains/jira-issues
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { toAdf } from '../adf.js';
 import {
@@ -37,6 +38,13 @@ const ISSUE_FIELDS = [
   'updated',
 ] as const;
 
+/**
+ * With a project allowlist configured, upstream pages that filter down to zero visible
+ * issues are skipped (bounded by this cap) rather than passed through, so a caller can't
+ * infer out-of-allowlist matches from an empty page whose cursor says "not last".
+ */
+const MAX_SEARCH_CONTINUATION_PAGES = 5;
+
 /** Client for Jira issue operations. */
 export interface JiraIssuesClient {
   /**
@@ -45,7 +53,9 @@ export interface JiraIssuesClient {
    * @param params.jql - The JQL query string.
    * @param params.maxResults - Page size (default 50, capped at 100).
    * @param params.nextPageToken - Opaque cursor from a previous page.
-   * @returns Page of issues plus the next-page cursor (absent on the last page).
+   * @returns Page of issues plus the next-page cursor (absent on the last page). With a
+   * project allowlist configured, all-excluded upstream pages are skipped (bounded) so the
+   * cursor/is_last never reveal the existence of out-of-allowlist matches.
    */
   search(params: {
     jql: string;
@@ -87,11 +97,18 @@ export interface JiraIssuesClient {
    * @param params.body - New description (plain text → ADF, or a raw ADF document).
    * @param params.priority - New priority name.
    * @param params.labels - Replacement label set.
+   * @param params.assigneeAccountId - Optional account ID to reassign to.
    * @returns The updated issue, re-fetched and normalised.
    */
   update(
     issueIdOrKey: string,
-    params: { summary?: string; body?: string | AdfDoc; priority?: string; labels?: string[] }
+    params: {
+      summary?: string;
+      body?: string | AdfDoc;
+      priority?: string;
+      labels?: string[];
+      assigneeAccountId?: string;
+    }
   ): Promise<JiraIssue>;
   /** List the workflow transitions currently available for an issue. */
   getTransitions(issueIdOrKey: string): Promise<JiraTransition[]>;
@@ -135,28 +152,43 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
 
   return {
     async search({ jql, maxResults = 50, nextPageToken }) {
-      const body: Record<string, unknown> = {
-        jql,
-        maxResults: Math.min(Math.max(maxResults, 1), 100),
-        fields: [...ISSUE_FIELDS],
-      };
-      if (nextPageToken) body.nextPageToken = nextPageToken;
-      // POST search is idempotent → safe to retry transient 5xx.
-      const res = await client.post<{
-        issues?: unknown[];
-        nextPageToken?: string | null;
-        isLast?: boolean;
-      }>('/rest/api/3/search/jql', body, { retryable: true });
-      // Filter the result set by the project allowlist.
-      const issues = filterByAllowlist(
-        (res.issues ?? []).map(mapIssue),
-        (i) => i.project_key,
-        client.jiraProjectKeys
+      const capped = clampPageSize(maxResults, 50, 100);
+      const scoped = client.jiraProjectKeys.length > 0;
+      let cursor = nextPageToken;
+      let issues: JiraIssue[] = [];
+      let upstreamDone = false;
+      let pages = 0;
+      do {
+        const body: Record<string, unknown> = {
+          jql,
+          maxResults: capped,
+          fields: [...ISSUE_FIELDS],
+        };
+        if (cursor) body.nextPageToken = cursor;
+        // POST search is idempotent → safe to retry transient 5xx.
+        const res = await client.post<{
+          issues?: unknown[];
+          nextPageToken?: string | null;
+          isLast?: boolean;
+        }>('/rest/api/3/search/jql', body, { retryable: true });
+        issues = filterByAllowlist(
+          (res.issues ?? []).map(mapIssue),
+          (i) => i.project_key,
+          client.jiraProjectKeys
+        );
+        cursor = res.nextPageToken ?? undefined;
+        upstreamDone = res.isLast ?? res.nextPageToken == null;
+        pages += 1;
+      } while (
+        scoped &&
+        !upstreamDone &&
+        issues.length === 0 &&
+        pages < MAX_SEARCH_CONTINUATION_PAGES
       );
       return {
         issues,
-        next_page_token: res.nextPageToken ?? null,
-        is_last: res.isLast ?? res.nextPageToken == null,
+        next_page_token: cursor ?? null,
+        is_last: upstreamDone,
       };
     },
 
@@ -194,13 +226,14 @@ export function createJiraIssuesClient(client: AtlassianClient): JiraIssuesClien
       return mapIssue(raw);
     },
 
-    async update(issueIdOrKey, { summary, body, priority, labels }) {
+    async update(issueIdOrKey, { summary, body, priority, labels, assigneeAccountId }) {
       enforceFromIssueKey(issueIdOrKey);
       const fields: Record<string, unknown> = {};
       if (summary !== undefined) fields.summary = summary;
       if (body !== undefined) fields.description = toAdf(body);
       if (priority !== undefined) fields.priority = { name: priority };
       if (labels !== undefined) fields.labels = labels;
+      if (assigneeAccountId) fields.assignee = { accountId: assigneeAccountId };
       await client.put<void>(`/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`, { fields });
       const raw = await client.get<unknown>(
         `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}`,

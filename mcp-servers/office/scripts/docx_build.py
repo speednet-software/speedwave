@@ -63,8 +63,10 @@ def _edit(src: str, output: str, ops: list) -> None:
             _add_element(doc, op["element"])
         elif kind == "replace_text":
             find, replace = str(op["find"]), str(op["replace"])
+            matches = 0
             for para in doc.paragraphs:
                 if find in para.text:
+                    matches += 1
                     # Replace across the whole paragraph text (rebuild a single run).
                     new_text = para.text.replace(find, replace)
                     for r in list(para.runs):
@@ -77,7 +79,14 @@ def _edit(src: str, output: str, ops: list) -> None:
                 for row in table.rows:
                     for cell in row.cells:
                         if find in cell.text:
+                            matches += 1
                             cell.text = cell.text.replace(find, replace)
+            if matches == 0:
+                fail(
+                    f"replace_text: '{find}' was not found in any paragraph or table cell "
+                    "-- text may be split across runs (e.g. mixed formatting mid-phrase); "
+                    "use readDocument first to confirm the exact text"
+                )
         elif kind == "delete_paragraph":
             idx = int(op["index"])
             paras = doc.paragraphs

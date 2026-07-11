@@ -24,8 +24,11 @@ function createMockExecuteResult(data: unknown, executionMs = 100) {
   };
 }
 
-// Mock the dependencies
-vi.mock('./search-tools.js');
+// Mock the dependencies. Keep the real DETAIL_LEVELS SSOT; only stub searchTools.
+vi.mock('./search-tools.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof searchToolsModule>();
+  return { ...actual, searchTools: vi.fn() };
+});
 vi.mock('./executor.js');
 vi.mock('./tool-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof toolRegistryModule>();
@@ -158,6 +161,31 @@ describe('createCodeExecutorHandlers', () => {
         service: undefined,
         includeDeferred: undefined,
       });
+    });
+
+    it('rejects an invalid detail_level with a teaching error instead of coercing', async () => {
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      const result = await handlers.handleSearchTools({
+        query: 'slack',
+        detail_level: 'full_schmea',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('"full_schmea"');
+      expect(result.content[0].text).toContain('names_only, with_descriptions, full_schema');
+      expect(searchToolsModule.searchTools).not.toHaveBeenCalled();
+    });
+
+    it('defaults detail_level to names_only when omitted', async () => {
+      const mockResults = { matches: [], total: 0, query: 'x', detail_level: 'names_only' };
+      vi.mocked(searchToolsModule.searchTools).mockResolvedValue(mockResults);
+
+      const handlers = createCodeExecutorHandlers(mockConfig);
+      await handlers.handleSearchTools({ query: 'x' });
+
+      expect(searchToolsModule.searchTools).toHaveBeenCalledWith(
+        expect.objectContaining({ detailLevel: 'names_only' })
+      );
     });
 
     it('should handle wildcard search', async () => {
@@ -880,19 +908,12 @@ describe('createCodeExecutorHandlers', () => {
       expect(result.content[0].text).toContain('code parameter must be a string');
     });
 
-    it('ignores non-string detail_level (defaults to names_only)', async () => {
-      vi.mocked(searchToolsModule.searchTools).mockResolvedValue({
-        matches: [],
-        total: 0,
-        query: 'test',
-        detail_level: 'names_only',
-      });
+    it('rejects a non-string detail_level with a teaching error', async () => {
       const handlers = createCodeExecutorHandlers(mockConfig);
       const result = await handlers.handleSearchTools({ query: 'test', detail_level: 123 } as any);
-      expect(result.isError).toBeUndefined();
-      expect(searchToolsModule.searchTools).toHaveBeenCalledWith(
-        expect.objectContaining({ detailLevel: 'names_only' })
-      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('names_only, with_descriptions, full_schema');
+      expect(searchToolsModule.searchTools).not.toHaveBeenCalled();
     });
 
     it('ignores non-string service param', async () => {

@@ -22,6 +22,8 @@ import {
   ConversationsHistoryResponse,
   ConversationsRepliesResponse,
   UsersLookupByEmailResponse,
+  AuthTestResponse,
+  UsersInfoResponse,
 } from '@slack/web-api';
 import {
   ts,
@@ -32,6 +34,7 @@ import {
   authedSdkCall,
   RefreshLock,
   OAuthRefreshError,
+  clampPageSize,
   type AuthedTokenState,
 } from '@speedwave/mcp-shared';
 
@@ -143,6 +146,13 @@ export interface SlackHistoryPage {
   /** Pass back as `cursor` to fetch the next (older) page. */
   next_cursor?: string;
   has_more: boolean;
+  /** The page size actually used, after clamping the requested `limit` to 1-100. */
+  limit_used?: number;
+}
+
+/** The signed-in user's own identity, as resolved by getCurrentUser. */
+export interface SlackCurrentUser extends SlackUser {
+  team_id?: string;
 }
 
 //═══════════════════════════════════════════════════════════════════════════════
@@ -256,9 +266,42 @@ export async function slackCall<T>(
 // Error Handling
 //═══════════════════════════════════════════════════════════════════════════════
 
+const AUTH_FAILURE_MESSAGE = withSetupGuidance(
+  'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+);
+const MISSING_SCOPE_MESSAGE = withSetupGuidance(
+  'Permission denied: the Slack sign-in lacks a newly required permission. ' +
+    'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
+);
+const MALFORMED_FIELD_MESSAGE =
+  'Slack rejected the request: a required field was missing or malformed (e.g. empty message text).';
+
+/** Slack platform error code → user-facing message, for exact-match codes. */
+const SLACK_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  not_authed: AUTH_FAILURE_MESSAGE,
+  invalid_auth: AUTH_FAILURE_MESSAGE,
+  token_expired: AUTH_FAILURE_MESSAGE,
+  token_revoked: AUTH_FAILURE_MESSAGE,
+  missing_scope: MISSING_SCOPE_MESSAGE,
+  restricted_action: MISSING_SCOPE_MESSAGE,
+  channel_not_found: 'Channel not found in Slack.',
+  users_not_found: 'User not found in Slack.',
+  user_not_found: 'User not found in Slack.',
+  ratelimited: 'Rate limit exceeded. Please try again later.',
+  is_archived:
+    'This channel is archived and cannot receive new messages. Choose a different channel.',
+  msg_too_long: "Message text exceeds Slack's length limit; shorten it and retry.",
+  not_in_channel:
+    'The signed-in user is not a member of this channel; use listChannelIds to see channels you can post to.',
+  cant_dm_bot:
+    'Slack apps/bots cannot receive DMs. Use findUsers to confirm the recipient is a real person.',
+  no_text: MALFORMED_FIELD_MESSAGE,
+  invalid_arguments: MALFORMED_FIELD_MESSAGE,
+});
+
 /**
- * Format Slack error messages consistently
- * Sanitizes errors and provides user-friendly messages
+ * Format Slack error messages consistently.
+ * Sanitizes errors and provides user-friendly messages via {@link SLACK_ERROR_MESSAGES}.
  * @param {unknown} error - Error object from Slack API
  * @returns {string} Formatted, user-friendly error message
  */
@@ -277,34 +320,8 @@ export function formatSlackError(error: unknown): string {
   const e = error as { message?: string; data?: { error?: string }; error?: string };
   const slackError = e.data?.error || e.error;
 
-  if (
-    slackError === 'not_authed' ||
-    slackError === 'invalid_auth' ||
-    slackError === 'token_expired' ||
-    slackError === 'token_revoked'
-  ) {
-    return withSetupGuidance(
-      'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
-    );
-  }
-
-  if (slackError === 'missing_scope' || slackError === 'restricted_action') {
-    return withSetupGuidance(
-      'Permission denied — the Slack sign-in lacks a newly required permission. ' +
-        'Re-authorise Slack in Speedwave Desktop (Integrations → Slack) and retry.'
-    );
-  }
-
-  if (slackError === 'channel_not_found') {
-    return 'Channel not found in Slack.';
-  }
-
-  if (slackError === 'users_not_found' || slackError === 'user_not_found') {
-    return 'User not found in Slack.';
-  }
-
-  if (slackError === 'ratelimited') {
-    return 'Rate limit exceeded. Please try again later.';
+  if (slackError && slackError in SLACK_ERROR_MESSAGES) {
+    return SLACK_ERROR_MESSAGES[slackError];
   }
 
   if (e.message?.includes('getaddrinfo') || e.message?.includes('ECONNREFUSED')) {
@@ -400,7 +417,9 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
   }
 
   throw new Error(
-    `Channel not found: ${channel}. To message a person, use findUsers to get their user ID, then openDirectMessage.`
+    `Channel not found: ${channel}. If this is a person, use findUsers then openDirectMessage. ` +
+      'If it is a channel, call listChannelIds to see channels you (the signed-in user) are a ' +
+      'member of — Speedwave has no bot to invite, so a missing channel usually means you are not a member.'
   );
 }
 
@@ -456,7 +475,7 @@ export async function readChannel(
   params: { channel: string; limit?: number; oldest?: string; latest?: string; cursor?: string }
 ): Promise<SlackHistoryPage> {
   const channelId = await resolveChannelId(clients, params.channel);
-  const limit = Math.min(Math.max(params.limit || 50, 1), 100);
+  const limit = clampPageSize(params.limit, 50, 100);
 
   const result = (await slackCall(clients, (c) =>
     c.conversations.history({
@@ -468,7 +487,7 @@ export async function readChannel(
     })
   )) as ConversationsHistoryResponse;
 
-  return toHistoryPage(result);
+  return toHistoryPage(result, limit);
 }
 
 interface RawFile {
@@ -531,12 +550,16 @@ function mapFiles(files: RawFile[] | undefined): SlackFileMeta[] | undefined {
  * @param result.has_more - more pages available
  * @param result.response_metadata - pagination metadata
  * @param result.response_metadata.next_cursor - next page cursor
+ * @param limitUsed - the (possibly clamped) `limit` actually sent to Slack
  */
-function toHistoryPage(result: {
-  messages?: RawMessage[];
-  has_more?: boolean;
-  response_metadata?: { next_cursor?: string };
-}): SlackHistoryPage {
+function toHistoryPage(
+  result: {
+    messages?: RawMessage[];
+    has_more?: boolean;
+    response_metadata?: { next_cursor?: string };
+  },
+  limitUsed: number
+): SlackHistoryPage {
   const messages: SlackMessage[] = (result.messages || []).map((msg: RawMessage) => ({
     user: msg.user || 'unknown',
     text: msg.text || '',
@@ -554,7 +577,20 @@ function toHistoryPage(result: {
     messages,
     next_cursor: nextCursor,
     has_more: result.has_more ?? Boolean(nextCursor),
+    limit_used: limitUsed,
   };
+}
+
+/** Shape of a genuine Slack message timestamp — seconds dot 6-digit microseconds. */
+const SLACK_TS_RE = /^\d+\.\d{6}$/;
+
+/**
+ * True when `value` looks like a real Slack `ts` (e.g. "1717000000.000100").
+ * Guards against a weak model reformatting/rounding a copied timestamp.
+ * @param value - candidate thread_ts value
+ */
+function looksLikeSlackTs(value: string): boolean {
+  return SLACK_TS_RE.test(value);
 }
 
 /**
@@ -567,14 +603,21 @@ function toHistoryPage(result: {
  * @param {number} [params.limit=50] - Maximum messages per page (1-100)
  * @param {string} [params.cursor] - Cursor from a previous page
  * @returns {Promise<SlackHistoryPage>} One page of thread messages
- * @throws {Error} If reading fails
+ * @throws {Error} If reading fails or thread_ts is not a genuine Slack timestamp
  */
 export async function readThread(
   clients: SlackClients,
   params: { channel: string; thread_ts: string; limit?: number; cursor?: string }
 ): Promise<SlackHistoryPage> {
+  if (!looksLikeSlackTs(params.thread_ts)) {
+    throw new Error(
+      `thread_ts "${params.thread_ts}" does not look like a Slack timestamp (expected e.g. ` +
+        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
+        'result — do not reformat or round it.'
+    );
+  }
   const channelId = await resolveChannelId(clients, params.channel);
-  const limit = Math.min(Math.max(params.limit || 50, 1), 100);
+  const limit = clampPageSize(params.limit, 50, 100);
 
   const result = (await slackCall(clients, (c) =>
     c.conversations.replies({
@@ -585,7 +628,7 @@ export async function readThread(
     })
   )) as ConversationsRepliesResponse;
 
-  return toHistoryPage(result);
+  return toHistoryPage(result, limit);
 }
 
 /** Max file bytes returned to the model — guards context and worker memory. */
@@ -860,10 +903,11 @@ export async function getUsers(
   clients: SlackClients,
   params: { email: string }
 ): Promise<{ user: SlackUser | null }> {
+  const email = params.email.trim();
   try {
     const result = (await slackCall(clients, (c) =>
       c.users.lookupByEmail({
-        email: params.email,
+        email,
       })
     )) as UsersLookupByEmailResponse;
 
@@ -887,6 +931,50 @@ export async function getUsers(
     }
     throw error;
   }
+}
+
+/**
+ * Resolve the signed-in user's identity via `auth.test` (ground truth for "me"),
+ * enriched with `users.info` for the display name when that lookup succeeds.
+ * @param {SlackClients} clients - Slack client container
+ * @returns {Promise<SlackCurrentUser>} The signed-in user's identity
+ * @throws {Error} If the `auth.test` call fails, or Slack reports `ok: false`
+ *   (carries `.data.error` so formatSlackError classifies it like any other auth failure)
+ * @throws {Error} If `ok: true` but no `user_id` is returned (malformed response)
+ */
+export async function getCurrentUser(clients: SlackClients): Promise<SlackCurrentUser> {
+  const auth = (await slackCall(clients, (c) => c.auth.test())) as AuthTestResponse;
+  if (!auth.ok) {
+    const code = auth.error ?? 'unknown_error';
+    throw Object.assign(new Error(code), { data: { error: code } });
+  }
+  if (!auth.user_id) {
+    throw new Error('auth.test did not return a user_id.');
+  }
+
+  const base: SlackCurrentUser = {
+    id: auth.user_id,
+    name: auth.user || '',
+    team_id: auth.team_id,
+  };
+
+  try {
+    const info = (await slackCall(clients, (c) =>
+      c.users.info({ user: auth.user_id as string })
+    )) as UsersInfoResponse;
+    if (info.user) {
+      base.real_name = info.user.real_name;
+      base.display_name = info.user.profile?.display_name || undefined;
+      base.name = info.user.name || base.name;
+    }
+  } catch (error) {
+    // Best-effort enrichment — auth.test alone is enough ground truth for "me".
+    console.warn(
+      `${ts()} Slack getCurrentUser: users.info enrichment failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  return base;
 }
 
 /** One direct-message conversation as returned by listDms. */
@@ -942,8 +1030,8 @@ export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSumm
   return { dms };
 }
 
-/** User-ID shape accepted by conversations.open (U… or enterprise W…). */
-const USER_ID_RE = /^[UW][A-Z0-9]+$/;
+/** User-ID shape accepted by conversations.open (U… or enterprise W…): a letter/digit run of at least 8 chars after the prefix, no upper length bound. */
+const USER_ID_RE = /^[UW][A-Z0-9]{8,}$/;
 
 /** Slack caps a single conversation at 8 participants (conversations.open). */
 const MAX_DM_PARTICIPANTS = 8;
@@ -964,6 +1052,9 @@ export async function openDm(
   clients: SlackClients,
   params: { users: string[] }
 ): Promise<{ id: string }> {
+  if (!Array.isArray(params.users)) {
+    throw new Error("'users' is required: an array of 1-8 user IDs or e-mail addresses.");
+  }
   if (params.users.length === 0) {
     throw new Error('openDirectMessage needs at least one user.');
   }
@@ -974,12 +1065,15 @@ export async function openDm(
   }
   const ids: string[] = [];
   for (const entry of params.users) {
-    if (USER_ID_RE.test(entry)) {
-      ids.push(entry);
+    const normalized = entry.toUpperCase();
+    if (USER_ID_RE.test(normalized)) {
+      ids.push(normalized);
     } else if (entry.includes('@')) {
       const found = await getUsers(clients, { email: entry });
       if (!found.user) {
-        throw new Error(`User not found for email: ${entry}`);
+        throw new Error(
+          `No Slack user found for email "${entry}". Check for typos/whitespace, or use findUsers to search by name instead.`
+        );
       }
       ids.push(found.user.id);
     } else {

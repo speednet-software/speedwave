@@ -64,6 +64,49 @@ public enum ScriptError: LocalizedError {
     }
 }
 
+/// True if `stderr` is AppleScript's "Can't get <noun> ..." (-1728), i.e. a name-lookup miss.
+/// Callers rethrow a domain-specific `CLIError.notFound` instead of the raw AppleScript text.
+public func isAppleScriptNotFoundError(_ stderr: String) -> Bool {
+    stderr.contains("Can\u{2019}t get") || stderr.contains("(-1728)")
+}
+
+/// True when `stderr` is a -1728 miss that names `specifier`, so a not-found rewrite
+/// fires only for the scoped folder/note, not an unrelated element in the same script.
+public func appleScriptNotFoundNames(_ stderr: String, _ specifier: String) -> Bool {
+    !specifier.isEmpty && isAppleScriptNotFoundError(stderr) && stderr.contains(specifier)
+}
+
+/// Split a comma-separated address list into trimmed, non-empty addresses.
+/// Quote-aware: commas inside a double-quoted span (e.g. a "Last, First" display name) do not split.
+/// An unbalanced quote count falls back to a naive comma split of the original input,
+/// rather than risk swallowing recipients into one unterminated quoted span.
+public func splitAddressList(_ addresses: String) -> [String] {
+    var entries: [String] = []
+    var current = ""
+    var insideQuotes = false
+
+    for char in addresses {
+        if char == "\"" {
+            insideQuotes.toggle()
+            current.append(char)
+        } else if char == "," && !insideQuotes {
+            entries.append(current)
+            current = ""
+        } else {
+            current.append(char)
+        }
+    }
+    entries.append(current)
+
+    if insideQuotes {
+        entries = addresses.components(separatedBy: ",")
+    }
+
+    return entries
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+}
+
 /// Escape AppleScript string literals; strips C0/DEL/line-separator scalars first.
 public func escapeAppleScript(_ s: String) -> String {
     let safe = String(s.unicodeScalars.filter { scalar in

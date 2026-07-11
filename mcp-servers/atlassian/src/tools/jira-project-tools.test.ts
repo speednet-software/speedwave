@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 
 const stub = { list: vi.fn(), get: vi.fn(), listIssueTypes: vi.fn() };
 vi.mock('../domains/jira-projects.js', () => ({ createJiraProjectsClient: () => stub }));
@@ -35,8 +36,8 @@ describe('definitions', () => {
     const byName = Object.fromEntries(
       createJiraProjectTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
     );
-    expect(byName.listProjects._meta).toEqual({ deferLoading: false });
-    expect(byName.getProject._meta).toEqual({ deferLoading: true });
+    expect(byName.listProjects._meta).toEqual({ [META_KEYS.DEFER_LOADING]: false });
+    expect(byName.getProject._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
   });
 });
 

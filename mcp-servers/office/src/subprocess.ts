@@ -146,6 +146,23 @@ export function run(command: string, args: string[], opts: RunOptions = {}): Pro
 }
 
 /**
+ * Renders a failed {@link RunResult} (timeout or non-zero exit) into the one `SubprocessError` shape both {@link runOk} and {@link runPythonScript} throw.
+ * @param label - Command/script name to name in the message.
+ * @param timeoutMs - The timeout that was in effect (used only when `r.timedOut`).
+ * @param r - The failed run result.
+ */
+function runFailure(label: string, timeoutMs: number, r: RunResult): SubprocessError {
+  if (r.timedOut) {
+    return new SubprocessError(`${label} timed out after ${timeoutMs}ms`, r);
+  }
+  const detail = (r.stderr || r.stdout).trim().slice(0, 2000);
+  return new SubprocessError(
+    `${label} exited with code ${r.code}${detail ? `: ${detail}` : ''}`,
+    r
+  );
+}
+
+/**
  * Run `command`/`args` and throw {@link SubprocessError} unless it exits 0 and did not time out.
  * @param command - Executable to run.
  * @param args - Argument vector.
@@ -159,31 +176,21 @@ export async function runOk(
   opts: RunOptions = {}
 ): Promise<RunResult> {
   const r = await run(command, args, opts);
-  if (r.timedOut) {
-    throw new SubprocessError(
-      `${command} timed out after ${opts.timeoutMs ?? TIMEOUT_STANDARD_MS}ms`,
-      r
-    );
-  }
-  if (r.code !== 0) {
-    const detail = (r.stderr || r.stdout).trim().slice(0, 2000);
-    throw new SubprocessError(
-      `${command} exited with code ${r.code}${detail ? `: ${detail}` : ''}`,
-      r
-    );
+  if (r.timedOut || r.code !== 0) {
+    throw runFailure(command, opts.timeoutMs ?? TIMEOUT_STANDARD_MS, r);
   }
   return r;
 }
 
 /**
  * Invoke a bundled Python support-script (`scripts/<name>`) with the project's venv interpreter.
- * The script convention: argv carries the file paths and a JSON spec/ops blob; stdout is a single JSON object `{ ok: true, ... }`;
- * a non-zero exit (with the error on stderr) is a failure. This helper enforces that convention and parses the JSON.
+ * A non-zero exit with no parseable JSON on stdout renders via the same {@link runFailure} `runOk` uses (exit code + stderr), never a silently defaulted `{}`.
  * @param scriptName - Filename under `scripts/` (e.g. `"docx_build.py"`).
  * @param args - Arguments to pass after the script path.
  * @param opts - Run options.
  * @returns The parsed JSON object the script printed on stdout.
- * @throws {SubprocessError} On subprocess failure or when stdout is not a JSON object with `ok: true`.
+ * @throws {SubprocessError} On timeout, spawn failure, a non-zero exit (even one whose stdout claims `ok: true`),
+ * or when stdout is not a JSON object with `ok: true`.
  */
 export async function runPythonScript(
   scriptName: string,
@@ -191,15 +198,37 @@ export async function runPythonScript(
   opts: RunOptions = {}
 ): Promise<Record<string, unknown>> {
   const scriptPath = path.join(SCRIPTS_DIR, scriptName);
-  const r = await runOk(PYTHON_BIN, [scriptPath, ...args], opts);
+  const timeoutMs = opts.timeoutMs ?? TIMEOUT_STANDARD_MS;
+  const r = await run(PYTHON_BIN, [scriptPath, ...args], opts);
+  if (r.timedOut) {
+    throw runFailure(PYTHON_BIN, timeoutMs, r);
+  }
+  const trimmed = r.stdout.trim();
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(r.stdout.trim() || '{}');
-  } catch {
+  if (trimmed) {
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = undefined;
+    }
+  }
+  if (parsed === undefined) {
+    // Empty or unparseable stdout is never treated as `{}`: a non-zero exit must surface its real detail.
+    if (r.code !== 0) {
+      throw runFailure(scriptName, timeoutMs, r);
+    }
     throw new SubprocessError(`${scriptName} did not return JSON on stdout`, r);
   }
   if (typeof parsed !== 'object' || parsed === null || (parsed as { ok?: unknown }).ok !== true) {
-    throw new SubprocessError(`${scriptName} reported failure: ${JSON.stringify(parsed)}`, r);
+    const error = (parsed as { error?: unknown }).error;
+    const message = typeof error === 'string' ? error : JSON.stringify(parsed);
+    throw new SubprocessError(`${scriptName} reported failure: ${message}`, r);
+  }
+  if (r.code !== 0) {
+    throw new SubprocessError(
+      `${scriptName} exited with code ${r.code} even though stdout claimed success`,
+      r
+    );
   }
   return parsed as Record<string, unknown>;
 }

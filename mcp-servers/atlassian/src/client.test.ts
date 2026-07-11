@@ -401,6 +401,13 @@ describe('formatError', () => {
     const err = httpError(418);
     expect(AtlassianClient.formatError(err)).toMatch(/418/);
   });
+
+  it('other 4xx with no API message falls back to an actionable hint', () => {
+    const msg = AtlassianClient.formatError(httpError(400));
+    expect(msg).toMatch(/Atlassian request error \(400\)/);
+    expect(msg).toMatch(/Check the request parameters/i);
+    expect(msg).toMatch(/JQL\/CQL/);
+  });
 });
 
 describe('initializeAtlassianClient', () => {

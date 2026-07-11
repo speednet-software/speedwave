@@ -22,6 +22,7 @@ import {
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, validateGraphId, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
@@ -84,11 +85,12 @@ export interface SitePage {
 
 const listPagesTool: Tool = {
   name: 'listPages',
-  description: 'List all pages in the configured SharePoint site.',
+  description:
+    'List all pages in the configured SharePoint site. Provides the pageId used by getPage/updatePage/publishPage/deletePage/addWebPart/updateWebPart/removeWebPart/addImageWebPart/generateTableOfContents.',
   // No site_id — the worker uses its stored site (ADR-060 site policy).
   inputSchema: { type: 'object', properties: {} },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'list'],
   example: 'const result = await sharepoint.listPages()',
   outputSchema: {
@@ -103,14 +105,15 @@ const listPagesTool: Tool = {
 
 const getPageTool: Tool = {
   name: 'getPage',
-  description: 'Get a page including its canvas layout.',
+  description:
+    'Get a page including its canvas layout. Get pageId from listPages. No ETag/version is returned or supported: this worker has no conditional-update (If-Match) support for page updates, so concurrent edits to the same page are not detected.',
   inputSchema: {
     type: 'object',
-    properties: { pageId: { type: 'string' } },
+    properties: { pageId: { type: 'string', description: 'Graph page id, from listPages.' } },
     required: ['pageId'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'get'],
   example: 'const page = await sharepoint.getPage({ pageId: "abc-123" })',
   outputSchema: {
@@ -133,7 +136,7 @@ const createPageTool: Tool = {
     required: ['title', 'name'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'create'],
   example: 'const page = await sharepoint.createPage({ title: "Hi", name: "hi.aspx" })',
   outputSchema: {
@@ -150,11 +153,11 @@ const createPageTool: Tool = {
 const updatePageTool: Tool = {
   name: 'updatePage',
   description:
-    'Update page metadata and/or canvas layout. At least one optional field must be supplied. Graph requires the FULL canvasLayout when present (partial PATCH not supported); other fields can be set independently.',
+    'Update page metadata and/or canvas layout. Get pageId from listPages. At least one of title, description, thumbnailWebUrl, showComments, showRecommendedPages, promotionKind, titleArea, or canvasLayout must be supplied. Graph requires the FULL canvasLayout when present (partial PATCH not supported); other fields can be set independently. No ETag/If-Match support: this call does not detect or prevent concurrent edits by another user.',
   inputSchema: {
     type: 'object',
     properties: {
-      pageId: { type: 'string' },
+      pageId: { type: 'string', description: 'Graph page id, from listPages.' },
       title: { type: 'string', description: 'Page title' },
       description: { type: 'string', description: 'Page description' },
       thumbnailWebUrl: { type: 'string', description: 'URL of the page thumbnail image' },
@@ -192,7 +195,7 @@ const updatePageTool: Tool = {
     required: ['pageId'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'update', 'edit', 'layout', 'title', 'hero', 'news', 'promote'],
   example:
     'await sharepoint.updatePage({ pageId: "abc", title: "New title", showComments: false })',
@@ -206,11 +209,11 @@ const updatePageTool: Tool = {
 const addWebPartTool: Tool = {
   name: 'addWebPart',
   description:
-    "Append a web part to a section/column on a page. Defaults to a text web part (supply `innerHtml`); pass `webPartType` to add one of Graph's 13 standard web parts (bingMaps, button, callToAction, divider, documentEmbed, image, imageGallery, linkPreview, orgChart, people, quickLinks, spacer, youtubeEmbed — note: `titleArea` is a sitePage property handled by `updatePage`, not a web part). Section/column are addressed by 0-based index. `data` is an optional webPartData payload (per-type shape — Graph docs do not publish them; consult SharePoint UI / SPFx docs).",
+    "Append a web part to a section/column on a page. Get pageId from listPages. Requires either `innerHtml` (text web part, the common case) or `webPartType` (one of Graph's 13 standard web parts: bingMaps, button, callToAction, divider, documentEmbed, image, imageGallery, linkPreview, orgChart, people, quickLinks, spacer, youtubeEmbed — note: `titleArea` is a sitePage property handled by `updatePage`, not a web part) — exactly one of the two, never both. Section/column are addressed by 0-based index; call getPage first to inspect canvasLayout.horizontalSections and choose valid indices (an out-of-range index returns the actual section/column count in the error). `data` is an optional webPartData payload (per-type shape — Graph docs do not publish them; consult SharePoint UI / SPFx docs).",
   inputSchema: {
     type: 'object',
     properties: {
-      pageId: { type: 'string' },
+      pageId: { type: 'string', description: 'Graph page id, from listPages.' },
       // Capped to bound index values from an untrusted caller.
       sectionIndex: { type: 'number', minimum: 0, maximum: 20 },
       columnIndex: { type: 'number', minimum: 0, maximum: 10 },
@@ -234,7 +237,7 @@ const addWebPartTool: Tool = {
     required: ['pageId', 'sectionIndex', 'columnIndex'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: [
     'sharepoint',
     'pages',
@@ -258,18 +261,21 @@ const addWebPartTool: Tool = {
 const updateWebPartTool: Tool = {
   name: 'updateWebPart',
   description:
-    'Replace the body of a text web part identified by `webPartId`. Only text web parts are supported (matches addWebPart).',
+    'Replace the body of a text web part identified by `webPartId`. Only text web parts are supported (matches addWebPart). Get pageId from listPages; get webPartId from getPage (canvasLayout.horizontalSections[].columns[].webparts[].id) or from a prior addWebPart response.',
   inputSchema: {
     type: 'object',
     properties: {
-      pageId: { type: 'string' },
-      webPartId: { type: 'string' },
+      pageId: { type: 'string', description: 'Graph page id, from listPages.' },
+      webPartId: {
+        type: 'string',
+        description: "Graph web part id, from getPage's canvasLayout or addWebPart's response.",
+      },
       innerHtml: { type: 'string' },
     },
     required: ['pageId', 'webPartId', 'innerHtml'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'webpart', 'update', 'edit', 'text'],
   example:
     'await sharepoint.updateWebPart({ pageId: "abc", webPartId: "wp1", innerHtml: "<p>...</p>" })',
@@ -282,17 +288,21 @@ const updateWebPartTool: Tool = {
 
 const removeWebPartTool: Tool = {
   name: 'removeWebPart',
-  description: 'Remove a web part from a page by id.',
+  description:
+    'Remove a web part from a page by id. Get pageId from listPages; get webPartId from getPage (canvasLayout.horizontalSections[].columns[].webparts[].id) or from a prior addWebPart response.',
   inputSchema: {
     type: 'object',
     properties: {
-      pageId: { type: 'string' },
-      webPartId: { type: 'string' },
+      pageId: { type: 'string', description: 'Graph page id, from listPages.' },
+      webPartId: {
+        type: 'string',
+        description: "Graph web part id, from getPage's canvasLayout or addWebPart's response.",
+      },
     },
     required: ['pageId', 'webPartId'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'webpart', 'remove', 'delete'],
   example: 'await sharepoint.removeWebPart({ pageId: "abc", webPartId: "wp1" })',
   outputSchema: {
@@ -304,14 +314,14 @@ const removeWebPartTool: Tool = {
 
 const publishPageTool: Tool = {
   name: 'publishPage',
-  description: 'Publish a SharePoint page so it is visible to readers.',
+  description: 'Publish a SharePoint page so it is visible to readers. Get pageId from listPages.',
   inputSchema: {
     type: 'object',
-    properties: { pageId: { type: 'string' } },
+    properties: { pageId: { type: 'string', description: 'Graph page id, from listPages.' } },
     required: ['pageId'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'publish'],
   example: 'await sharepoint.publishPage({ pageId: "abc-123" })',
   outputSchema: {
@@ -328,7 +338,7 @@ const addImageWebPartTool: Tool = {
   inputSchema: {
     type: 'object',
     properties: {
-      pageId: { type: 'string' },
+      pageId: { type: 'string', description: 'Graph page id, from listPages.' },
       sectionIndex: { type: 'number', minimum: 0, maximum: 20 },
       columnIndex: { type: 'number', minimum: 0, maximum: 10 },
       sharepointPath: {
@@ -345,7 +355,7 @@ const addImageWebPartTool: Tool = {
     required: ['pageId', 'sectionIndex', 'columnIndex', 'sharepointPath'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'webpart', 'image', 'add'],
   example:
     'await sharepoint.addImageWebPart({ pageId: "abc", sectionIndex: 1, columnIndex: 0, sharepointPath: "Shared Documents/hero.jpg", altText: "Speedwave hero" })',
@@ -359,11 +369,11 @@ const addImageWebPartTool: Tool = {
 const generateTableOfContentsTool: Tool = {
   name: 'generateTableOfContents',
   description:
-    "Generate a manual table of contents from a page's text web parts and add it as a new text web part. Microsoft Graph does not expose a native ToC web part, so this scans each textWebPart's innerHtml for `<h1>`–`<h6>` headings (in document order), PATCHes each source web part to inject `id=\"<slug>\"` on headings that lack one (so links resolve), and renders a nested `<ul>` of bookmark links. Section/column index follow the same rules as `addWebPart`. Note: SharePoint's rich-text sanitizer may strip the injected ids in some tenants — in that case the ToC reads but anchors won't click through.",
+    "Generate a manual table of contents from a page's text web parts and add it as a new text web part. Get pageId from listPages; call getPage first to inspect canvasLayout.horizontalSections and choose valid 0-based sectionIndex/columnIndex (an out-of-range index returns the actual section/column count in the error). Microsoft Graph does not expose a native ToC web part, so this scans each textWebPart's innerHtml for `<h1>`–`<h6>` headings (in document order), PATCHes each source web part to inject `id=\"<slug>\"` on headings that lack one (so links resolve), and renders a nested `<ul>` of bookmark links. Note: SharePoint's rich-text sanitizer may strip the injected ids in some tenants — in that case the ToC reads but anchors won't click through.",
   inputSchema: {
     type: 'object',
     properties: {
-      pageId: { type: 'string' },
+      pageId: { type: 'string', description: 'Graph page id, from listPages.' },
       sectionIndex: { type: 'number', minimum: 0, maximum: 20 },
       columnIndex: { type: 'number', minimum: 0, maximum: 10 },
       title: { type: 'string', description: 'Optional `<h2>` rendered above the ToC.' },
@@ -383,7 +393,7 @@ const generateTableOfContentsTool: Tool = {
     required: ['pageId', 'sectionIndex', 'columnIndex'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['sharepoint', 'pages', 'toc', 'table of contents', 'navigation'],
   example:
     'await sharepoint.generateTableOfContents({ pageId: "abc", sectionIndex: 0, columnIndex: 0, title: "Contents" })',
@@ -450,7 +460,7 @@ async function handleGetPage(
   client: SharePointClient,
   params: { pageId: string }
 ): Promise<ToolResult> {
-  const idErr = validateGraphId(params.pageId, 'pageId');
+  const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
   try {
     const page = (await pages(client).getPage(params.pageId)) as SitePage | undefined;
@@ -522,7 +532,7 @@ async function handleUpdatePage(
   client: SharePointClient,
   params: UpdatePageParams
 ): Promise<ToolResult> {
-  const idErr = validateGraphId(params.pageId, 'pageId');
+  const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
 
   const body: Record<string, unknown> = {};
@@ -578,7 +588,7 @@ async function handleAddWebPart(
     data?: Record<string, unknown>;
   }
 ): Promise<ToolResult> {
-  const idErr = validateGraphId(params.pageId, 'pageId');
+  const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
   // Defense in depth — cap here since `withValidation` skips JSON Schema validation.
   const MAX_SECTION = 20;
@@ -703,9 +713,9 @@ async function handleUpdateWebPart(
   client: SharePointClient,
   params: { pageId: string; webPartId: string; innerHtml: string }
 ): Promise<ToolResult> {
-  const pidErr = validateGraphId(params.pageId, 'pageId');
+  const pidErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (pidErr) return pidErr;
-  const wpErr = validateGraphId(params.webPartId, 'webPartId');
+  const wpErr = validateGraphId(params.webPartId, 'webPartId', 'getPage');
   if (wpErr) return wpErr;
   if (typeof params.innerHtml !== 'string') {
     return {
@@ -732,9 +742,9 @@ async function handleRemoveWebPart(
   client: SharePointClient,
   params: { pageId: string; webPartId: string }
 ): Promise<ToolResult> {
-  const pidErr = validateGraphId(params.pageId, 'pageId');
+  const pidErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (pidErr) return pidErr;
-  const wpErr = validateGraphId(params.webPartId, 'webPartId');
+  const wpErr = validateGraphId(params.webPartId, 'webPartId', 'getPage');
   if (wpErr) return wpErr;
   try {
     await pages(client).removeWebPart(params.pageId, params.webPartId);
@@ -754,7 +764,7 @@ async function handlePublishPage(
   client: SharePointClient,
   params: { pageId: string }
 ): Promise<ToolResult> {
-  const idErr = validateGraphId(params.pageId, 'pageId');
+  const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
   try {
     await pages(client).publishPage(params.pageId);
@@ -786,7 +796,7 @@ async function handleGenerateTableOfContents(
     maxLevel?: number;
   }
 ): Promise<ToolResult> {
-  const idErr = validateGraphId(params.pageId, 'pageId');
+  const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
   const minLevel = params.minLevel ?? 1;
   const maxLevel = params.maxLevel ?? 3;
@@ -904,7 +914,7 @@ async function handleAddImageWebPart(
     fixAspectRatio?: boolean;
   }
 ): Promise<ToolResult> {
-  const idErr = validateGraphId(params.pageId, 'pageId');
+  const idErr = validateGraphId(params.pageId, 'pageId', 'listPages');
   if (idErr) return idErr;
   const MAX_SECTION = 20;
   const MAX_COLUMN = 10;

@@ -7,8 +7,9 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
-import { withValidation, withClients, ToolResult } from './validation.js';
+import { withValidation, withClients, missingParamResult, ToolResult } from './validation.js';
 import { SlackClients, listDms, openDm, formatSlackError } from '../client.js';
 import { peekUserDirectory, displayNameOf } from '../user-directory.js';
 
@@ -25,7 +26,11 @@ const listDirectMessagesTool: Tool = {
     properties: {},
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'dm', 'direct', 'message', 'im', 'mpim', 'conversation', 'list', 'private'],
   example: 'const { dms } = await slack.listDirectMessages({})',
   outputSchema: {
@@ -83,7 +88,11 @@ const openDirectMessageTool: Tool = {
     required: ['users'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'dm', 'direct', 'message', 'open', 'start', 'conversation', 'person'],
   example: 'const { id } = await slack.openDirectMessage({ users: ["U0123ABC456"] })',
   outputSchema: {
@@ -138,6 +147,13 @@ export async function handleOpenDirectMessage(
   clients: SlackClients,
   params: OpenDirectMessageParams
 ): Promise<ToolResult> {
+  if (!Array.isArray(params.users) || params.users.length === 0) {
+    return missingParamResult(
+      'users',
+      params.users,
+      'Provide an array of 1-8 user IDs (from findUsers) or exact e-mail addresses.'
+    );
+  }
   try {
     const result = await openDm(clients, params);
     return { success: true, data: result };

@@ -7,19 +7,21 @@ import {
   ToolDefinition,
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult } from './validation.js';
 import { SharePointClient } from '../client.js';
 
 const getCurrentUserTool: Tool = {
   name: 'getCurrentUser',
-  description: 'Get information about the currently authenticated SharePoint user',
+  description:
+    'Get the identity (id, displayName, email, userPrincipalName) of the currently authenticated SharePoint user. Call this first whenever a request refers to "my" files, "items I created", or "assigned to me" before filtering listItems/getItem results by author.',
   inputSchema: {
     type: 'object',
     properties: {},
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['sharepoint', 'user', 'current', 'me', 'auth'],
   example: 'const user = await sharepoint.getCurrentUser()',
   outputSchema: {

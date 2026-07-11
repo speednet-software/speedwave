@@ -12,7 +12,10 @@ import {
   memoizedPromise,
   loadTokenFile,
   tokensDir,
+  clampPageSize,
 } from '@speedwave/mcp-shared';
+import { MAPPABLE_FIELDS } from './tools/helpers.js';
+import { TOOL_NAMES } from './tool-names.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Axios Retry Config Extension
@@ -758,6 +761,87 @@ function sanitizeTextile(textile: string): string {
   return result;
 }
 
+/** Attempted resource identifier(s) surfaced in an error message, e.g. `{ issue_id: 12345 }`. */
+export type ErrorContext = Record<string, string | number>;
+
+/** Recovery hint per entity-type context key, appended to a 404 error message. */
+const NOT_FOUND_RECOVERY_HINTS: Record<string, string> = {
+  issue_id: `Verify the issue ID with ${TOOL_NAMES.LIST_ISSUE_IDS} or ${TOOL_NAMES.SEARCH_ISSUE_IDS}.`,
+  issue_to_id: `Verify the issue ID with ${TOOL_NAMES.LIST_ISSUE_IDS} or ${TOOL_NAMES.SEARCH_ISSUE_IDS}.`,
+  project_id: `Verify the project ID with ${TOOL_NAMES.LIST_PROJECT_IDS} or ${TOOL_NAMES.SEARCH_PROJECT_IDS}.`,
+  journal_id: `Verify the journal ID with ${TOOL_NAMES.LIST_JOURNALS}(issue_id).`,
+  relation_id: `Verify the relation ID with ${TOOL_NAMES.LIST_RELATIONS}(issue_id).`,
+  time_entry_id: `Verify the time entry ID with ${TOOL_NAMES.LIST_TIME_ENTRIES}.`,
+};
+
+/**
+ * Render a context object as "key=value" pairs, e.g. `{ issue_id: 1 }` -> `"issue_id=1"`.
+ * @param context - Attempted resource identifier(s).
+ */
+function formatContextLabel(context: ErrorContext): string {
+  return Object.entries(context)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ');
+}
+
+/**
+ * Build a 404 error message, naming the attempted resource and a recovery tool per
+ * entity type in the context (identical hints, e.g. issue_id/issue_to_id, dedupe to one line).
+ * @param context - Attempted resource identifier(s).
+ */
+function formatNotFoundError(context?: ErrorContext): string {
+  if (!context) return 'Resource not found in Redmine.';
+  const label = formatContextLabel(context);
+  const hints = [
+    ...new Set(
+      Object.keys(context)
+        .map((key) => NOT_FOUND_RECOVERY_HINTS[key])
+        .filter(Boolean)
+    ),
+  ];
+  return hints.length > 0
+    ? `Resource not found in Redmine: ${label}. ${hints.join(' ')}`
+    : `Resource not found in Redmine: ${label}.`;
+}
+
+/** Field-name prefixes (case-insensitive, matched at the start of a message) that map to a hint. */
+const ASSIGNEE_HINT_PREFIXES = ['assigned to', 'assignee'];
+
+/**
+ * Check whether a lowercased message starts with `field` as a whole word, so a custom
+ * field like "Qa status is invalid" (starts with "qa") never matches "status".
+ * @param messageLower - Lowercased error message.
+ * @param field - Lowercased field name to match.
+ */
+function startsWithFieldName(messageLower: string, field: string): boolean {
+  if (!messageLower.startsWith(field)) return false;
+  const next = messageLower.charAt(field.length);
+  return next === '' || !/[a-z0-9]/.test(next);
+}
+
+/**
+ * Build a 422 validation error message, appending a recovery hint only when an individual
+ * error string starts with a known field name (never a substring match anywhere in the blob).
+ * @param errors - Raw Redmine validation errors (array of message strings, or other shape).
+ * @param context - Attempted resource identifier, included verbatim when present.
+ */
+function formatValidationError(errors: unknown, context?: ErrorContext): string {
+  const base = `Validation error: ${JSON.stringify(errors)}`;
+  const prefixed = context ? `${base} (${formatContextLabel(context)})` : base;
+
+  const messages = Array.isArray(errors)
+    ? errors.filter((e): e is string => typeof e === 'string').map((e) => e.toLowerCase())
+    : [];
+
+  if (messages.some((m) => ASSIGNEE_HINT_PREFIXES.some((p) => startsWithFieldName(m, p)))) {
+    return `${prefixed}. Call resolveUser or listUsers to find a valid assignee.`;
+  }
+  if (messages.some((m) => MAPPABLE_FIELDS.some((field) => startsWithFieldName(m, field)))) {
+    return `${prefixed}. Call getMappings for valid values in this project.`;
+  }
+  return prefixed;
+}
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -956,7 +1040,7 @@ export class RedmineClient {
     const enforcedProjectId = this._enforceProjectId(options.project_id);
 
     const params: Record<string, string | number> = {
-      limit: options.limit || 25,
+      limit: clampPageSize(options.limit, 25, 100),
       offset: options.offset || 0,
     };
 
@@ -1019,7 +1103,7 @@ export class RedmineClient {
     const params: Record<string, string | number> = {
       q: query,
       issues: 1,
-      limit: options.limit || 25,
+      limit: clampPageSize(options.limit, 25, 100),
     };
 
     if (enforcedProjectId) {
@@ -1165,7 +1249,7 @@ export class RedmineClient {
    * @param options - Filter options.
    * @param options.issue_id - Filter by issue ID.
    * @param options.project_id - Filter by project ID.
-   * @param options.user_id - Filter by user ID.
+   * @param options.user_id - Filter by user ID, or 'me' for the current authenticated user (passed to Redmine verbatim).
    * @param options.from - From date (YYYY-MM-DD format).
    * @param options.to - To date (YYYY-MM-DD format).
    * @param options.limit - Maximum number of results (default 25).
@@ -1176,7 +1260,7 @@ export class RedmineClient {
     options: {
       issue_id?: number;
       project_id?: string;
-      user_id?: number;
+      user_id?: number | string;
       from?: string;
       to?: string;
       limit?: number;
@@ -1190,7 +1274,7 @@ export class RedmineClient {
     }
 
     const params: Record<string, string | number> = {
-      limit: options.limit || 25,
+      limit: clampPageSize(options.limit, 25, 100),
     };
 
     if (options.issue_id) params.issue_id = options.issue_id;
@@ -1419,7 +1503,7 @@ export class RedmineClient {
     }
 
     const params: Record<string, number> = {
-      limit: options.limit || 100,
+      limit: clampPageSize(options.limit, 100, 100),
       offset: options.offset || 0,
     };
 
@@ -1519,7 +1603,7 @@ export class RedmineClient {
         (p.description && p.description.toLowerCase().includes(queryLower))
     );
 
-    const limited = matched.slice(0, options.limit || 25);
+    const limited = matched.slice(0, clampPageSize(options.limit, 25, 100));
 
     return {
       projects: limited.map((p: RedmineProject) => ({
@@ -1611,9 +1695,10 @@ export class RedmineClient {
    * Format error objects into user-friendly error messages.
    * Handles Axios errors with appropriate HTTP status code messages.
    * @param error - The error object to format.
+   * @param context - Attempted resource identifier(s), e.g. `{ issue_id: 12345 }`, included in 404/validation messages.
    * @returns Formatted error message string.
    */
-  static formatError(error: unknown): string {
+  static formatError(error: unknown, context?: ErrorContext): string {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
 
@@ -1625,9 +1710,8 @@ export class RedmineClient {
           return withSetupGuidance('Authentication failed. Check your Redmine API key.');
         if (status === 403)
           return 'Permission denied. Your Redmine API key may not have sufficient permissions.';
-        if (status === 404) return 'Resource not found in Redmine.';
-        if (status === 422 && data?.errors)
-          return `Validation error: ${JSON.stringify(data.errors)}`;
+        if (status === 404) return formatNotFoundError(context);
+        if (status === 422 && data?.errors) return formatValidationError(data.errors, context);
         if (data?.errors) return `Error: ${JSON.stringify(data.errors)}`;
 
         return `HTTP ${status}: ${axiosError.message}`;

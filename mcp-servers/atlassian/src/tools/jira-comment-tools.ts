@@ -9,6 +9,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -22,7 +23,7 @@ const addCommentTool: Tool = {
   description:
     'Add a comment to a Jira issue. `bodyText` is plain text (converted to ADF); pass `bodyAdf` for a pre-built ADF document.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'comment', 'add', 'reply', 'note', 'issue'],
   example:
     'await atlassian.addComment({ issueIdOrKey: "PROJ-123", bodyText: "Looking into this." })',
@@ -61,7 +62,7 @@ const getCommentsTool: Tool = {
   name: 'getComments',
   description: 'List comments on a Jira issue.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'comments', 'list', 'issue', 'discussion'],
   example: 'const { comments } = await atlassian.getComments({ issueIdOrKey: "PROJ-123" })',
   inputSchema: {
@@ -89,9 +90,10 @@ const getCommentsTool: Tool = {
 
 const addWorklogTool: Tool = {
   name: 'addWorklog',
-  description: 'Log work against a Jira issue (time in seconds; optional comment and start time).',
+  description:
+    'Log work against a Jira issue (time in seconds; optional comment and start time). Speedwave authenticates as one shared Atlassian account per project, not a per-human login — every worklog is attributed to that account, so "my hours" always means it.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'worklog', 'time', 'log work', 'timesheet', 'effort'],
   example:
     'await atlassian.addWorklog({ issueIdOrKey: "PROJ-123", timeSpentSeconds: 3600, comment: "Pairing on the fix" })',

@@ -6,8 +6,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createPrReviewTools } from './pr-review-tools.js';
+import { createToolDefinitions } from './index.js';
 import type { GitHubClient } from '../client.js';
 
 type MockClient = {
@@ -130,7 +131,7 @@ describe('PR Review Tools', () => {
       const tools = createPrReviewTools(mockClient as unknown as GitHubClient);
       expect(tools.map((t) => t.tool.name)).toEqual(ALL_TOOL_NAMES);
       for (const t of tools) {
-        expect(t.tool._meta?.deferLoading).toBe(true);
+        expect(t.tool._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       }
     });
 
@@ -448,6 +449,29 @@ describe('PR Review Tools', () => {
       expect(mockClient.createPrReviewComment).toHaveBeenCalledWith('octocat', 'hello-world', 42, {
         body: 'Rename this',
         commit_id: 'abc123def456',
+        path: 'src/index.ts',
+        line: 10,
+      });
+    });
+
+    it('forgives a string `line` (schema-driven numeric forgiveness at registration)', async () => {
+      mockClient.createPrReviewComment.mockResolvedValue(makeReviewComment());
+
+      const tools = createToolDefinitions(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'createPrReviewComment')?.handler;
+      await handler!({
+        owner: 'octocat',
+        repo: 'hello-world',
+        number: '#42',
+        body: 'b',
+        commit_id: 'c',
+        path: 'src/index.ts',
+        line: '10',
+      });
+
+      expect(mockClient.createPrReviewComment).toHaveBeenCalledWith('octocat', 'hello-world', 42, {
+        body: 'b',
+        commit_id: 'c',
         path: 'src/index.ts',
         line: 10,
       });

@@ -7,6 +7,7 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
@@ -64,7 +65,11 @@ const listReminderListsTool: Tool = {
   name: 'listReminderLists',
   description: 'List all reminder lists/groups available on this device',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'reminders' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
   keywords: ['os', 'reminders', 'lists', 'calendars', 'groups', 'categories'],
   example: 'const lists = await os.listReminderLists()',
   inputSchema: {
@@ -99,13 +104,20 @@ const listRemindersTool: Tool = {
   name: 'listReminders',
   description: 'List reminders, optionally filtered by list',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'reminders' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
   keywords: ['os', 'reminders', 'list', 'tasks', 'todo', 'due'],
   example: 'const { reminders } = await os.listReminders({ show_completed: false, limit: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
-      list_id: { type: 'string', description: 'Filter by reminder list ID' },
+      list_id: {
+        type: 'string',
+        description: 'Filter by reminder list id or its exact display name',
+      },
       limit: { type: 'number', description: 'Max reminders to return (default 20)' },
       show_completed: {
         type: 'boolean',
@@ -156,13 +168,21 @@ const getReminderTool: Tool = {
   name: 'getReminder',
   description: 'Get a specific reminder by ID',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'reminders' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
   keywords: ['os', 'reminder', 'get', 'detail', 'show'],
   example: 'const reminder = await os.getReminder({ id: "abc-123" })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Reminder ID' },
+      id: {
+        type: 'string',
+        description:
+          'Reminder ID (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
     },
     required: ['id'],
   },
@@ -197,7 +217,11 @@ const createReminderTool: Tool = {
   name: 'createReminder',
   description: 'Create a new reminder',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'reminders' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
   keywords: ['os', 'reminder', 'create', 'new', 'add', 'task', 'todo'],
   example:
     'const { id } = await os.createReminder({ name: "Review PR #42", due_date: "2025-01-15T10:00:00Z", priority: 1 })',
@@ -207,10 +231,15 @@ const createReminderTool: Tool = {
       name: { type: 'string', description: 'Reminder title/name' },
       list_id: {
         type: 'string',
-        description: 'Target reminder list ID (uses default list if omitted)',
+        description:
+          'Target reminder list id or its exact display name (uses default list if omitted)',
       },
       due_date: { type: 'string', description: 'Due date in ISO8601 format' },
-      priority: { type: 'number', description: 'Priority (0=none, 1=high, 5=medium, 9=low)' },
+      priority: {
+        type: 'number',
+        description:
+          'Priority, 0-9 (0=none, 1-4=high, 5=medium, 6-9=low; EventKit treats 1-9 as a gradient)',
+      },
       notes: { type: 'string', description: 'Additional notes' },
       tags: {
         type: 'array',
@@ -250,13 +279,21 @@ const completeReminderTool: Tool = {
   name: 'completeReminder',
   description: 'Mark a reminder as completed',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'reminders' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'reminders',
+  },
   keywords: ['os', 'reminder', 'complete', 'done', 'finish', 'check'],
   example: 'await os.completeReminder({ id: "abc-123" })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Reminder ID to complete' },
+      id: {
+        type: 'string',
+        description:
+          'Reminder ID to complete (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
     },
     required: ['id'],
   },

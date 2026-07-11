@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createJiraAgileClient } from './jira-agile.js';
+import { createJiraAgileClient, MOVE_ISSUES_MAX } from './jira-agile.js';
 import { ScopeError } from '../scope.js';
 import type { AtlassianClient } from '../client.js';
 
@@ -175,26 +175,41 @@ describe('sprints', () => {
 });
 
 describe('moveIssuesToSprint', () => {
-  it('scope-checks the sprint board then POSTs up to 50 issues', async () => {
+  it('scope-checks the sprint board then POSTs all given issues (no truncation)', async () => {
     client.get
       .mockResolvedValueOnce({ originBoardId: 7 }) // sprint lookup
       .mockResolvedValueOnce(rawBoard()); // enforceBoard
     client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
-    const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
-    await c.moveIssuesToSprint(42, many);
+    const fifty = Array.from({ length: MOVE_ISSUES_MAX }, (_, i) => `PROJ-${i}`);
+    await c.moveIssuesToSprint(42, fifty);
     const sent = client.post.mock.calls[0];
     expect(sent[0]).toBe('/rest/agile/1.0/sprint/42/issue');
-    expect((sent[1] as { issues: string[] }).issues).toHaveLength(50);
+    expect((sent[1] as { issues: string[] }).issues).toHaveLength(MOVE_ISSUES_MAX);
   });
 
-  it('forwards exactly 50 issues to the domain when given 60', async () => {
+  it('enforces the MOVE_ISSUES_MAX cap itself, as the SSOT (defense in depth even if a caller bypasses the tool handler)', async () => {
     client.get.mockResolvedValueOnce({}); // sprint lookup, no originBoardId, no allowlist → ok
-    client.post.mockResolvedValueOnce(undefined);
     const c = createJiraAgileClient(client);
-    const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
-    await c.moveIssuesToSprint(42, many);
-    expect((client.post.mock.calls[0][1] as { issues: string[] }).issues).toHaveLength(50);
+    const many = Array.from({ length: MOVE_ISSUES_MAX + 10 }, (_, i) => `PROJ-${i}`);
+    await expect(c.moveIssuesToSprint(42, many)).rejects.toThrow(
+      new RegExp(`at most ${MOVE_ISSUES_MAX}`)
+    );
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('checks every issue for scope even past position 50: a batch of 51+ with the out-of-scope item beyond index 50 is rejected', async () => {
+    client = stubClient(['PROJ']);
+    client.get
+      .mockResolvedValueOnce({ originBoardId: 7 }) // sprint lookup
+      .mockResolvedValueOnce(rawBoard({ location: { projectKey: 'PROJ' } })); // enforceBoard
+    const c = createJiraAgileClient(client);
+    const issues = Array.from({ length: MOVE_ISSUES_MAX + 1 }, (_, i) => `PROJ-${i}`);
+    // The 51st issue (index 50) is out of scope; a truncating `.slice(0, 50)`
+    // before the scope-check loop would let it silently through.
+    issues[MOVE_ISSUES_MAX] = 'OTHER-1';
+    await expect(c.moveIssuesToSprint(42, issues)).rejects.toThrow(ScopeError);
+    expect(client.post).not.toHaveBeenCalled();
   });
 
   it('skips the board scope check when the sprint has no originBoardId and no allowlist', async () => {

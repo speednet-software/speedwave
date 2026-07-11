@@ -31,6 +31,7 @@ pub mod os_prereqs;
 pub mod pkce;
 pub mod plugin;
 pub mod project;
+pub mod prompts;
 pub mod provision;
 pub mod resources;
 pub mod runtime;

@@ -15,6 +15,13 @@ import json
 from script_runner import atomic_save, main, ok, fail
 
 
+def _sheet(wb, name: str):
+    """Look up worksheet ``name`` in ``wb``, or fail with the actual available sheet names."""
+    if name not in wb.sheetnames:
+        fail(f"sheet '{name}' not found; workbook sheets are: {wb.sheetnames}")
+    return wb[name]
+
+
 def _chart_class(kind: str):
     """Map a DSL chart kind to an openpyxl chart class."""
     from openpyxl.chart import BarChart, LineChart, PieChart, ScatterChart
@@ -37,7 +44,7 @@ def _add_chart(ws, chart_spec: dict) -> None:
         # Accept "Sheet!A1:B10" or "A1:B10" (defaults to ws).
         if "!" in s:
             sheet_name, rng = s.split("!", 1)
-            target = ws.parent[sheet_name]
+            target = _sheet(ws.parent, sheet_name)
         else:
             target, rng = ws, s
         a1 = rng.split(":")
@@ -88,16 +95,16 @@ def _edit(src: str, output: str, ops: list) -> None:
     for op in ops:
         kind = op.get("op")
         if kind == "set_cell":
-            ws = wb[str(op["sheet"])]
+            ws = _sheet(wb, str(op["sheet"]))
             ws[str(op["cell"])] = op["value"]
         elif kind == "set_formula":
-            ws = wb[str(op["sheet"])]
+            ws = _sheet(wb, str(op["sheet"]))
             formula = str(op["formula"])
             ws[str(op["cell"])] = formula if formula.startswith("=") else f"={formula}"
         elif kind == "add_sheet":
             wb.create_sheet(title=str(op["name"]))
         elif kind == "add_chart":
-            ws = wb[str(op["sheet"])]
+            ws = _sheet(wb, str(op["sheet"]))
             _add_chart(ws, op["chart"])
         else:
             fail(f"unknown op: {kind}")

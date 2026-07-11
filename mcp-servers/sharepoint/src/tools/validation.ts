@@ -2,28 +2,43 @@
  * Validation helpers for tool parameters.
  */
 
-import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
+import {
+  withResultValidation,
+  teachingToolResult,
+  type ToolResult,
+  type ToolsCallResult,
+} from '@speedwave/mcp-shared';
 
 export type { ToolResult };
 
-/** Permitted characters in a Microsoft Graph id segment: alphanumerics, dashes, underscores, dots. */
+/** Permitted characters and length of a Microsoft Graph id segment. */
 const GRAPH_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const GRAPH_ID_SPEC = /\[([^\]]+)\]\{(\d+),(\d+)\}/.exec(GRAPH_ID_RE.source);
+/** Rule text derived from GRAPH_ID_RE so the message and the regex cannot drift. */
+const GRAPH_ID_RULE = GRAPH_ID_SPEC
+  ? `${GRAPH_ID_SPEC[2]} to ${GRAPH_ID_SPEC[3]} characters from the set [${GRAPH_ID_SPEC[1]}]`
+  : 'a Microsoft Graph id';
 
 /**
- * Assert that `value` is a non-empty string matching {@link GRAPH_ID_RE}.
- * Returns `null` on success or a `ToolResult` error on failure.
+ * Assert `value` is a string matching {@link GRAPH_ID_RE}; null on success, else
+ * a teaching `ToolResult` naming the bad value and (when known) its source tool.
  * @param value - candidate id from the tool call
  * @param fieldName - parameter name to mention in the error message
+ * @param sourceTool - name of the tool that returns a valid value for this field
  */
-export function validateGraphId(value: unknown, fieldName: string): ToolResult | null {
+export function validateGraphId(
+  value: unknown,
+  fieldName: string,
+  sourceTool?: string
+): ToolResult | null {
   if (typeof value !== 'string' || !GRAPH_ID_RE.test(value)) {
-    return {
-      success: false,
-      error: {
-        code: 'INVALID_ID',
-        message: `${fieldName} must match ${GRAPH_ID_RE.source}`,
-      },
-    };
+    const nextStep = sourceTool
+      ? 'Retry with that id instead of guessing one.'
+      : `A valid ${fieldName} is ${GRAPH_ID_RULE}.`;
+    return teachingToolResult(
+      { paramName: fieldName, received: value, correctValueTool: sourceTool, nextStep },
+      'INVALID_ID'
+    );
   }
   return null;
 }

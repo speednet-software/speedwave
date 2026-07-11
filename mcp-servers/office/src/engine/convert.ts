@@ -288,40 +288,78 @@ export const CONVERT_MATRIX: Readonly<Record<string, ReadonlySet<string>>> = {
   '.ods': new Set(['pdf', 'xlsx', 'csv']),
 };
 
+/** Matches "password"/"encrypt(ed|ion)" as a whole word only, never a substring inside a longer token. */
+const PASSWORD_OR_ENCRYPTED = /\b(?:password|encrypt(?:ed|ion)?)\b/i;
+
+/**
+ * Strips path-like tokens (anything containing `/`) so an echoed source path can never false-trigger the signature match.
+ * @param detail - The raw failure detail text.
+ */
+function withoutPathTokens(detail: string): string {
+  return detail.replace(/\S*\/\S+/g, '');
+}
+
+/**
+ * Re-throw a LibreOffice subprocess failure as a {@link ValidationError} with actionable guidance,
+ * anchoring the password/encrypted case to a whole-word signature outside any echoed file path.
+ * @param err - The error thrown by `runOk` for the `soffice` invocation.
+ */
+function translateLibreOfficeError(err: unknown): never {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (PASSWORD_OR_ENCRYPTED.test(withoutPathTokens(detail))) {
+    throw new ValidationError(
+      'LibreOffice could not open the input -- it may be password-protected or encrypted; ' +
+        'verify the file opens normally (without a password) before converting.'
+    );
+  }
+  throw new ValidationError(
+    `LibreOffice conversion failed: ${detail} -- the input file may be corrupted, encrypted, ` +
+      'or use a feature LibreOffice cannot render.'
+  );
+}
+
 /**
  * Run `soffice --headless --convert-to <fmt>` on `srcAbs` into a fresh temp dir with a per-call user profile,
  * serialized through the LibreOffice queue. Returns the produced file's temp path.
  * @param srcAbs - Absolute path of the source Office file.
  * @param target - Target format token (e.g. `"pdf"`).
  * @returns The absolute path of the produced file under a temp directory.
- * @throws {Error} If LibreOffice produces no output file.
+ * @throws {ValidationError} If LibreOffice fails to run or produces no output file.
  */
 async function libreOfficeConvert(srcAbs: string, target: string): Promise<string> {
   return libreOfficeQueue.run(async () => {
     const outDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'office-lo-'));
     const profilePath = path.join(os.tmpdir(), `lo-profile-${randomUUID()}`);
     try {
-      await runOk(
-        'soffice',
-        [
-          '--headless',
-          '--norestore',
-          '--nologo',
-          '--nofirststartwizard',
-          `-env:UserInstallation=file://${profilePath}`,
-          '--convert-to',
-          target,
-          '--outdir',
-          outDir,
-          srcAbs,
-        ],
-        { timeoutMs: TIMEOUT_LIBREOFFICE_MS, env: { HOME: '/tmp/lo' } }
-      );
+      try {
+        await runOk(
+          'soffice',
+          [
+            '--headless',
+            '--norestore',
+            '--nologo',
+            '--nofirststartwizard',
+            `-env:UserInstallation=file://${profilePath}`,
+            '--convert-to',
+            target,
+            '--outdir',
+            outDir,
+            srcAbs,
+          ],
+          { timeoutMs: TIMEOUT_LIBREOFFICE_MS, env: { HOME: '/tmp/lo' } }
+        );
+      } catch (err) {
+        translateLibreOfficeError(err);
+      }
       const produced = (await fsp.readdir(outDir)).map((f) => path.join(outDir, f));
       const file =
         produced.find((f) => f.toLowerCase().endsWith(`.${target.toLowerCase()}`)) ?? produced[0];
       if (!file) {
-        throw new Error(`LibreOffice produced no output for --convert-to ${target}`);
+        throw new ValidationError(
+          `LibreOffice produced no output for --convert-to ${target} -- the source file may use a ` +
+            'feature headless LibreOffice cannot render; try readDocument to confirm the file parses ' +
+            'normally, or simplify/re-save the source file and retry.'
+        );
       }
       // Move out of the temp dir we are about to delete.
       const staged = path.join(os.tmpdir(), `office-staged-${randomUUID()}${path.extname(file)}`);

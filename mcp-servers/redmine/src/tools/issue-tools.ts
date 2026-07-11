@@ -10,16 +10,50 @@ import {
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  teachingErrorResult,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
+import { withRedmineErrors } from './error-handling.js';
+
+/**
+ * Resolve `assigned_to` to `assigned_to_id` in place; returns a teaching error
+ * result when the identifier matches no user, undefined on success/no-op.
+ * @param client - Redmine client used for user resolution.
+ * @param resolved - Params object mutated in place.
+ */
+async function resolveAssignedTo(
+  client: RedmineClient,
+  resolved: Record<string, unknown>
+): Promise<ReturnType<typeof teachingErrorResult> | undefined> {
+  if (!resolved.assigned_to || resolved.assigned_to_id) return undefined;
+  const userId = await client.resolveUser(resolved.assigned_to as string);
+  if (userId === null) {
+    return teachingErrorResult({
+      paramName: 'assigned_to',
+      received: resolved.assigned_to,
+      correctValueTool: 'resolveUser',
+      nextStep:
+        'Call resolveUser({ identifier }) or listUsers to find a valid username, email, or numeric user ID, then retry with assigned_to_id.',
+    });
+  }
+  resolved.assigned_to_id = userId;
+  delete resolved.assigned_to;
+  return undefined;
+}
 
 // Tool Definitions
 const listIssueIdsTool: Tool = {
   name: 'listIssueIds',
-  description: 'List issue IDs with optional filters. Returns only IDs for efficiency.',
+  description:
+    'List issue IDs with optional filters. Returns only IDs for efficiency. Omitting assigned_to returns issues for ALL users; pass assigned_to: "me" to scope to the current user.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
+  },
   keywords: ['redmine', 'issues', 'list', 'filter', 'tasks', 'bugs', 'ids'],
   example: `const { ids, total_count } = await redmine.listIssueIds({ status: "open", assigned_to: "me" })`,
   inputSchema: {
@@ -93,16 +127,30 @@ const getIssueFullTool: Tool = {
   name: 'getIssueFull',
   description: 'Get complete issue data including custom_fields, relations. No truncation.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['redmine', 'issue', 'show', 'get', 'detail', 'single', 'full'],
   example: `const issue = await redmine.getIssueFull({ issue_id: 12345, include: ["journals", "attachments"] })`,
   inputSchema: {
     type: 'object',
     properties: {
-      issue_id: { type: 'number', description: 'Issue ID' },
+      issue_id: {
+        type: 'number',
+        description: 'Issue ID — obtained from listIssueIds or searchIssueIds',
+      },
       include: {
         type: 'array',
-        items: { type: 'string' },
+        items: {
+          type: 'string',
+          enum: [
+            'journals',
+            'attachments',
+            'relations',
+            'children',
+            'watchers',
+            'changesets',
+            'allowed_statuses',
+          ],
+        },
         description: 'Additional data to include',
       },
     },
@@ -177,7 +225,7 @@ const searchIssueIdsTool: Tool = {
   name: 'searchIssueIds',
   description: 'Search issues by text query. Returns matching IDs only.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'issue', 'search', 'find', 'query', 'ids'],
   example: `const { ids, total_count } = await redmine.searchIssueIds({ query: "authentication error", project_id: "my-project" })`,
   inputSchema: {
@@ -228,9 +276,14 @@ const searchIssueIdsTool: Tool = {
 
 const createIssueTool: Tool = {
   name: 'createIssue',
-  description: 'Create a new Redmine issue',
+  description:
+    "Create a new Redmine issue. tracker/priority/status names must match this project's configured mappings (see getMappings); an unrecognized name throws an error listing valid values.",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
+  },
   keywords: ['redmine', 'issue', 'create', 'new', 'task', 'bug', 'add'],
   example: `const issue = await redmine.createIssue({ subject: "Fix bug", project_id: "my-project", tracker: "bug" })`,
   inputSchema: {
@@ -246,7 +299,10 @@ const createIssueTool: Tool = {
       priority_id: { type: 'number', description: 'Priority ID' },
       priority: { type: 'string', description: 'Priority name' },
       assigned_to_id: { type: 'number', description: 'Assigned user ID' },
-      assigned_to: { type: 'string', description: 'Assignee name' },
+      assigned_to: {
+        type: 'string',
+        description: "Assignee name, or 'me' to assign to the current authenticated user",
+      },
       parent_issue_id: { type: 'number', description: 'Parent issue ID' },
       estimated_hours: { type: 'number', description: 'Estimated hours' },
     },
@@ -306,7 +362,11 @@ const updateIssueTool: Tool = {
   name: 'updateIssue',
   description: 'Update an existing Redmine issue',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "assigned_to: 'me'",
+  },
   keywords: ['redmine', 'issue', 'update', 'modify', 'change', 'edit', 'move', 'project'],
   example: `const updated = await redmine.updateIssue({ issue_id: 12345, assigned_to_id: userId });
 // IMPORTANT: Verify change was applied - Redmine silently ignores some changes for closed issues
@@ -316,13 +376,20 @@ if (!updated.assigned_to || updated.assigned_to.id !== userId) {
   inputSchema: {
     type: 'object',
     properties: {
-      issue_id: { type: 'number', description: 'Issue ID to update' },
+      issue_id: {
+        type: 'number',
+        description: 'Issue ID to update — obtained from listIssueIds or searchIssueIds',
+      },
       subject: { type: 'string', description: 'New subject' },
       description: { type: 'string', description: 'New description' },
       status_id: { type: 'number', description: 'Status ID' },
       status: { type: 'string', description: 'Status name' },
       priority_id: { type: 'number', description: 'Priority ID' },
       assigned_to_id: { type: 'number', description: 'Assigned user ID' },
+      assigned_to: {
+        type: 'string',
+        description: "Assignee name, or 'me' to assign to the current authenticated user",
+      },
       notes: { type: 'string', description: 'Update notes/comment' },
     },
     required: ['issue_id'],
@@ -379,7 +446,7 @@ const commentIssueTool: Tool = {
   name: 'commentIssue',
   description: 'Add a comment to an issue',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'issue', 'comment', 'note', 'add'],
   example: `await redmine.commentIssue({ issue_id: 12345, notes: "Work in progress" })`,
   inputSchema: {
@@ -434,8 +501,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
   return [
     {
       tool: listIssueIdsTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const p = params as Record<string, unknown>;
           const specialStatuses = ['open', 'closed', '*'];
           const statusValue = p.status as string | undefined;
@@ -446,11 +513,8 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
           } else {
             resolved = resolveParams(p, client.getMappings());
           }
-          if (resolved.assigned_to && !resolved.assigned_to_id) {
-            const userId = await client.resolveUser(resolved.assigned_to as string);
-            if (userId) resolved.assigned_to_id = userId;
-            delete resolved.assigned_to;
-          }
+          const assignError = await resolveAssignedTo(client, resolved);
+          if (assignError) return assignError;
           const result = await client.listIssues(
             resolved as Parameters<typeof client.listIssues>[0]
           );
@@ -458,27 +522,22 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             ids: result.issues.map((i: { id: number }) => i.id),
             total_count: result.total_count,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: getIssueFullTool,
       handler: async (params) => {
-        try {
-          const { issue_id, include = [] } = params as { issue_id: number; include?: string[] };
+        const { issue_id, include = [] } = params as { issue_id: number; include?: string[] };
+        return withRedmineErrors({ issue_id }, async () => {
           const result = await client.showIssue(issue_id, { include });
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
     {
       tool: searchIssueIdsTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const { query, project_id, limit } = params as {
             query: string;
             project_id?: string;
@@ -489,21 +548,15 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             ids: result.results.map((i: { id: number }) => i.id),
             total_count: result.total_count,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: createIssueTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
-          if (resolved.assigned_to && !resolved.assigned_to_id) {
-            const userId = await client.resolveUser(resolved.assigned_to as string);
-            if (userId) resolved.assigned_to_id = userId;
-            delete resolved.assigned_to;
-          }
+          const assignError = await resolveAssignedTo(client, resolved);
+          if (assignError) return assignError;
           if (resolved.parent_id !== undefined && resolved.parent_issue_id === undefined) {
             resolved.parent_issue_id = resolved.parent_id;
             delete resolved.parent_id;
@@ -512,22 +565,16 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             resolved as Parameters<typeof client.createIssue>[0]
           );
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: updateIssueTool,
       handler: async (params) => {
-        try {
+        const { issue_id } = params as { issue_id: number };
+        return withRedmineErrors({ issue_id }, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
-          if (resolved.assigned_to && !resolved.assigned_to_id) {
-            const userId = await client.resolveUser(resolved.assigned_to as string);
-            if (userId) resolved.assigned_to_id = userId;
-            delete resolved.assigned_to;
-          }
-          const { issue_id } = resolved as { issue_id: number };
+          const assignError = await resolveAssignedTo(client, resolved);
+          if (assignError) return assignError;
           const updatedIssue = await client.updateIssue(
             issue_id,
             resolved as Parameters<typeof client.updateIssue>[1]
@@ -537,21 +584,17 @@ export function createIssueTools(client: RedmineClient | null): ToolDefinition[]
             subject: updatedIssue.subject,
             status: updatedIssue.status,
           });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
     {
       tool: commentIssueTool,
       handler: async (params) => {
-        try {
-          const { issue_id, notes } = params as { issue_id: number; notes: string };
+        const { issue_id, notes } = params as { issue_id: number; notes: string };
+        return withRedmineErrors({ issue_id }, async () => {
           await client.commentIssue(issue_id, notes);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
   ];

@@ -472,9 +472,15 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject Windows paths', async () => {
-      await expect(client.uploadFile('docs/test.txt', 'C:\\Users\\speedwave')).rejects.toThrow(
-        'Invalid local_path: must be under /workspace'
-      );
+      // path.resolve consults process.cwd(); pin it so the assertion holds for a checkout under /workspace too.
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/home/node');
+      try {
+        await expect(client.uploadFile('docs/test.txt', 'C:\\Users\\speedwave')).rejects.toThrow(
+          'Invalid local_path: must be under /workspace'
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
     });
   });
 
@@ -503,11 +509,15 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject relative path starting with ../', async () => {
-      // Relative paths should resolve based on current working directory
-      // and should fail if they escape the whitelist
-      await expect(client.uploadFile('docs/test.txt', '../../../etc/passwd')).rejects.toThrow(
-        'Invalid local_path: must be under /workspace'
-      );
+      // path.resolve consults process.cwd(); pin it so the traversal escapes /workspace regardless of checkout location.
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/home/node');
+      try {
+        await expect(client.uploadFile('docs/test.txt', '../../../etc/passwd')).rejects.toThrow(
+          'Invalid local_path: must be under /workspace'
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
     });
   });
 

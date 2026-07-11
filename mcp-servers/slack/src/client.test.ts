@@ -13,6 +13,7 @@ import {
   getFileContent,
   downloadFile,
   getUsers,
+  getCurrentUser,
   listDms,
   openDm,
 } from './client.js';
@@ -68,8 +69,9 @@ function presentClients(): SlackClients {
       token: 'xoxe.xoxp-test',
       chat: { postMessage: vi.fn() },
       conversations: { list: vi.fn(), history: vi.fn(), replies: vi.fn(), open: vi.fn() },
-      users: { lookupByEmail: vi.fn() },
+      users: { lookupByEmail: vi.fn(), info: vi.fn() },
       files: { info: vi.fn() },
+      auth: { test: vi.fn() },
     } as unknown as WebClient,
     tokenState: { accessToken: 'xoxe.xoxp-test' },
     lock: new RefreshLock(),
@@ -147,6 +149,39 @@ describe('slack client', () => {
       const error = { data: { error: 'ratelimited' } };
       const message = formatSlackError(error);
       expect(message).toBe('Rate limit exceeded. Please try again later.');
+    });
+
+    it('formats an archived-channel error', () => {
+      const error = { data: { error: 'is_archived' } };
+      const message = formatSlackError(error);
+      expect(message).toContain('archived');
+      expect(message).toContain('Choose a different channel');
+    });
+
+    it('formats a message-too-long error', () => {
+      const error = { data: { error: 'msg_too_long' } };
+      const message = formatSlackError(error);
+      expect(message).toContain("Slack's length limit");
+    });
+
+    it('formats a not-in-channel error with a listChannelIds pointer', () => {
+      const error = { data: { error: 'not_in_channel' } };
+      const message = formatSlackError(error);
+      expect(message).toContain('not a member of this channel');
+      expect(message).toContain('listChannelIds');
+    });
+
+    it('formats a cant-dm-bot error', () => {
+      const error = { data: { error: 'cant_dm_bot' } };
+      const message = formatSlackError(error);
+      expect(message).toContain('cannot receive DMs');
+    });
+
+    it('formats no_text and invalid_arguments as a missing/malformed-field error', () => {
+      for (const code of ['no_text', 'invalid_arguments']) {
+        const message = formatSlackError({ data: { error: code } });
+        expect(message).toContain('missing or malformed');
+      }
     });
 
     it('formats network errors', () => {
@@ -523,7 +558,9 @@ describe('slack client', () => {
           message: 'Hello!',
         })
       ).rejects.toThrow(
-        'Channel not found: nonexistent. To message a person, use findUsers to get their user ID, then openDirectMessage.'
+        'Channel not found: nonexistent. If this is a person, use findUsers then openDirectMessage. ' +
+          'If it is a channel, call listChannelIds to see channels you (the signed-in user) are a ' +
+          'member of — Speedwave has no bot to invite, so a missing channel usually means you are not a member.'
       );
     });
 
@@ -752,7 +789,7 @@ describe('slack client', () => {
       });
     });
 
-    it('clamps limit to minimum of 1', async () => {
+    it('treats a negative limit as the default (50)', async () => {
       const mockHistory = vi.fn().mockResolvedValue({ messages: [] });
       mockClients.user.conversations.history = mockHistory;
 
@@ -763,8 +800,24 @@ describe('slack client', () => {
 
       expect(mockHistory).toHaveBeenCalledWith({
         channel: 'C12345678',
-        limit: 1,
+        limit: 50,
       });
+    });
+
+    it('treats limit: 0 as the default (50), not the floor of 1', async () => {
+      const mockHistory = vi.fn().mockResolvedValue({ messages: [] });
+      mockClients.user.conversations.history = mockHistory;
+
+      const result = await readChannel(mockClients, {
+        channel: 'C12345678',
+        limit: 0,
+      });
+
+      expect(mockHistory).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        limit: 50,
+      });
+      expect(result.limit_used).toBe(50);
     });
 
     it('clamps limit to maximum of 100', async () => {
@@ -919,20 +972,40 @@ describe('slack client', () => {
     it('reads a thread by channel ID with default limit', async () => {
       const mockReplies = vi.fn().mockResolvedValue({
         messages: [
-          { user: 'U1', text: 'parent', ts: '1.0', type: 'message', reply_count: 1 },
-          { user: 'U2', text: 'reply', ts: '1.1', type: 'message', thread_ts: '1.0' },
+          {
+            user: 'U1',
+            text: 'parent',
+            ts: '1717000000.000100',
+            type: 'message',
+            reply_count: 1,
+          },
+          {
+            user: 'U2',
+            text: 'reply',
+            ts: '1717000000.000200',
+            type: 'message',
+            thread_ts: '1717000000.000100',
+          },
         ],
         has_more: false,
       });
       mockClients.user.conversations.replies = mockReplies;
 
-      const result = await readThread(mockClients, { channel: 'C12345678', thread_ts: '1.0' });
+      const result = await readThread(mockClients, {
+        channel: 'C12345678',
+        thread_ts: '1717000000.000100',
+      });
 
-      expect(mockReplies).toHaveBeenCalledWith({ channel: 'C12345678', ts: '1.0', limit: 50 });
+      expect(mockReplies).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        ts: '1717000000.000100',
+        limit: 50,
+      });
       expect(result.messages).toHaveLength(2);
       expect(result.messages[0].reply_count).toBe(1);
-      expect(result.messages[1].thread_ts).toBe('1.0');
+      expect(result.messages[1].thread_ts).toBe('1717000000.000100');
       expect(result.has_more).toBe(false);
+      expect(result.limit_used).toBe(50);
     });
 
     it('resolves channel names and forwards cursor', async () => {
@@ -949,14 +1022,14 @@ describe('slack client', () => {
 
       const result = await readThread(mockClients, {
         channel: '#general',
-        thread_ts: '1.0',
+        thread_ts: '1717000000.000100',
         cursor: 'cur-1',
         limit: 7,
       });
 
       expect(mockReplies).toHaveBeenCalledWith({
         channel: 'C77',
-        ts: '1.0',
+        ts: '1717000000.000100',
         limit: 7,
         cursor: 'cur-1',
       });
@@ -968,17 +1041,59 @@ describe('slack client', () => {
       const mockReplies = vi.fn().mockResolvedValue({ messages: [] });
       mockClients.user.conversations.replies = mockReplies;
 
-      await readThread(mockClients, { channel: 'C1', thread_ts: '1.0', limit: 500 });
-      expect(mockReplies).toHaveBeenCalledWith({ channel: 'C1', ts: '1.0', limit: 100 });
+      const result = await readThread(mockClients, {
+        channel: 'C1',
+        thread_ts: '1717000000.000100',
+        limit: 500,
+      });
+      expect(mockReplies).toHaveBeenCalledWith({
+        channel: 'C1',
+        ts: '1717000000.000100',
+        limit: 100,
+      });
+      expect(result.limit_used).toBe(100);
+    });
+
+    it('treats limit: 0 as the default (50), not the floor of 1', async () => {
+      const mockReplies = vi.fn().mockResolvedValue({ messages: [] });
+      mockClients.user.conversations.replies = mockReplies;
+
+      const result = await readThread(mockClients, {
+        channel: 'C1',
+        thread_ts: '1717000000.000100',
+        limit: 0,
+      });
+
+      expect(mockReplies).toHaveBeenCalledWith({
+        channel: 'C1',
+        ts: '1717000000.000100',
+        limit: 50,
+      });
+      expect(result.limit_used).toBe(50);
     });
 
     it('propagates API errors (e.g. thread_not_found)', async () => {
       const mockReplies = vi.fn().mockRejectedValue({ data: { error: 'thread_not_found' } });
       mockClients.user.conversations.replies = mockReplies;
 
-      await expect(readThread(mockClients, { channel: 'C1', thread_ts: '9.9' })).rejects.toEqual({
+      await expect(
+        readThread(mockClients, { channel: 'C1', thread_ts: '1717000000.000900' })
+      ).rejects.toEqual({
         data: { error: 'thread_not_found' },
       });
+    });
+
+    it('rejects a thread_ts that is not a genuine Slack timestamp before calling the API', async () => {
+      const mockReplies = vi.fn();
+      mockClients.user.conversations.replies = mockReplies;
+
+      await expect(
+        readThread(mockClients, { channel: 'C1', thread_ts: '1717000000' })
+      ).rejects.toThrow(/does not look like a Slack timestamp/);
+      await expect(
+        readThread(mockClients, { channel: 'C1', thread_ts: '1717000000.0001' })
+      ).rejects.toThrow(/does not look like a Slack timestamp/);
+      expect(mockReplies).not.toHaveBeenCalled();
     });
   });
 
@@ -1653,10 +1768,10 @@ describe('slack client', () => {
     it('passes user IDs straight through (U… and enterprise W…)', async () => {
       const open = stubOpen('D9');
 
-      const result = await openDm(mockClients, { users: ['U0123ABC', 'W0456DEF'] });
+      const result = await openDm(mockClients, { users: ['U0123ABCD456', 'W0456DEFG789'] });
 
       expect(result).toEqual({ id: 'D9' });
-      expect(open).toHaveBeenCalledWith({ users: 'U0123ABC,W0456DEF' });
+      expect(open).toHaveBeenCalledWith({ users: 'U0123ABCD456,W0456DEFG789' });
     });
 
     it('resolves email entries via users.lookupByEmail', async () => {
@@ -1677,16 +1792,65 @@ describe('slack client', () => {
         Object.assign(new Error('users_not_found'), { data: { error: 'users_not_found' } })
       );
       await expect(openDm(mockClients, { users: ['ghost@example.pl'] })).rejects.toThrow(
-        /User not found for email/
+        /No Slack user found for email "ghost@example.pl"/
       );
 
       await expect(openDm(mockClients, { users: ['Pawel'] })).rejects.toThrow(/findUsers first/);
       expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
     });
 
+    it('routes names that merely look like Slack IDs to the findUsers teaching path', async () => {
+      await expect(openDm(mockClients, { users: ['Wanda'] })).rejects.toThrow(/findUsers first/);
+      await expect(openDm(mockClients, { users: ['Wojciech Nowak'] })).rejects.toThrow(
+        /findUsers first/
+      );
+      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
+    });
+
+    it('normalizes a lowercase user ID before matching (case-insensitive)', async () => {
+      const open = stubOpen('D12');
+
+      const result = await openDm(mockClients, { users: ['u0123abcd456'] });
+
+      expect(result).toEqual({ id: 'D12' });
+      expect(open).toHaveBeenCalledWith({ users: 'U0123ABCD456' });
+    });
+
+    it('accepts an ID exactly at the 8-char boundary after the prefix', async () => {
+      const open = stubOpen('D13');
+
+      const result = await openDm(mockClients, { users: ['U01234567'] });
+
+      expect(result).toEqual({ id: 'D13' });
+      expect(open).toHaveBeenCalledWith({ users: 'U01234567' });
+    });
+
+    it('rejects an ID one character short of the boundary (7 chars after the prefix)', async () => {
+      await expect(openDm(mockClients, { users: ['U0123456'] })).rejects.toThrow(
+        /not a user ID or email/
+      );
+      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
+    });
+
+    it('accepts a real-looking uppercase user ID', async () => {
+      const open = stubOpen('D11');
+
+      const result = await openDm(mockClients, { users: ['U0123ABCD456'] });
+
+      expect(result).toEqual({ id: 'D11' });
+      expect(open).toHaveBeenCalledWith({ users: 'U0123ABCD456' });
+    });
+
+    it('rejects a non-array users value before any API call', async () => {
+      await expect(
+        openDm(mockClients, { users: undefined as unknown as string[] })
+      ).rejects.toThrow(/'users' is required/);
+      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
+    });
+
     it('rejects more than 8 participants before any API call', async () => {
       const open = mockClients.user.conversations.open as ReturnType<typeof vi.fn>;
-      const nine = Array.from({ length: 9 }, (_, i) => `U${i}`);
+      const nine = Array.from({ length: 9 }, (_, i) => `U${i}0123ABC`);
 
       await expect(openDm(mockClients, { users: nine })).rejects.toThrow(/at most 8 people/);
       expect(open).not.toHaveBeenCalled();
@@ -1700,7 +1864,7 @@ describe('slack client', () => {
 
     it('accepts exactly 8 participants (the boundary)', async () => {
       const open = stubOpen('G8');
-      const eight = Array.from({ length: 8 }, (_, i) => `U${i}`);
+      const eight = Array.from({ length: 8 }, (_, i) => `U${i}0123ABC`);
 
       const result = await openDm(mockClients, { users: eight });
 
@@ -1712,7 +1876,7 @@ describe('slack client', () => {
       (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: true,
       });
-      await expect(openDm(mockClients, { users: ['U1'] })).rejects.toThrow(
+      await expect(openDm(mockClients, { users: ['U0123ABCD456'] })).rejects.toThrow(
         /did not return a conversation ID/
       );
     });
@@ -1721,7 +1885,7 @@ describe('slack client', () => {
       (mockClients.user.conversations.open as ReturnType<typeof vi.fn>).mockRejectedValue(
         Object.assign(new Error('missing_scope'), { data: { error: 'missing_scope' } })
       );
-      await expect(openDm(mockClients, { users: ['U1'] })).rejects.toMatchObject({
+      await expect(openDm(mockClients, { users: ['U0123ABCD456'] })).rejects.toMatchObject({
         data: { error: 'missing_scope' },
       });
     });
@@ -1776,6 +1940,15 @@ describe('slack client', () => {
       });
 
       expect(result.user).toBeNull();
+    });
+
+    it('trims surrounding whitespace from the email before lookup', async () => {
+      const mockLookup = vi.fn().mockResolvedValue({ user: { id: 'U1', name: 'pawel' } });
+      mockClients.user.users.lookupByEmail = mockLookup;
+
+      await getUsers(mockClients, { email: '  pawel@example.pl  ' });
+
+      expect(mockLookup).toHaveBeenCalledWith({ email: 'pawel@example.pl' });
     });
 
     it('returns null when user object is missing', async () => {
@@ -1864,6 +2037,103 @@ describe('slack client', () => {
           email: 'test@example.com',
         })
       ).rejects.toThrow('Network error');
+    });
+  });
+
+  describe('getCurrentUser', () => {
+    let mockClients: SlackClients;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockClients = presentClients();
+    });
+
+    it('resolves id/name/team from auth.test, enriched by users.info', async () => {
+      (mockClients.user.auth.test as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        user_id: 'U12345',
+        user: 'pawel',
+        team_id: 'T999',
+      });
+      (mockClients.user.users.info as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        user: { name: 'pawel', real_name: 'Paweł Kowalski', profile: { display_name: 'pawel.k' } },
+      });
+
+      const result = await getCurrentUser(mockClients);
+
+      expect(result).toEqual({
+        id: 'U12345',
+        name: 'pawel',
+        team_id: 'T999',
+        real_name: 'Paweł Kowalski',
+        display_name: 'pawel.k',
+      });
+      expect(mockClients.user.users.info).toHaveBeenCalledWith({ user: 'U12345' });
+    });
+
+    it('degrades to auth.test alone when users.info enrichment fails', async () => {
+      (mockClients.user.auth.test as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        user_id: 'U12345',
+        user: 'pawel',
+      });
+      (mockClients.user.users.info as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('missing_scope')
+      );
+
+      const result = await getCurrentUser(mockClients);
+
+      expect(result).toEqual({ id: 'U12345', name: 'pawel', team_id: undefined });
+    });
+
+    it('throws when auth.test reports not ok', async () => {
+      (mockClients.user.auth.test as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        error: 'invalid_auth',
+      });
+
+      await expect(getCurrentUser(mockClients)).rejects.toThrow('invalid_auth');
+    });
+
+    it('throws a not-ok error that formatSlackError classifies with reconnect guidance', async () => {
+      (mockClients.user.auth.test as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        error: 'invalid_auth',
+      });
+
+      const error = await getCurrentUser(mockClients).catch((e: unknown) => e);
+
+      expect(formatSlackError(error)).toBe(
+        withSetupGuidance(
+          'Slack authentication failed. Reconnect Slack in Speedwave Desktop (Integrations → Slack).'
+        )
+      );
+    });
+
+    it('throws when auth.test omits user_id', async () => {
+      (mockClients.user.auth.test as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+
+      await expect(getCurrentUser(mockClients)).rejects.toThrow(
+        'auth.test did not return a user_id.'
+      );
+    });
+
+    it('logs a warning when users.info enrichment fails', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      (mockClients.user.auth.test as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        user_id: 'U12345',
+        user: 'pawel',
+      });
+      (mockClients.user.users.info as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('missing_scope')
+      );
+
+      await getCurrentUser(mockClients);
+
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing_scope'));
+      warnSpy.mockRestore();
     });
   });
 });

@@ -8,15 +8,17 @@ import {
   jsonResult,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const listMrDiscussionsTool: Tool = {
   name: 'listMrDiscussions',
   description: 'List discussion threads on a merge request',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'discussions', 'threads'],
   example:
     'const discussions = await gitlab.listMrDiscussions({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -24,7 +26,10 @@ const listMrDiscussionsTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       limit: { type: 'number', description: 'Max results (default 20)' },
     },
     required: ['project_id', 'mr_iid'],
@@ -57,9 +62,14 @@ const listMrDiscussionsTool: Tool = {
 
 const createMrDiscussionTool: Tool = {
   name: 'createMrDiscussion',
-  description: 'Create a discussion thread on a merge request',
+  description:
+    'Create a discussion thread on a merge request. Posted as the currently authenticated GitLab user.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
   keywords: ['gitlab', 'merge', 'request', 'discussion', 'thread'],
   example:
     'await gitlab.createMrDiscussion({ project_id: "speedwave/core", mr_iid: 42, body: "What about error handling?" })',
@@ -67,7 +77,10 @@ const createMrDiscussionTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       body: { type: 'string', description: 'Discussion body' },
     },
     required: ['project_id', 'mr_iid', 'body'],

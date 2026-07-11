@@ -122,6 +122,99 @@ final class ScriptRunnerTests: XCTestCase {
         XCTAssertEqual(escapeAppleScript(String(UnicodeScalar(0x202A)!)), String(UnicodeScalar(0x202A)!), "U+202A should be preserved")
     }
 
+    // MARK: - isAppleScriptNotFoundError
+
+    func testIsAppleScriptNotFoundErrorMatchesCurlyApostropheWording() {
+        XCTAssertTrue(isAppleScriptNotFoundError("Notes got an error: Can\u{2019}t get folder \"X\". (-1728)"))
+    }
+
+    func testIsAppleScriptNotFoundErrorMatchesBareErrorCode() {
+        XCTAssertTrue(isAppleScriptNotFoundError("some wrapped message (-1728)"))
+    }
+
+    func testIsAppleScriptNotFoundErrorFalseForUnrelatedError() {
+        XCTAssertFalse(isAppleScriptNotFoundError("syntax error: expected end of line"))
+    }
+
+    func testIsAppleScriptNotFoundErrorFalseForEmptyString() {
+        XCTAssertFalse(isAppleScriptNotFoundError(""))
+    }
+
+    // MARK: - splitAddressList
+
+    func testSplitAddressListSingle() {
+        XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
+    }
+
+    func testSplitAddressListMultipleTrimsWhitespace() {
+        XCTAssertEqual(
+            splitAddressList("alice@example.com,  bob@example.com , carol@example.com"),
+            ["alice@example.com", "bob@example.com", "carol@example.com"]
+        )
+    }
+
+    func testSplitAddressListDropsEmptyEntries() {
+        XCTAssertEqual(splitAddressList(",alice@example.com,,"), ["alice@example.com"])
+    }
+
+    func testSplitAddressListEmptyString() {
+        XCTAssertEqual(splitAddressList(""), [])
+    }
+
+    func testSplitAddressListWhitespaceOnlyEntriesDropped() {
+        XCTAssertEqual(splitAddressList("  ,  "), [])
+    }
+
+    func testSplitAddressListQuotedCommaDisplayNameKeptIntact() {
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane\" <jane@x.com>, bob@x.com"),
+            ["\"Smith, Jane\" <jane@x.com>", "bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListPlainList() {
+        XCTAssertEqual(
+            splitAddressList("alice@x.com,bob@x.com,carol@x.com"),
+            ["alice@x.com", "bob@x.com", "carol@x.com"]
+        )
+    }
+
+    func testSplitAddressListTrailingComma() {
+        XCTAssertEqual(splitAddressList("alice@x.com,bob@x.com,"), ["alice@x.com", "bob@x.com"])
+    }
+
+    func testSplitAddressListUnbalancedQuoteFallsBackToNaiveSplit() {
+        // A single stray quote never closes; falls back to a plain comma split of the
+        // original input instead of swallowing every remaining recipient into one entry.
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane <jane@x.com>, bob@x.com"),
+            ["\"Smith", "Jane <jane@x.com>", "bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListOddQuoteCountAcrossMultipleEntriesFallsBackToNaiveSplit() {
+        // Three quotes total (odd) means the scan ends still "inside" a span.
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane\" <jane@x.com>, \"bob@x.com"),
+            ["\"Smith", "Jane\" <jane@x.com>", "\"bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListBalancedQuotesUnaffectedByFallback() {
+        // Even quote count must still take the quote-aware path, not the naive fallback.
+        XCTAssertEqual(
+            splitAddressList("\"Smith, Jane\" <jane@x.com>, bob@x.com"),
+            ["\"Smith, Jane\" <jane@x.com>", "bob@x.com"]
+        )
+    }
+
+    func testSplitAddressListPlainInputUnaffectedByFallback() {
+        XCTAssertEqual(
+            splitAddressList("alice@x.com,bob@x.com"),
+            ["alice@x.com", "bob@x.com"]
+        )
+    }
+
     // MARK: - Parse Delimited
 
     func testParseDelimitedBasic4Field() {

@@ -122,6 +122,27 @@ describe('dm-tools', () => {
       expect(result.error?.code).toBe('OPEN_FAILED');
       expect(result.error?.message).toContain('findUsers');
     });
+
+    it('rejects a missing users array with a teaching error before calling Slack', async () => {
+      const result = await handleOpenDirectMessage(
+        presentClients(),
+        {} as unknown as { users: string[] }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain('Invalid users');
+      expect(client.openDm).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty users array with a teaching error before calling Slack', async () => {
+      const result = await handleOpenDirectMessage(presentClients(), { users: [] });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain('Invalid users');
+      expect(client.openDm).not.toHaveBeenCalled();
+    });
   });
 
   describe('createDmTools', () => {

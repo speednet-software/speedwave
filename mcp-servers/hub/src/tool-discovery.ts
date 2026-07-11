@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'crypto';
 import type { Tool } from '@speedwave/mcp-shared';
-import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts } from '@speedwave/mcp-shared';
+import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, META_KEYS, metaValue } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
@@ -195,8 +195,17 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
     );
   }
   const meta = tool._meta ?? {};
+  const deferLoading = metaValue(meta, META_KEYS.DEFER_LOADING, 'deferLoading');
+  const timeoutClass = metaValue(meta, META_KEYS.TIMEOUT_CLASS, 'timeoutClass');
+  const timeoutMsRaw = metaValue(meta, META_KEYS.TIMEOUT_MS, 'timeoutMs');
+  const osCategoryRaw = metaValue(meta, META_KEYS.OS_CATEGORY, 'osCategory');
+  const userScoped = metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped');
+  const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
+  const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
+
   const validOsCategories = ['reminders', 'calendar', 'mail', 'notes'] as const;
-  const rawOsCategory = typeof meta.osCategory === 'string' ? meta.osCategory : undefined;
+  const rawOsCategory = typeof osCategoryRaw === 'string' ? osCategoryRaw : undefined;
+
   return {
     name: methodName,
     // Worker's original tool name (often snake_case); used verbatim for tools/call
@@ -208,20 +217,18 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
     example: tool.example ?? '',
     inputExamples: tool.inputExamples,
     service,
-    deferLoading: typeof meta.deferLoading === 'boolean' ? meta.deferLoading : true,
+    deferLoading: typeof deferLoading === 'boolean' ? deferLoading : true,
     timeoutClass:
-      meta.timeoutClass === 'long'
-        ? 'long'
-        : meta.timeoutClass === 'standard'
-          ? 'standard'
-          : undefined,
-    timeoutMs:
-      typeof meta.timeoutMs === 'number' && meta.timeoutMs > 0 ? meta.timeoutMs : undefined,
+      timeoutClass === 'long' ? 'long' : timeoutClass === 'standard' ? 'standard' : undefined,
+    timeoutMs: typeof timeoutMsRaw === 'number' && timeoutMsRaw > 0 ? timeoutMsRaw : undefined,
     osCategory:
       rawOsCategory && (validOsCategories as readonly string[]).includes(rawOsCategory)
         ? (rawOsCategory as ToolMetadata['osCategory'])
         : undefined,
     annotations: tool.annotations,
+    userScoped: typeof userScoped === 'boolean' ? userScoped : undefined,
+    currentUserTool: typeof currentUserTool === 'string' ? currentUserTool : undefined,
+    selfParam: typeof selfParam === 'string' ? selfParam : undefined,
   };
 }
 
@@ -288,5 +295,63 @@ export async function discoverAndMergeService(
     }
   }
 
+  dropDanglingCurrentUserTool(service, result);
+  dropDanglingSelfParam(service, result);
+  warnMissingIdentityCompanion(service, result);
+
   return result;
+}
+
+/**
+ * Warn and drop `currentUserTool` on any tool whose pointer names a tool that does
+ * not exist among the service's discovered tools — never serve a dangling pointer.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service, mutated in place.
+ */
+function dropDanglingCurrentUserTool(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    const target = metadata.currentUserTool;
+    if (target && !(target in tools)) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: currentUserTool '${target}' does not exist — dropping`
+      );
+      delete metadata.currentUserTool;
+    }
+  }
+}
+
+/**
+ * Warn and drop `selfParam` when its leading parameter name is not an input parameter
+ * of the declaring tool; never serve a self-reference hint the schema cannot honor.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service, mutated in place.
+ */
+function dropDanglingSelfParam(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    if (!metadata.selfParam) continue;
+    const leadingParam = metadata.selfParam.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+    const schema = metadata.inputSchema as { properties?: Record<string, unknown> };
+    if (!leadingParam || !(leadingParam in (schema.properties ?? {}))) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: selfParam '${metadata.selfParam}' is not an input parameter; dropping`
+      );
+      delete metadata.selfParam;
+    }
+  }
+}
+
+/**
+ * Warn once per tool at discovery when a userScoped tool declares neither companion;
+ * the tool is kept and search_tools serves it with a misconfiguration hint.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service (read-only here).
+ */
+function warnMissingIdentityCompanion(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    if (metadata.userScoped && !metadata.currentUserTool && !metadata.selfParam) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: userScoped but declares neither currentUserTool nor selfParam; search results will carry a misconfiguration hint`
+      );
+    }
+  }
 }

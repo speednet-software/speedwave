@@ -10,6 +10,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
@@ -20,6 +21,10 @@ import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient } from '../domains/jira-issues.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
+
+/** Shared account-ID resolution guidance (no user-search tool exists here). */
+const ACCOUNT_ID_RESOLUTION_GUIDANCE =
+  'Resolve your own account ID via getMyself; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result, or ask the user rather than guessing.';
 
 /** Root of the read-only project mount inside the worker (overridable for tests). */
 function workspaceRoot(): string {
@@ -51,9 +56,14 @@ async function readWorkspaceFile(filePath: string): Promise<{ buffer: Buffer; na
 
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
-  description: 'Search Jira issues with JQL (enhanced search; paginated by nextPageToken).',
+  description:
+    'Search Jira issues with JQL (enhanced search; paginated by nextPageToken). For "my"/"assigned to me" queries use `assignee = currentUser()` directly in the JQL — no need to resolve an account ID first. If a project allowlist is configured, matches outside it are silently removed from the returned issues, and next_page_token/is_last still reflect the unfiltered upstream page (so a page that looks "last" may still be hiding excluded items).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issues', 'search', 'jql', 'query', 'tickets', 'find'],
   example:
     'const { issues, next_page_token } = await atlassian.searchIssues({ jql: "project = PROJ AND status = \\"To Do\\" ORDER BY created DESC", maxResults: 20 })',
@@ -94,7 +104,7 @@ const getIssueTool: Tool = {
   name: 'getIssue',
   description: 'Get a single Jira issue by key or ID.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['jira', 'issue', 'get', 'show', 'ticket', 'detail'],
   example: 'const issue = await atlassian.getIssue({ issueIdOrKey: "PROJ-123" })',
   inputSchema: {
@@ -124,7 +134,11 @@ const createIssueTool: Tool = {
   description:
     'Create a Jira issue. `bodyText` (plain text) becomes the description as ADF; pass `bodyAdf` for a pre-built ADF document.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issue', 'create', 'new', 'ticket', 'open'],
   example:
     'const issue = await atlassian.createIssue({ projectKey: "PROJ", summary: "Fix login", issueType: "Bug", bodyText: "Steps to reproduce..." })',
@@ -141,7 +155,10 @@ const createIssueTool: Tool = {
       },
       priority: { type: 'string', description: 'Priority name (e.g. High)' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Labels to apply' },
-      assigneeAccountId: { type: 'string', description: 'Account ID to assign to' },
+      assigneeAccountId: {
+        type: 'string',
+        description: `Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+      },
     },
     required: ['projectKey', 'summary', 'issueType'],
   },
@@ -189,7 +206,11 @@ const updateIssueTool: Tool = {
   description:
     'Update fields of a Jira issue (only provided fields change). `bodyText`/`bodyAdf` set the description.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issue', 'update', 'edit', 'change', 'modify', 'ticket'],
   example:
     'await atlassian.updateIssue({ issueIdOrKey: "PROJ-123", summary: "New title", priority: "Low" })',
@@ -205,6 +226,10 @@ const updateIssueTool: Tool = {
       bodyAdf: { type: 'object', description: 'New ADF description (overrides bodyText)' },
       priority: { type: 'string', description: 'New priority name' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Replacement label set' },
+      assigneeAccountId: {
+        type: 'string',
+        description: `Cloud account ID to reassign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+      },
     },
     required: ['issueIdOrKey'],
   },
@@ -231,6 +256,7 @@ const updateIssueTool: Tool = {
         bodyText: 'Y',
         priority: 'High',
         labels: ['a', 'b'],
+        assigneeAccountId: '5b10a...',
       },
     },
   ],
@@ -240,7 +266,7 @@ const getTransitionsTool: Tool = {
   name: 'getTransitions',
   description: 'List the workflow transitions currently available for an issue.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'transitions', 'workflow', 'status', 'list'],
   example: 'const { transitions } = await atlassian.getTransitions({ issueIdOrKey: "PROJ-123" })',
   inputSchema: {
@@ -264,7 +290,7 @@ const transitionIssueTool: Tool = {
   name: 'transitionIssue',
   description: 'Move an issue through a workflow transition by transition ID (see getTransitions).',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'transition', 'workflow', 'status', 'move', 'close', 'resolve'],
   example: 'await atlassian.transitionIssue({ issueIdOrKey: "PROJ-123", transitionId: "31" })',
   inputSchema: {
@@ -287,9 +313,13 @@ const transitionIssueTool: Tool = {
 
 const assignIssueTool: Tool = {
   name: 'assignIssue',
-  description: 'Assign an issue to an account, or unassign it (omit accountId or pass null).',
+  description: `Assign an issue to an account, or unassign it (omit accountId or pass null). ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'assign', 'assignee', 'unassign', 'owner'],
   example: 'await atlassian.assignIssue({ issueIdOrKey: "PROJ-123", accountId: "5b10a..." })',
   inputSchema: {
@@ -298,7 +328,8 @@ const assignIssueTool: Tool = {
       issueIdOrKey: { type: 'string', description: 'Issue key or ID' },
       accountId: {
         type: ['string', 'null'],
-        description: 'Account ID to assign to (null/omit to unassign)',
+        description:
+          'Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), or null/omit to unassign — not a username or email.',
       },
     },
     required: ['issueIdOrKey'],
@@ -321,7 +352,7 @@ const getMyselfTool: Tool = {
   name: 'getMyself',
   description: 'Get the Atlassian account this worker authenticates as.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'me', 'myself', 'current user', 'account', 'whoami'],
   example: 'const me = await atlassian.getMyself()',
   inputSchema: { type: 'object', properties: {} },
@@ -490,6 +521,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           bodyAdf?: AdfDoc;
           priority?: string;
           labels?: string[];
+          assigneeAccountId?: string;
         };
         const body = p.bodyAdf ?? p.bodyText;
         return jsonResult({
@@ -498,6 +530,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
             body,
             priority: p.priority,
             labels: p.labels,
+            assigneeAccountId: p.assigneeAccountId,
           }),
         });
       }),

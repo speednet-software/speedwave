@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolveParams, MappingError } from './helpers.js';
+import { resolveParams, MappingError, MAPPABLE_FIELDS } from './helpers.js';
 import type { RedmineMappings } from '../client.js';
 
 // ── Fixture mappings used across tests ────────────────────────────────────────
@@ -51,6 +51,12 @@ describe('MappingError', () => {
 
     expect(err.value).toBe(objValue);
     expect(err.message).toContain('"[object Object]"');
+  });
+});
+
+describe('MAPPABLE_FIELDS', () => {
+  it('is the SSOT list resolveParams and formatValidationError both key off', () => {
+    expect(MAPPABLE_FIELDS).toEqual(['status', 'priority', 'tracker', 'activity']);
   });
 });
 

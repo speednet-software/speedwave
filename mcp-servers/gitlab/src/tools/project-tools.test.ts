@@ -185,6 +185,28 @@ describe('createProjectTools', () => {
         isError: true,
       });
     });
+
+    it('forwards owned/membership/archived filters to the client ("my projects" support)', async () => {
+      mockClient.listProjects.mockResolvedValue([]);
+
+      const tools = createProjectTools(mockClient as unknown as GitLabClient);
+      const listProjectIdsTool = tools.find((t) => t.tool.name === 'listProjectIds');
+      await listProjectIdsTool!.handler({ owned: true, membership: false, archived: true });
+
+      expect(mockClient.listProjects).toHaveBeenCalledWith({
+        owned: true,
+        membership: false,
+        archived: true,
+      });
+    });
+
+    it('declares owned in the input schema so "my projects" is discoverable', () => {
+      const tools = createProjectTools(mockClient as unknown as GitLabClient);
+      const listProjectIdsTool = tools.find((t) => t.tool.name === 'listProjectIds');
+
+      expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('owned');
+      expect(listProjectIdsTool?.tool.description).toContain('owned: true');
+    });
   });
 
   describe('getProjectFull', () => {
@@ -623,7 +645,7 @@ describe('createProjectTools', () => {
 
       const listProjectIdsTool = tools.find((t) => t.tool.name === 'listProjectIds');
       expect(listProjectIdsTool?.tool.description).toBe(
-        'List project IDs and paths. Use get_project_full for details.'
+        'List project IDs and paths. Use getProjectFull for details. For "my projects"/"projects I own", pass owned: true.'
       );
       expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('membership');
       expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('archived');

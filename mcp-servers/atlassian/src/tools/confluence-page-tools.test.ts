@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 
 const stub = {
   search: vi.fn(),
@@ -45,9 +46,9 @@ describe('definitions', () => {
     const byName = Object.fromEntries(
       createConfluencePageTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
     );
-    expect(byName.searchPages._meta).toEqual({ deferLoading: false });
-    expect(byName.getPage._meta).toEqual({ deferLoading: false });
-    expect(byName.createPage._meta).toEqual({ deferLoading: true });
+    expect(byName.searchPages._meta).toEqual({ [META_KEYS.DEFER_LOADING]: false });
+    expect(byName.getPage._meta).toEqual({ [META_KEYS.DEFER_LOADING]: false });
+    expect(byName.createPage._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
   });
 });
 

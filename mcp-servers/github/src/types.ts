@@ -212,16 +212,17 @@ export interface GitHubWorkflowRunArtifact {
 
 /**
  * GitHub file content - the contents and metadata of a file in a repository.
- * Note: GitHub returns file content base64-encoded.
+ * Note: GitHub returns file content base64-encoded; the client decodes it to UTF-8 text when
+ * the bytes round-trip losslessly, otherwise it returns the raw base64 (see `encoding`).
  * @interface GitHubFileContent
  * @see https://docs.github.com/en/rest/repos/contents
  */
 export interface GitHubFileContent {
   /** Full path from the repository root */
   path: string;
-  /** File content (base64-encoded by GitHub) */
+  /** File content: UTF-8 text, or raw base64 for binary files (see `encoding`) */
   content: string;
-  /** Content encoding reported by GitHub (typically "base64") */
+  /** Content encoding of `content`: "utf-8" for decoded text, "base64" for binary content */
   encoding: string;
   /** Git blob SHA for this file (needed to update the file) */
   sha: string;
@@ -323,6 +324,22 @@ export interface GitHubCommitComparison {
   commits: GitHubCommit[];
   /** Comparison status: "ahead", "behind", "identical", or "diverged" */
   status: string;
+}
+
+/**
+ * The GitHub user authenticated by the mounted token.
+ * @interface GitHubUser
+ * @see https://docs.github.com/en/rest/users/users#get-the-authenticated-user
+ */
+export interface GitHubUser {
+  /** Login (username) of the authenticated user. */
+  login: string;
+  /** Display name, if set on the profile. */
+  name?: string;
+  /** Public email, if set on the profile. */
+  email?: string;
+  /** Full URL to the user's profile in the GitHub web interface. */
+  html_url: string;
 }
 
 // ConnectionTestResult moved to @speedwave/mcp-shared (SSOT). Import directly

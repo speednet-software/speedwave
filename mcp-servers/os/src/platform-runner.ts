@@ -153,7 +153,8 @@ export async function runCommand(
 ): Promise<RunResult> {
   const allowed = ALLOWED_COMMANDS[domain];
   if (!allowed || !allowed.has(command)) {
-    throw new Error('Unknown command.');
+    const allowedList = allowed ? [...allowed].join(', ') : '(no commands registered for domain)';
+    throw new Error(`Unknown command '${command}' for domain '${domain}'. Allowed: ${allowedList}`);
   }
 
   const paths = resolvePaths();

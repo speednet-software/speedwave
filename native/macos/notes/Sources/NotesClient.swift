@@ -4,6 +4,13 @@ import SharedCLI
 /// Apple Notes.app automation via AppleScript.
 enum NotesClient {
 
+    /// AppleScript `of folder "<name>"` clause, or empty string when unscoped.
+    /// Notes folder lookups match by name, not by the opaque CoreData id.
+    static func folderClause(_ folder: String?) -> String {
+        guard let f = folder else { return "" }
+        return "of folder \"\(escapeAppleScript(f))\""
+    }
+
     static func listFolders() throws -> [String: Any] {
         let script = """
         tell application "Notes"
@@ -27,18 +34,11 @@ enum NotesClient {
     }
 
     static func listNotes(limit: Int, folder: String?) throws -> [String: Any] {
-        let folderClause: String
-        if let f = folder {
-            folderClause = "of folder \"\(escapeAppleScript(f))\""
-        } else {
-            folderClause = ""
-        }
-
         let script = """
         tell application "Notes"
             set output to ""
             set noteCount to 0
-            set allNotes to every note \(folderClause)
+            set allNotes to every note \(folderClause(folder))
             repeat with n in allNotes
                 if noteCount < \(limit) then
                     set nId to id of n
@@ -57,7 +57,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30, folder: folder)
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -83,7 +83,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30, noteId: id)
         // Split on || but body (HTML) might contain || so we use |||| as body separator
         let mainParts = output.components(separatedBy: "||||")
         guard mainParts.count >= 2 else {
@@ -108,13 +108,13 @@ enum NotesClient {
         ]
     }
 
-    static func searchNotes(query: String, limit: Int) throws -> [String: Any] {
+    static func searchNotes(query: String, limit: Int, folder: String? = nil) throws -> [String: Any] {
         let queryEsc = escapeAppleScript(query)
         let script = """
         tell application "Notes"
             set output to ""
             set noteCount to 0
-            set matchingNotes to (every note whose name contains "\(queryEsc)" or plaintext contains "\(queryEsc)")
+            set matchingNotes to (every note \(folderClause(folder)) whose name contains "\(queryEsc)" or plaintext contains "\(queryEsc)")
             repeat with n in matchingNotes
                 if noteCount < \(limit) then
                     set nId to id of n
@@ -133,7 +133,7 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30)
+        let output = try runNoteScript(script, timeout: 30, folder: folder)
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -143,21 +143,14 @@ enum NotesClient {
         let bodyContent = body ?? ""
         let bodyEsc = escapeAppleScript(bodyContent)
 
-        let folderClause: String
-        if let f = folder {
-            folderClause = "of folder \"\(escapeAppleScript(f))\""
-        } else {
-            folderClause = ""
-        }
-
         let script = """
         tell application "Notes"
-            set n to make new note \(folderClause) with properties {name:"\(titleEsc)", body:"\(bodyEsc)"}
+            set n to make new note \(folderClause(folder)) with properties {name:"\(titleEsc)", body:"\(bodyEsc)"}
             return id of n
         end tell
         """
 
-        let noteId = try runNoteScript(script, timeout: 30)
+        let noteId = try runNoteScript(script, timeout: 30, folder: folder)
         return [
             "id": noteId.trimmingCharacters(in: .whitespacesAndNewlines),
             "status": "created",
@@ -186,7 +179,7 @@ enum NotesClient {
         end tell
         """
 
-        _ = try runNoteScript(script, timeout: 30)
+        _ = try runNoteScript(script, timeout: 30, noteId: id)
         return ["status": "updated"]
     }
 
@@ -198,15 +191,33 @@ enum NotesClient {
         end tell
         """
 
-        _ = try runNoteScript(script, timeout: 30)
+        _ = try runNoteScript(script, timeout: 30, noteId: id)
         return ["status": "deleted"]
     }
 }
 
-func runNoteScript(_ script: String, timeout: TimeInterval) throws -> String {
+/// Runs a Notes-scoped AppleScript. A -1728 "Can't get" failure maps to a folder- or
+/// note-not-found teaching error only when the failure names the scoped `folder`/`noteId`;
+/// an unscoped miss (e.g. listFolders) propagates its real message.
+func runNoteScript(
+    _ script: String,
+    timeout: TimeInterval,
+    folder: String? = nil,
+    noteId: String? = nil
+) throws -> String {
     do { return try ScriptRunner.run(script, timeout: timeout) }
     catch ScriptError.timeout(let seconds, _) {
         throw ScriptError.timeout(seconds, "note may contain large attachments")
+    }
+    catch ScriptError.scriptFailed(let msg) where folder != nil && appleScriptNotFoundNames(msg, folder!) {
+        throw CLIError.notFound(
+            "Folder not found. List valid folders via listNoteFolders and use their name field as folder_id."
+        )
+    }
+    catch ScriptError.scriptFailed(let msg) where noteId != nil && appleScriptNotFoundNames(msg, noteId!) {
+        throw CLIError.notFound(
+            "Note not found. List notes via listNotes/searchNotes and use its id."
+        )
     }
 }
 

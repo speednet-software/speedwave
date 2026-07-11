@@ -9,6 +9,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
@@ -20,7 +21,7 @@ const listSpacesTool: Tool = {
   description:
     'List Confluence spaces visible to the account (restricted to the configured space allowlist, if any).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['confluence', 'spaces', 'list', 'browse', 'wiki'],
   example: 'const { spaces } = await atlassian.listSpaces({ keys: ["DEV", "DOCS"] })',
   inputSchema: {
@@ -54,7 +55,7 @@ const getSpaceTool: Tool = {
   name: 'getSpace',
   description: 'Get a single Confluence space by key.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'space', 'get', 'show', 'detail', 'wiki'],
   example: 'const space = await atlassian.getSpace({ spaceKey: "DEV" })',
   inputSchema: {

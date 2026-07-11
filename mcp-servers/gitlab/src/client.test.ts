@@ -68,7 +68,7 @@ interface MockGitlabEndpoints {
   Commits: { all: Mock; showDiff: Mock };
   Pipelines: { all: Mock; show: Mock; retry: Mock; create: Mock };
   Jobs: { all: Mock; showLog: Mock; erase: Mock };
-  Tags: { create: Mock; show: Mock; remove: Mock };
+  Tags: { all: Mock; create: Mock; show: Mock; remove: Mock };
   ProjectReleases: { create: Mock };
   Branches: { all: Mock; show: Mock; create: Mock; remove: Mock };
   Repositories: { compare: Mock; allRepositoryTrees: Mock };
@@ -135,6 +135,7 @@ describe('GitLabClient', () => {
         erase: vi.fn(),
       },
       Tags: {
+        all: vi.fn(),
         create: vi.fn(),
         show: vi.fn(),
         remove: vi.fn(),
@@ -214,10 +215,12 @@ describe('GitLabClient', () => {
       expect(message).toContain('Authentication failed');
     });
 
-    it('should format 403 errors with permission message', () => {
+    it('should format 403 errors with a permission message naming the likely cause', () => {
       const error = { response: { status: 403 } };
       const message = GitLabClientClass.formatError(error);
       expect(message).toContain('Permission denied');
+      expect(message).toContain('scope');
+      expect(message).toContain('Maintainer');
     });
 
     it('should format 403 errors from message', () => {
@@ -226,16 +229,44 @@ describe('GitLabClient', () => {
       expect(message).toContain('Permission denied');
     });
 
-    it('should format 404 errors', () => {
+    it('should format 404 errors with actionable discovery guidance', () => {
       const error = { response: { status: 404 } };
       const message = GitLabClientClass.formatError(error);
-      expect(message).toBe('Resource not found in GitLab.');
+      expect(message).toContain('Resource not found in GitLab.');
+      expect(message).toContain('listProjectIds');
+      expect(message).toContain('listMrIds');
     });
 
     it('should format 404 errors from message', () => {
       const error = { message: 'Resource not found' };
       const message = GitLabClientClass.formatError(error);
-      expect(message).toBe('Resource not found in GitLab.');
+      expect(message).toContain('Resource not found in GitLab.');
+    });
+
+    it('should format 422 errors as a parameter problem, preserving upstream detail', () => {
+      const error = { response: { status: 422 }, cause: { description: 'Branch already taken' } };
+      const message = GitLabClientClass.formatError(error);
+      expect(message).toContain('422 Unprocessable');
+      expect(message).toContain('Branch already taken');
+    });
+
+    it('should format 422 errors without a cause description using the bare message', () => {
+      const error = { response: { status: 422 }, message: 'Invalid state_event' };
+      const message = GitLabClientClass.formatError(error);
+      expect(message).toContain('422 Unprocessable');
+      expect(message).toContain('Invalid state_event');
+    });
+
+    it('should fall back to the bare message instead of rendering [object Object] when cause.description is an object', () => {
+      const error = {
+        response: { status: 422 },
+        cause: { description: { message: 'nested validation error' } },
+        message: 'Validation failed',
+      };
+      const message = GitLabClientClass.formatError(error);
+      expect(message).toContain('422 Unprocessable');
+      expect(message).toContain('Validation failed');
+      expect(message).not.toContain('[object Object]');
     });
 
     it('should format network errors with getaddrinfo', () => {
@@ -261,6 +292,12 @@ describe('GitLabClient', () => {
       const error = { cause: { description: 'Invalid parameter: name' } };
       const message = GitLabClientClass.formatError(error);
       expect(message).toBe('GitLab API error: Invalid parameter: name');
+    });
+
+    it('should fall through to the generic message when cause.description is a non-string object', () => {
+      const error = { cause: { description: { code: 'bad' } }, message: 'raw message' };
+      const message = GitLabClientClass.formatError(error);
+      expect(message).toBe('raw message');
     });
 
     it('should return generic message for unknown errors', () => {
@@ -292,6 +329,48 @@ describe('GitLabClient', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
       expect(result.errorType).toBe('network');
+    });
+  });
+
+  describe('getCurrentUser', () => {
+    it('should return the authenticated user identity', async () => {
+      mockGitlabInstance.Users.showCurrentUser.mockResolvedValue({
+        id: 42,
+        username: 'jane.doe',
+        name: 'Jane Doe',
+        email: 'jane@example.com',
+        webUrl: 'https://gitlab.example.com/jane.doe',
+      });
+
+      const result = await client.getCurrentUser();
+
+      expect(mockGitlabInstance.Users.showCurrentUser).toHaveBeenCalled();
+      expect(result).toEqual({
+        id: 42,
+        username: 'jane.doe',
+        name: 'Jane Doe',
+        email: 'jane@example.com',
+        web_url: 'https://gitlab.example.com/jane.doe',
+      });
+    });
+
+    it('should tolerate a missing email (some GitLab configs hide it)', async () => {
+      mockGitlabInstance.Users.showCurrentUser.mockResolvedValue({
+        id: 42,
+        username: 'jane.doe',
+        name: 'Jane Doe',
+        web_url: 'https://gitlab.example.com/jane.doe',
+      });
+
+      const result = await client.getCurrentUser();
+
+      expect(result.email).toBeUndefined();
+    });
+
+    it('should propagate errors from the underlying API call', async () => {
+      mockGitlabInstance.Users.showCurrentUser.mockRejectedValue(new Error('401 Unauthorized'));
+
+      await expect(client.getCurrentUser()).rejects.toThrow('401 Unauthorized');
     });
   });
 
@@ -369,6 +448,27 @@ describe('GitLabClient', () => {
       });
     });
 
+    it('falls back to the default limit for a negative value instead of passing it through raw', async () => {
+      mockGitlabInstance.Projects.all.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+
+      const result = await client.listProjects({ limit: -5 });
+
+      expect(mockGitlabInstance.Projects.all).toHaveBeenCalledWith(
+        expect.objectContaining({ perPage: 20 })
+      );
+      expect(result).toHaveLength(2);
+    });
+
+    it('clamps an oversized limit down to the GitLab per-page maximum of 100', async () => {
+      mockGitlabInstance.Projects.all.mockResolvedValue([{ id: 1 }]);
+
+      await client.listProjects({ limit: 999999 });
+
+      expect(mockGitlabInstance.Projects.all).toHaveBeenCalledWith(
+        expect.objectContaining({ perPage: 100 })
+      );
+    });
+
     it('should list only owned projects', async () => {
       mockGitlabInstance.Projects.all.mockResolvedValue([]);
       await client.listProjects({ owned: true });
@@ -379,6 +479,21 @@ describe('GitLabClient', () => {
         page: 1,
         pagination: 'offset',
         owned: true,
+      });
+    });
+
+    it('should forward membership and archived filters to the API', async () => {
+      mockGitlabInstance.Projects.all.mockResolvedValue([]);
+      await client.listProjects({ membership: false, archived: true });
+
+      expect(mockGitlabInstance.Projects.all).toHaveBeenCalledWith({
+        search: undefined,
+        perPage: 20,
+        page: 1,
+        pagination: 'offset',
+        owned: undefined,
+        membership: false,
+        archived: true,
       });
     });
 
@@ -470,7 +585,10 @@ describe('GitLabClient', () => {
 
       const result = await client.searchCode('test');
 
-      expect(mockGitlabInstance.Search.all).toHaveBeenCalledWith('blobs', 'test');
+      expect(mockGitlabInstance.Search.all).toHaveBeenCalledWith('blobs', 'test', {
+        perPage: 100,
+        maxPages: 1,
+      });
       expect(result).toEqual(mockResults);
     });
 
@@ -483,18 +601,36 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.Search.all).toHaveBeenCalledWith('blobs', 'test', {
         projectId: 1,
+        perPage: 100,
+        maxPages: 1,
       });
       expect(result).toEqual(mockResults);
     });
 
-    it('should search code with scope', async () => {
+    it('should search code within a project by path (scope is not a supported parameter)', async () => {
       mockGitlabInstance.Search.all.mockResolvedValue([]);
 
-      await client.searchCode('test', { project_id: 'group/project', scope: 'blobs' });
+      await client.searchCode('test', { project_id: 'group/project' });
 
       expect(mockGitlabInstance.Search.all).toHaveBeenCalledWith('blobs', 'test', {
         projectId: 'group/project',
+        perPage: 100,
+        maxPages: 1,
       });
+    });
+
+    it('should bound the fetch for very large global search result sets', async () => {
+      const manyResults = Array.from({ length: 500 }, (_, i) => ({ filename: `file${i}.js` }));
+      mockGitlabInstance.Search.all.mockResolvedValue(manyResults);
+
+      const result = await client.searchCode('test');
+
+      expect(mockGitlabInstance.Search.all).toHaveBeenCalledWith(
+        'blobs',
+        'test',
+        expect.objectContaining({ maxPages: 1 })
+      );
+      expect(result).toEqual(manyResults);
     });
   });
 
@@ -523,6 +659,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
         projectId: 1,
         perPage: 20,
+        maxPages: 1,
       });
 
       expect(result).toEqual([
@@ -550,6 +687,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
         projectId: 1,
         perPage: 20,
+        maxPages: 1,
         state: 'merged',
       });
     });
@@ -562,6 +700,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
         projectId: 1,
         perPage: 20,
+        maxPages: 1,
         authorUsername: 'johndoe',
       });
     });
@@ -574,6 +713,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
         projectId: 1,
         perPage: 20,
+        maxPages: 1,
         reviewerUsername: 'janedoe',
       });
     });
@@ -586,7 +726,21 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
         projectId: 1,
         perPage: 20,
+        maxPages: 1,
         labels: 'bug,urgent',
+      });
+    });
+
+    it('should filter merge requests by scope without needing a username', async () => {
+      mockGitlabInstance.MergeRequests.all.mockResolvedValue([]);
+
+      await client.listMergeRequests(1, { scope: 'assigned_to_me' });
+
+      expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
+        projectId: 1,
+        perPage: 20,
+        maxPages: 1,
+        scope: 'assigned_to_me',
       });
     });
 
@@ -598,6 +752,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.MergeRequests.all).toHaveBeenCalledWith({
         projectId: 1,
         perPage: 5,
+        maxPages: 1,
       });
     });
 
@@ -614,6 +769,12 @@ describe('GitLabClient', () => {
           web_url: 'https://gitlab.example.com/mr/10',
           created_at: '2023-01-01T00:00:00Z',
           updated_at: '2023-01-02T00:00:00Z',
+          merged_at: '2023-01-03T00:00:00Z',
+          merge_commit_sha: 'deadbeef',
+          changes_count: '5',
+          has_conflicts: true,
+          merge_status: 'can_be_merged',
+          detailed_merge_status: 'mergeable',
         },
       ];
 
@@ -622,6 +783,12 @@ describe('GitLabClient', () => {
 
       expect(result[0].source_branch).toBe('feature');
       expect(result[0].target_branch).toBe('main');
+      expect(result[0].merged_at).toBe('2023-01-03T00:00:00Z');
+      expect(result[0].merge_commit_sha).toBe('deadbeef');
+      expect(result[0].changes_count).toBe('5');
+      expect(result[0].has_conflicts).toBe(true);
+      expect(result[0].merge_status).toBe('can_be_merged');
+      expect(result[0].detailed_merge_status).toBe('mergeable');
     });
 
     it('should limit results to specified limit', async () => {
@@ -679,6 +846,75 @@ describe('GitLabClient', () => {
         created_at: '2023-01-01T00:00:00Z',
         updated_at: '2023-01-02T00:00:00Z',
       });
+    });
+
+    it('should surface assignees/reviewers/labels/merge status fields when present (no truncation)', async () => {
+      const mockMR = {
+        id: 1,
+        iid: 10,
+        title: 'Test MR',
+        state: 'opened',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'John Doe', username: 'johndoe' },
+        webUrl: 'https://gitlab.example.com/group/project/-/merge_requests/10',
+        createdAt: '2023-01-01T00:00:00Z',
+        updatedAt: '2023-01-02T00:00:00Z',
+        assignees: [{ id: 2, name: 'Jane', username: 'jane' }],
+        reviewers: [{ id: 3, name: 'Bob', username: 'bob' }],
+        labels: ['bug', 'urgent'],
+        mergedAt: null,
+        mergeCommitSha: null,
+        changesCount: '5',
+        hasConflicts: false,
+        mergeStatus: 'can_be_merged',
+        detailedMergeStatus: 'mergeable',
+      };
+
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(mockMR);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.assignees).toEqual([{ id: 2, name: 'Jane', username: 'jane' }]);
+      expect(result.reviewers).toEqual([{ id: 3, name: 'Bob', username: 'bob' }]);
+      expect(result.labels).toEqual(['bug', 'urgent']);
+      expect(result.changes_count).toBe('5');
+      expect(result.has_conflicts).toBe(false);
+      expect(result.merge_status).toBe('can_be_merged');
+      expect(result.detailed_merge_status).toBe('mergeable');
+    });
+
+    it('maps author/assignees/reviewers to the minimal {id, name, username} shape, dropping extra gitbeaker fields', async () => {
+      const rawUser = (id: number, name: string, username: string) => ({
+        id,
+        name,
+        username,
+        avatar_url: 'https://gitlab.example.com/avatar.png',
+        state: 'active',
+        web_url: `https://gitlab.example.com/${username}`,
+      });
+      const mockMR = {
+        id: 1,
+        iid: 10,
+        title: 'Test MR',
+        state: 'opened',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: rawUser(1, 'John Doe', 'johndoe'),
+        assignees: [rawUser(2, 'Jane', 'jane')],
+        reviewers: [rawUser(3, 'Bob', 'bob')],
+        webUrl: 'https://gitlab.example.com/group/project/-/merge_requests/10',
+        createdAt: '2023-01-01T00:00:00Z',
+        updatedAt: '2023-01-02T00:00:00Z',
+      };
+
+      mockGitlabInstance.MergeRequests.show.mockResolvedValue(mockMR);
+
+      const result = await client.showMergeRequest(1, 10);
+
+      expect(result.author).toEqual({ id: 1, name: 'John Doe', username: 'johndoe' });
+      expect(result.assignees).toEqual([{ id: 2, name: 'Jane', username: 'jane' }]);
+      expect(result.reviewers).toEqual([{ id: 3, name: 'Bob', username: 'bob' }]);
     });
   });
 
@@ -830,6 +1066,30 @@ describe('GitLabClient', () => {
         mergeWhenPipelineSucceeds: true,
       });
     });
+
+    it('should surface merged_at and merge_commit_sha from the merge response', async () => {
+      const mockMR = {
+        id: 1,
+        iid: 10,
+        title: 'Merged MR',
+        state: 'merged',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'John Doe', username: 'johndoe' },
+        webUrl: 'https://gitlab.example.com/mr/10',
+        createdAt: '2023-01-01T00:00:00Z',
+        updatedAt: '2023-01-02T00:00:00Z',
+        mergedAt: '2023-01-03T00:00:00Z',
+        mergeCommitSha: 'deadbeef',
+      };
+
+      mockGitlabInstance.MergeRequests.accept.mockResolvedValue(mockMR);
+
+      const result = await client.mergeMergeRequest(1, 10);
+
+      expect(result.merged_at).toBe('2023-01-03T00:00:00Z');
+      expect(result.merge_commit_sha).toBe('deadbeef');
+    });
   });
 
   describe('updateMergeRequest', () => {
@@ -897,6 +1157,28 @@ describe('GitLabClient', () => {
         labels: 'bug,critical',
       });
     });
+
+    it('should surface the updated labels array in the response (not silently dropped)', async () => {
+      const mockMR = {
+        id: 1,
+        iid: 10,
+        title: 'Updated Title',
+        state: 'opened',
+        sourceBranch: 'feature',
+        targetBranch: 'main',
+        author: { id: 1, name: 'John Doe', username: 'johndoe' },
+        webUrl: 'https://gitlab.example.com/mr/10',
+        createdAt: '2023-01-01T00:00:00Z',
+        updatedAt: '2023-01-02T00:00:00Z',
+        labels: ['bug', 'critical'],
+      };
+
+      mockGitlabInstance.MergeRequests.edit.mockResolvedValue(mockMR);
+
+      const result = await client.updateMergeRequest(1, 10, { labels: 'bug,critical' });
+
+      expect(result.labels).toEqual(['bug', 'critical']);
+    });
   });
 
   describe('getMrChanges', () => {
@@ -933,6 +1215,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Commits.all).toHaveBeenCalledWith(1, {
         refName: 'main',
         perPage: 20,
+        maxPages: 1,
       });
 
       expect(result).toEqual([
@@ -956,6 +1239,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Commits.all).toHaveBeenCalledWith(1, {
         refName: 'develop',
         perPage: 10,
+        maxPages: 1,
       });
     });
 
@@ -1033,6 +1317,7 @@ describe('GitLabClient', () => {
         ref: undefined,
         perPage: 5,
         page: 1,
+        maxPages: 1,
       });
 
       expect(result).toEqual([
@@ -1058,6 +1343,7 @@ describe('GitLabClient', () => {
         ref: undefined,
         perPage: 5,
         page: 1,
+        maxPages: 1,
       });
     });
 
@@ -1071,6 +1357,7 @@ describe('GitLabClient', () => {
         ref: 'develop',
         perPage: 5,
         page: 1,
+        maxPages: 1,
       });
     });
 
@@ -1084,7 +1371,26 @@ describe('GitLabClient', () => {
         ref: undefined,
         perPage: 10,
         page: 2,
+        maxPages: 1,
       });
+    });
+
+    it('should bound the fetch to a single page for very large pipeline result sets', async () => {
+      const manyPipelines = Array.from({ length: 500 }, (_, i) => ({
+        id: i,
+        status: 'success',
+        ref: 'main',
+        sha: `sha${i}`,
+      }));
+      mockGitlabInstance.Pipelines.all.mockResolvedValue(manyPipelines);
+
+      const result = await client.listPipelines(1, { limit: 5 });
+
+      expect(mockGitlabInstance.Pipelines.all).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ maxPages: 1 })
+      );
+      expect(result).toHaveLength(5);
     });
 
     it('should handle snake_case properties in pipelines', async () => {
@@ -1126,7 +1432,11 @@ describe('GitLabClient', () => {
       const result = await client.showPipeline(1, 1);
 
       expect(mockGitlabInstance.Pipelines.show).toHaveBeenCalledWith(1, 1);
-      expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, { pipelineId: 1 });
+      expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, {
+        pipelineId: 1,
+        perPage: 100,
+        maxPages: 1,
+      });
       expect(result).toEqual({
         pipeline: mockPipeline,
         jobs: mockJobs,
@@ -1285,6 +1595,82 @@ describe('GitLabClient', () => {
     });
   });
 
+  describe('listTags', () => {
+    it('should list tags with default options', async () => {
+      const mockTags = [
+        { name: 'v2.0.0', target: 'def456' },
+        { name: 'v1.0.0', target: 'abc123' },
+      ];
+
+      mockGitlabInstance.Tags.all.mockResolvedValue(mockTags);
+
+      const result = await client.listTags(1);
+
+      expect(mockGitlabInstance.Tags.all).toHaveBeenCalledWith(1, {
+        search: undefined,
+        perPage: 20,
+        maxPages: 1,
+      });
+      expect(result).toEqual(mockTags);
+    });
+
+    it('should filter tags by search pattern', async () => {
+      mockGitlabInstance.Tags.all.mockResolvedValue([]);
+
+      await client.listTags(1, { search: 'v1.', limit: 5 });
+
+      expect(mockGitlabInstance.Tags.all).toHaveBeenCalledWith(1, {
+        search: 'v1.',
+        perPage: 5,
+        maxPages: 1,
+      });
+    });
+
+    it('should require a project_id', async () => {
+      await expect(client.listTags('' as unknown as string)).rejects.toThrow(
+        'Missing required parameter: project_id'
+      );
+    });
+
+    it('should truncate results to the limit', async () => {
+      const mockTags = Array.from({ length: 30 }, (_, i) => ({ name: `v${i}`, target: `sha${i}` }));
+      mockGitlabInstance.Tags.all.mockResolvedValue(mockTags);
+
+      const result = await client.listTags(1, { limit: 10 });
+
+      expect(result).toHaveLength(10);
+    });
+
+    it('falls back to the default limit for a zero value', async () => {
+      mockGitlabInstance.Tags.all.mockResolvedValue([]);
+
+      await client.listTags(1, { limit: 0 });
+
+      expect(mockGitlabInstance.Tags.all).toHaveBeenCalledWith(1, {
+        search: undefined,
+        perPage: 20,
+        maxPages: 1,
+      });
+    });
+
+    it('should clamp an oversized limit down to the max of 100', async () => {
+      const mockTags = Array.from({ length: 150 }, (_, i) => ({
+        name: `v${i}`,
+        target: `sha${i}`,
+      }));
+      mockGitlabInstance.Tags.all.mockResolvedValue(mockTags);
+
+      const result = await client.listTags(1, { limit: 999999 });
+
+      expect(mockGitlabInstance.Tags.all).toHaveBeenCalledWith(1, {
+        search: undefined,
+        perPage: 100,
+        maxPages: 1,
+      });
+      expect(result).toHaveLength(100);
+    });
+  });
+
   describe('createTag', () => {
     it('should create tag with required fields', async () => {
       const mockTag = {
@@ -1394,6 +1780,7 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.MergeRequests.allCommits).toHaveBeenCalledWith(1, 10, {
         perPage: 20,
+        maxPages: 1,
       });
       expect(result).toEqual([
         {
@@ -1415,6 +1802,7 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.MergeRequests.allCommits).toHaveBeenCalledWith(1, 10, {
         perPage: 5,
+        maxPages: 1,
       });
     });
 
@@ -1457,7 +1845,10 @@ describe('GitLabClient', () => {
 
       const result = await client.listMrPipelines(1, 10);
 
-      expect(mockGitlabInstance.MergeRequests.allPipelines).toHaveBeenCalledWith(1, 10);
+      expect(mockGitlabInstance.MergeRequests.allPipelines).toHaveBeenCalledWith(1, 10, {
+        perPage: 10,
+        maxPages: 1,
+      });
       expect(result).toEqual([
         {
           id: 1,
@@ -1503,6 +1894,7 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.MergeRequestNotes.all).toHaveBeenCalledWith(1, 10, {
         perPage: 20,
+        maxPages: 1,
       });
       expect(result).toEqual(mockNotes);
     });
@@ -1551,6 +1943,7 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.MergeRequestDiscussions.all).toHaveBeenCalledWith(1, 10, {
         perPage: 20,
+        maxPages: 1,
       });
       expect(result).toEqual(mockDiscussions);
     });
@@ -1604,6 +1997,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Branches.all).toHaveBeenCalledWith(1, {
         search: undefined,
         perPage: 20,
+        maxPages: 1,
       });
       expect(result).toEqual(mockBranches);
     });
@@ -1616,6 +2010,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Branches.all).toHaveBeenCalledWith(1, {
         search: 'feat',
         perPage: 20,
+        maxPages: 1,
       });
     });
 
@@ -1714,6 +2109,7 @@ describe('GitLabClient', () => {
         until: undefined,
         path: undefined,
         perPage: 20,
+        maxPages: 1,
       });
       expect(result[0].author_name).toBe('John');
     });
@@ -1735,6 +2131,7 @@ describe('GitLabClient', () => {
         until: '2023-12-31',
         path: 'src/',
         perPage: 50,
+        maxPages: 1,
       });
     });
   });
@@ -1798,6 +2195,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Commits.all).toHaveBeenCalledWith(1, {
         refName: 'develop',
         perPage: 100, // searchCommits always fetches 100 to filter locally
+        maxPages: 1,
       });
     });
 
@@ -1840,6 +2238,7 @@ describe('GitLabClient', () => {
         ref: undefined,
         recursive: undefined,
         perPage: 100,
+        maxPages: 1,
       });
       expect(result).toEqual(mockTree);
     });
@@ -1859,6 +2258,7 @@ describe('GitLabClient', () => {
         ref: 'develop',
         recursive: true,
         perPage: 50,
+        maxPages: 1,
       });
     });
 
@@ -1878,11 +2278,14 @@ describe('GitLabClient', () => {
   });
 
   describe('getFile', () => {
-    it('should get file with default ref', async () => {
+    it('should get file with default ref, including file_name/file_path/ref metadata', async () => {
       const mockFile = {
         content: 'Y29uc29sZS5sb2coImhlbGxvIik=',
         encoding: 'base64',
         size: 22,
+        fileName: 'index.js',
+        filePath: 'src/index.js',
+        ref: 'main',
       };
 
       mockGitlabInstance.RepositoryFiles.show.mockResolvedValue(mockFile);
@@ -1898,21 +2301,74 @@ describe('GitLabClient', () => {
         content: 'Y29uc29sZS5sb2coImhlbGxvIik=',
         encoding: 'base64',
         size: 22,
+        file_name: 'index.js',
+        file_path: 'src/index.js',
+        ref: 'main',
       });
     });
 
     it('should get file with custom ref', async () => {
-      const mockFile = { content: 'test', encoding: 'base64', size: 4 };
+      const mockFile = {
+        content: 'test',
+        encoding: 'base64',
+        size: 4,
+        fileName: 'README.md',
+        filePath: 'README.md',
+        ref: 'develop',
+      };
 
       mockGitlabInstance.RepositoryFiles.show.mockResolvedValue(mockFile);
 
-      await client.getFile(1, 'README.md', 'develop');
+      const result = await client.getFile(1, 'README.md', 'develop');
 
       expect(mockGitlabInstance.RepositoryFiles.show).toHaveBeenCalledWith(
         1,
         'README.md',
         'develop'
       );
+      expect(result.file_path).toBe('README.md');
+      expect(result.ref).toBe('develop');
+    });
+
+    it('should fall back to snake_case response fields when camelCase metadata is absent', async () => {
+      const mockFile = {
+        content: 'test',
+        encoding: 'base64',
+        size: 4,
+        file_name: 'guide.md',
+        file_path: 'docs/guide.md',
+        ref: 'v1.0.0',
+      };
+
+      mockGitlabInstance.RepositoryFiles.show.mockResolvedValue(mockFile);
+
+      const result = await client.getFile(1, 'docs/guide.md', 'v1.0.0');
+
+      expect(result.file_name).toBe('guide.md');
+      expect(result.file_path).toBe('docs/guide.md');
+      expect(result.ref).toBe('v1.0.0');
+    });
+
+    it('derives file_name from the basename of filePath when no metadata is present at all', async () => {
+      const mockFile = { content: 'test', encoding: 'base64', size: 4 };
+
+      mockGitlabInstance.RepositoryFiles.show.mockResolvedValue(mockFile);
+
+      const result = await client.getFile(1, 'docs/guide.md', 'v1.0.0');
+
+      expect(result.file_name).toBe('guide.md');
+      expect(result.file_path).toBe('docs/guide.md');
+      expect(result.ref).toBe('v1.0.0');
+    });
+
+    it('derives file_name from a nested path with no directory component', async () => {
+      const mockFile = { content: 'test', encoding: 'base64', size: 4 };
+
+      mockGitlabInstance.RepositoryFiles.show.mockResolvedValue(mockFile);
+
+      const result = await client.getFile(1, 'README.md', 'main');
+
+      expect(result.file_name).toBe('README.md');
     });
   });
 
@@ -1978,7 +2434,11 @@ describe('GitLabClient', () => {
 
       const result = await client.listArtifacts(1, 100);
 
-      expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, { pipelineId: 100 });
+      expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, {
+        pipelineId: 100,
+        perPage: 100,
+        maxPages: 1,
+      });
       expect(result).toHaveLength(2);
       expect(result[0]).toEqual({
         job_id: 1,
@@ -2002,7 +2462,7 @@ describe('GitLabClient', () => {
   });
 
   describe('downloadArtifact', () => {
-    it('should download job log as artifact', async () => {
+    it('should return the job log as text, filename, and full byte size', async () => {
       const mockLog = 'Build output line 1\nBuild output line 2';
 
       mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
@@ -2011,7 +2471,43 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.Jobs.showLog).toHaveBeenCalledWith(1, 123);
       expect(result.filename).toBe('job-123-log.txt');
-      expect(result.data.toString()).toBe(mockLog);
+      expect(result.content).toBe(mockLog);
+      expect(result.size).toBe(Buffer.byteLength(mockLog, 'utf-8'));
+    });
+
+    it('caps content to the last tailLines lines while size reports the full untruncated length', async () => {
+      const lines = Array.from({ length: 600 }, (_, i) => `line ${i}`);
+      const mockLog = lines.join('\n');
+
+      mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
+
+      const result = await client.downloadArtifact(1, 123, 10);
+
+      expect(result.content).toBe(lines.slice(-10).join('\n'));
+      expect(result.content).not.toBe(mockLog);
+      expect(result.size).toBe(Buffer.byteLength(mockLog, 'utf-8'));
+    });
+
+    it('returns the full log untruncated when tailLines is 0', async () => {
+      const lines = Array.from({ length: 600 }, (_, i) => `line ${i}`);
+      const mockLog = lines.join('\n');
+
+      mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
+
+      const result = await client.downloadArtifact(1, 123, 0);
+
+      expect(result.content).toBe(mockLog);
+    });
+
+    it('defaults to capping at the last 500 lines when tailLines is not given', async () => {
+      const lines = Array.from({ length: 600 }, (_, i) => `line ${i}`);
+      const mockLog = lines.join('\n');
+
+      mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
+
+      const result = await client.downloadArtifact(1, 123);
+
+      expect(result.content).toBe(lines.slice(-500).join('\n'));
     });
   });
 
@@ -2046,6 +2542,7 @@ describe('GitLabClient', () => {
         labels: undefined,
         assigneeUsername: undefined,
         perPage: 20,
+        maxPages: 1,
       });
       expect(result).toEqual(mockIssues);
     });
@@ -2066,6 +2563,23 @@ describe('GitLabClient', () => {
         labels: 'bug,critical',
         assigneeUsername: 'johndoe',
         perPage: 10,
+        maxPages: 1,
+      });
+    });
+
+    it('should list issues scoped to "assigned_to_me" without needing a username', async () => {
+      mockGitlabInstance.Issues.all.mockResolvedValue([]);
+
+      await client.listIssues(1, { scope: 'assigned_to_me' });
+
+      expect(mockGitlabInstance.Issues.all).toHaveBeenCalledWith({
+        projectId: 1,
+        state: undefined,
+        labels: undefined,
+        assigneeUsername: undefined,
+        scope: 'assigned_to_me',
+        perPage: 20,
+        maxPages: 1,
       });
     });
 
@@ -2114,12 +2628,39 @@ describe('GitLabClient', () => {
       expect(result).toEqual(mockIssues[0]);
     });
 
-    it('should return null when issue not found', async () => {
+    it('should throw a descriptive error when issue not found (no silent null)', async () => {
       mockGitlabInstance.Issues.all.mockResolvedValue([]);
 
-      const result = await client.getIssue(1, 999);
+      await expect(client.getIssue(1, 999)).rejects.toThrow(
+        "Issue #999 not found in project '1'. List valid issue IIDs first via listIssues."
+      );
+    });
 
-      expect(result).toBeNull();
+    it('should throw when Issues.all returns a paginated response with an empty data array', async () => {
+      mockGitlabInstance.Issues.all.mockResolvedValue({ data: [] });
+
+      await expect(client.getIssue(1, 999)).rejects.toThrow(/not found in project/);
+    });
+
+    it('formatError passes the getIssue not-found message through intact (IID/project context preserved)', async () => {
+      mockGitlabInstance.Issues.all.mockResolvedValue([]);
+
+      let caught: unknown;
+      try {
+        await client.getIssue('my-group/my-project', 999);
+      } catch (error) {
+        caught = error;
+      }
+
+      const message = GitLabClientClass.formatError(caught);
+      expect(message).toBe(
+        "Issue #999 not found in project 'my-group/my-project'. List valid issue IIDs first via listIssues."
+      );
+      expect(message).not.toBe(
+        'Resource not found in GitLab. Verify the project_id/path and the ID/name argument are ' +
+          'correct, then list valid values with the corresponding list* tool first (listProjectIds, ' +
+          'listMrIds, listIssues, listBranches, etc.) before retrying.'
+      );
     });
 
     it('should handle paginated response', async () => {
@@ -2245,6 +2786,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.ProjectLabels.all).toHaveBeenCalledWith(1, {
         search: undefined,
         perPage: 50,
+        maxPages: 1,
       });
       expect(result).toEqual(mockLabels);
     });
@@ -2257,6 +2799,7 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.ProjectLabels.all).toHaveBeenCalledWith(1, {
         search: 'bug',
         perPage: 50,
+        maxPages: 1,
       });
     });
 
@@ -2578,7 +3121,7 @@ describe('Response Mappers', () => {
       Commits: { all: vi.fn(), showDiff: vi.fn() },
       Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
       Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
-      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      Tags: { all: vi.fn(), create: vi.fn(), show: vi.fn(), remove: vi.fn() },
       ProjectReleases: { create: vi.fn() },
       Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
@@ -2805,7 +3348,7 @@ describe('validateRequired — error paths', () => {
       Commits: { all: vi.fn(), showDiff: vi.fn() },
       Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
       Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
-      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      Tags: { all: vi.fn(), create: vi.fn(), show: vi.fn(), remove: vi.fn() },
       ProjectReleases: { create: vi.fn() },
       Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
@@ -2950,10 +3493,11 @@ describe('formatError — 5xx server error branches', () => {
     expect(result).toContain('Permission denied');
   });
 
-  it('should format 404 from message containing "not found" (case-insensitive)', () => {
+  it('should format 404 from a message containing the exact substring "not found"', () => {
     const error = { message: 'Project not found in namespace' };
     const result = GitLabClientClass.formatError(error);
-    expect(result).toBe('Resource not found in GitLab.');
+    expect(result).toContain('Resource not found in GitLab.');
+    expect(result).toContain('list valid values with the corresponding list* tool first');
   });
 
   it('should format network error from ETIMEDOUT message', () => {
@@ -3106,7 +3650,7 @@ describe('getTag and deleteTag', () => {
       Commits: { all: vi.fn(), showDiff: vi.fn() },
       Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
       Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
-      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      Tags: { all: vi.fn(), create: vi.fn(), show: vi.fn(), remove: vi.fn() },
       ProjectReleases: { create: vi.fn() },
       Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
@@ -3264,7 +3808,7 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
       Commits: { all: vi.fn(), showDiff: vi.fn() },
       Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
       Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
-      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      Tags: { all: vi.fn(), create: vi.fn(), show: vi.fn(), remove: vi.fn() },
       ProjectReleases: { create: vi.fn() },
       Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
@@ -3747,7 +4291,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
       Commits: { all: vi.fn(), showDiff: vi.fn() },
       Pipelines: { all: vi.fn(), show: vi.fn(), retry: vi.fn(), create: vi.fn() },
       Jobs: { all: vi.fn(), showLog: vi.fn(), erase: vi.fn() },
-      Tags: { create: vi.fn(), show: vi.fn(), remove: vi.fn() },
+      Tags: { all: vi.fn(), create: vi.fn(), show: vi.fn(), remove: vi.fn() },
       ProjectReleases: { create: vi.fn() },
       Branches: { all: vi.fn(), show: vi.fn(), create: vi.fn(), remove: vi.fn() },
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
@@ -3963,12 +4507,12 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
   });
 
   describe('getIssue — || [] fallback when result has no .data property', () => {
-    it('should return null when result is not an array and has no .data property', async () => {
+    it('should throw a teaching error naming the IID, project, and listIssues when result is not an array and has no .data property', async () => {
       mockGitlabInstance.Issues.all.mockResolvedValue({ meta: { total: 0 } } as unknown as never);
 
-      const result = await client.getIssue(1, 5);
-
-      expect(result).toBeNull();
+      await expect(client.getIssue(1, 5)).rejects.toThrow(
+        "Issue #5 not found in project '1'. List valid issue IIDs first via listIssues."
+      );
     });
   });
 

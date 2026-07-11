@@ -7,6 +7,8 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
+  type ResultValidationOptions,
 } from '@speedwave/mcp-shared';
 import { withValidation, withClients, ToolResult } from './validation.js';
 import { enrichMessagesWithAuthors } from '../user-directory.js';
@@ -64,7 +66,11 @@ const sendChannelTool: Tool = {
     required: ['channel', 'message'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'send', 'message', 'channel', 'post', 'write'],
   example: 'await slack.sendChannel({ channel: "#general", message: "Hello!" })',
   outputSchema: {
@@ -92,12 +98,16 @@ const sendChannelTool: Tool = {
 const getChannelMessagesTool: Tool = {
   name: 'getChannelMessages',
   description:
-    'Get one page of messages from a channel or DM conversation (newest first; accepts #name, C…, or D…/G… IDs). Iterate with `cursor` (from `next_cursor`) to read the full history.',
+    'Get one page of messages from a channel or DM conversation (newest first; accepts #name, C…, or D…/G… IDs). Iterate with `cursor` (from `next_cursor`) to read the full history. To find which messages are from or addressed to the signed-in user, first resolve their identity with getCurrentUser and compare against the `user` field.',
   inputSchema: {
     type: 'object',
     properties: {
       channel: { type: 'string', description: 'Channel ID or name' },
-      limit: { type: 'number', description: 'Max messages per page, 1-100 (default 50)' },
+      limit: {
+        type: 'number',
+        description:
+          'Max messages per page, 1-100 (default 50); out-of-range values are silently clamped to the nearest bound — see limit_used in the response',
+      },
       oldest: { type: 'string', description: 'Only messages after this Slack timestamp' },
       latest: { type: 'string', description: 'Only messages before this Slack timestamp' },
       cursor: { type: 'string', description: 'Pagination cursor from a previous next_cursor' },
@@ -105,7 +115,11 @@ const getChannelMessagesTool: Tool = {
     required: ['channel'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'read', 'message', 'history', 'channel', 'get', 'pagination'],
   example: 'const messages = await slack.getChannelMessages({ channel: "#general", limit: 10 })',
   outputSchema: {
@@ -160,6 +174,10 @@ const getChannelMessagesTool: Tool = {
         description: 'Pass as `cursor` to fetch the next (older) page; absent on the last page',
       },
       has_more: { type: 'boolean', description: 'True when another page exists' },
+      limit_used: {
+        type: 'number',
+        description: 'The page size actually used, after clamping the requested limit to 1-100',
+      },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -183,19 +201,31 @@ const getChannelMessagesTool: Tool = {
 const getThreadMessagesTool: Tool = {
   name: 'getThreadMessages',
   description:
-    "Get one page of a thread's messages in a channel or DM (parent first, then replies oldest-first). Find threads via getChannelMessages entries with reply_count > 0; iterate with `cursor`.",
+    "Get one page of a thread's messages in a channel or DM (parent first, then replies oldest-first). Find threads via getChannelMessages entries with reply_count > 0; iterate with `cursor`. To find whether the signed-in user already replied, resolve their identity with getCurrentUser and compare against the `user` field.",
   inputSchema: {
     type: 'object',
     properties: {
       channel: { type: 'string', description: 'Channel ID or name' },
-      thread_ts: { type: 'string', description: '`ts` of the thread parent message' },
-      limit: { type: 'number', description: 'Max messages per page, 1-100 (default 50)' },
+      thread_ts: {
+        type: 'string',
+        description:
+          'The exact `ts` of the thread parent message, copied VERBATIM from a prior getChannelMessages/getThreadMessages result (e.g. "1717000000.000100") — never reformat, round, or convert it to a number',
+      },
+      limit: {
+        type: 'number',
+        description:
+          'Max messages per page, 1-100 (default 50); out-of-range values are silently clamped to the nearest bound — see limit_used in the response',
+      },
       cursor: { type: 'string', description: 'Pagination cursor from a previous next_cursor' },
     },
     required: ['channel', 'thread_ts'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'thread', 'replies', 'read', 'message', 'history'],
   example:
     'const thread = await slack.getThreadMessages({ channel: "#general", thread_ts: "1717000000.000100" })',
@@ -227,6 +257,10 @@ const getThreadMessagesTool: Tool = {
         description: 'Pass as `cursor` to fetch the next page; absent on the last page',
       },
       has_more: { type: 'boolean', description: 'True when another page exists' },
+      limit_used: {
+        type: 'number',
+        description: 'The page size actually used, after clamping the requested limit to 1-100',
+      },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -262,7 +296,11 @@ const listChannelIdsTool: Tool = {
     },
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'channels', 'list', 'get', 'member'],
   example: 'const channels = await slack.listChannelIds()',
   outputSchema: {
@@ -274,7 +312,10 @@ const listChannelIdsTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string', description: 'Channel ID' },
+            id: {
+              type: 'string',
+              description: 'Channel ID — pass to getChannelMessages/sendChannel',
+            },
             name: { type: 'string', description: 'Channel name' },
             is_private: { type: 'boolean' },
             is_member: { type: 'boolean' },
@@ -380,6 +421,15 @@ export async function handleListChannelIds(
 //===============================================================================
 
 /**
+ * Required-param options for {@link withValidation}, driven by the tool's own
+ * declared `inputSchema.required` so the guard can never drift from the schema.
+ * @param tool - Tool definition to read `inputSchema.required`/`name` from.
+ */
+function requiredOf(tool: Tool): ResultValidationOptions {
+  return { required: tool.inputSchema.required ?? [], toolName: tool.name };
+}
+
+/**
  * Tool handler function.
  * @param clients - Slack client instances (non-null; null check via _tokensStatus)
  */
@@ -389,15 +439,24 @@ export function createChannelTools(clients: SlackClients): ToolDefinition[] {
   return [
     {
       tool: sendChannelTool,
-      handler: withValidation<SendChannelParams>(gate(handleSendChannel)),
+      handler: withValidation<SendChannelParams>(
+        gate(handleSendChannel),
+        requiredOf(sendChannelTool)
+      ),
     },
     {
       tool: getChannelMessagesTool,
-      handler: withValidation<GetChannelMessagesParams>(gate(handleGetChannelMessages)),
+      handler: withValidation<GetChannelMessagesParams>(
+        gate(handleGetChannelMessages),
+        requiredOf(getChannelMessagesTool)
+      ),
     },
     {
       tool: getThreadMessagesTool,
-      handler: withValidation<GetThreadMessagesParams>(gate(handleGetThreadMessages)),
+      handler: withValidation<GetThreadMessagesParams>(
+        gate(handleGetThreadMessages),
+        requiredOf(getThreadMessagesTool)
+      ),
     },
     {
       tool: listChannelIdsTool,

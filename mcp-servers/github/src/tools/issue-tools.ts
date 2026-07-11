@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -12,6 +13,7 @@ import {
 import { GitHubClient } from '../client.js';
 import { GitHubIssue } from '../types.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 /**
  * Maps a normalized issue to the compact summary returned by `listIssues`
@@ -40,10 +42,14 @@ function issueSummary(i: GitHubIssue): {
 }
 
 const listIssuesTool: Tool = {
-  name: 'listIssues',
+  name: TOOL_NAMES.LIST_ISSUES,
   description: 'List issues in a repository. Pull requests are excluded.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
   keywords: ['github', 'issues', 'list', 'bugs', 'tasks', 'tickets'],
   example:
     'const { issues, count } = await github.listIssues({ owner: "octocat", repo: "hello", state: "open" })',
@@ -58,9 +64,18 @@ const listIssuesTool: Tool = {
         description: 'Issue state (default open)',
       },
       labels: { type: 'string', description: 'Comma-separated label names' },
-      assignee: { type: 'string', description: "GitHub login, or '*' for any, or 'none'" },
-      creator: { type: 'string', description: 'GitHub login' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      assignee: {
+        type: 'string',
+        description: `GitHub login, or '*' for any assignee, or 'none' for unassigned. Does NOT accept 'me'. Resolve the authenticated user's login via ${TOOL_NAMES.GET_CURRENT_USER} first, then pass it here.`,
+      },
+      creator: {
+        type: 'string',
+        description: `GitHub login. Does NOT accept 'me'. Resolve the authenticated user's login via ${TOOL_NAMES.GET_CURRENT_USER} first, then pass it here.`,
+      },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -114,7 +129,7 @@ const getIssueTool: Tool = {
   name: 'getIssue',
   description: 'Get detailed information about a specific issue.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'issue', 'get', 'show', 'details', 'ticket'],
   example: 'const issue = await github.getIssue({ owner: "octocat", repo: "hello", number: 42 })',
   inputSchema: {
@@ -162,7 +177,11 @@ const createIssueTool: Tool = {
   name: 'createIssue',
   description: 'Create a new issue.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
   keywords: ['github', 'issue', 'create', 'new', 'bug', 'ticket'],
   example:
     'const issue = await github.createIssue({ owner: "octocat", repo: "hello", title: "Fix login bug", labels: ["bug"] })',
@@ -174,7 +193,11 @@ const createIssueTool: Tool = {
       title: { type: 'string', description: 'Issue title' },
       body: { type: 'string', description: 'Issue body (Markdown)' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Label names to apply' },
-      assignees: { type: 'array', items: { type: 'string' }, description: 'Assignee logins' },
+      assignees: {
+        type: 'array',
+        items: { type: 'string' },
+        description: `Assignee logins. Does NOT accept 'me'. To assign to the authenticated user, resolve their login via ${TOOL_NAMES.GET_CURRENT_USER} first.`,
+      },
     },
     required: ['owner', 'repo', 'title'],
   },
@@ -223,7 +246,11 @@ const updateIssueTool: Tool = {
   name: 'updateIssue',
   description: 'Update an existing issue.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
   keywords: ['github', 'issue', 'update', 'edit', 'modify', 'ticket'],
   example:
     'await github.updateIssue({ owner: "octocat", repo: "hello", number: 42, title: "Updated title", state: "closed" })',
@@ -240,7 +267,7 @@ const updateIssueTool: Tool = {
       assignees: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Replacement assignee logins',
+        description: `Replacement assignee logins. Does NOT accept 'me'. To assign to the authenticated user, resolve their login via ${TOOL_NAMES.GET_CURRENT_USER} first.`,
       },
     },
     required: ['owner', 'repo', 'number'],
@@ -285,7 +312,7 @@ const closeIssueTool: Tool = {
   name: 'closeIssue',
   description: "Closes an issue (shortcut for updateIssue with state 'closed').",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'issue', 'close', 'resolve', 'done', 'ticket'],
   example: 'await github.closeIssue({ owner: "octocat", repo: "hello", number: 42 })',
   inputSchema: {

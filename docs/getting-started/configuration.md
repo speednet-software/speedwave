@@ -94,6 +94,13 @@ A `.speedwave.json` file in the project repository root provides repo-level defa
 
 Optional. When set, this is the persisted context window (in tokens) the chat footer uses to render the `used / max` ratio before any stream-level value lands. Settings populates it automatically from the SSOT (Anthropic — `defaults::ANTHROPIC_MODELS`) or from the live discovery probe (local providers). Clearing it (`null`) lets the chat footer fall back through `live stream → SSOT lookup → previous in-memory value → 200_000`. Zero is rejected at save time to prevent a divide-by-zero in the percentage bar.
 
+### Session flags for local providers
+
+When the active provider kind is `local`, Speedwave adds two Claude Code CLI flags to every session (Anthropic and OpenRouter sessions are unaffected):
+
+- `--exclude-dynamic-system-prompt-sections` moves per-machine sections (cwd, env info, git status) out of the system prompt prefix, so a llama.cpp/Unsloth server can reuse its KV cache across session restarts instead of re-prefilling the whole prompt.
+- `--append-system-prompt` with a short skill-recall nudge (`speedwave_runtime::prompts::local_llm_skills_nudge`). Small open models rarely act on the available-skills list unprompted; the nudge restates that contract. Even with it, explicit invocation (`/skill-name`) remains the reliable way to trigger skills on local models.
+
 ### Model discovery (local providers)
 
 When the selected provider is local (`local`, or legacy `ollama` / `lmstudio` / `llamacpp`), the Settings → LLM Provider panel probes the server for the list of available models when you click **Discover models**. Discovery is button-driven only: the panel never probes automatically, not on open, not on provider switch, and not when a `base_url` is configured. A successful probe surfaces both the model ids and per-model context windows where the server advertises them:

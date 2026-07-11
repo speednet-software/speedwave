@@ -22,6 +22,9 @@ import {
 // Import handlers
 import { createCodeExecutorHandlers } from './handlers.js';
 
+// Detail-level SSOT (powers the TS union, this JSON-schema enum, and the validator)
+import { DETAIL_LEVELS } from './search-tools.js';
+
 // Import bridge initialization
 import { initializeBridges } from './executor.js';
 
@@ -60,10 +63,12 @@ const HUB_RATE_LIMIT_WINDOW_MS = 60_000;
 const TOOLS: Tool[] = [
   {
     name: 'search_tools',
-    description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
+    description: `Search available MCP tools by keyword or short phrase. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
 Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
+
+Matching is tokenized and ranked (each word matched independently against name/keywords/description), so a natural phrase like "my logged hours" also works. A zero-match result includes a 'hint' with next steps.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })
@@ -79,7 +84,7 @@ Examples:
         },
         detail_level: {
           type: 'string',
-          enum: ['names_only', 'with_descriptions', 'full_schema'],
+          enum: [...DETAIL_LEVELS],
           description:
             "Level of detail. Use 'names_only' first, then 'full_schema' for specific tools.",
         },
@@ -206,6 +211,7 @@ return { total: results.length, failed: errors.length };
 /**
  * Main server initialization and startup
  */
+/* c8 ignore start: server bootstrap (registry/bridge init + listen); exercised by container start, not unit tests */
 async function main() {
   console.log(`${ts()} 🚀 Starting Speedwave Code Executor MCP Server...`);
   console.log(`${ts()} 📊 Token reduction: 44 tools → 2 meta-tools (97.6% reduction)`);
@@ -259,7 +265,6 @@ async function main() {
   });
 
   // Graceful shutdown handler.
-  /* c8 ignore start */
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
     server.close(() => {
@@ -275,8 +280,8 @@ async function main() {
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  /* c8 ignore stop */
 }
+/* c8 ignore stop */
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Hub Express App Factory

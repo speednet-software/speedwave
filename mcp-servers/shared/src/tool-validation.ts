@@ -14,6 +14,7 @@
 import type { ToolsCallResult } from './types.js';
 import { errorResult } from './server.js';
 import { notConfiguredMessage } from './errors.js';
+import { missingParamResult } from './teaching-errors.js';
 
 //═══════════════════════════════════════════════════════════════════════════════
 // Family A — param-shape guard + ToolResult formatting (slack / sharepoint / os)
@@ -49,16 +50,35 @@ function formatResult(result: ToolResult, indent: number): ToolsCallResult {
   return result.success ? { content } : { content, isError: true };
 }
 
+/** Optional behavior for {@link withResultValidation}. */
+export interface ResultValidationOptions {
+  /** Param names that must be present; a missing one short-circuits to a teaching error. */
+  required?: readonly string[];
+  /** Tool name folded into the missing-param teaching message. */
+  toolName?: string;
+}
+
 /**
- * Wrap a {@link ToolResult}-returning handler with a param-shape guard and
+ * True iff a required param value counts as missing (absent, null, or empty string).
+ * @param value - The param value to test.
+ */
+function isMissingRequired(value: unknown): boolean {
+  return value === undefined || value === null || value === '';
+}
+
+/**
+ * Wrap a {@link ToolResult}-returning handler with a param-shape guard, optional
+ * `required`-param enforcement driven by the tool's `inputSchema.required`, and
  * uniform error formatting.
  * @template T - The handler's parsed params type.
  * @param handler - Handler returning a {@link ToolResult} (sync or async).
  * @param indent - `JSON.stringify` indent for the formatted payload (default 2).
+ * @param options - Optional required-param list and tool name for teaching errors.
  */
 export function withResultValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>,
-  indent = 2
+  indent = 2,
+  options?: ResultValidationOptions
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
   return async (params: Record<string, unknown>) => {
     if (!isParamObject(params)) {
@@ -69,6 +89,15 @@ export function withResultValidation<T>(
         },
         indent
       );
+    }
+    for (const name of options?.required ?? []) {
+      if (isMissingRequired(params[name])) {
+        const suffix = options?.toolName ? ` for ${options.toolName}.` : '.';
+        return formatResult(
+          missingParamResult(name, params[name], `Provide ${name}${suffix}`),
+          indent
+        );
+      }
     }
     try {
       const result = await handler(params as T);

@@ -226,6 +226,32 @@ describe('RedmineClient', () => {
       expect(result.issues).toHaveLength(25);
       expect(result.total_count).toBe(100);
     });
+
+    it('should default the limit to 25 when omitted', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({});
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+        params: {
+          limit: 25,
+          offset: 0,
+        },
+      });
+    });
+
+    it('should clamp an oversized limit down to 100', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      await client.listIssues({ limit: 999999 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/issues.json', {
+        params: {
+          limit: 100,
+          offset: 0,
+        },
+      });
+    });
   });
 
   describe('showIssue', () => {
@@ -404,6 +430,26 @@ describe('RedmineClient', () => {
           limit: 10,
           scope: 'project:my-project',
         },
+      });
+    });
+
+    it('should clamp an oversized limit down to 100', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { results: [], total_count: 0 } });
+
+      await client.searchIssues('bug', { limit: 999999 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/search.json', {
+        params: { q: 'bug', issues: 1, limit: 100 },
+      });
+    });
+
+    it('should default the limit to 25 when 0', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { results: [], total_count: 0 } });
+
+      await client.searchIssues('bug', { limit: 0 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/search.json', {
+        params: { q: 'bug', issues: 1, limit: 25 },
       });
     });
   });
@@ -811,6 +857,36 @@ describe('RedmineClient', () => {
           from: '2024-01-01',
           to: '2024-01-31',
         },
+      });
+    });
+
+    it("should pass user_id: 'me' through to the API verbatim", async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { time_entries: [], total_count: 0 } });
+
+      await client.listTimeEntries({ user_id: 'me' });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+        params: { limit: 25, user_id: 'me' },
+      });
+    });
+
+    it('should clamp an oversized limit down to 100', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { time_entries: [], total_count: 0 } });
+
+      await client.listTimeEntries({ limit: 999999 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+        params: { limit: 100 },
+      });
+    });
+
+    it('should default the limit to 25 when 0', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { time_entries: [], total_count: 0 } });
+
+      await client.listTimeEntries({ limit: 0 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/time_entries.json', {
+        params: { limit: 25 },
       });
     });
   });
@@ -1492,6 +1568,22 @@ describe('RedmineClient', () => {
       expect(result).toBe(withSetupGuidance('Authentication failed. Check your Redmine API key.'));
     });
 
+    it('formats a 422 without a lookup hint when no mappable field is named', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Subject cannot be blank'] },
+        },
+        message: 'Request failed with status code 422',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('Subject cannot be blank');
+      expect(result).not.toContain('getMappings');
+      expect(result).not.toContain('resolveUser');
+    });
+
     it('should format 403 permission error', () => {
       const error = {
         isAxiosError: true,
@@ -1520,6 +1612,68 @@ describe('RedmineClient', () => {
       expect(result).toContain('Resource not found');
     });
 
+    it('should include the entity identifier and a recovery hint in a 404 with context', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, { issue_id: 99999 });
+      expect(result).toContain('issue_id=99999');
+      expect(result).toContain('listIssueIds');
+    });
+
+    it('should give a distinct recovery hint per entity type on 404', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      expect(RedmineClient.formatError(error, { journal_id: 42 })).toContain('listJournals');
+      expect(RedmineClient.formatError(error, { relation_id: 7 })).toContain('listRelations');
+      expect(RedmineClient.formatError(error, { time_entry_id: 789 })).toContain('listTimeEntries');
+      expect(RedmineClient.formatError(error, { project_id: 'my-project' })).toContain(
+        'listProjectIds'
+      );
+    });
+
+    it('should fall back to the generic 404 message for an unknown context key', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, { weird_key: 1 });
+      expect(result).toContain('Resource not found in Redmine: weird_key=1.');
+    });
+
+    it('should give a hint for every key in a compound relation-style context', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, { issue_id: 5, issue_to_id: 9 });
+      expect(result).toContain('issue_id=5, issue_to_id=9');
+      expect(result).toContain('listIssueIds');
+    });
+
+    it('does not append a getMappings hint for a custom field whose name merely contains "status"', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 422, data: { errors: ['Qa status is invalid'] } },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('Qa status is invalid');
+      expect(result).not.toContain('getMappings');
+    });
+
     it('should format 422 validation error with details', () => {
       const error = {
         isAxiosError: true,
@@ -1535,6 +1689,34 @@ describe('RedmineClient', () => {
       const result = RedmineClient.formatError(error);
       expect(result).toContain('Validation error');
       expect(result).toContain('Subject cannot be blank');
+    });
+
+    it('should append a resolveUser hint when a 422 validation error names assigned_to', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Assigned to is invalid'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('resolveUser');
+    });
+
+    it('should append a getMappings hint when a 422 validation error names status/priority/tracker/activity', () => {
+      const error = {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { errors: ['Tracker is invalid'] },
+        },
+        message: 'Unprocessable Entity',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error);
+      expect(result).toContain('getMappings');
     });
 
     it('should format generic HTTP error with status', () => {
@@ -2288,6 +2470,30 @@ describe('RedmineClient', () => {
           params: { limit: 25, offset: 50 },
         });
       });
+
+      it('should clamp an oversized limit down to 100 when unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: [], total_count: 0 },
+        });
+
+        await client.listProjects({ limit: 999999 });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
+          params: { limit: 100, offset: 0 },
+        });
+      });
+
+      it('should default the limit to 100 when 0 and unscoped', async () => {
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: [], total_count: 0 },
+        });
+
+        await client.listProjects({ limit: 0 });
+
+        expect(mockAxiosInstance.get).toHaveBeenCalledWith('/projects.json', {
+          params: { limit: 100, offset: 0 },
+        });
+      });
     });
 
     // ─── showProject() include option ───────────────────────────────────
@@ -2420,6 +2626,39 @@ describe('RedmineClient', () => {
 
         expect(result.projects).toHaveLength(1);
         expect(result.projects[0].identifier).toBe('alpha');
+      });
+
+      it('should clamp an oversized limit down to 100 results', async () => {
+        const manyProjects = Array.from({ length: 150 }, (_, i) => ({
+          id: i,
+          identifier: `proj-${i}`,
+          name: `Proj match ${i}`,
+          description: '',
+        }));
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: manyProjects, total_count: manyProjects.length },
+        });
+
+        const result = await client.searchProjects('match', { limit: 999999 });
+
+        expect(result.projects).toHaveLength(100);
+        expect(result.total_count).toBe(150);
+      });
+
+      it('should default the limit to 25 results when 0', async () => {
+        const manyProjects = Array.from({ length: 50 }, (_, i) => ({
+          id: i,
+          identifier: `proj-${i}`,
+          name: `Proj match ${i}`,
+          description: '',
+        }));
+        mockAxiosInstance.get.mockResolvedValue({
+          data: { projects: manyProjects, total_count: manyProjects.length },
+        });
+
+        const result = await client.searchProjects('match', { limit: 0 });
+
+        expect(result.projects).toHaveLength(25);
       });
     });
 

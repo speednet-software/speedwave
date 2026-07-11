@@ -122,6 +122,25 @@ export interface DriveItemForImage {
   };
 }
 
+/** Carries the HTTP status of a failed Graph response so callers can branch on it. */
+export class GraphApiError extends Error {
+  /**
+   * Build an error tagged with the failed Graph response status.
+   * @param message - human-readable failure detail
+   * @param status - HTTP status of the failed Graph response
+   */
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'GraphApiError';
+  }
+}
+
+/** Minimum spacing between siteId resolve retries while the worker is wedged. */
+const RESOLVE_RETRY_COOLDOWN_MS = TIMEOUTS.API_CALL_MS;
+
 //═══════════════════════════════════════════════════════════════════════════════
 // Client Class
 //═══════════════════════════════════════════════════════════════════════════════
@@ -155,6 +174,8 @@ export class SharePointClient {
   private readonly _resolveSiteIdMemo = memoizedPromise<void>({
     fetch: () => this._resolveSiteIdOnce(),
   });
+  /** Epoch ms before which a wedged-call resolve retry is skipped (cooldown). */
+  private _resolveRetryBlockedUntil = 0;
 
   /**
    * Create a SharePoint client
@@ -278,7 +299,7 @@ export class SharePointClient {
       } catch {
         // body not JSON — keep status line
       }
-      throw new Error(`Graph API ${method} ${url} failed: ${detail}`);
+      throw new GraphApiError(`Graph API ${method} ${url} failed: ${detail}`, response.status);
     }
     if (response.status === 204) return undefined;
     return (await response.json()) as T;
@@ -320,6 +341,14 @@ export class SharePointClient {
       return 'Resource not found in SharePoint.';
     }
 
+    if (message.includes('429') || message.includes('activityLimitReached')) {
+      return 'Rate limited by Microsoft Graph (429). Wait and retry the same call.';
+    }
+
+    if (message.includes('423') || message.includes('resourceLocked')) {
+      return 'Resource is locked in SharePoint (checked out or being edited elsewhere). Retry later.';
+    }
+
     if (message.includes('security check failed') || message.includes('traversal')) {
       return 'Invalid path: security check failed (path traversal not allowed).';
     }
@@ -346,10 +375,13 @@ export class SharePointClient {
    * @param url - Graph API endpoint URL
    * @param options - fetch options (Authorization is added by the helper)
    * @returns API response (caller checks `response.ok`)
-   * @throws {Error} on request timeout
+   * @throws {Error} on request timeout, or when a wedged-worker siteId resolve retry fails
    * @throws {OAuthScopeMismatchError} when refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
+    if (this.statusTracker.getStatus() === 'failed') {
+      url = await this._retryWedgedResolve(url);
+    }
     // Live view onto config.accessToken so the helper's writes are shared.
     const config = this.config;
     const state: AuthedTokenState = {
@@ -388,6 +420,37 @@ export class SharePointClient {
       tokensDir: this.tokensDir,
       proactiveWithinSeconds: PROACTIVE_REFRESH_SECONDS,
     });
+  }
+
+  /**
+   * Re-resolve the siteId for a wedged worker and rewrite `url` with the fresh
+   * id so this very call benefits; cooldown-guarded, scope-mismatch propagated.
+   * @param url - Graph URL built from the stale siteId
+   */
+  private async _retryWedgedResolve(url: string): Promise<string> {
+    if (Date.now() < this._resolveRetryBlockedUntil) {
+      throw this._siteConnectionError();
+    }
+    const staleSiteId = this.config.siteId;
+    try {
+      await this._resolveSiteIdMemo();
+    } catch (err) {
+      if (err instanceof OAuthScopeMismatchError) throw err;
+      this._resolveRetryBlockedUntil = Date.now() + RESOLVE_RETRY_COOLDOWN_MS;
+      throw this._siteConnectionError();
+    }
+    this._resolveRetryBlockedUntil = 0;
+    return this.config.siteId === staleSiteId
+      ? url
+      : url.split(staleSiteId).join(this.config.siteId);
+  }
+
+  /** Teaching error for a wedged worker whose siteId still cannot be resolved. */
+  private _siteConnectionError(): Error {
+    return new Error(
+      'SharePoint site connection is not established (siteId resolve failed). ' +
+        'This is a configuration issue, not a parameter problem: ask the user to check the SharePoint integration settings.'
+    );
   }
 
   /**
@@ -523,7 +586,10 @@ export class SharePointClient {
 
     if (!response.ok) {
       const errorData = (await response.json()) as { error?: { message?: string } };
-      throw new Error(errorData.error?.message || 'Failed to get file metadata');
+      throw new GraphApiError(
+        errorData.error?.message || 'Failed to get file metadata',
+        response.status
+      );
     }
 
     return (await response.json()) as DriveItemMetadata;
@@ -683,7 +749,9 @@ export class SharePointClient {
     const downloadUrl = metadata['@microsoft.graph.downloadUrl'];
 
     if (!downloadUrl) {
-      throw new Error('No download URL available for file');
+      throw new Error(
+        'No download URL available for file. This can happen if the item is a folder, is checked out to another user, or is an online-only document type; verify with getFileFull or listFileIds first.'
+      );
     }
 
     // Ensure parent directory exists
@@ -897,7 +965,7 @@ export async function resolveCompositeSiteId(
           tokensDir,
         });
       } catch (err) {
-        // Scope mismatch can't self-heal — propagate so the re-consent UI fires.
+        // Scope mismatch can't self-heal; propagate so the re-consent UI fires.
         if (err instanceof OAuthScopeMismatchError) throw err;
         console.warn(
           `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
@@ -929,6 +997,8 @@ export async function resolveCompositeSiteId(
     }
     return { ok: true, compositeId: id };
   } catch (e) {
+    // Scope mismatch can't self-heal; propagate so the re-consent UI fires.
+    if (e instanceof OAuthScopeMismatchError) throw e;
     if (e instanceof Error && e.name === 'AbortError') {
       return {
         ok: false,
