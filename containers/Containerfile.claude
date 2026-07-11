@@ -65,10 +65,22 @@ RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
 
 # TypeScript language server for the typescript-lsp plugin (Apache-2.0): the plugin only ships an
 # lspServers metadata entry pointing at the bare command; baking it into /usr/local puts it on PATH.
+# Tarballs are fetched via `npm pack` and SHA256-verified before install, matching this file's
+# SHA256-verified download convention rather than trusting the registry response outright.
 ARG TS_LANGUAGE_SERVER_VERSION=5.3.0
 ARG TYPESCRIPT_VERSION=6.0.3
-RUN npm install -g "typescript-language-server@${TS_LANGUAGE_SERVER_VERSION}" "typescript@${TYPESCRIPT_VERSION}" \
-    && npm cache clean --force
+ARG TS_LANGUAGE_SERVER_SHA256=398cacc17fff2108652e7b4050e3182008d17063246b3fea7dcf5fae2ce1560e
+ARG TYPESCRIPT_SHA256=33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a
+RUN NPM_PACK_DIR=$(mktemp -d) && \
+    cd "$NPM_PACK_DIR" && \
+    npm pack "typescript-language-server@${TS_LANGUAGE_SERVER_VERSION}" "typescript@${TYPESCRIPT_VERSION}" && \
+    echo "${TS_LANGUAGE_SERVER_SHA256}  typescript-language-server-${TS_LANGUAGE_SERVER_VERSION}.tgz" | sha256sum -c - && \
+    echo "${TYPESCRIPT_SHA256}  typescript-${TYPESCRIPT_VERSION}.tgz" | sha256sum -c - && \
+    npm install -g \
+        "${NPM_PACK_DIR}/typescript-language-server-${TS_LANGUAGE_SERVER_VERSION}.tgz" \
+        "${NPM_PACK_DIR}/typescript-${TYPESCRIPT_VERSION}.tgz" && \
+    npm cache clean --force && \
+    rm -rf "$NPM_PACK_DIR"
 
 # Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh

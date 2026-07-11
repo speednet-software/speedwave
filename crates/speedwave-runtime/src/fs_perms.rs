@@ -6,6 +6,10 @@ use std::path::Path;
 
 use tempfile::NamedTempFile;
 
+/// Prefix every `NamedTempFile::with_prefix_in` call in this module uses; a
+/// crash between creation and `persist` orphans a file with this prefix.
+const ATOMIC_WRITE_TEMP_PREFIX: &str = "write-";
+
 /// Restrict file permissions to owner-only access: Unix `chmod 0o600`; Windows DACL with a single
 /// `GENERIC_ALL` ACE for the current user.
 pub fn set_owner_only(path: &Path) -> Result<(), String> {
@@ -209,7 +213,7 @@ fn write_restricted_file_synced(
             path.display()
         )
     })?;
-    let mut tmp = NamedTempFile::with_prefix_in("write-", parent)?;
+    let mut tmp = NamedTempFile::with_prefix_in(ATOMIC_WRITE_TEMP_PREFIX, parent)?;
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
 
@@ -298,7 +302,7 @@ pub fn write_shared_file_atomic(path: &Path, content: &str) -> anyhow::Result<()
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
-    let mut tmp = NamedTempFile::with_prefix_in("write-", parent)?;
+    let mut tmp = NamedTempFile::with_prefix_in(ATOMIC_WRITE_TEMP_PREFIX, parent)?;
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
     #[cfg(unix)]
@@ -341,6 +345,40 @@ pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Removes orphaned atomic-write tempfiles (`write-*`) directly under `dir`
+/// older than `min_age`. Shallow, best-effort (a per-entry error is skipped,
+/// never propagated); returns the count removed.
+pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(ATOMIC_WRITE_TEMP_PREFIX) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age >= min_age && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -949,5 +987,78 @@ mod tests {
             mode, 0o600,
             "expected 0o600 after tightening, got 0o{mode:o}"
         );
+    }
+
+    // ── sweep_stale_atomic_write_temp_files ──────────────────────────────
+
+    /// Backdates a file's mtime by `age` so an age-based sweep sees it as stale.
+    fn backdate(path: &Path, age: std::time::Duration) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        let stamp = std::time::SystemTime::now() - age;
+        file.set_modified(stamp).unwrap();
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_write_prefixed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("write-abc123");
+        let fresh = dir.path().join("write-def456");
+        let unrelated = dir.path().join("other-file.txt");
+        std::fs::write(&stale, "orphan").unwrap();
+        std::fs::write(&fresh, "just written").unwrap();
+        std::fs::write(&unrelated, "keep me").unwrap();
+        backdate(&stale, std::time::Duration::from_secs(3600));
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(dir.path(), std::time::Duration::from_secs(60));
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists(), "stale write-* orphan must be removed");
+        assert!(fresh.exists(), "a fresh write-* tempfile must survive");
+        assert!(
+            unrelated.exists(),
+            "non-prefixed files must never be touched"
+        );
+    }
+
+    #[test]
+    fn sweep_is_shallow_and_ignores_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("write-looks-like-a-dir");
+        std::fs::create_dir(&sub).unwrap();
+        let nested = sub.join("write-nested");
+        std::fs::write(&nested, "should not be reached").unwrap();
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(dir.path(), std::time::Duration::from_secs(0));
+
+        assert_eq!(removed, 0, "a directory named like a tempfile is skipped");
+        assert!(nested.exists(), "the sweep must not recurse");
+    }
+
+    #[test]
+    fn sweep_on_missing_directory_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(&missing, std::time::Duration::from_secs(0));
+
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn sweep_leaves_a_persisted_atomic_write_output_untouched() {
+        // The final file from write_shared_file_atomic has no "write-" prefix —
+        // confirms the sweep only ever targets orphaned tempfiles, never real data.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-teardowns");
+        write_shared_file_atomic(&path, "proj-a").unwrap();
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(dir.path(), std::time::Duration::from_secs(0));
+
+        assert_eq!(removed, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "proj-a");
     }
 }

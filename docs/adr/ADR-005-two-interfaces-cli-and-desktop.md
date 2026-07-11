@@ -16,7 +16,7 @@ Speedwave ships two separate front-ends — a terminal CLI (`speedwave`) and a D
 
 ## How project context is resolved
 
-The CLI bare-run form (and `update`/`login`/`logout`) targets the active project recorded in `~/.speedwave/config.json` (the Desktop project switcher's `active_project`), overridable with `--project <name>`. The working directory is not consulted. The precedence rules live in the CLI guide's [Project Resolution](../guides/cli.md#project-resolution) section.
+The CLI bare-run form (and `update`/`login`/`logout`) targets the active project recorded in `~/.speedwave/config.json` (the Desktop project switcher's `active_project`), overridable with `--project <name>`. The working directory is not consulted. The precedence rules live in the CLI guide's Project Resolution section at <https://speedwave.dev/docs>.
 
 ## CLI scope and subcommands
 

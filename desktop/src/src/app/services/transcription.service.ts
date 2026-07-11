@@ -24,6 +24,9 @@ import { LoggerService } from './logger.service';
 /** Event name the Rust backend emits per model-download progress update. */
 const MODEL_PROGRESS_EVENT = 'transcription_model_status';
 
+/** Poll interval for detecting completion of a download this webview did not itself start. */
+const RESUMED_DOWNLOAD_POLL_MS = 2000;
+
 /** Instruction prepended to a transcript sent to chat, per session language. */
 const SEND_TO_CHAT_INSTRUCTIONS: Record<Language, string> = {
   pl:
@@ -53,8 +56,11 @@ export class TranscriptionService {
   private readonly downloadingModelKeySignal = signal<string | null>(null);
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
   private downloadUnlisten: UnlistenFn | null = null;
+  private downloadPollTimer: ReturnType<typeof setInterval> | undefined;
   private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
   private readonly recordingSessionIdSignal = signal<string | null>(null);
+  private readonly recordingSourceSignal = signal<AudioSource | null>(null);
+  private readonly recordingLanguageSignal = signal<Language | null>(null);
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
@@ -64,6 +70,13 @@ export class TranscriptionService {
    * record tab being destroyed on navigation (the backend driver keeps going).
    */
   readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
+
+  /**
+   * Source/language of the in-progress recording — service-level so a remounted
+   * `RecordingControlsComponent` can restore its picker selection instead of showing defaults.
+   */
+  readonly recordingSource: Signal<AudioSource | null> = this.recordingSourceSignal.asReadonly();
+  readonly recordingLanguage: Signal<Language | null> = this.recordingLanguageSignal.asReadonly();
 
   /** Latest capture-health warning for the active session (null = none). */
   readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
@@ -97,8 +110,17 @@ export class TranscriptionService {
       params: { source, language },
     });
     this.activateSnapshot(ack.snapshot);
+    try {
+      await this.attachListener(ack.event_name);
+    } catch (e) {
+      this.recordingSessionIdSignal.set(null);
+      this.recordingSourceSignal.set(null);
+      this.recordingLanguageSignal.set(null);
+      throw e;
+    }
     this.recordingSessionIdSignal.set(ack.session_id);
-    await this.attachListener(ack.event_name);
+    this.recordingSourceSignal.set(source);
+    this.recordingLanguageSignal.set(language);
     return ack;
   }
 
@@ -112,6 +134,8 @@ export class TranscriptionService {
     } finally {
       if (this.recordingSessionIdSignal() === sessionId) {
         this.recordingSessionIdSignal.set(null);
+        this.recordingSourceSignal.set(null);
+        this.recordingLanguageSignal.set(null);
       }
     }
   }
@@ -126,10 +150,15 @@ export class TranscriptionService {
   }
 
   /**
-   * Subscribes to an existing session's snapshot + live event stream.
+   * Subscribes to an existing session's snapshot + live event stream. Refuses to switch away
+   * from an in-progress recording's own session, which would otherwise drop its live listener.
    * @param sessionId - the session to attach to.
    */
   async subscribeToTranscript(sessionId: string): Promise<SubscribeAck> {
+    const recordingId = this.recordingSessionIdSignal();
+    if (recordingId !== null && recordingId !== sessionId) {
+      throw new Error('a recording is in progress — stop it before viewing another session');
+    }
     const ack = await this.tauri.invoke<SubscribeAck>('subscribe_transcript', { sessionId });
     this.activateSnapshot(ack.snapshot);
     await this.attachListener(ack.event_name);
@@ -217,16 +246,44 @@ export class TranscriptionService {
 
   /**
    * Re-attaches progress tracking to a download the backend reports as still running (webview
-   * reloaded mid-download — the invoke promise is gone).
+   * reloaded mid-download), then polls until it settles since no owning caller will clear it.
    * @param modelId - catalogue key the backend flagged as `downloading`.
    */
   async resumeDownloadTracking(modelId: string): Promise<void> {
     if (this.downloadingModelKeySignal() === modelId) return;
     await this.beginDownloadTracking(modelId);
+    this.stopDownloadPoll();
+    this.downloadPollTimer = setInterval(
+      () => void this.pollResumedDownload(modelId),
+      RESUMED_DOWNLOAD_POLL_MS
+    );
+  }
+
+  private async pollResumedDownload(modelId: string): Promise<void> {
+    if (this.downloadingModelKeySignal() !== modelId) {
+      this.stopDownloadPoll();
+      return;
+    }
+    try {
+      const ack = await this.recommendedModel();
+      if (ack.key === modelId && !ack.downloading) {
+        this.clearDownloadTracking();
+      }
+    } catch (e) {
+      this.log.warn(`resumed download poll failed: ${String(e)}`);
+    }
+  }
+
+  private stopDownloadPoll(): void {
+    if (this.downloadPollTimer !== undefined) {
+      clearInterval(this.downloadPollTimer);
+      this.downloadPollTimer = undefined;
+    }
   }
 
   /** Drops download tracking (used when the backend no longer reports one). */
   clearDownloadTracking(): void {
+    this.stopDownloadPoll();
     if (this.downloadUnlisten) {
       try {
         this.downloadUnlisten();

@@ -418,9 +418,10 @@ fn nerdctl_sha256_for_arch() -> anyhow::Result<&'static str> {
     }
 }
 
-/// Verifies SHA256 of a file using PowerShell. Returns `true` if the hash matches.
+/// Verifies SHA256 of a file using PowerShell. `Ok(bool)` is a real match/mismatch;
+/// `Err` (spawn failure or timeout) is not a mismatch and must be handled separately.
 #[cfg(target_os = "windows")]
-fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool {
+fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> anyhow::Result<bool> {
     let escaped = ps_escape(file_path);
     let cmd = format!(
         "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
@@ -429,14 +430,12 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool 
     let output = crate::binary::run_powershell_capture(
         &["-NoProfile", "-Command", &cmd],
         std::time::Duration::from_secs(120),
-    );
-    match output {
-        Ok(o) if o.status.success() => {
-            let actual = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            actual == expected_sha256
-        }
-        _ => false,
+    )?;
+    if !output.status.success() {
+        return Ok(false);
     }
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(actual == expected_sha256)
 }
 
 /// Runs the Windows VM provisioning sequence: WSL availability + auto-install,
@@ -666,27 +665,43 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
         .join("ext4.vhdx")
 }
 
+/// Maps the elevated-install PowerShell outcome to the bail message for `attempt_wsl_install`,
+/// reporting a spawn/timeout distinctly from a genuine failed/cancelled install.
+#[cfg(any(target_os = "windows", test))]
+fn wsl_install_outcome_message(result: &anyhow::Result<std::process::ExitStatus>) -> anyhow::Error {
+    match result {
+        Err(e) => anyhow::anyhow!(
+            "WSL2 installation is taking longer than expected ({e}); it may still be \
+             running in the background under a separate elevated prompt. Wait for any \
+             Windows Security / UAC prompt to finish, then run Speedwave setup again. \
+             If no installation is in progress, see below.\n\
+             {}",
+            consts::WSL_NOT_AVAILABLE_MSG
+        ),
+        Ok(status) if !status.success() => anyhow::anyhow!(
+            "WSL2 installation failed or was cancelled.\n\
+             {}",
+            consts::WSL_NOT_AVAILABLE_MSG
+        ),
+        Ok(_) => anyhow::anyhow!(
+            "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
+        ),
+    }
+}
+
 /// Installs WSL2 via elevated PowerShell. Always bails: either with a restart
-/// prompt (success) or an installation failure message.
+/// prompt (success), a timeout notice (install may still be running), or a
+/// failure message.
 #[cfg(target_os = "windows")]
 fn attempt_wsl_install() -> anyhow::Result<()> {
-    let status = crate::binary::run_powershell(
+    let result = crate::binary::run_powershell(
         &[
             "-Command",
             "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
         ],
         std::time::Duration::from_secs(900),
-    )?;
-    if !status.success() {
-        anyhow::bail!(
-            "WSL2 installation failed or was cancelled.\n\
-             {}",
-            consts::WSL_NOT_AVAILABLE_MSG
-        );
-    }
-    anyhow::bail!(
-        "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
     );
+    Err(wsl_install_outcome_message(&result))
 }
 
 /// Downloads the Ubuntu rootfs (SHA256-verified) and imports it as a dedicated WSL2 distribution:
@@ -706,19 +721,46 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     let mut have_valid_rootfs = false;
 
     if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::UBUNTU_ROOTFS_ASSET) {
-        if verify_sha256_ps(&bundled, expected_sha256) {
-            // Copy bundled rootfs to the cache location for wsl --import
-            std::fs::copy(&bundled, &rootfs_path)?;
-            have_valid_rootfs = true;
+        match verify_sha256_ps(&bundled, expected_sha256) {
+            Ok(true) => {
+                // Copy bundled rootfs to the cache location for wsl --import
+                std::fs::copy(&bundled, &rootfs_path)?;
+                have_valid_rootfs = true;
+            }
+            Ok(false) => {
+                log::warn!(
+                    "bundled Ubuntu rootfs at {} does not match the pinned SHA256; \
+                     falling back to download",
+                    bundled.display()
+                );
+            }
+            Err(e) => log::warn!(
+                "could not verify bundled Ubuntu rootfs at {} ({e}); falling back to download",
+                bundled.display()
+            ),
         }
     }
 
     // Check cached download
     if !have_valid_rootfs && rootfs_path.exists() {
-        if verify_sha256_ps(&rootfs_path, expected_sha256) {
-            have_valid_rootfs = true;
-        } else {
-            let _ = std::fs::remove_file(&rootfs_path);
+        match verify_sha256_ps(&rootfs_path, expected_sha256) {
+            Ok(true) => have_valid_rootfs = true,
+            Ok(false) => {
+                log::warn!(
+                    "cached Ubuntu rootfs at {} does not match the pinned SHA256; \
+                     re-downloading",
+                    rootfs_path.display()
+                );
+                let _ = std::fs::remove_file(&rootfs_path);
+            }
+            Err(e) => {
+                // Verification didn't complete (e.g. AV-scan slowdown on a large file);
+                // keep the cached file on disk and fall through to a fresh download.
+                log::warn!(
+                    "could not verify cached Ubuntu rootfs at {} ({e}); re-downloading",
+                    rootfs_path.display()
+                );
+            }
         }
     }
 
@@ -1242,19 +1284,23 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
     // Try bundled nerdctl-full tarball first (offline install from the bundle).
     let expected_sha256 = nerdctl_sha256_for_arch()?;
     let mut bundled_wsl_path: Option<String> = None;
-    let mut bundled_rejected: Option<PathBuf> = None;
+    let mut bundled_rejected: Option<(PathBuf, String)> = None;
 
     if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::NERDCTL_TARBALL_ASSET) {
-        if verify_sha256_ps(&bundled, expected_sha256) {
-            // Translate the bundled tarball's host path to WSL via the SSOT.
-            match crate::engine_path::to_engine_path(&bundled) {
-                Ok(wsl) => bundled_wsl_path = Some(wsl),
-                Err(e) => log::warn!(
-                    "could not translate bundled nerdctl path to WSL ({e}); will download instead"
-                ),
+        match verify_sha256_ps(&bundled, expected_sha256) {
+            Ok(true) => {
+                // Translate the bundled tarball's host path to WSL via the SSOT.
+                match crate::engine_path::to_engine_path(&bundled) {
+                    Ok(wsl) => bundled_wsl_path = Some(wsl),
+                    Err(e) => log::warn!(
+                        "could not translate bundled nerdctl path to WSL ({e}); will download instead"
+                    ),
+                }
             }
-        } else {
-            bundled_rejected = Some(bundled);
+            Ok(false) => {
+                bundled_rejected = Some((bundled, "does not match the pinned SHA256".to_string()))
+            }
+            Err(e) => bundled_rejected = Some((bundled, format!("could not be verified ({e})"))),
         }
     }
 
@@ -1273,9 +1319,9 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    if let Some(rejected) = bundled_rejected {
+    if let Some((rejected, reason)) = bundled_rejected {
         log::warn!(
-            "bundled nerdctl tarball at {} does not match the pinned {} SHA256; \
+            "bundled nerdctl tarball at {} {reason} (pinned {}); \
              falling back to in-distro download",
             rejected.display(),
             consts::NERDCTL_FULL_VERSION
@@ -2541,6 +2587,92 @@ mod tests {
         fn empty_path_returns_empty() {
             let p = Path::new("");
             assert_eq!(ps_escape(p), "");
+        }
+    }
+
+    // ── verify_sha256_ps ─────────────────────────────────────────────────────
+
+    #[cfg(target_os = "windows")]
+    mod verify_sha256_ps_tests {
+        use super::super::verify_sha256_ps;
+
+        #[test]
+        fn matching_hash_returns_ok_true() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("file.txt");
+            std::fs::write(&path, b"hello").expect("write");
+            // SHA256("hello")
+            let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+            let result = verify_sha256_ps(&path, expected).expect("verification should run");
+            assert!(result, "hash of 'hello' should match the known SHA256");
+        }
+
+        #[test]
+        fn mismatched_hash_returns_ok_false() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("file.txt");
+            std::fs::write(&path, b"hello").expect("write");
+            let result =
+                verify_sha256_ps(&path, "0".repeat(64).as_str()).expect("verification should run");
+            assert!(!result, "wrong expected hash must not match");
+        }
+
+        #[test]
+        fn missing_file_returns_ok_false_not_err() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("does-not-exist.txt");
+            let result = verify_sha256_ps(&path, "0".repeat(64).as_str())
+                .expect("PowerShell reporting a missing file is not a spawn/timeout error");
+            assert!(!result);
+        }
+    }
+
+    // ── wsl_install_outcome_message ──────────────────────────────────────────
+
+    mod wsl_install_outcome_message_tests {
+        use super::super::wsl_install_outcome_message;
+
+        // SSOT-allow: test fixture spawn
+        fn status_with_code(success: bool) -> std::process::ExitStatus {
+            let script = if success { "exit 0" } else { "exit 1" };
+            if cfg!(windows) {
+                std::process::Command::new("cmd")
+                    .args(["/C", script])
+                    .status()
+                    .expect("spawn cmd fixture")
+            } else {
+                std::process::Command::new("sh")
+                    .args(["-c", script])
+                    .status()
+                    .expect("spawn sh fixture")
+            }
+        }
+
+        #[test]
+        fn timeout_or_spawn_error_reports_still_running_not_failed() {
+            let result: anyhow::Result<std::process::ExitStatus> = Err(anyhow::anyhow!(
+                "command 'powershell.exe' timed out after 900s"
+            ));
+            let msg = wsl_install_outcome_message(&result).to_string();
+            assert!(msg.contains("taking longer than expected"), "got: {msg}");
+            assert!(
+                !msg.contains("failed or was cancelled"),
+                "a timeout must not be reported as a hard failure, got: {msg}"
+            );
+        }
+
+        #[test]
+        fn nonzero_exit_reports_failed_or_cancelled() {
+            let result = Ok(status_with_code(false));
+            let msg = wsl_install_outcome_message(&result).to_string();
+            assert!(msg.contains("failed or was cancelled"), "got: {msg}");
+        }
+
+        #[test]
+        fn success_reports_restart_prompt() {
+            let result = Ok(status_with_code(true));
+            let msg = wsl_install_outcome_message(&result).to_string();
+            assert!(msg.contains("restart your computer"), "got: {msg}");
         }
     }
 

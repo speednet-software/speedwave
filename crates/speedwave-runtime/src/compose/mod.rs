@@ -943,7 +943,7 @@ fn apply_oauth_config_with_paths(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
             to_engine_path(&bearer_file)?
         );
-        add_service_volume(&mut doc, &compose_service, &mount);
+        add_service_volume(&mut doc, &compose_service, &mount)?;
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
@@ -1118,8 +1118,9 @@ pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> 
     Ok(())
 }
 
-/// Adds a volume mount to the mcp-hub service.
-pub(crate) fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
+/// Adds a volume mount to the mcp-hub service. Errors when mcp-hub is missing or
+/// malformed (the mount carries a Speedwave-internal bridge bearer token).
+pub(crate) fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> anyhow::Result<()> {
     add_service_volume(doc, "mcp-hub", mount)
 }
 
@@ -1156,22 +1157,30 @@ pub(crate) fn ensure_host_gateway_extra_host(
     Ok(())
 }
 
-/// Adds a volume mount to an arbitrary service. No-op if the service is absent.
-fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(svc) = services.get_mut(service) {
-            if let Some(volumes) = svc.get_mut("volumes") {
-                if let Some(vol_seq) = volumes.as_sequence_mut() {
-                    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
-                }
-            } else {
-                svc["volumes"] =
-                    serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(
-                        mount.to_string(),
-                    )]);
-            }
-        }
+/// Adds a volume mount to an arbitrary service. Errors when the service is
+/// missing or malformed — a security-relevant mount must never vanish silently.
+fn add_service_volume(
+    doc: &mut serde_yaml_ng::Value,
+    service: &str,
+    mount: &str,
+) -> anyhow::Result<()> {
+    let svc = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(service))
+        .ok_or_else(|| anyhow::anyhow!("compose has no '{service}' service to mount into"))?;
+    let map = svc
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("'{service}' service is not a mapping"))?;
+    let key = serde_yaml_ng::Value::String("volumes".to_string());
+    if !map.contains_key(&key) {
+        map.insert(key.clone(), serde_yaml_ng::Value::Sequence(Vec::new()));
     }
+    let vol_seq = map
+        .get_mut(&key)
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| anyhow::anyhow!("'{service}' volumes is not a sequence"))?;
+    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
+    Ok(())
 }
 
 /// Adds an environment variable to the claude service. Thin wrapper over
@@ -4978,6 +4987,24 @@ services:
         );
     }
 
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_mcp_os_config_errors_when_hub_service_absent() {
+        // The /secrets/os-auth-token mount is security-relevant — a doc missing
+        // mcp-hub must hard-fail, never silently drop the mount.
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
+        let malformed_doc = "services:\n  claude:\n    image: test\n";
+        let result = apply_mcp_os_config_with_path(malformed_doc, &token_path, &lock_path);
+        assert!(
+            result.is_err(),
+            "missing mcp-hub service must be an error, not a silent no-op"
+        );
+    }
+
     /// Like the live helper but reaps a real child for a deterministically-dead
     /// PID, so apply_worker_config's liveness gate treats the lock as absent.
     fn write_dead_lock_and_token_mount(
@@ -5049,6 +5076,30 @@ services:
             count_canonical_entries(&entries),
             1,
             "mcp-sharepoint must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_oauth_config_errors_when_consumer_service_absent() {
+        // The /secrets/oauth-auth-token-<service> mount is security-relevant — a doc
+        // missing the consumer service must hard-fail, never silently drop the mount.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        write_live_oauth_lock(&lock_path, 4090);
+        let bearer_map_path = tmp.path().join("bearer-map.json");
+        std::fs::write(
+            &bearer_map_path,
+            r#"{"bearer-sharepoint-secret":"sharepoint"}"#,
+        )
+        .unwrap();
+
+        let malformed_doc = "services:\n  claude:\n    image: test\n  mcp-hub:\n    image: hub\n";
+        let result =
+            apply_oauth_config_with_paths(malformed_doc, tmp.path(), &lock_path, &bearer_map_path);
+        assert!(
+            result.is_err(),
+            "missing oauth-consumer service must be an error, not a silent no-op"
         );
     }
 
@@ -5684,7 +5735,8 @@ services:
         add_hub_volume(
             &mut doc,
             "/home/user/.speedwave/mcp-os-auth-token:/secrets/os-auth-token:ro",
-        );
+        )
+        .unwrap();
 
         let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
         let vols = hub.get("volumes").unwrap().as_sequence().unwrap();
@@ -6520,7 +6572,7 @@ services:
         // Hub in the template has no volumes. add_hub_volume must create
         // the volumes key if it doesn't exist.
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro").unwrap();
 
         let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
         let vols = hub.get("volumes").unwrap().as_sequence().unwrap();
@@ -6529,6 +6581,72 @@ services:
             vols[0].as_str().unwrap(),
             "/tmp/test-token:/secrets/os-auth-token:ro"
         );
+    }
+
+    #[test]
+    fn add_hub_volume_errors_when_hub_service_absent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: test\n").unwrap();
+        let result = add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        assert!(
+            result.is_err(),
+            "a missing mcp-hub service must hard-fail, not silently drop the mount"
+        );
+    }
+
+    #[test]
+    fn add_hub_volume_errors_when_hub_is_not_a_mapping() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  mcp-hub: not-a-mapping\n").unwrap();
+        let result = add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        assert!(
+            result.is_err(),
+            "a malformed mcp-hub service must hard-fail, not silently drop the mount"
+        );
+    }
+
+    #[test]
+    fn add_service_volume_errors_when_service_absent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: test\n").unwrap();
+        let result = add_service_volume(&mut doc, "mcp-slack", "/tmp/x:/secrets/x:ro");
+        assert!(
+            result.is_err(),
+            "a missing target service must hard-fail, not silently drop the mount"
+        );
+    }
+
+    #[test]
+    fn add_service_volume_creates_missing_volumes_key() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  mcp-slack:\n    image: x\n").unwrap();
+        add_service_volume(&mut doc, "mcp-slack", "/tmp/x:/secrets/x:ro").unwrap();
+        let vols = doc["services"]["mcp-slack"]["volumes"]
+            .as_sequence()
+            .unwrap();
+        assert!(vols
+            .iter()
+            .any(|v| v.as_str() == Some("/tmp/x:/secrets/x:ro")));
+    }
+
+    #[test]
+    fn add_service_volume_appends_to_existing_sequence() {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "services:\n  mcp-slack:\n    volumes:\n      - /existing:/existing:ro\n",
+        )
+        .unwrap();
+        add_service_volume(&mut doc, "mcp-slack", "/tmp/x:/secrets/x:ro").unwrap();
+        let vols = doc
+            .get("services")
+            .unwrap()
+            .get("mcp-slack")
+            .unwrap()
+            .get("volumes")
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(vols.len(), 2);
+        assert_eq!(vols[1].as_str().unwrap(), "/tmp/x:/secrets/x:ro");
     }
 
     #[test]
@@ -9701,6 +9819,22 @@ networks:
                 expected_mount
             );
         }
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_errors_when_hub_service_absent() {
+        // A doc missing mcp-hub must hard-fail — the /secrets/<service>-auth-token
+        // mount is a security-relevant boundary and must never be silently dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+        let malformed_doc = "services:\n  mcp-slack:\n    image: slack\n";
+
+        let result =
+            apply_worker_auth_tokens_with_dir(malformed_doc, tmp.path(), &integrations, &[]);
+        assert!(
+            result.is_err(),
+            "missing mcp-hub service must be an error, not a silent no-op"
+        );
     }
 
     #[test]

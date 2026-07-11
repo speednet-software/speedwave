@@ -119,10 +119,25 @@ fn write_png(target: &Path, img: &arboard::ImageData<'_>) -> Result<()> {
             .context("png encode")?;
     }
     // Owner-only perm BEFORE rename so the final inode never appears world-readable.
-    set_owner_only(&tmp)
-        .map_err(|e| anyhow::anyhow!(e))
-        .with_context(|| format!("owner-only perms {}", tmp.display()))?;
+    restrict_paste_perms(&tmp)?;
     std::fs::rename(&tmp, target).with_context(|| format!("rename → {}", target.display()))?;
+    Ok(())
+}
+
+/// Unix: a chmod failure aborts the paste. Windows: DACL calls can transiently
+/// fail under AV/EDR, so it degrades to warn-and-continue instead.
+#[cfg(unix)]
+fn restrict_paste_perms(tmp: &Path) -> Result<()> {
+    set_owner_only(tmp)
+        .map_err(|e| anyhow::anyhow!(e))
+        .with_context(|| format!("owner-only perms {}", tmp.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_paste_perms(tmp: &Path) -> Result<()> {
+    if let Err(e) = set_owner_only(tmp) {
+        log::warn!("owner-only perms failed for {}: {e}", tmp.display());
+    }
     Ok(())
 }
 
@@ -203,6 +218,25 @@ mod tests {
         write_png(&target, &img).unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_paste_perms_fails_on_nonexistent_path_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.png.tmp");
+        assert!(restrict_paste_perms(&missing).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn restrict_paste_perms_degrades_to_ok_on_failure_non_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.png.tmp");
+        assert!(
+            restrict_paste_perms(&missing).is_ok(),
+            "a DACL failure must warn-and-continue, not fail the paste"
+        );
     }
 
     #[test]

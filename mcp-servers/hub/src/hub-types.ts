@@ -155,6 +155,8 @@ export interface ToolSearchResult {
   inputExamples?: ToolInputExample[];
   /** Defer loading status: true = on-demand, false = core tool */
   deferLoading?: boolean;
+  /** Self-reference sentence for userScoped tools; present at every detail level. */
+  identityHint?: string;
 }
 
 // ── PII Tokenization Types ────────────────────────────────────────────────────────────────────

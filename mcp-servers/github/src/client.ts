@@ -317,17 +317,19 @@ export class GitHubClient {
    * @param route - Octokit endpoint method to paginate
    * @param params - Request parameters (excluding `per_page`)
    * @param limit - Caller-requested limit (optional)
+   * @param filter - Optional predicate; only matching items count toward `limit` (e.g. excluding PRs from an issues page)
    */
   private async paginateUpTo(
     route: unknown,
     params: Record<string, unknown>,
-    limit?: number
+    limit?: number,
+    filter?: (item: Record<string, unknown>) => boolean
   ): Promise<Array<Record<string, unknown>>> {
     const wanted = this.wantedCount(limit);
     let collected = 0;
     const mapPage = (response: { data: unknown }, done: () => void): unknown[] => {
-      const page = (response.data as unknown[] | undefined) ?? [];
-      collected += page.length;
+      const page = (response.data as Record<string, unknown>[] | undefined) ?? [];
+      collected += filter ? page.filter(filter).length : page.length;
       if (collected >= wanted) done();
       return page;
     };
@@ -341,7 +343,7 @@ export class GitHubClient {
       { ...params, per_page: this.perPage(limit) },
       mapPage
     )) as Array<Record<string, unknown>>;
-    return items.slice(0, wanted);
+    return (filter ? items.filter(filter) : items).slice(0, wanted);
   }
 
   // ── Response Mappers ──────────────────────────────────────────────────────────────────────
@@ -1445,22 +1447,25 @@ export class GitHubClient {
         });
         existingData = existing.data;
       } catch (error) {
-        // 404 means the file does not exist yet (a normal create); anything else blocks the write.
+        // 404 means the file does not exist yet (a normal create); any other HTTP status blocks the write.
         const status = (error as OctokitErrorLike)?.status;
         if (status !== 404) {
+          if (typeof status !== 'number') {
+            throw error;
+          }
           throw new TeachingError(
             `Could not check whether '${params.path}' already exists in ${owner}/${repo} before writing: ${GitHubClient.formatError(error)}`,
             status
           );
         }
       }
-      if (Array.isArray(existingData)) {
-        throw new TeachingError(
-          `Path '${params.path}' is a directory, not a file. Use ${TOOL_NAMES.GET_TREE} to list its contents.`
-        );
-      }
       if (existingData) {
         const file = existingData as Record<string, unknown>;
+        if (Array.isArray(existingData) || file.type !== 'file') {
+          throw new TeachingError(
+            `Path '${params.path}' is a directory, not a file. Use ${TOOL_NAMES.GET_TREE} to list its contents.`
+          );
+        }
         sha = typeof file.sha === 'string' ? file.sha : undefined;
       }
     }
@@ -1656,17 +1661,20 @@ export class GitHubClient {
     } = {}
   ): Promise<GitHubIssue[]> {
     this.validateRequired({ owner, repo });
-    const issues = (await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
-      owner,
-      repo,
-      state: options.state || 'open',
-      labels: options.labels,
-      assignee: options.assignee,
-      creator: options.creator,
-      per_page: this.perPage(options.limit),
-    })) as Array<Record<string, unknown>>;
-    const issuesOnly = issues.filter((i) => !i.pull_request);
-    return this.slice(issuesOnly, options.limit).map((i) => this.mapIssue(i));
+    const issuesOnly = await this.paginateUpTo(
+      this.octokit.rest.issues.listForRepo,
+      {
+        owner,
+        repo,
+        state: options.state || 'open',
+        labels: options.labels,
+        assignee: options.assignee,
+        creator: options.creator,
+      },
+      options.limit,
+      (i) => !i.pull_request
+    );
+    return issuesOnly.map((i) => this.mapIssue(i));
   }
 
   /**

@@ -264,31 +264,34 @@ export class SharePointClient {
   // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Sanitize a Graph API error into a consistent, user-friendly message.
+   * Sanitize a Graph API error into a consistent, user-friendly message. Numeric status codes
+   * are read from `GraphApiError.status`, not matched as message substrings (the message embeds the request URL, which can itself contain a colliding numeric id).
    * @param error - Error object from the Graph API call.
    */
   static formatError(error: unknown): string {
     const e = error as { message?: string };
     const message = e.message || '';
+    // Substring fallback only for non-GraphApiError inputs (network/timeout/etc).
+    const status = error instanceof GraphApiError ? error.status : undefined;
+    const numeric = (code: string): boolean => status === undefined && message.includes(code);
 
-    // Handle Graph API error responses
-    if (message.includes('401') || message.includes('Unauthorized')) {
+    if (status === 401 || numeric('401') || message.includes('Unauthorized')) {
       return withSetupGuidance('Authentication failed. Your SharePoint token may have expired.');
     }
 
-    if (message.includes('403') || message.includes('Forbidden')) {
+    if (status === 403 || numeric('403') || message.includes('Forbidden')) {
       return 'Permission denied. Your SharePoint token may not have sufficient permissions.';
     }
 
-    if (message.includes('404') || message.includes('not found')) {
+    if (status === 404 || numeric('404') || message.includes('not found')) {
       return 'Resource not found in SharePoint.';
     }
 
-    if (message.includes('429') || message.includes('activityLimitReached')) {
+    if (status === 429 || numeric('429') || message.includes('activityLimitReached')) {
       return 'Rate limited by Microsoft Graph (429). Wait and retry the same call.';
     }
 
-    if (message.includes('423') || message.includes('resourceLocked')) {
+    if (status === 423 || numeric('423') || message.includes('resourceLocked')) {
       return 'Resource is locked in SharePoint (checked out or being edited elsewhere). Retry later.';
     }
 
@@ -371,14 +374,20 @@ export class SharePointClient {
     try {
       await this._resolveSiteIdMemo();
     } catch (err) {
-      if (err instanceof OAuthScopeMismatchError) throw err;
       this._resolveRetryBlockedUntil = Date.now() + RESOLVE_RETRY_COOLDOWN_MS;
+      if (err instanceof OAuthScopeMismatchError) throw err;
       throw this._siteConnectionError();
     }
     this._resolveRetryBlockedUntil = 0;
-    return this.config.siteId === staleSiteId
-      ? url
-      : url.split(staleSiteId).join(this.config.siteId);
+    if (this.config.siteId === staleSiteId) {
+      return url;
+    }
+    // Every Graph URL this worker builds addresses the site via a `/sites/{siteId}` path
+    // segment — rewrite only that segment, not any substring match anywhere in the URL.
+    const sitesSegment = `/sites/${staleSiteId}`;
+    return url.includes(sitesSegment)
+      ? url.replace(sitesSegment, `/sites/${this.config.siteId}`)
+      : url;
   }
 
   /** Teaching error for a wedged worker whose siteId still cannot be resolved. */
@@ -505,11 +514,14 @@ export class SharePointClient {
     const response = await this.callGraphAPI(url);
 
     if (!response.ok) {
-      const errorData = (await response.json()) as { error?: { message?: string } };
-      throw new GraphApiError(
-        errorData.error?.message || 'Failed to get file metadata',
-        response.status
-      );
+      let detail = 'Failed to get file metadata';
+      try {
+        const errorData = (await response.json()) as { error?: { message?: string } };
+        if (errorData.error?.message) detail = errorData.error.message;
+      } catch {
+        // body not JSON — keep the generic fallback message
+      }
+      throw new GraphApiError(detail, response.status);
     }
 
     return (await response.json()) as DriveItemMetadata;

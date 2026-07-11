@@ -119,20 +119,33 @@ if [[ -n "$INPUT" ]]; then
 fi
 model_name="${model_name:-Claude}"
 
-# Context fields live under "context_window" (CC >=2.1.132); scope the scan there, or a
-# whole-input scan reads rate_limits' used_percentage as CTX whenever context is null.
+# Context fields live under "context_window" (CC >=2.1.132). jq parses the real object
+# regardless of key order; the regex scope-scan is a fallback for a missing/broken jq.
 context_window_size=0
 used_pct=0
-cw_pattern='"context_window"[[:space:]]*:[[:space:]]*\{'
-if [[ "$INPUT" =~ $cw_pattern ]]; then
-    cw_scope="${INPUT#*\"context_window\"}"
-    cw_scope="${cw_scope%%\"rate_limits\"*}"
-    context_window_size="$(extract_json_number "$cw_scope" "context_window_size")"
-    context_window_size="${context_window_size:-0}"
-    used_pct_raw="$(extract_json_float "$cw_scope" "used_percentage")"
-    used_pct="${used_pct_raw%%.*}"
-    used_pct="${used_pct:-0}"
+have_context_window=false
+if command -v jq >/dev/null 2>&1; then
+    cw_json="$(printf '%s' "$INPUT" | jq -e -c '.context_window | select(type == "object")' 2>/dev/null)"
+    if [[ -n "$cw_json" ]]; then
+        have_context_window=true
+        context_window_size="$(printf '%s' "$cw_json" | jq -r '.context_window_size // 0' 2>/dev/null)"
+        used_pct_raw="$(printf '%s' "$cw_json" | jq -r '.used_percentage // 0' 2>/dev/null)"
+    fi
 fi
+if [[ "$have_context_window" == false ]]; then
+    cw_pattern='"context_window"[[:space:]]*:[[:space:]]*\{'
+    if [[ "$INPUT" =~ $cw_pattern ]]; then
+        cw_scope="${INPUT#*\"context_window\"}"
+        cw_scope="${cw_scope%%\"rate_limits\"*}"
+        context_window_size="$(extract_json_number "$cw_scope" "context_window_size")"
+        used_pct_raw="$(extract_json_float "$cw_scope" "used_percentage")"
+    fi
+fi
+context_window_size="${context_window_size:-0}"
+[[ "$context_window_size" =~ ^[0-9]+$ ]] || context_window_size=0
+used_pct="${used_pct_raw%%.*}"
+used_pct="${used_pct:-0}"
+[[ "$used_pct" =~ ^[0-9]+$ ]] || used_pct=0
 
 # Rate limits — detect rate_limits key, then extract five_hour/seven_day from INPUT.
 has_rl_key=false

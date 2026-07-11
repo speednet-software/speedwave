@@ -93,13 +93,19 @@ fn protocol_wire(p: OtlpProtocol) -> &'static str {
 /// Full telemetry env for the resolved config. When disabled, only the master
 /// switch (`0`) is emitted — no endpoint, headers, or exporters.
 pub fn telemetry_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
+    if !t.enabled {
+        return HashMap::from([(ENABLE_KEY.to_string(), bool01(false))]);
+    }
+    let mut m = full_field_env_map(t);
+    m.insert(ENABLE_KEY.to_string(), bool01(true));
+    m
+}
+
+/// Every field's env value, independent of the master switch — the source both
+/// `telemetry_env_map` (behavior) and `locked_env_map` (lock enforcement) read.
+fn full_field_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
     use TelemetryField as F;
     let mut m = HashMap::new();
-    if !t.enabled {
-        m.insert(ENABLE_KEY.to_string(), "0".into());
-        return m;
-    }
-    m.insert(ENABLE_KEY.to_string(), "1".into());
     // Inserts `<env_key_for(field)> = value` when the field has an env key. A
     // macro (not a closure) so it doesn't hold a long-lived mutable borrow of `m`.
     macro_rules! put {
@@ -141,12 +147,17 @@ pub fn telemetry_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
 }
 
 /// The subset of the telemetry env whose keys MDM locked — the payload for the
-/// native managed-settings.json `env` block.
+/// native managed-settings.json `env` block. Reads the full field map so a
+/// co-locked field (e.g. a privacy gate) survives even under the kill-switch.
 pub fn locked_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
-    telemetry_env_map(t)
+    let mut m: HashMap<String, String> = full_field_env_map(t)
         .into_iter()
         .filter(|(k, _)| t.locked_keys.contains(k))
-        .collect()
+        .collect();
+    if t.locked_keys.contains(ENABLE_KEY) {
+        m.insert(ENABLE_KEY.to_string(), bool01(t.enabled));
+    }
+    m
 }
 
 fn bool01(b: bool) -> String {
@@ -249,6 +260,24 @@ mod tests {
             m.get("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
             "https://c.example.com:4318"
         );
+    }
+
+    #[test]
+    fn locked_env_map_carries_co_locked_field_under_kill_switch() {
+        // MDM kill-switches telemetry AND separately locks a privacy gate; the
+        // native managed-settings.json must still carry both locked keys.
+        let mut t = enabled_sample();
+        t.enabled = false;
+        t.endpoint = None;
+        t.headers = None;
+        t.export_metrics = false;
+        t.export_logs = false;
+        t.locked_keys.insert(ENABLE_KEY.to_string());
+        t.locked_keys.insert("OTEL_LOG_USER_PROMPTS".to_string());
+        let m = locked_env_map(&t);
+        assert_eq!(m.get(ENABLE_KEY).unwrap(), "0");
+        assert_eq!(m.get("OTEL_LOG_USER_PROMPTS").unwrap(), "0");
+        assert_eq!(m.len(), 2, "only the two locked keys, nothing unlocked");
     }
 
     #[test]

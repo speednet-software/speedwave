@@ -143,7 +143,7 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
   });
   /** Capture-health warning for the active session (from the live event stream). */
-  readonly captureWarning = computed(() => this.transcription.captureWarning());
+  readonly captureWarning = this.transcription.captureWarning;
   /** Banner copy for the active capture warning. */
   readonly captureWarningText = computed(() => {
     switch (this.captureWarning()) {
@@ -177,13 +177,17 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
 
   /** Checks model availability on first paint and re-checks on re-activation. */
   async ngOnInit(): Promise<void> {
-    await this.refreshModelReady();
-    // Re-attach the live stream if a recording was left running while this tab
-    // was destroyed on navigation (the backend driver never stopped).
-    await this.transcription.resumeActiveRecording();
-    // Clear the gate after a download in Settings without recreating the tab.
+    // Registered before any await so a rejected resume below can never skip them.
     window.addEventListener('focus', this.onActivate);
     document.addEventListener('visibilitychange', this.onActivate);
+    await this.refreshModelReady();
+    try {
+      // Re-attach the live stream if a recording was left running while this tab
+      // was destroyed on navigation (the backend driver never stopped).
+      await this.transcription.resumeActiveRecording();
+    } catch (err) {
+      this.log.warn(`resume active recording failed: ${String(err)}`);
+    }
   }
 
   /** Detaches the live-stream listener and removes activation listeners. */

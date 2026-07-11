@@ -291,19 +291,24 @@ export async function discoverAndMergeService(
 }
 
 /**
- * Warn and drop `currentUserTool` on any tool whose pointer names a tool that does
- * not exist among the service's discovered tools — never serve a dangling pointer.
+ * Warn and drop `currentUserTool` when neither the camelCase method name nor the
+ * worker's own tool name resolves to a discovered tool; normalizes a resolved pointer to camelCase.
  * @param service - Service name (for the warning message).
  * @param tools - Merged tools for the service, mutated in place.
  */
 function dropDanglingCurrentUserTool(service: string, tools: Record<string, ToolMetadata>): void {
   for (const [methodName, metadata] of Object.entries(tools)) {
     const target = metadata.currentUserTool;
-    if (target && !(target in tools)) {
+    if (!target) continue;
+
+    const resolved = target in tools ? target : toCamelCase(target);
+    if (!(resolved in tools)) {
       console.warn(
         `${ts()} [tool-discovery] ${service}.${methodName}: currentUserTool '${target}' does not exist — dropping`
       );
       delete metadata.currentUserTool;
+    } else {
+      metadata.currentUserTool = resolved;
     }
   }
 }

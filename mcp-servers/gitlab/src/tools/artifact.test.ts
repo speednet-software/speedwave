@@ -38,7 +38,7 @@ describe('artifact-tools', () => {
         },
       ];
 
-      mockClient.listArtifacts.mockResolvedValue(mockArtifacts);
+      mockClient.listArtifacts.mockResolvedValue({ artifacts: mockArtifacts, truncated: false });
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
@@ -49,7 +49,11 @@ describe('artifact-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, artifacts: mockArtifacts }, null, 2),
+            text: JSON.stringify(
+              { success: true, artifacts: mockArtifacts, truncated: false },
+              null,
+              2
+            ),
           },
         ],
       });
@@ -65,7 +69,7 @@ describe('artifact-tools', () => {
         },
       ];
 
-      mockClient.listArtifacts.mockResolvedValue(mockArtifacts);
+      mockClient.listArtifacts.mockResolvedValue({ artifacts: mockArtifacts, truncated: false });
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
@@ -76,7 +80,11 @@ describe('artifact-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, artifacts: mockArtifacts }, null, 2),
+            text: JSON.stringify(
+              { success: true, artifacts: mockArtifacts, truncated: false },
+              null,
+              2
+            ),
           },
         ],
       });
@@ -84,7 +92,7 @@ describe('artifact-tools', () => {
     });
 
     it('handles empty artifacts list', async () => {
-      mockClient.listArtifacts.mockResolvedValue([]);
+      mockClient.listArtifacts.mockResolvedValue({ artifacts: [], truncated: false });
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
@@ -95,7 +103,25 @@ describe('artifact-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, artifacts: [] }, null, 2),
+            text: JSON.stringify({ success: true, artifacts: [], truncated: false }, null, 2),
+          },
+        ],
+      });
+    });
+
+    it('surfaces truncated: true when the pipeline has more than 100 jobs', async () => {
+      mockClient.listArtifacts.mockResolvedValue({ artifacts: [], truncated: true });
+
+      const tools = createArtifactTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
+
+      const result = await handler!({ project_id: 'my-project', pipeline_id: 456 });
+
+      expect(result).toEqual({
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, artifacts: [], truncated: true }, null, 2),
           },
         ],
       });
@@ -124,7 +150,7 @@ describe('artifact-tools', () => {
     });
 
     it('accepts a numeric-string pipeline_id', async () => {
-      mockClient.listArtifacts.mockResolvedValue([]);
+      mockClient.listArtifacts.mockResolvedValue({ artifacts: [], truncated: false });
 
       const tools = createArtifactTools(mockClient as unknown as GitLabClient);
       const handler = tools.find((t) => t.tool.name === 'listArtifacts')?.handler;
@@ -157,6 +183,8 @@ describe('artifact-tools', () => {
       expect(itemProps).toHaveProperty('job_id');
       expect(itemProps).toHaveProperty('job_name');
       expect(itemProps).toHaveProperty('artifacts');
+      expect(outputProps).toHaveProperty('truncated');
+      expect(tool?.description).toContain('truncated');
     });
   });
 
@@ -297,6 +325,8 @@ describe('artifact-tools', () => {
       expect(outputProps).toHaveProperty('filename');
       expect(outputProps).toHaveProperty('size');
       expect(outputProps).not.toHaveProperty('artifact');
+      const inputProps = tool?.inputSchema?.properties as Record<string, { minimum?: number }>;
+      expect(inputProps.tail_lines.minimum).toBe(0);
     });
 
     it('handles non-existent job', async () => {

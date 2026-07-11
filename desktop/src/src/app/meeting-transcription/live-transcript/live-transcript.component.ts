@@ -72,13 +72,17 @@ interface TranscriptLine {
             type="button"
             class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
             data-testid="send-to-chat-btn"
-            [disabled]="sending()"
+            [disabled]="sending() || status() === 'recording'"
             (click)="sendToChat()"
           >
             {{ sending() ? 'sending…' : 'Send to chat' }}
           </button>
           <span class="mono ml-2 text-[10px] text-[var(--ink-mute)]">
-            drops the transcript into the chat and opens it
+            @if (status() === 'recording') {
+              stop recording first
+            } @else {
+              drops the transcript into the chat and opens it
+            }
           </span>
         </div>
       }
@@ -126,7 +130,7 @@ export class LiveTranscriptComponent {
   /** Confirms, drops the transcript into the chat, then opens the chat tab. */
   async sendToChat(): Promise<void> {
     const s = this.session();
-    if (!s) return;
+    if (!s || s.status.state === 'recording') return;
     const ok = window.confirm(
       'This drops the transcript text into the chat (sent to your configured LLM provider). Continue?'
     );

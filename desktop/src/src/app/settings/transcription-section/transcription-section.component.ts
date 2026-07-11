@@ -192,8 +192,7 @@ export class TranscriptionSectionComponent implements OnInit {
 
   /** Reads the recommended model + its download state on first paint. */
   async ngOnInit(): Promise<void> {
-    await this.refresh();
-    await this.refreshPermissions();
+    await Promise.all([this.refresh(), this.refreshPermissions()]);
   }
 
   /** Reads the platform + mic-consent state; non-fatal on failure. */

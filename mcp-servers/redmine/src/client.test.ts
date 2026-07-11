@@ -1646,6 +1646,19 @@ describe('RedmineClient', () => {
       expect(result).toContain('listIssueIds');
     });
 
+    it('should name both identifiers and give both hints for a compound issue_id+journal_id context', () => {
+      const error = {
+        isAxiosError: true,
+        response: { status: 404, data: {} },
+        message: 'Not Found',
+      } as AxiosError;
+
+      const result = RedmineClient.formatError(error, { issue_id: 99999, journal_id: 42 });
+      expect(result).toContain('issue_id=99999, journal_id=42');
+      expect(result).toContain('listIssueIds');
+      expect(result).toContain('listJournals');
+    });
+
     it('does not append a getMappings hint for a custom field whose name merely contains "status"', () => {
       const error = {
         isAxiosError: true,

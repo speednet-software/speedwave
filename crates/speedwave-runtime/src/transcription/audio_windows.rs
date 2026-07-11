@@ -113,6 +113,7 @@ impl AudioCapture for WasapiAudioCapture {
                     LoopbackRole::Console,
                     ResamplerSink::Channel(tx),
                     &stop,
+                    std::time::Instant::now(),
                 )?;
                 Ok(Box::new(WasapiLoopbackStream {
                     rx,
@@ -136,6 +137,9 @@ impl AudioCapture for WasapiAudioCapture {
                 let mic_dev = resolve_mic(&host, mic)?;
                 let buf = Arc::new(Mutex::new(MixBuffer::new()));
                 let stop = Arc::new(AtomicBool::new(false));
+                // Both loopback threads push into the same MixSource::System slot — a shared
+                // epoch keeps their offsets coherent when only one side re-anchors.
+                let loopback_epoch = std::time::Instant::now();
                 let handle = spawn_wasapi_loopback(
                     LoopbackRole::Console,
                     ResamplerSink::Mixed {
@@ -143,6 +147,7 @@ impl AudioCapture for WasapiAudioCapture {
                         source: MixSource::System,
                     },
                     &stop,
+                    loopback_epoch,
                 )?;
                 // Call audio renders to the Communications endpoint — capture it too (own stop
                 // flag: its init failure must not kill the console).
@@ -154,6 +159,7 @@ impl AudioCapture for WasapiAudioCapture {
                         source: MixSource::System,
                     },
                     &comms_stop,
+                    loopback_epoch,
                 ) {
                     Ok(h) => Some(h),
                     Err(e) => {
@@ -283,11 +289,12 @@ impl Drop for WasapiCaptureHandle {
 }
 
 /// Spawns the wasapi system-loopback capture thread, delivering 16 kHz mono chunks into `sink`
-/// until `stop` is set. Reports setup success/failure via a one-shot channel.
+/// until `stop`; `epoch` anchors the resampler (share one `Instant` across paired threads).
 fn spawn_wasapi_loopback(
     role: LoopbackRole,
     sink: ResamplerSink,
     stop: &Arc<AtomicBool>,
+    epoch: std::time::Instant,
 ) -> Result<WasapiCaptureHandle, CaptureError> {
     // COM objects are apartment-bound, so the capture thread creates them.
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -297,7 +304,7 @@ fn spawn_wasapi_loopback(
     let join = std::thread::Builder::new()
         .name(format!("wasapi-loopback-{role:?}").to_lowercase())
         .spawn(move || {
-            run_wasapi_loopback(role, sink, &stop_thread, &failed_thread, ready_tx);
+            run_wasapi_loopback(role, sink, &stop_thread, &failed_thread, ready_tx, epoch);
         })
         .map_err(|e| CaptureError::Failed(format!("spawn wasapi capture thread: {e}")))?;
     // Wait for the thread's setup result (bounded — a wedged COM init shouldn't hang start()).
@@ -323,7 +330,7 @@ fn spawn_wasapi_loopback(
 }
 
 /// The wasapi capture thread body: init COM, open the loopback capture client, signal readiness,
-/// then pump frames → `Resampler` → `sink` until `stop`.
+/// then pump frames → `Resampler` → `sink` until `stop`. `epoch` anchors the resampler.
 #[cfg(windows)]
 fn run_wasapi_loopback(
     role: LoopbackRole,
@@ -331,6 +338,7 @@ fn run_wasapi_loopback(
     stop: &AtomicBool,
     failed: &AtomicBool,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    epoch: std::time::Instant,
 ) {
     use std::collections::VecDeque;
     use wasapi::{DeviceEnumerator, Direction, Role, SampleType, StreamMode};
@@ -451,7 +459,7 @@ fn run_wasapi_loopback(
 
     // Anchored: a loopback endpoint delivers nothing while idle, so stream position alone
     // would misplace audio starting mid-recording.
-    let mut resampler = Resampler::new(src_rate, src_channels).anchored();
+    let mut resampler = Resampler::new(src_rate, src_channels).anchored_at(epoch);
     let mut queue: VecDeque<u8> = VecDeque::new();
     let timeout_ms = WASAPI_POLL_TIMEOUT.as_millis() as u32;
 
@@ -511,6 +519,7 @@ fn run_wasapi_loopback(
     _stop: &AtomicBool,
     _failed: &AtomicBool,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
+    _epoch: std::time::Instant,
 ) {
     let _ = ready.send(Err("wasapi loopback is Windows-only".to_string()));
 }
@@ -590,8 +599,14 @@ impl Resampler {
 
     /// Anchors chunk offsets to wall clock so audio starting mid-recording lands at the right
     /// session position (see `REANCHOR_GAP_NS`).
-    fn anchored(mut self) -> Self {
-        self.anchor = Some(std::time::Instant::now());
+    fn anchored(self) -> Self {
+        self.anchored_at(std::time::Instant::now())
+    }
+
+    /// Anchors to a caller-supplied epoch. Multiple resamplers sharing one `epoch` (e.g. the
+    /// Console and Communications loopback threads) stay coherent when they re-anchor.
+    fn anchored_at(mut self, epoch: std::time::Instant) -> Self {
+        self.anchor = Some(epoch);
         self
     }
 
@@ -665,9 +680,12 @@ impl Resampler {
             let elapsed_ns = epoch.elapsed().as_nanos() as u64;
             let chunk_ns = n * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
             let stream_end_ns = self.base_ns + offset_ns + chunk_ns;
-            if elapsed_ns.saturating_sub(stream_end_ns) > REANCHOR_GAP_NS {
-                // The source was idle — realign so this chunk ends "now".
-                self.base_ns = elapsed_ns.saturating_sub(chunk_ns + offset_ns); // idle realign
+            // Signed: catches both an idle gap (stream behind wall clock) and sustained
+            // positive device-clock drift (stream creeping ahead of wall clock).
+            let drift_ns = elapsed_ns as i64 - stream_end_ns as i64;
+            if drift_ns.unsigned_abs() > REANCHOR_GAP_NS {
+                // Realign so this chunk ends "now".
+                self.base_ns = elapsed_ns.saturating_sub(chunk_ns + offset_ns);
             }
             offset_ns += self.base_ns;
         }
@@ -925,6 +943,58 @@ mod tests {
             chunk.offset > Duration::from_secs(8) && chunk.offset < Duration::from_secs(12),
             "got {:?}",
             chunk.offset
+        );
+    }
+
+    #[test]
+    fn anchored_resampler_realigns_when_the_stream_drifts_ahead_of_wall_clock() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
+        let sink = ResamplerSink::Channel(tx);
+        let mut r = Resampler::new(16_000, 1).anchored();
+        // Simulate accumulated positive device-clock drift: the stream's declared position has
+        // crept 10 s ahead of true wall-clock elapsed time (base_ns dominates stream_end_ns).
+        r.base_ns = Duration::from_secs(10).as_nanos() as u64;
+        r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
+        drop(sink);
+        let chunk = rx.recv().unwrap();
+        // Re-anchored back down near "now" instead of staying pinned ~10 s ahead.
+        assert!(
+            chunk.offset < Duration::from_secs(2),
+            "got {:?}, expected forward drift to be corrected",
+            chunk.offset
+        );
+    }
+
+    #[test]
+    fn two_resamplers_sharing_one_epoch_reanchor_to_the_same_offset() {
+        // Console + Communications loopback threads, both idle for 10 s: a shared epoch keeps
+        // their MixSource::System offsets aligned instead of drifting apart on re-anchor.
+        let epoch = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("test clock underflowed");
+        let (console_tx, console_rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
+        let (comms_tx, comms_rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
+        let mut console = Resampler::new(16_000, 1).anchored_at(epoch);
+        let mut comms = Resampler::new(16_000, 1).anchored_at(epoch);
+        console.feed(
+            &vec![0.1f32; CHUNK_SAMPLES],
+            &ResamplerSink::Channel(console_tx),
+        );
+        comms.feed(
+            &vec![0.1f32; CHUNK_SAMPLES],
+            &ResamplerSink::Channel(comms_tx),
+        );
+        let console_chunk = console_rx.recv().unwrap();
+        let comms_chunk = comms_rx.recv().unwrap();
+        // Both threads anchor to the same epoch, so their first chunks land within a hair of
+        // each other — not drifting to unrelated absolute offsets.
+        let diff = console_chunk.offset.abs_diff(comms_chunk.offset);
+        assert!(
+            diff < Duration::from_millis(50),
+            "console={:?} comms={:?} diff={:?}",
+            console_chunk.offset,
+            comms_chunk.offset,
+            diff
         );
     }
 

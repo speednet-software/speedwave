@@ -373,7 +373,8 @@ pub fn update_containers(
         log::warn!("Failed to list installed plugins for security check: {e}");
         Vec::new()
     });
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?;
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
     let violations = SecurityCheck::run(&compose_yml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
         let msgs: Vec<String> = violations
@@ -503,7 +504,14 @@ pub fn rollback_containers(
     // Use manifests from the snapshot (live state may differ post-uninstall).
     let user_config = config::load_user_config()?;
     let project_dir = user_config.require_project(project)?.dir.clone();
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?;
+    // Current resolved policy — a snapshot without the managed-settings mount must fail
+    // when today's policy locks telemetry, forcing the forward-fix to a fresh render.
+    let (resolved, _integrations) = {
+        let project_path = std::path::PathBuf::from(&project_dir);
+        config::resolve_project_config(&project_path, &user_config, project)
+    };
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, &project_dir)?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
     let snapshot_violations = SecurityCheck::run(
         &snapshot.compose_yml,
         project,
@@ -809,6 +817,29 @@ mod tests {
         assert!(
             violations.is_empty(),
             "empty compose with empty manifests should produce no violations"
+        );
+    }
+
+    #[test]
+    fn test_rollback_stale_snapshot_without_mount_fails_when_policy_locks_telemetry() {
+        // A pre-ADR-076 snapshot has no managed-settings mount; SecurityCheck must flag it
+        // when today's policy locks telemetry, forcing a forward-fix to a fresh render.
+        let stale_snapshot_yaml = "services:\n  claude:\n    volumes: []\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_paths = compose::SecurityExpectedPaths::from_raw("/test", "/test/tokens")
+            .with_telemetry_locked(true);
+        let violations = compose::SecurityCheck::run_with_data_dir(
+            stale_snapshot_yaml,
+            "test",
+            &[],
+            &expected_paths,
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == compose::SecurityRule::ManagedSettingsMount),
+            "a snapshot missing the managed-settings mount must fail when policy locks telemetry"
         );
     }
 

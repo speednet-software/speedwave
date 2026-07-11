@@ -61,14 +61,13 @@ const SELF_REFERENCE_TOKENS: ReadonlySet<string> = new Set([
 ]);
 
 /** Ranking tiers, lower sorts first. */
-const MatchTier = Object.freeze({
-  ExactName: 0,
-  NamePrefix: 1,
-  NameSubstring: 2,
-  Keyword: 3,
-  Description: 4,
-} as const);
-type MatchTier = (typeof MatchTier)[keyof typeof MatchTier];
+enum MatchTier {
+  ExactName,
+  NamePrefix,
+  NameSubstring,
+  Keyword,
+  Description,
+}
 
 /** Per-tool computed match info used for ranking before result shaping. */
 interface ScoredTool {
@@ -107,7 +106,7 @@ function requiredMatchCount(tokenCount: number): number {
   return tokenCount >= 4 ? tokenCount - 1 : tokenCount;
 }
 
-/** Lowercased copies of a tool's searchable fields, computed once per tool per scoring pass. */
+/** Lowercased copies of a tool's searchable fields, cached per tool object. */
 interface LowercasedToolFields {
   nameLower: string;
   descriptionLower: string;
@@ -115,15 +114,26 @@ interface LowercasedToolFields {
 }
 
 /**
- * Lowercase the searchable name/description/keywords of a tool.
+ * Cache of lowercased fields keyed by ToolMetadata object identity; a registry refresh
+ * replaces tool objects wholesale (tool-registry.ts), so stale entries fall out naturally.
+ */
+const lowercaseFieldsCache = new WeakMap<ToolMetadata, LowercasedToolFields>();
+
+/**
+ * Lowercase the searchable name/description/keywords of a tool, cached per tool object.
  * @param tool - Tool metadata to derive lowercased fields from
  */
 function lowercaseFields(tool: ToolMetadata): LowercasedToolFields {
-  return {
+  const cached = lowercaseFieldsCache.get(tool);
+  if (cached) return cached;
+
+  const fields: LowercasedToolFields = {
     nameLower: tool.name.toLowerCase(),
     descriptionLower: tool.description.toLowerCase(),
     keywordsLower: tool.keywords.map((k) => k.toLowerCase()),
   };
+  lowercaseFieldsCache.set(tool, fields);
+  return fields;
 }
 
 /**
@@ -252,6 +262,10 @@ function buildSearchResult(
     deferLoading: tool.deferLoading ?? true,
   };
 
+  if (tool.userScoped) {
+    result.identityHint = buildIdentitySentence(tool);
+  }
+
   if (detailLevel === 'with_descriptions' || detailLevel === 'full_schema') {
     result.description = renderDescriptionWithIdentity(tool);
   }
@@ -267,13 +281,11 @@ function buildSearchResult(
 }
 
 /**
- * Render a tool's served description, appending ONE canonical identity sentence when userScoped.
- * Never mutates the stored metadata — renders fresh on every call.
+ * Build the self-reference sentence for a userScoped tool: which sibling tool resolves
+ * "me", which param accepts a self-reference, or a misconfiguration hint if neither exists.
  * @param tool - Tool metadata (stored, read-only)
  */
-export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
-  if (!tool.userScoped) return tool.description;
-
+function buildIdentitySentence(tool: ToolMetadata): string {
   const parts = ['Results depend on the authenticated user.'];
   if (tool.currentUserTool) {
     parts.push(`Use ${tool.currentUserTool} to resolve the current user.`);
@@ -287,7 +299,17 @@ export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
     );
   }
 
-  return `${tool.description} ${parts.join(' ')}`;
+  return parts.join(' ');
+}
+
+/**
+ * Render a tool's served description, appending ONE canonical identity sentence when userScoped.
+ * Never mutates the stored metadata — renders fresh on every call.
+ * @param tool - Tool metadata (stored, read-only)
+ */
+export function renderDescriptionWithIdentity(tool: ToolMetadata): string {
+  if (!tool.userScoped) return tool.description;
+  return `${tool.description} ${buildIdentitySentence(tool)}`;
 }
 
 /**

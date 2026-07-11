@@ -18,6 +18,9 @@ import { ListsClient } from '../graph/lists-client.js';
 import { ColumnsClient } from '../graph/columns-client.js';
 import { PagesClient } from '../graph/pages-client.js';
 
+/** A double-quote opening an OData comparison literal (e.g. `eq "Open"`) — the real syntax mistake, as opposed to a double quote legitimately nested inside a correct single-quoted literal. */
+const DOUBLE_QUOTED_LITERAL_RE = /\b(?:eq|ne|gt|ge|lt|le)\s+"/;
+
 // ── Types ─────────────────────────────────────────────────────────────────────────
 
 /** Minimal Graph list projection used by the tools. */
@@ -689,9 +692,14 @@ async function handleListItems(
       },
     };
   } catch (e) {
-    // Only a genuine 400 with a double-quoted $filter is the OData literal mistake;
-    // a 401/403/429 must not be relabeled as a filter-syntax error.
-    if (e instanceof GraphApiError && e.status === 400 && params.filter?.includes('"')) {
+    // Only a genuine 400 with a double-quote opening a comparison literal is the OData mistake;
+    // a 401/403/429, or a `"` nested inside a correct single-quoted literal, must not match.
+    if (
+      e instanceof GraphApiError &&
+      e.status === 400 &&
+      params.filter &&
+      DOUBLE_QUOTED_LITERAL_RE.test(params.filter)
+    ) {
       return teachingToolResult(
         {
           paramName: 'filter',

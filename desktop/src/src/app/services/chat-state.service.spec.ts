@@ -3247,6 +3247,78 @@ describe('ChatStateService', () => {
       expect(service.lastContextTokens).toBe(71_766);
     });
 
+    it('skips a trailing all-zero usage (aborted/errored call) and seeds from the prior real call', async () => {
+      service.seedSessionId('sess-seed-zero');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-seed-zero',
+            messages: [
+              { role: 'user', content: 'q' },
+              {
+                role: 'assistant',
+                content: 'a1',
+                usage: {
+                  input_tokens: 5,
+                  output_tokens: 9,
+                  cache_read_tokens: 30_000,
+                  cache_write_tokens: 100,
+                },
+              },
+              // Trailing main-chain line with all-zero usage (e.g. an aborted
+              // API call) must not overwrite the real prior context occupancy.
+              {
+                role: 'assistant',
+                content: 'a2',
+                usage: {
+                  input_tokens: 0,
+                  output_tokens: 0,
+                  cache_read_tokens: 0,
+                  cache_write_tokens: 0,
+                },
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(service.sessionStats?.context_usage?.cache_read_tokens).toBe(30_000);
+      expect(service.lastContextTokens).toBe(30_105);
+    });
+
+    it('does not seed context when every assistant usage in the transcript is all-zero', async () => {
+      service.seedSessionId('sess-seed-all-zero');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation') {
+          return {
+            session_id: 'sess-seed-all-zero',
+            messages: [
+              { role: 'user', content: 'q' },
+              {
+                role: 'assistant',
+                content: 'a1',
+                usage: {
+                  input_tokens: 0,
+                  output_tokens: 0,
+                  cache_read_tokens: 0,
+                  cache_write_tokens: 0,
+                },
+              },
+            ],
+          };
+        }
+        return undefined;
+      };
+
+      await fireRestart(projectState);
+
+      expect(service.sessionStats?.context_usage).toBeUndefined();
+      expect(service.lastContextTokens).toBeNull();
+    });
+
     it('auto-resumes when unmounted even if history does not fit the target window', async () => {
       service.seedSessionId('sess-2');
       // History exceeds the window → would prompt if mounted; unmounted ⇒ resume.

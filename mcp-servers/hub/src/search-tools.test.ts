@@ -302,6 +302,33 @@ describe('searchTools', () => {
       }
     });
   });
+
+  describe('lowercased field caching', () => {
+    it('returns identical results across repeated searches of the same registry', async () => {
+      const first = await searchTools({ query: 'send', detailLevel: 'names_only' });
+      const second = await searchTools({ query: 'send', detailLevel: 'names_only' });
+
+      expect(second.matches).toEqual(first.matches);
+    });
+
+    it('does not re-lowercase a tool name/description on a repeated search', async () => {
+      const tool = TOOL_REGISTRY['slack']['sendChannel'];
+      const toLowerCaseSpy = vi.spyOn(String.prototype, 'toLowerCase');
+      const callsForTool = () =>
+        toLowerCaseSpy.mock.contexts.filter(
+          (ctx) => String(ctx) === tool.name || String(ctx) === tool.description
+        ).length;
+
+      await searchTools({ query: 'send', detailLevel: 'names_only', service: 'slack' });
+      const callsAfterFirst = callsForTool();
+      await searchTools({ query: 'send', detailLevel: 'names_only', service: 'slack' });
+
+      expect(callsAfterFirst).toBeGreaterThan(0);
+      expect(callsForTool()).toBe(callsAfterFirst);
+
+      toLowerCaseSpy.mockRestore();
+    });
+  });
 });
 
 describe('searchTools edge cases', () => {
@@ -1133,14 +1160,18 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
     resetServiceCaches();
   });
 
-  it('does not append identity sentence at names_only (no description field at all)', async () => {
+  it('omits the full description at names_only but still carries the identity hint', async () => {
     const result = await searchTools({
       query: 'getCurrentUser',
       detailLevel: 'names_only',
       service: 'redmine',
     });
 
+    const hint = result.matches[0].identityHint ?? '';
     expect(result.matches[0].description).toBeUndefined();
+    expect(hint).toContain('Results depend on the authenticated user.');
+    expect(hint).toContain('Use getCurrentUser to resolve the current user.');
+    expect(hint).toContain('Pass "user_id" to reference yourself.');
   });
 
   it('appends the identity sentence at with_descriptions', async () => {
@@ -1175,6 +1206,42 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
     });
 
     expect(result.matches[0].description).not.toContain('authenticated user');
+  });
+
+  it('does not set identityHint for a non-userScoped tool at any detail level', async () => {
+    const namesOnly = await searchTools({
+      query: 'createIssue',
+      detailLevel: 'names_only',
+      service: 'redmine',
+    });
+    const withDescriptions = await searchTools({
+      query: 'createIssue',
+      detailLevel: 'with_descriptions',
+      service: 'redmine',
+    });
+
+    expect(namesOnly.matches[0].identityHint).toBeUndefined();
+    expect(withDescriptions.matches[0].identityHint).toBeUndefined();
+  });
+
+  it('sets identityHint for a userScoped tool at with_descriptions and full_schema too', async () => {
+    const withDescriptions = await searchTools({
+      query: 'getCurrentUser',
+      detailLevel: 'with_descriptions',
+      service: 'redmine',
+    });
+    const fullSchema = await searchTools({
+      query: 'getCurrentUser',
+      detailLevel: 'full_schema',
+      service: 'redmine',
+    });
+
+    expect(withDescriptions.matches[0].identityHint).toContain(
+      'Use getCurrentUser to resolve the current user.'
+    );
+    expect(fullSchema.matches[0].identityHint).toContain(
+      'Use getCurrentUser to resolve the current user.'
+    );
   });
 
   it('never mutates the stored ToolMetadata description', () => {

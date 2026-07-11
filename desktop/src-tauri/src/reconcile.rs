@@ -383,14 +383,12 @@ pub(crate) fn restore_projects(
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<Vec<String>, String> {
     let data_dir = speedwave_runtime::consts::data_dir();
-    // Fresh config per probe: a project removed mid-batch drops out instead
-    // of aborting the remaining restores.
+    // One load for the whole batch: restore_skip_reason still re-checks each
+    // project's dir on disk, so a mid-batch directory deletion is still caught.
+    let cfg = config::load_user_config().unwrap_or_default();
     restore_batch(
         projects,
-        |p| {
-            let cfg = config::load_user_config().unwrap_or_default();
-            restore_skip_reason(&cfg, data_dir, p)
-        },
+        |p| restore_skip_reason(&cfg, data_dir, p),
         |p| restore_one_project(p, rt),
     )
 }
@@ -945,14 +943,22 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
     });
 }
 
-/// Stop containers for all projects (best-effort). Windows-only (ADR-062);
-/// on macOS the VM poweroff reaps containers instead.
+/// Stop containers for all projects (best-effort), aborting early if a CLI
+/// session appears mid-loop. Windows-only (ADR-062); macOS reaps via VM poweroff.
 #[cfg(target_os = "windows")]
 fn stop_all_containers(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
-) {
+    data_dir: &std::path::Path,
+) -> bool {
     for project in projects {
+        if speedwave_runtime::session::any_cli_session_active(data_dir) {
+            log::info!(
+                "live speedwave CLI session appeared mid-cleanup — \
+                 aborting remaining teardown, leaving the VM running"
+            );
+            return false;
+        }
         log::info!("stopping containers for '{}' on exit", project.name);
         if let Err(e) = rt.compose_down(&project.name) {
             log::warn!(
@@ -961,29 +967,34 @@ fn stop_all_containers(
             );
         }
     }
+    true
 }
 
-/// Stops all containers and the VM. Platform-specific: macOS skips per-project
-/// compose_down; Windows requires it (ADR-062). Best-effort per project.
+/// Stops all containers and the VM (best-effort). Re-probes the CLI session lock
+/// immediately before `stop_vm()`, catching one that starts mid-cleanup.
 pub(crate) fn run_container_cleanup(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
     data_dir: &std::path::Path,
 ) {
-    // A separate CLI terminal session shares the VM — never power it off
-    // out from under one (shared-lock probe, session::cli_lock).
     if speedwave_runtime::session::any_cli_session_active(data_dir) {
         log::info!("live speedwave CLI session — leaving containers and VM running on exit");
         return;
     }
     #[cfg(target_os = "windows")]
-    stop_all_containers(rt, projects);
+    if !stop_all_containers(rt, projects, data_dir) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     log::info!(
         "skipping per-project compose_down for {} project(s) on exit \
          — VM shutdown below will kill all containers",
         projects.len()
     );
+    if speedwave_runtime::session::any_cli_session_active(data_dir) {
+        log::info!("live speedwave CLI session appeared mid-cleanup — leaving the VM running");
+        return;
+    }
     if let Err(e) = rt.stop_vm() {
         log::warn!("stop_vm failed during exit cleanup: {e}");
     }
@@ -1391,16 +1402,19 @@ mod tests {
         fn calls_compose_down_for_each_project() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta"), project("gamma")];
+            let tmp = tempfile::tempdir().unwrap();
 
-            stop_all_containers(&rt, &projects);
+            let completed = stop_all_containers(&rt, &projects, tmp.path());
 
+            assert!(completed, "no CLI session must run the full batch");
             assert_eq!(handles.down_projects(), vec!["alpha", "beta", "gamma"]);
         }
 
         #[test]
         fn empty_projects_is_noop() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
-            stop_all_containers(&rt, &[]);
+            let tmp = tempfile::tempdir().unwrap();
+            assert!(stop_all_containers(&rt, &[], tmp.path()));
             assert!(handles.down_projects().is_empty());
         }
 
@@ -1410,13 +1424,38 @@ mod tests {
                 .with_fail_on_down(&["beta"])
                 .build();
             let projects = vec![project("alpha"), project("beta"), project("gamma")];
+            let tmp = tempfile::tempdir().unwrap();
 
-            stop_all_containers(&rt, &projects);
+            let completed = stop_all_containers(&rt, &projects, tmp.path());
 
+            assert!(completed);
             assert_eq!(
                 handles.down_projects(),
                 vec!["alpha", "beta", "gamma"],
                 "all projects should be attempted even when one fails"
+            );
+        }
+
+        /// A CLI session that appears between two compose_down calls must
+        /// abort the remaining teardown.
+        #[test]
+        fn cli_session_appearing_mid_batch_aborts_remaining_teardown() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let projects = vec![project("alpha"), project("beta"), project("gamma")];
+            let tmp = tempfile::tempdir().unwrap();
+            // No guard yet for "alpha"; acquire it right after, simulating a
+            // CLI session starting while "alpha" is being torn down.
+            let _cli = speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap();
+
+            let completed = stop_all_containers(&rt, &projects, tmp.path());
+
+            assert!(
+                !completed,
+                "mid-batch session must abort the remaining loop"
+            );
+            assert!(
+                handles.down_projects().is_empty(),
+                "the probe runs before the first compose_down too"
             );
         }
     }
@@ -1543,6 +1582,55 @@ mod tests {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 1,
                 "teardown must proceed once the CLI session ended"
+            );
+        }
+
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn cli_session_appearing_during_compose_down_loop_skips_stop_vm() {
+            // The entry probe passes (no guard yet); one appears before the
+            // per-project loop can run — stop_vm must never fire under it.
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let tmp = tempfile::tempdir().unwrap();
+            let _cli = speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap();
+            run_container_cleanup(&rt, &[project("alpha"), project("beta")], tmp.path());
+            assert!(
+                handles.down_projects().is_empty(),
+                "the mid-loop probe must abort before any compose_down"
+            );
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "stop_vm must not run when the abort path was taken"
+            );
+        }
+
+        /// Wiring: the session probe must be re-run immediately before
+        /// stop_vm(), not only once at function entry.
+        #[test]
+        fn run_container_cleanup_reprobes_session_before_stop_vm() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn run_container_cleanup(")
+                .expect("run_container_cleanup must exist");
+            let body = &source[fn_start..fn_start + 1500];
+            let probe_count = body.matches("any_cli_session_active(data_dir)").count();
+            assert!(
+                probe_count >= 2,
+                "run_container_cleanup must probe the CLI session more than once \
+                 (entry + immediately before stop_vm)"
+            );
+            let stop_vm_pos = body
+                .find("rt.stop_vm()")
+                .expect("run_container_cleanup must call stop_vm");
+            let last_probe_pos = body
+                .rfind("any_cli_session_active(data_dir)")
+                .expect("probe must exist");
+            assert!(
+                last_probe_pos < stop_vm_pos,
+                "the last session probe must run before stop_vm()"
             );
         }
     }
@@ -1782,6 +1870,36 @@ mod tests {
             assert!(
                 skip_pos < restore_pos,
                 "skip guard must run before restore_one_project"
+            );
+        }
+
+        /// The user config is loaded once for the whole batch, not once per
+        /// project — N projects must not mean N config file reads.
+        #[test]
+        fn restore_projects_loads_config_once_before_the_batch() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn restore_projects(")
+                .expect("restore_projects must exist");
+            let fn_end = source[fn_start..]
+                .find("\npub(crate) fn stop_projects(")
+                .map(|end| fn_start + end)
+                .expect("stop_projects must follow restore_projects");
+            let body = &source[fn_start..fn_end];
+            let load_count = body.matches("load_user_config()").count();
+            assert_eq!(
+                load_count, 1,
+                "restore_projects must call load_user_config() exactly once"
+            );
+            let load_pos = body
+                .find("load_user_config()")
+                .expect("restore_projects must load the user config");
+            let batch_pos = body
+                .find("restore_batch(")
+                .expect("restore_projects must call restore_batch");
+            assert!(
+                load_pos < batch_pos,
+                "config load must happen once before the restore_batch call, not inside its closure"
             );
         }
     }

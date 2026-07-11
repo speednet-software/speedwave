@@ -262,7 +262,7 @@ export function formatSlackError(error: unknown): string {
   const e = error as { message?: string; data?: { error?: string }; error?: string };
   const slackError = e.data?.error || e.error;
 
-  if (slackError && slackError in SLACK_ERROR_MESSAGES) {
+  if (slackError && Object.hasOwn(SLACK_ERROR_MESSAGES, slackError)) {
     return SLACK_ERROR_MESSAGES[slackError];
   }
 
@@ -938,8 +938,8 @@ export async function listDms(clients: SlackClients): Promise<{ dms: SlackDmSumm
   return { dms };
 }
 
-/** User-ID shape accepted by conversations.open (U… or enterprise W…): a letter/digit run of at least 8 chars after the prefix, no upper length bound. */
-const USER_ID_RE = /^[UW][A-Z0-9]{8,}$/;
+/** User-ID shape accepted by conversations.open (U… or enterprise W…): a letter/digit run of at least 8 chars after the prefix, requiring at least one digit so an all-alphabetic word can't match after case-normalization. */
+const USER_ID_RE = /^[UW](?=[A-Z0-9]{8,}$)[A-Z]*[0-9][A-Z0-9]*$/;
 
 /** Slack caps a single conversation at 8 participants (conversations.open). */
 const MAX_DM_PARTICIPANTS = 8;

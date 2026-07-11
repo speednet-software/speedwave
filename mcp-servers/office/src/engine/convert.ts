@@ -291,20 +291,27 @@ export const CONVERT_MATRIX: Readonly<Record<string, ReadonlySet<string>>> = {
 const PASSWORD_OR_ENCRYPTED = /\b(?:password|encrypt(?:ed|ion)?)\b/i;
 
 /**
- * Strips path-like tokens (anything containing `/`) so an echoed source path can never false-trigger the signature match.
+ * Strips path-like tokens so an echoed source path can never false-trigger the signature match.
+ * `knownPaths` are stripped first as literal substrings, covering paths a space would defeat below.
  * @param detail - the raw failure detail text
+ * @param knownPaths - exact path strings known to have been passed to the failing subprocess
  */
-function withoutPathTokens(detail: string): string {
-  return detail.replace(/\S*\/\S+/g, '');
+function withoutPathTokens(detail: string, knownPaths: readonly string[] = []): string {
+  let stripped = detail;
+  for (const knownPath of knownPaths) {
+    stripped = stripped.split(knownPath).join('');
+  }
+  return stripped.replace(/\S*\/\S+/g, '');
 }
 
 /**
  * Re-throw a LibreOffice subprocess failure as a {@link ValidationError} with actionable guidance, anchoring the password/encrypted case to a whole-word signature outside any echoed file path.
  * @param err - the error thrown by `runOk` for the `soffice` invocation
+ * @param knownPaths - exact path strings known to have been passed to the failing subprocess
  */
-function translateLibreOfficeError(err: unknown): never {
+function translateLibreOfficeError(err: unknown, knownPaths: readonly string[] = []): never {
   const detail = err instanceof Error ? err.message : String(err);
-  if (PASSWORD_OR_ENCRYPTED.test(withoutPathTokens(detail))) {
+  if (PASSWORD_OR_ENCRYPTED.test(withoutPathTokens(detail, knownPaths))) {
     throw new ValidationError(
       'LibreOffice could not open the input -- it may be password-protected or encrypted; ' +
         'verify the file opens normally (without a password) before converting.'
@@ -346,7 +353,7 @@ async function libreOfficeConvert(srcAbs: string, target: string): Promise<strin
           { timeoutMs: TIMEOUT_LIBREOFFICE_MS, env: { HOME: '/tmp/lo' } }
         );
       } catch (err) {
-        translateLibreOfficeError(err);
+        translateLibreOfficeError(err, [srcAbs, outDir]);
       }
       const produced = (await fsp.readdir(outDir)).map((f) => path.join(outDir, f));
       const file =

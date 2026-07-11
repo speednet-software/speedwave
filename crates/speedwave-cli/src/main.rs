@@ -969,7 +969,8 @@ fn main() -> anyhow::Result<()> {
         Vec::new()
     });
     let expected_paths =
-        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?;
+        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?
+            .with_telemetry_locked(resolved.telemetry.any_locked);
 
     // OS prerequisite check
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
@@ -1119,9 +1120,10 @@ fn main() -> anyhow::Result<()> {
             ),
         );
         let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
-        let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
+        let status_result = runtime.container_exec(&container_name, &cmd_ref).status();
         terminal_restore::sanitize_host_terminal();
         reap_instance(&runtime, &container_name, &instance_id);
+        let status = status_result?;
         std::process::exit(
             status
                 .code()
@@ -1135,13 +1137,12 @@ fn main() -> anyhow::Result<()> {
     tail.extend(resolved.flags.iter().cloned());
     let exec_argv = stamped_exec_argv(&instance_id, tail);
     let exec_cmd: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
-    let status = runtime
-        .container_exec(&container_name, &exec_cmd)
-        .status()?;
-    // Claude killed abruptly (VM poweroff, OOM) cannot pop the emulator modes
-    // it enabled; the CLI is the last process on the PTY chain that can.
+    let status_result = runtime.container_exec(&container_name, &exec_cmd).status();
+    // Claude killed abruptly (VM poweroff, OOM) cannot pop the emulator modes it
+    // enabled; run even on a spawn error, before propagating it below.
     terminal_restore::sanitize_host_terminal();
     reap_instance(&runtime, &container_name, &instance_id);
+    let status = status_result?;
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
@@ -1267,6 +1268,64 @@ mod tests {
         assert!(
             window.contains("sanitize_host_terminal()"),
             "login exec must sanitize the host terminal after status()"
+        );
+    }
+
+    #[test]
+    fn interactive_exec_sanitizes_and_reaps_before_propagating_spawn_error() {
+        // .status() must not be followed by `?` directly: a failed spawn (not just
+        // a bad exit code) must still sanitize/reap before the error propagates.
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let status_line_end = source[exec..]
+            .find(';')
+            .map(|i| exec + i)
+            .expect("status() statement must be terminated");
+        assert!(
+            !source[exec..status_line_end].contains('?'),
+            "the interactive exec status must be captured without an early `?` return"
+        );
+        let sanitize = source[status_line_end..]
+            .find("sanitize_host_terminal()")
+            .map(|i| status_line_end + i)
+            .expect("sanitize must run after the captured status");
+        let propagate = source[status_line_end..]
+            .find("status_result?")
+            .map(|i| status_line_end + i)
+            .expect("the captured status_result must be propagated after cleanup");
+        assert!(
+            sanitize < propagate,
+            "sanitize/reap must run before the spawn error is propagated"
+        );
+    }
+
+    #[test]
+    fn login_exec_sanitizes_and_reaps_before_propagating_spawn_error() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let status_line_end = source[exec..]
+            .find(';')
+            .map(|i| exec + i)
+            .expect("status() statement must be terminated");
+        assert!(
+            !source[exec..status_line_end].contains('?'),
+            "the login exec status must be captured without an early `?` return"
+        );
+        let sanitize = source[status_line_end..]
+            .find("sanitize_host_terminal()")
+            .map(|i| status_line_end + i)
+            .expect("sanitize must run after the captured status");
+        let propagate = source[status_line_end..]
+            .find("status_result?")
+            .map(|i| status_line_end + i)
+            .expect("the captured status_result must be propagated after cleanup");
+        assert!(
+            sanitize < propagate,
+            "sanitize/reap must run before the spawn error is propagated"
         );
     }
 

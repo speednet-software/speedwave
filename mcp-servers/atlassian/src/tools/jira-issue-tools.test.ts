@@ -265,17 +265,19 @@ describe('getMyself handler', () => {
 });
 
 describe('addAttachment handler validation', () => {
-  it('errors when issueIdOrKey is missing', async () => {
+  it('errors when issueIdOrKey is missing, with teaching next-step guidance', async () => {
     const res = await handlerFor('addAttachment')({ filePath: '/workspace/bug.png' });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/issueIdOrKey/);
+    expect(res.content[0].text).toMatch(/Provide the Jira issue key/);
     expect(issuesStub.addAttachment).not.toHaveBeenCalled();
   });
 
-  it('errors when filePath is missing', async () => {
+  it('errors when filePath is missing, with teaching next-step guidance', async () => {
     const res = await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1' });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/filePath/);
+    expect(res.content[0].text).toMatch(/Provide a path under \/workspace/);
     expect(issuesStub.addAttachment).not.toHaveBeenCalled();
   });
 });
@@ -382,6 +384,60 @@ describe('addAttachment handler via filePath', () => {
   });
 });
 
+describe('addAttachment handler size cap', () => {
+  let ws: string;
+  let prevWorkspace: string | undefined;
+  let prevMax: string | undefined;
+
+  beforeEach(() => {
+    prevWorkspace = process.env.WORKSPACE_DIR;
+    prevMax = process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
+    ws = realpathSync(mkdtempSync(join(tmpdir(), 'atl-ws-cap-')));
+    process.env.WORKSPACE_DIR = ws;
+    process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES = '10';
+    vi.resetModules();
+  });
+  afterEach(() => {
+    if (prevWorkspace === undefined) delete process.env.WORKSPACE_DIR;
+    else process.env.WORKSPACE_DIR = prevWorkspace;
+    if (prevMax === undefined) delete process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
+    else process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES = prevMax;
+    rmSync(ws, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  /** Re-import the module fresh so it re-reads `ATLASSIAN_MAX_ATTACHMENT_BYTES` from env. */
+  async function freshAddAttachmentDef() {
+    const mod = await import('./jira-issue-tools.js');
+    return mod.createJiraIssueTools(FAKE_CLIENT).find((d) => d.tool.name === 'addAttachment')!;
+  }
+
+  it('rejects a file over the configured byte cap before reading it into memory', async () => {
+    writeFileSync(join(ws, 'big.bin'), Buffer.alloc(11, 'x'));
+    const def = await freshAddAttachmentDef();
+    const res = await def.handler({ issueIdOrKey: 'PROJ-1', filePath: 'big.bin' } as never);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/too large to attach/);
+    expect(res.content[0].text).toMatch(/11 bytes > 10 byte limit/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+  });
+
+  it('accepts a file at exactly the byte cap', async () => {
+    writeFileSync(join(ws, 'ok.bin'), Buffer.alloc(10, 'x'));
+    issuesStub.addAttachment.mockResolvedValueOnce({ id: '1' });
+    const def = await freshAddAttachmentDef();
+    const res = await def.handler({ issueIdOrKey: 'PROJ-1', filePath: 'ok.bin' } as never);
+    expect(res.isError).toBeUndefined();
+    expect(issuesStub.addAttachment).toHaveBeenCalledTimes(1);
+  });
+
+  it('states the configured byte cap in the tool description', async () => {
+    const def = await freshAddAttachmentDef();
+    expect(def.tool.description).toMatch(/capped at 10 bytes/);
+    expect(def.tool.description).not.toMatch(/streams it/);
+  });
+});
+
 describe('deleteAttachment handler', () => {
   it('is marked destructive in its annotations', () => {
     const def = createJiraIssueTools(FAKE_CLIENT).find((d) => d.tool.name === 'deleteAttachment');
@@ -396,10 +452,11 @@ describe('deleteAttachment handler', () => {
     expect(payload(res)).toEqual({ deleted: true });
   });
 
-  it('errors when attachmentId is missing', async () => {
+  it('errors when attachmentId is missing, with teaching next-step guidance', async () => {
     const res = await handlerFor('deleteAttachment')({});
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/attachmentId/);
+    expect(res.content[0].text).toMatch(/Provide the Jira attachment ID/);
     expect(issuesStub.deleteAttachment).not.toHaveBeenCalled();
   });
 

@@ -201,7 +201,7 @@ export function createJournalTools(client: RedmineClient | null): ToolDefinition
           journal_id: number;
           notes: string;
         };
-        return withRedmineErrors({ journal_id }, async () => {
+        return withRedmineErrors({ issue_id, journal_id }, async () => {
           await client.updateJournal(issue_id, journal_id, notes);
           return jsonResult({ ok: true });
         });
@@ -211,7 +211,7 @@ export function createJournalTools(client: RedmineClient | null): ToolDefinition
       tool: deleteJournalTool,
       handler: async (params) => {
         const { issue_id, journal_id } = params as { issue_id: number; journal_id: number };
-        return withRedmineErrors({ journal_id }, async () => {
+        return withRedmineErrors({ issue_id, journal_id }, async () => {
           await client.deleteJournal(issue_id, journal_id);
           return jsonResult({ ok: true });
         });

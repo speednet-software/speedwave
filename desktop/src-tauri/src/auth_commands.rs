@@ -302,8 +302,7 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("pub async fn ")
-            .or_else(|| fn_tail.find("pub fn "))
+            .find("// ── CLI auth command generation")
             .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
@@ -349,8 +348,7 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("pub async fn ")
-            .or_else(|| fn_tail.find("pub fn "))
+            .find("// ── CLI auth command generation")
             .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
@@ -374,8 +372,7 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("pub async fn ")
-            .or_else(|| fn_tail.find("pub fn "))
+            .find("// ── CLI auth command generation")
             .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];

@@ -265,7 +265,7 @@ describe('journal-tools', () => {
       });
     });
 
-    it('passes journal_id as formatError context on failure', async () => {
+    it('passes issue_id and journal_id as formatError context on failure', async () => {
       mockClient.updateJournal.mockRejectedValue(new Error('Not found'));
       const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
 
@@ -274,7 +274,10 @@ describe('journal-tools', () => {
 
       await handler!({ issue_id: 10, journal_id: 9999, notes: 'Updated' });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { journal_id: 9999 });
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), {
+        issue_id: 10,
+        journal_id: 9999,
+      });
     });
 
     it('handles permission errors', async () => {
@@ -365,7 +368,7 @@ describe('journal-tools', () => {
       });
     });
 
-    it('passes journal_id as formatError context on failure', async () => {
+    it('passes issue_id and journal_id as formatError context on failure', async () => {
       mockClient.deleteJournal.mockRejectedValue(new Error('Not found'));
       const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
 
@@ -374,7 +377,10 @@ describe('journal-tools', () => {
 
       await handler!({ issue_id: 10, journal_id: 9999 });
 
-      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { journal_id: 9999 });
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), {
+        issue_id: 10,
+        journal_id: 9999,
+      });
     });
 
     it('handles non-existent issue', async () => {

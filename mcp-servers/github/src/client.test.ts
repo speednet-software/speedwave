@@ -1521,6 +1521,40 @@ describe('GitHubClient', () => {
       expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
     });
 
+    it('teaches instead of overwriting a symlink target', async () => {
+      octokit.rest.repos.getContent.mockResolvedValue({
+        data: { type: 'symlink', path: 'link', sha: 'linksha', target: '../other' },
+      });
+      await expect(
+        client.createOrUpdateFile('o', 'r', { path: 'link', content: 'x', message: 'm' })
+      ).rejects.toThrow("Path 'link' is a directory, not a file.");
+      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+    });
+
+    it('teaches instead of overwriting a submodule target', async () => {
+      octokit.rest.repos.getContent.mockResolvedValue({
+        data: { type: 'submodule', path: 'sub', sha: 'subsha' },
+      });
+      await expect(
+        client.createOrUpdateFile('o', 'r', { path: 'sub', content: 'x', message: 'm' })
+      ).rejects.toThrow("Path 'sub' is a directory, not a file.");
+      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+    });
+
+    it('propagates a non-Octokit SHA-lookup error unchanged (no numeric status)', async () => {
+      const bug = new TypeError('cannot read property of undefined');
+      octokit.rest.repos.getContent.mockRejectedValue(bug);
+      await expect(
+        client.createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
+      ).rejects.toBe(bug);
+      expect(octokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+      await client
+        .createOrUpdateFile('o', 'r', { path: 'a.txt', content: 'x', message: 'm' })
+        .catch((error) => {
+          expect(isExpectedError(error)).toBe(false);
+        });
+    });
+
     it('uses the provided SHA without a lookup', async () => {
       octokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({
         data: { commit: { sha: 's' }, content: { path: 'a.txt', html_url: 'h' } },
@@ -1805,8 +1839,47 @@ describe('GitHubClient', () => {
           assignee: 'me',
           creator: 'them',
           per_page: 5,
-        })
+        }),
+        expect.any(Function)
       );
+    });
+
+    it('stops paginating once enough non-PR issues are collected, mixed PR pages included', async () => {
+      const page1 = [
+        { number: 1, title: 'bug', state: 'open', user: {}, labels: [], assignees: [] },
+        { number: 2, title: 'pr', state: 'open', user: {}, labels: [], pull_request: { url: 'x' } },
+      ];
+      const page2 = [
+        { number: 3, title: 'feature', state: 'open', user: {}, labels: [], assignees: [] },
+      ];
+      const pages = [page1, page2];
+      let pagesFetched = 0;
+      octokit.paginate.mockImplementation(
+        async (
+          _route: unknown,
+          _params: unknown,
+          mapFn: (r: { data: unknown }, done: () => void) => unknown[]
+        ) => {
+          const collected: unknown[] = [];
+          let stop = false;
+          const done = (): void => {
+            stop = true;
+          };
+          for (const p of pages) {
+            pagesFetched++;
+            collected.push(...mapFn({ data: p }, done));
+            if (stop) break;
+          }
+          return collected;
+        }
+      );
+
+      const issues = await client.listIssues('o', 'r', { limit: 1 });
+
+      expect(issues).toHaveLength(1);
+      expect(issues[0].number).toBe(1);
+      // Page 1 alone already yields 1 non-PR issue meeting the limit; page 2 is never fetched.
+      expect(pagesFetched).toBe(1);
     });
 
     it('normalizes string labels', async () => {

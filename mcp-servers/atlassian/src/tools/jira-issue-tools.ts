@@ -9,6 +9,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  teachingErrorResult,
   META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
@@ -25,6 +26,16 @@ import { withValidation } from './validation.js';
 const ACCOUNT_ID_RESOLUTION_GUIDANCE =
   'Resolve your own account ID via getMyself; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result, or ask the user rather than guessing.';
 
+/**
+ * Max attachment size this worker will buffer and upload, well under its 128 MiB memory budget.
+ * Override: `ATLASSIAN_MAX_ATTACHMENT_BYTES`.
+ */
+const MAX_ATTACHMENT_BYTES = (() => {
+  const raw = process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
+  const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : 25 * 1024 * 1024;
+})();
+
 /** Root of the read-only project mount inside the worker (overridable for tests). */
 function workspaceRoot(): string {
   return process.env.WORKSPACE_DIR || '/workspace';
@@ -32,7 +43,7 @@ function workspaceRoot(): string {
 
 /**
  * Read `filePath` from the read-only workspace mount, rejecting any path escaping it (traversal
- * or symlink) so a tokened worker can't read `/tokens` etc.
+ * or symlink) so a tokened worker can't read `/tokens` etc, or exceeding {@link MAX_ATTACHMENT_BYTES}.
  * @param filePath - Path relative to (or inside) the workspace root.
  * @returns The file bytes and its basename.
  */
@@ -50,6 +61,12 @@ async function readWorkspaceFile(filePath: string): Promise<{ buffer: Buffer; na
   }
   const stat = await fsp.stat(real);
   if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
+  if (stat.size > MAX_ATTACHMENT_BYTES) {
+    throw new Error(
+      `File is too large to attach (${stat.size} bytes > ${MAX_ATTACHMENT_BYTES} byte limit): ${filePath}. ` +
+        'Split the file or reduce it before attaching.'
+    );
+  }
   return { buffer: await fsp.readFile(real), name: path.basename(real) };
 }
 
@@ -369,10 +386,9 @@ const getMyselfTool: Tool = {
 
 const addAttachmentTool: Tool = {
   name: 'addAttachment',
-  description:
-    "Attach a file to a Jira issue. The worker reads `filePath` (a path under /workspace) from disk and streams it — no size limit beyond Jira's.",
+  description: `Attach a file to a Jira issue. The worker reads \`filePath\` (a path under /workspace) fully into memory before uploading, so it is capped at ${MAX_ATTACHMENT_BYTES} bytes regardless of Jira's own attachment-size limit.`,
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'attachment', 'attach', 'upload', 'file', 'screenshot', 'image', 'załącznik'],
   example:
     'await atlassian.addAttachment({ issueIdOrKey: "PROJ-123", filePath: "/workspace/bug.png" })',
@@ -382,7 +398,7 @@ const addAttachmentTool: Tool = {
       issueIdOrKey: { type: 'string', description: 'Issue key (e.g. PROJ-123) or numeric ID' },
       filePath: {
         type: 'string',
-        description: 'Path under /workspace to read and stream (e.g. /workspace/bug.png)',
+        description: `Path under /workspace to read (e.g. /workspace/bug.png), max ${MAX_ATTACHMENT_BYTES} bytes`,
       },
       filename: {
         type: 'string',
@@ -422,7 +438,7 @@ const deleteAttachmentTool: Tool = {
   name: 'deleteAttachment',
   description: 'Delete a Jira attachment by its attachment ID (irreversible).',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'attachment', 'delete', 'remove', 'załącznik', 'usuń'],
   example: 'await atlassian.deleteAttachment({ attachmentId: "10475" })',
   inputSchema: {
@@ -575,10 +591,23 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           filePath?: string;
           contentType?: string;
         };
-        if (!issueIdOrKey) throw new Error('issueIdOrKey is required');
-        if (!filePath) throw new Error('filePath is required (a path under /workspace)');
+        if (!issueIdOrKey) {
+          return teachingErrorResult({
+            paramName: 'issueIdOrKey',
+            received: issueIdOrKey,
+            nextStep:
+              'Provide the Jira issue key (e.g. PROJ-123) or numeric ID to attach the file to.',
+          });
+        }
+        if (!filePath) {
+          return teachingErrorResult({
+            paramName: 'filePath',
+            received: filePath,
+            nextStep:
+              'Provide a path under /workspace to the file to attach (e.g. /workspace/bug.png).',
+          });
+        }
 
-        // Worker reads the file directly from the read-only workspace mount and streams it.
         const file = await readWorkspaceFile(filePath);
         return jsonResult({
           attachment: await issues.addAttachment(issueIdOrKey, {
@@ -593,7 +622,14 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
       tool: deleteAttachmentTool,
       handler: withValidation(client, async (_c, params) => {
         const { attachmentId } = params as { attachmentId: string };
-        if (!attachmentId) throw new Error('attachmentId is required');
+        if (!attachmentId) {
+          return teachingErrorResult({
+            paramName: 'attachmentId',
+            received: attachmentId,
+            nextStep:
+              'Provide the Jira attachment ID to delete (e.g. from a prior getIssue/addAttachment result).',
+          });
+        }
         await issues.deleteAttachment(attachmentId);
         return jsonResult({ deleted: true });
       }),

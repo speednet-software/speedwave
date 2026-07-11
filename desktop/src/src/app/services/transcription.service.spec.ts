@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { TranscriptionService } from './transcription.service';
 import { TauriService } from './tauri.service';
@@ -97,6 +97,24 @@ describe('TranscriptionService', () => {
       });
       // The recording id is tracked at service level so it survives a remount.
       expect(svc.recordingSessionId()).toBe('sess-1');
+      expect(svc.recordingSource()).toEqual(mixed);
+      expect(svc.recordingLanguage()).toBe('pl');
+    });
+
+    it('rolls back recordingSessionId/Source/Language when attachListener rejects', async () => {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot(),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      mockTauri.listen = vi.fn(async () => {
+        throw new Error('ipc down');
+      });
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      expect(svc.recordingSessionId()).toBeNull();
+      expect(svc.recordingSource()).toBeNull();
+      expect(svc.recordingLanguage()).toBeNull();
     });
   });
 
@@ -111,12 +129,16 @@ describe('TranscriptionService', () => {
       await svc.startRecording({ kind: 'system_wide' }, 'pl');
     }
 
-    it('stopRecording clears the tracked id', async () => {
+    it('stopRecording clears the tracked id, source, and language', async () => {
       await startWith('sess-1');
       expect(svc.recordingSessionId()).toBe('sess-1');
+      expect(svc.recordingSource()).toEqual({ kind: 'system_wide' });
+      expect(svc.recordingLanguage()).toBe('pl');
       mockTauri.invokeHandler = async () => undefined;
       await svc.stopRecording('sess-1');
       expect(svc.recordingSessionId()).toBeNull();
+      expect(svc.recordingSource()).toBeNull();
+      expect(svc.recordingLanguage()).toBeNull();
     });
 
     it('stopRecording clears the id even if the backend call rejects', async () => {
@@ -155,6 +177,46 @@ describe('TranscriptionService', () => {
       };
       await svc.resumeActiveRecording();
       expect(seen).toEqual([]);
+    });
+
+    it('subscribeToTranscript refuses to switch away from the in-progress recording', async () => {
+      await startWith('sess-1');
+      await expect(svc.subscribeToTranscript('sess-2')).rejects.toThrow('recording is in progress');
+      // The recording's own listener/snapshot must be untouched.
+      expect(svc.recordingSessionId()).toBe('sess-1');
+      expect(svc.active()?.id).toBe('sess-1');
+    });
+
+    it('subscribeToTranscript still works for the recording own session while recording', async () => {
+      await startWith('sess-1');
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'subscribe_transcript') {
+          return {
+            event_name: 'transcript_event::sess-1',
+            snapshot: snapshot({ id: 'sess-1', last_seq: 3 }),
+          };
+        }
+        return undefined;
+      };
+      const ack = await svc.subscribeToTranscript('sess-1');
+      expect(ack.event_name).toBe('transcript_event::sess-1');
+      expect(svc.active()?.last_seq).toBe(3);
+    });
+
+    it('subscribeToTranscript switches sessions freely once nothing is recording', async () => {
+      await startWith('sess-1');
+      await svc.stopRecording('sess-1');
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'subscribe_transcript') {
+          return {
+            event_name: 'transcript_event::sess-2',
+            snapshot: snapshot({ id: 'sess-2' }),
+          };
+        }
+        return undefined;
+      };
+      await svc.subscribeToTranscript('sess-2');
+      expect(svc.active()?.id).toBe('sess-2');
     });
   });
 
@@ -445,6 +507,7 @@ describe('TranscriptionService', () => {
         total_bytes: 10,
       });
       expect(svc.downloadProgress()).toBeNull();
+      svc.clearDownloadTracking(); // stop the completion-poll timer started above
     });
 
     it('resumeDownloadTracking attaches without invoking the download command', async () => {
@@ -462,6 +525,7 @@ describe('TranscriptionService', () => {
         total_bytes: 100,
       });
       expect(svc.downloadProgress()?.downloaded_bytes).toBe(99);
+      svc.clearDownloadTracking(); // stop the completion-poll timer started above
     });
 
     it('clearDownloadTracking detaches the progress listener', async () => {
@@ -474,6 +538,61 @@ describe('TranscriptionService', () => {
         total_bytes: 10,
       });
       expect(svc.downloadProgress()).toBeNull();
+    });
+
+    describe('resumeDownloadTracking completion polling', () => {
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('clears tracking once the backend reports the resumed download finished', async () => {
+        mockTauri.invokeHandler = async (cmd) =>
+          cmd === 'recommended_transcription_model'
+            ? {
+                key: 'large-v3',
+                display_name: 'Large v3',
+                size_bytes: 3_100_000_000,
+                downloaded: true,
+                downloading: false,
+                accel_label: 'Metal (GPU)',
+              }
+            : undefined;
+        await svc.resumeDownloadTracking('large-v3');
+        expect(svc.downloadingModelKey()).toBe('large-v3');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBeNull();
+      });
+
+      it('keeps tracking while the backend still reports the resumed download in progress', async () => {
+        mockTauri.invokeHandler = async (cmd) =>
+          cmd === 'recommended_transcription_model'
+            ? {
+                key: 'large-v3',
+                display_name: 'Large v3',
+                size_bytes: 3_100_000_000,
+                downloaded: false,
+                downloading: true,
+                accel_label: 'Metal (GPU)',
+              }
+            : undefined;
+        await svc.resumeDownloadTracking('large-v3');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBe('large-v3');
+      });
+
+      it('stops polling once tracking is cleared by another path', async () => {
+        mockTauri.invokeHandler = async () => undefined;
+        const spy = vi.spyOn(mockTauri, 'invoke');
+        await svc.resumeDownloadTracking('large-v3');
+        svc.clearDownloadTracking();
+        spy.mockClear();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(spy).not.toHaveBeenCalledWith('recommended_transcription_model');
+      });
     });
   });
 });

@@ -24,7 +24,7 @@ pub fn write_managed_settings(
     telemetry: &ResolvedTelemetry,
 ) -> anyhow::Result<()> {
     let dir = claude_managed_dir(data_dir, project);
-    crate::fs_perms::ensure_owner_only_dir(&dir)?;
+    create_owner_only_dir_chain(&dir)?;
     let env = crate::telemetry_env::locked_env_map(telemetry);
     let doc = serde_json::json!({ "env": env });
     let content = serde_json::to_string_pretty(&doc)?;
@@ -32,6 +32,37 @@ pub fn write_managed_settings(
         &managed_settings_path(data_dir, project),
         &content,
     )
+}
+
+/// Creates `dir` and every missing ancestor with owner-only permissions from the
+/// moment each level is created — never a default-umask window (Unix) before a
+/// later chmod. Existing ancestors are left untouched; only newly created ones,
+/// plus the leaf, are tightened.
+fn create_owner_only_dir_chain(dir: &Path) -> anyhow::Result<()> {
+    let mut to_create = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(p) = cursor {
+        if p.exists() {
+            break;
+        }
+        to_create.push(p);
+        cursor = p.parent();
+    }
+    for p in to_create.into_iter().rev() {
+        // A concurrent creator (e.g. another project render) may have won the
+        // race; either way the dir now exists and gets tightened below.
+        if let Err(e) = std::fs::create_dir(p) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e.into());
+            }
+        }
+        crate::fs_perms::set_owner_only_dir(p).map_err(|e| {
+            anyhow::anyhow!("failed to restrict permissions on {}: {e}", p.display())
+        })?;
+    }
+    // Leaf may have pre-existed (idempotent re-render) — always re-tighten it.
+    crate::fs_perms::set_owner_only_dir(dir)
+        .map_err(|e| anyhow::anyhow!("failed to restrict permissions on {}: {e}", dir.display()))
 }
 
 #[cfg(test)]
@@ -91,6 +122,40 @@ mod tests {
             !env.contains_key("OTEL_METRICS_EXPORTER"),
             "only locked keys go into managed-settings"
         );
+    }
+
+    #[test]
+    fn intermediate_claude_managed_dir_is_owner_only_on_first_render() {
+        // The top-level `claude-managed/` dir must never pass through a
+        // default-umask window before being tightened (project-name enumeration).
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_settings(tmp.path(), "proj", &locked_sample()).unwrap();
+        let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
+        assert!(top.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&top).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+        }
+    }
+
+    #[test]
+    fn second_project_render_leaves_shared_parent_owner_only() {
+        // Two projects share the same `claude-managed/` parent; rendering the
+        // second must not weaken (or fail on) the already-tightened parent.
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_settings(tmp.path(), "proj-a", &locked_sample()).unwrap();
+        write_managed_settings(tmp.path(), "proj-b", &locked_sample()).unwrap();
+        let top = tmp.path().join(crate::consts::CLAUDE_MANAGED_SUBDIR);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&top).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+        }
+        assert!(managed_settings_path(tmp.path(), "proj-a").exists());
+        assert!(managed_settings_path(tmp.path(), "proj-b").exists());
     }
 
     #[test]

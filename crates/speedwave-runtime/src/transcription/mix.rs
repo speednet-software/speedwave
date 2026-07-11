@@ -112,11 +112,6 @@ impl MixBuffer {
         if samples.is_empty() {
             return;
         }
-        if source == MixSource::System {
-            if let Some(t) = self.zero.feed(samples) {
-                self.pending_health.push(t);
-            }
-        }
         let start = Self::index_of(offset_ns);
         let end = start.saturating_add(samples.len() as u64);
         // Index of the first sample we still keep.
@@ -137,6 +132,13 @@ impl MixBuffer {
             );
             self.bump_filled(source, end);
             return;
+        }
+        // Feed the silence detector only the samples actually kept — a discarded (stale or
+        // over-cap) push must not skew the all-zero streak either way.
+        if source == MixSource::System {
+            if let Some(t) = self.zero.feed(&samples[skip..]) {
+                self.pending_health.push(t);
+            }
         }
         let buf = match source {
             MixSource::System => &mut self.sys,
@@ -529,6 +531,51 @@ mod tests {
             let _ = b.pop(1, usize::MAX);
         }
         assert_eq!(b.take_health(), vec![]);
+    }
+
+    #[test]
+    fn a_stale_duplicate_zero_push_does_not_count_toward_the_silence_streak() {
+        let mut b = MixBuffer::new();
+        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize]; // 1 s
+        for i in 0..14u64 {
+            b.push(MixSource::System, i * 1_000_000_000, &chunk);
+            b.push(MixSource::Mic, i * 1_000_000_000, &chunk);
+            let _ = b.pop(1, usize::MAX);
+        }
+        // Re-push an already-popped (entirely stale) range many times — a re-anchor
+        // or retry replaying old offsets must not advance the streak at all.
+        for _ in 0..10 {
+            b.push(MixSource::System, 0, &chunk);
+        }
+        assert_eq!(
+            b.take_health(),
+            vec![],
+            "stale re-delivery must not fast-forward the 15 s silence threshold"
+        );
+    }
+
+    #[test]
+    fn an_over_cap_dropped_nonzero_push_does_not_clear_an_active_silence_warning() {
+        let mut b = MixBuffer::new();
+        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize]; // 1 s
+        for i in 0..16u64 {
+            b.push(MixSource::System, i * 1_000_000_000, &chunk);
+            b.push(MixSource::Mic, i * 1_000_000_000, &chunk);
+            let _ = b.pop(1, usize::MAX);
+        }
+        assert_eq!(
+            b.take_health(),
+            vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
+        );
+        // A non-zero push that lands entirely past the buffering cap is dropped —
+        // it must not be treated as "signal arrived" and clear the warning.
+        let one_hour_ns: u64 = 3600 * 1_000_000_000;
+        b.push(MixSource::System, one_hour_ns, &[1.0; 16]);
+        assert_eq!(
+            b.take_health(),
+            vec![],
+            "a discarded over-cap push must not clear the silence warning"
+        );
     }
 
     #[test]
