@@ -112,6 +112,9 @@ pub struct TranscriptDriver {
     next_pcm_warn_at: f32,
     /// End of the last committed live segment; the live view is append-only.
     published_until: Duration,
+    /// Text of the last committed segment — a wordless jittered re-decode
+    /// repeating it verbatim at the horizon is a duplicate, not new speech.
+    last_committed_text: String,
     /// Draft (uncommitted tail) last published to the store.
     last_draft: String,
 }
@@ -130,6 +133,7 @@ impl TranscriptDriver {
             last_decode_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
             published_until: Duration::ZERO,
+            last_committed_text: String::new(),
             last_draft: String::new(),
         }
     }
@@ -256,7 +260,17 @@ impl TranscriptDriver {
                 let Some(seg) = trim_committed_overlap(seg, self.published_until) else {
                     continue;
                 };
+                // Without word timestamps trim cannot shorten the text; a verbatim
+                // repeat hugging the horizon is a jittered re-decode, not new speech.
+                if seg.words.is_empty()
+                    && seg.start <= self.published_until + BOUNDARY_JITTER
+                    && seg.text == self.last_committed_text
+                {
+                    self.published_until = self.published_until.max(seg.end);
+                    continue;
+                }
                 self.published_until = seg.end;
+                self.last_committed_text = seg.text.clone();
                 batch.push(seg);
             } else {
                 if !draft.is_empty() {
@@ -841,10 +855,12 @@ mod tests {
             }
         }
         assert_eq!(seqs.len(), 3, "ala, ma kota, i psa");
+        // Draft events share the seq counter, so committed seqs are strictly
+        // increasing but not dense.
         for w in seqs.windows(2) {
-            assert_eq!(w[1], w[0] + 1, "seqs must be dense and monotonic: {seqs:?}");
+            assert!(w[1] > w[0], "seqs must be strictly increasing: {seqs:?}");
         }
-        assert_eq!(store.get(id).unwrap().last_seq, *seqs.last().unwrap());
+        assert!(store.get(id).unwrap().last_seq >= *seqs.last().unwrap());
     }
 
     #[test]
@@ -935,10 +951,11 @@ mod tests {
         let script = vec![
             vec![seg_at(0.0, 4.5, "ala ma kota")],
             vec![seg_at(0.0, 5.0, "ala ma kota")],
-            // Re-decode of the same span, jittered start (4.5 s, within 1 s of the
-            // 5.0 s horizon) — no new content past what's already committed.
-            vec![seg_at(4.5, 5.0, "ala ma kota")],
-            vec![seg_at(4.5, 5.0, "ala ma kota")],
+            // Decodes 3-4 run with window_start ≈ 3 s, so these window-relative
+            // times land at abs 4.5-5.2 s: a wordless verbatim re-decode jittered
+            // across the 5.0 s horizon — trim can't shorten it, the guard drops it.
+            vec![seg_at(1.5, 2.2, "ala ma kota")],
+            vec![seg_at(1.5, 2.2, "ala ma kota")],
         ];
         let driver = TranscriptDriver::new(DriverConfig {
             id,

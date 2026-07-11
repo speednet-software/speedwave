@@ -1179,7 +1179,7 @@ mod tests {
         // The on-disk transcript path shares `is_sidechain_event` with the live
         // stream-json path — `parent_tool_use_id` alone (no `isSidechain`) must
         // also drop usage, not just the transcript-native `isSidechain` marker.
-        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
+        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.usage.is_none());
     }

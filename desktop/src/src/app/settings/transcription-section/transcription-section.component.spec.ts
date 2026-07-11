@@ -260,13 +260,13 @@ describe('TranscriptionSectionComponent', () => {
       return undefined;
     });
     await component.ngOnInit();
-    // Both start before either finishes — proves they ran in parallel, not one-after-another.
-    expect(order).toEqual([
-      'recommendedModel:start',
-      'get_platform:start',
-      'recommendedModel:end',
-      'get_platform:end',
-    ]);
+    // Both start before either finishes — proves they ran in parallel, not
+    // one-after-another. (Index-based: framework CD may re-run the hook.)
+    expect(order.indexOf('get_platform:start')).toBeGreaterThan(-1);
+    expect(order.indexOf('get_platform:start')).toBeLessThan(order.indexOf('recommendedModel:end'));
+    expect(order.indexOf('recommendedModel:start')).toBeLessThan(
+      order.indexOf('recommendedModel:end')
+    );
   });
 
   it('size() formats GB and MB', () => {

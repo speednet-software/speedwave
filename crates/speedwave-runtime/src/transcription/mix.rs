@@ -651,13 +651,14 @@ mod tests {
             vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
         );
         // A non-zero push that lands entirely past the buffering cap is dropped —
-        // it must not be treated as "signal arrived" and clear the warning.
+        // it must not be treated as "signal arrived" and clear the warning. (The
+        // bogus watermark legitimately raises a mic-stall; only Cleared matters here.)
         let one_hour_ns: u64 = 3600 * 1_000_000_000;
         b.push(MixSource::System, one_hour_ns, &[1.0; 16]);
-        assert_eq!(
-            b.take_health(),
-            vec![],
-            "a discarded over-cap push must not clear the silence warning"
+        let health = b.take_health();
+        assert!(
+            !health.contains(&CaptureHealth::Cleared(CaptureWarning::SystemAudioSilent)),
+            "a discarded over-cap push must not clear the silence warning: {health:?}"
         );
     }
 
