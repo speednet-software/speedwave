@@ -946,15 +946,16 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = speedwave_runtime::binary::powershell_command()
-            .args([
+        let status = speedwave_runtime::binary::run_powershell(
+            &[
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
                 &script,
-            ])
-            .status()?;
+            ],
+            std::time::Duration::from_secs(60),
+        )?;
         if !status.success() {
             anyhow::bail!("Failed to add CLI to PATH");
         }
