@@ -326,10 +326,10 @@ mod tests {
         // skip for non-anthropic providers.
         let source = include_str!("auth_commands.rs");
         let fn_start = source.find("pub async fn get_auth_status(").unwrap();
-        // End at the next item after the command (avoids matching test names
-        // below that mention check_claude_auth by design).
+        // Scan production code only — the test module below mentions
+        // check_claude_auth by design.
         let fn_end = source[fn_start..]
-            .find("// ----")
+            .find("#[cfg(test)]")
             .map(|i| fn_start + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
@@ -347,9 +347,11 @@ mod tests {
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
-        let fn_end = source[fn_start..]
-            .find("// ----")
-            .map(|i| fn_start + i)
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
@@ -370,9 +372,11 @@ mod tests {
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
-        let fn_end = source[fn_start..]
-            .find("// ----")
-            .map(|i| fn_start + i)
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
@@ -585,9 +589,11 @@ mod tests {
         let fn_start = source
             .find("pub async fn anthropic_logout(")
             .expect("anthropic_logout Tauri command must exist");
-        let fn_end = source[fn_start..]
-            .find("// ----")
-            .map(|i| fn_start + i)
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(

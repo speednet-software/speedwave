@@ -1904,9 +1904,11 @@ mod tests {
         let start = src
             .find("pub fn init_vm_macos")
             .expect("init_vm_macos must exist");
-        let end = src[start..]
-            .find("// -----")
-            .map(|i| start + i)
+        let tail = &src[start + 1..];
+        let end = tail
+            .find("pub fn ")
+            .or_else(|| tail.find("pub async fn "))
+            .map(|i| start + 1 + i)
             .unwrap_or(src.len());
         let body = &src[start..end];
         assert!(
