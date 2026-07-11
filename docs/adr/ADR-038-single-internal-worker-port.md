@@ -94,9 +94,9 @@ Rejected because it adds a discovery mechanism (the hub needs to learn which por
 
 [^2]: Plugin contract table in `CLAUDE.md`: https://github.com/speednet-software/speedwave/blob/dev/CLAUDE.md#plugins
 
-[^3]: Security architecture overview: https://github.com/speednet-software/speedwave/blob/dev/docs/architecture/security.md
+[^3]: Security invariants: https://github.com/speednet-software/speedwave/blob/dev/.claude/rules/security.md
 
-[^4]: Container hardening reference: https://github.com/speednet-software/speedwave/blob/dev/docs/architecture/containers.md
+[^4]: Container hardening invariants: https://github.com/speednet-software/speedwave/blob/dev/.claude/rules/security.md
 
 [^5]: `mcp-servers/shared/src/security.ts`, function `validateWorkerUrl`: https://github.com/speednet-software/speedwave/blob/dev/mcp-servers/shared/src/security.ts
 

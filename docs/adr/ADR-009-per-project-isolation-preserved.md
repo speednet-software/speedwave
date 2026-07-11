@@ -27,7 +27,6 @@ When this ADR was first written, SharePoint was the single exception: it mounted
 - `:ro`-everywhere enforcement (no SharePoint special case) — `crates/speedwave-runtime/src/compose.rs` (`SecurityRule`, `validate_service_volume_mounts`)
 - Host-side refresh worker rationale and threat model — [ADR-060](ADR-060-host-side-oauth-refresh-worker.md)
 - SharePoint health-only token manager — `mcp-servers/sharepoint/src/token-manager.ts`
-- Platform/VM isolation specifics — [docs/architecture/platform-matrix.md](../architecture/platform-matrix.md)
 
 ## Rejected alternatives
 

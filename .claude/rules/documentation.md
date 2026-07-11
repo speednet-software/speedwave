@@ -9,29 +9,12 @@ paths:
 
 # Documentation Rules
 
-**Every feature, architectural change, and public API must be documented.** Documentation is not optional — it is a delivery requirement, same as tests.
+Project documentation is exactly two things; there are no user guides, reference manuals, or architecture overviews in-repo:
 
-## Documentation Structure
+- **ADRs (`docs/adr/`)** for big changes: any decision affecting the system's structure, security model, or platform behavior gets a new ADR named `ADR-NNN-kebab-case-title.md` plus an entry in the `docs/adr/README.md` index table. ADRs are historical records: never rewrite an accepted ADR to reflect later changes; supersede it with a new one and update its status in the index.
+- **Rules (`.claude/rules/`)**: the working guidance, kept next to the code it describes. A missing guideline becomes a new self-contained rule file; a change that invalidates a rule statement fixes the rule in the same commit.
 
-```
-docs/
-├── README.md                  <- entry point, table of contents
-├── getting-started/           <- quickstart, installation, configuration
-├── guides/                    <- CLI, desktop, integrations, IDE bridge
-├── architecture/              <- overview, security, containers, platform matrix
-├── contributing/              <- dev setup, testing
-├── adr/                       <- Architecture Decision Records
-├── accessibility/             <- accessibility guidelines
-└── troubleshooting.md         <- troubleshooting and common issues
-```
-
-## Rules
-
-- **New feature -> update relevant guide.** If you add a CLI subcommand, update `docs/guides/cli.md`. If you add an integration, update `docs/guides/integrations.md`. If you change the security model, update `docs/architecture/security.md`.
-- **Architectural decision -> write an ADR.** Any decision that affects the system's structure, security model, or platform behavior requires a new ADR in `docs/adr/` following the `ADR-NNN-kebab-case-title.md` naming convention. Update `docs/adr/README.md` index table.
-- **New docs section -> link from `docs/README.md`.** Every new file must be reachable from the docs entry point.
-- **No orphan docs.** Every Markdown file in `docs/` must be linked from at least one other file.
-- **Keep skeletons honest.** Placeholder sections use `<!-- Content to be written: ... -->` HTML comments. When implementing a feature that fills a placeholder — replace it with real content in the same PR.
+User-facing documentation (guides, installation, security overview, troubleshooting, reference) lives on the external site https://speedwave.dev/docs, maintained outside this repo. Do not create Markdown files under `docs/` outside `docs/adr/`; user-facing links in code, READMEs, and error messages point at the site, never at in-repo doc paths.
 
 ## ADR Writing Standards
 

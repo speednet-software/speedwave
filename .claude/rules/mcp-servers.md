@@ -25,7 +25,7 @@ New tool validation errors (missing/invalid params, not-found lookups, teaching 
 
 ## Adding a built-in worker touches many places (checklist)
 
-`consts.rs` service descriptor (`TOGGLEABLE_MCP_SERVICES`, resources on the descriptor) + `BUILT_IN_SERVICE_IDS` · `build.rs::IMAGES` entry with `hash_inputs` + `${IMAGE_*}` placeholder + resource placeholders in `compose.template.yml` + bundle-script list (all test-guarded) · `tzdata` in the image (MANUAL, nothing catches a miss) · hub env `WORKER_<SVC>_URL` wiring · optional `containers/claude-resources/*/integrations/<config_key>/` resources (+ BATS on/off test in `_tests/entrypoint/entrypoint.bats`) · user docs. Grep an existing worker (e.g. `redmine`) end-to-end rather than trusting this list to be exhaustive.
+`consts.rs` service descriptor (`TOGGLEABLE_MCP_SERVICES`, resources on the descriptor) + `BUILT_IN_SERVICE_IDS` · `build.rs::IMAGES` entry with `hash_inputs` + `${IMAGE_*}` placeholder + resource placeholders in `compose.template.yml` + bundle-script list (all test-guarded) · `tzdata` in the image (MANUAL, nothing catches a miss) · hub env `WORKER_<SVC>_URL` wiring · optional `containers/claude-resources/*/integrations/<config_key>/` resources (+ BATS on/off test in `_tests/entrypoint/entrypoint.bats`). Grep an existing worker (e.g. `redmine`) end-to-end rather than trusting this list to be exhaustive.
 
 ## Test pattern
 

@@ -56,7 +56,7 @@ Drive-letter and Unix paths are unchanged — they continue to flow through `can
 
 - Unit tests in [`runtime/wsl.rs::tests`](https://github.com/speednet-software/speedwave/blob/dev/crates/speedwave-runtime/src/runtime/wsl.rs) cover happy paths, mismatch errors, malformed WSL UNC, and the `is_root_path` helper.
 - Unit tests in [`project.rs::tests`](https://github.com/speednet-software/speedwave/blob/dev/crates/speedwave-runtime/src/project.rs) cover Windows-only UNC branches (cross-distro reject, bare-root reject, nonexistent subdir reject) and the cross-platform end-to-end happy path via `add_project_with_validated_dir`.
-- `make test` and `make check` both pass on macOS host (Windows manual verification is documented in [`docs/getting-started/installation.md` § WSL-native workflow](../getting-started/installation.md#wsl-native-workflow)).
+- `make test` and `make check` both pass on macOS host (Windows verification is manual).
 
 ## References
 

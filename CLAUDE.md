@@ -34,5 +34,5 @@ Every change must work on **both macOS and Windows**.
 - `desktop-ui.md` — Angular/Tauri UI rules (zoneless signals, Rust↔TS mirrors, CSP).
 - `logging.md` — the `log` facade, sanitizer SSOT, diagnostics registry.
 - `managed-policy-config.md` — org/MDM-forced policy: the system managed-config file, presence-is-lock, and the un-bypassable `managed-settings.json` mount.
-- `documentation.md` — when a change requires a doc/ADR update.
+- `documentation.md` — ADRs (`docs/adr/`) and `.claude/rules/` are the only in-repo documentation; when a change requires an ADR or a rule update.
 - `rust-style.md` — Rust-specific conventions.

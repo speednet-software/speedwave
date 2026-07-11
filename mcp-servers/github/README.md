@@ -100,4 +100,3 @@ curl http://localhost:3000/health
 - **GitHub REST API**: https://docs.github.com/en/rest
 - **@octokit/rest**: https://github.com/octokit/rest.js
 - **MCP Spec**: https://modelcontextprotocol.io/
-- **Speedwave Architecture**: `docs/architecture/README.md`

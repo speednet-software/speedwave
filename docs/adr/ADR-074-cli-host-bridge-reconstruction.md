@@ -118,16 +118,15 @@ cross-component change.
 
 ## Files touched
 
-| File                                                                                                                                           | Change                                                                                                                |
-| ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `crates/speedwave-runtime/src/plugin.rs`                                                                                                       | + `BRIDGE_TOKEN_FILENAME` (SSOT), `read_persistent_bridge_token_from` (symlink-rejecting, UUID-validated) + tests     |
-| `crates/speedwave-runtime/src/compose/mod.rs`                                                                                                  | + `host_bridges_from_disk{,_in}`, `collect_host_bridges`, `build_host_bridge_registration`, redacting `Debug` + tests |
-| `crates/speedwave-cli/src/main.rs`                                                                                                             | build registrations from disk before `render_compose` + structural test                                               |
-| `crates/speedwave-runtime/src/update.rs`                                                                                                       | `update_containers` reconstructs bridges from disk + structural test                                                  |
-| `crates/speedwave-runtime/src/project.rs`                                                                                                      | `add_project_with_validated_dir` reconstructs bridges from disk + structural test                                     |
-| `desktop/src-tauri/src/bridges/plugin_host_bridge.rs`                                                                                          | `BRIDGE_TOKEN_FILENAME` becomes a `pub use` re-export from runtime                                                    |
-| `docs/guides/integrations.md`                                                                                                                  | "Bridge plugins — dev UX" documents the CLI path                                                                      |
-| `CLAUDE.md`, `docs/adr/ADR-051-plugin-signature-runtime-verification.md`, `docs/adr/ADR-015-plugin-system.md`, `docs/architecture/security.md` | enumerate `bridge-token` as a second `plugin-state/` file (0600 secret)                                               |
+| File                                                                                                          | Change                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `crates/speedwave-runtime/src/plugin.rs`                                                                      | + `BRIDGE_TOKEN_FILENAME` (SSOT), `read_persistent_bridge_token_from` (symlink-rejecting, UUID-validated) + tests     |
+| `crates/speedwave-runtime/src/compose/mod.rs`                                                                 | + `host_bridges_from_disk{,_in}`, `collect_host_bridges`, `build_host_bridge_registration`, redacting `Debug` + tests |
+| `crates/speedwave-cli/src/main.rs`                                                                            | build registrations from disk before `render_compose` + structural test                                               |
+| `crates/speedwave-runtime/src/update.rs`                                                                      | `update_containers` reconstructs bridges from disk + structural test                                                  |
+| `crates/speedwave-runtime/src/project.rs`                                                                     | `add_project_with_validated_dir` reconstructs bridges from disk + structural test                                     |
+| `desktop/src-tauri/src/bridges/plugin_host_bridge.rs`                                                         | `BRIDGE_TOKEN_FILENAME` becomes a `pub use` re-export from runtime                                                    |
+| `CLAUDE.md`, `docs/adr/ADR-051-plugin-signature-runtime-verification.md`, `docs/adr/ADR-015-plugin-system.md` | enumerate `bridge-token` as a second `plugin-state/` file (0600 secret)                                               |
 
 ## Consequences
 
@@ -169,7 +168,6 @@ cross-component change.
   under `plugin-state/`.
 - [ADR-008](ADR-008-no-background-daemon.md) — no background daemon;
   the listener's lifetime is the Desktop process.
-- `docs/guides/integrations.md` → "Bridge plugins — dev UX".
 
 ## Footnotes
 

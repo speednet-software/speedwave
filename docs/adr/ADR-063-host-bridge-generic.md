@@ -28,7 +28,6 @@ For plugins that pair a worker with an external app the user configures once, th
 - Manifest schema (`HostBridgeManifest`: `roles`, `collision_policy`, `preferred_port`, `persistent_token`) and validation — `crates/speedwave-runtime/src/plugin.rs`
 - Owner-only `0o700` directory helper added for the bridge lock dirs — `set_owner_only_dir` in `desktop/src-tauri/src/fs_perms.rs`
 - Module index and bridge manager wiring — `desktop/src-tauri/src/bridges/mod.rs`, imports in `desktop/src-tauri/src/main.rs` and `desktop/src-tauri/src/reconcile.rs`
-- User-facing flow — "Bridge plugins — dev UX" in `docs/guides/integrations.md`
 
 ## Rejected alternatives
 

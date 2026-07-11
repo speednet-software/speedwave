@@ -71,7 +71,7 @@ Surfacing registered hooks per plugin in the Desktop UI (informed consent at ena
 - Negative: a genuinely new execution surface (see Security analysis); one more generated state file (`.speedwave-managed-hooks`).
 - Downgrade: an app downgrade runs an entrypoint that knows nothing about `.speedwave-managed-hooks`, so already-injected entries stay registered and are no longer managed — a subsequently disabled plugin keeps its hook entry while its `/speedwave/plugins/<slug>` mount disappears (the command then fails at event time). Cleanup is manual (`~/.claude/settings.json`) or by re-upgrading.
 - A corrupted tracking manifest degrades, not breaks: still-enabled sources re-register (dedupe prevents duplicates) and are re-tracked; entries of sources disabled while the manifest was corrupt linger until removed manually or re-managed by an enable/disable cycle.
-- Docs updated in this change: [ADR-022], [ADR-051], [ADR-015] carry update notes; `docs/architecture/bundled-resources.md`, `docs/architecture/security.md`, and `docs/guides/integrations.md` describe the real mechanism; the plugin contract (`.claude/rules/plugins.md`) names `hooks/hooks.json` and the placeholder.
+- Docs updated in this change: [ADR-022], [ADR-051], [ADR-015] carry update notes; the plugin contract (`.claude/rules/plugins.md`) names `hooks/hooks.json` and the placeholder.
 
 ## Footnotes
 

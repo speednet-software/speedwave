@@ -4,7 +4,7 @@
 # Security:
 # - Optional API key mounted at /tokens/api_key (anonymous mode if absent)
 # - No access to other service tokens
-# - Per-IP rate limit when anonymous (~200/day) — see docs/architecture/security.md
+# - Per-IP rate limit when anonymous (~200/day)
 
 # Build stage
 FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0 AS builder

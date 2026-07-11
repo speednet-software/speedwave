@@ -480,7 +480,8 @@ USAGE:
 The active project is the one selected in Speedwave Desktop; `--project <p>`
 overrides it. The working directory does not select the project.
 
-Most commands require Speedwave Desktop to be running. See docs/guides/cli.md.",
+Most commands require Speedwave Desktop to be running.
+Full documentation: https://speedwave.dev/docs",
     );
 }
 

@@ -32,21 +32,21 @@ Isolated GitLab MCP server with per-service token isolation for Speedwave.
 
 The exact tool count is pinned by `src/tools/metadata.test.ts`; all tool names are camelCase.
 
-| Domain        | Count | Tools                                                                                      |
-| ------------- | ----- | ------------------------------------------------------------------------------------------- |
-| Project       | 3     | listProjectIds, getProjectFull, searchCode                                                  |
-| User          | 1     | getCurrentUser (resolves the token owner's identity for "me"/"my" filters)                  |
+| Domain        | Count | Tools                                                                                                              |
+| ------------- | ----- | ------------------------------------------------------------------------------------------------------------------ |
+| Project       | 3     | listProjectIds, getProjectFull, searchCode                                                                         |
+| User          | 1     | getCurrentUser (resolves the token owner's identity for "me"/"my" filters)                                         |
 | Merge Request | 7     | listMrIds, getMrFull, createMergeRequest, approveMergeRequest, mergeMergeRequest, updateMergeRequest, getMrChanges |
-| MR Notes      | 4     | listMrCommits, listMrPipelines, listMrNotes, createMrNote                                   |
-| Discussion    | 2     | listMrDiscussions, createMrDiscussion                                                       |
-| Branch        | 5     | listBranches, getBranch, createBranch, deleteBranch, compareBranches                        |
-| Commit        | 4     | listBranchCommits, listCommits, searchCommits, getCommitDiff                                |
-| Pipeline      | 5     | listPipelineIds, getPipelineFull, getJobLog, retryPipeline, triggerPipeline                  |
-| Repository    | 3     | getTree, getFile, getBlame                                                                  |
-| Artifact      | 3     | listArtifacts, downloadArtifact, deleteArtifacts                                            |
-| Issue         | 5     | listIssues, getIssue, createIssue, updateIssue, closeIssue                                  |
-| Label         | 2     | listLabels, createLabel                                                                     |
-| Release       | 4     | listTags, createTag, deleteTag, createRelease                                               |
+| MR Notes      | 4     | listMrCommits, listMrPipelines, listMrNotes, createMrNote                                                          |
+| Discussion    | 2     | listMrDiscussions, createMrDiscussion                                                                              |
+| Branch        | 5     | listBranches, getBranch, createBranch, deleteBranch, compareBranches                                               |
+| Commit        | 4     | listBranchCommits, listCommits, searchCommits, getCommitDiff                                                       |
+| Pipeline      | 5     | listPipelineIds, getPipelineFull, getJobLog, retryPipeline, triggerPipeline                                        |
+| Repository    | 3     | getTree, getFile, getBlame                                                                                         |
+| Artifact      | 3     | listArtifacts, downloadArtifact, deleteArtifacts                                                                   |
+| Issue         | 5     | listIssues, getIssue, createIssue, updateIssue, closeIssue                                                         |
+| Label         | 2     | listLabels, createLabel                                                                                            |
+| Release       | 4     | listTags, createTag, deleteTag, createRelease                                                                      |
 
 `downloadArtifact` and `getJobLog` return job log text (this client cannot fetch a raw CI artifact zip, only the job log/trace), each capped to the last N lines.
 
@@ -97,4 +97,3 @@ curl http://localhost:3000/health
 - **GitLab API**: https://docs.gitlab.com/ee/api/
 - **@gitbeaker/rest**: https://github.com/jdalrymple/gitbeaker
 - **MCP Spec**: https://modelcontextprotocol.io/
-- **Speedwave Architecture**: `docs/architecture/README.md`

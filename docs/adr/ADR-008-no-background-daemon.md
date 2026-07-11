@@ -37,7 +37,6 @@ The choice of whether to run per-project `compose_down` at exit follows who owns
 - `LimaRuntime::stop_vm` (the `limactl stop --force` override) — `crates/speedwave-runtime/src/runtime/lima.rs`.
 - `WslRuntime` (no `stop_vm` override) — `crates/speedwave-runtime/src/runtime/wsl.rs`.
 - Exit cleanup, `CLEANUP_ONCE`, and the tray-Quit / window-destroyed / exit-requested handling — `desktop/src-tauri/src/main.rs`.
-- VM network rationale for why host-side probes run inside the VM — `docs/architecture/platform-matrix.md`.
 
 ## References
 

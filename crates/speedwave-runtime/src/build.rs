@@ -1036,8 +1036,7 @@ fn is_disk_full_error(err: &anyhow::Error) -> bool {
 /// - `"failed to rename"` + `"file exists"` — OS-level rename failure on stale snapshot
 /// - `"failed to stat parent"` + `"snapshots/"` — overlayfs parent snapshot dir gone
 ///
-/// Known upstream race (containerd#11719, nerdctl#3420), not a Speedwave bug —
-/// recovery and the expected WARN are documented in `docs/architecture/containers.md`.
+/// Known upstream race (containerd#11719, nerdctl#3420), not a Speedwave bug.
 fn is_snapshotter_error(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         let msg = cause.to_string().to_ascii_lowercase();
