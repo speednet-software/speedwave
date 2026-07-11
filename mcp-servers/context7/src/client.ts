@@ -1,6 +1,6 @@
 /**
  * Context7 REST API client for `https://context7.com/api/v2/*`.
- * Anonymous mode (no API key): per-IP rate limit, see docs/architecture/security.md.
+ * Anonymous mode (no API key): per-IP rate limit (~200/day).
  * @module mcp-context7/client
  */
 

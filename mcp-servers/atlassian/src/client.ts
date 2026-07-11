@@ -1,8 +1,7 @@
 /**
  * Atlassian HTTP client for the MCP worker.
  *
- * Thin wrapper over `axios` (no external Atlassian SDK — see
- * `docs/guides/integrations.md`). Provides:
+ * Thin wrapper over `axios` (no external Atlassian SDK). Provides:
  * - Basic auth (`Authorization: Basic base64(email:api_token)`).
  * - A **per-request** retry policy (NOT a global interceptor): only requests
  *   explicitly marked `retryable` (GET / idempotent reads) retry transient

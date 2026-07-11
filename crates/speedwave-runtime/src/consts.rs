@@ -258,7 +258,7 @@ pub fn wsl_other_distro_msg(other_distro: &str) -> String {
               mv ~/<project> /mnt/c/projects/<project>\n\n\
          3. Use Claude Code natively in your '{other_distro}' distribution without Speedwave \
          (loses MCP integrations).\n\n\
-         See https://github.com/speednet-software/speedwave/blob/main/docs/getting-started/installation.md#wsl-native-workflow",
+         Full documentation: https://speedwave.dev/docs",
         own = wsl_distro_name(),
     )
 }
@@ -2443,17 +2443,6 @@ mod tests {
             src.contains(PRODUCTION_WSL_DISTRO),
             "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
              scripts/e2e-vm.sh; rename it there too (CLAUDE.md SSOT alignment)"
-        );
-    }
-
-    #[test]
-    fn wsl_distro_name_appears_in_installation_doc() {
-        let src = include_str!("../../../docs/getting-started/installation.md");
-        assert!(
-            src.contains(PRODUCTION_WSL_DISTRO),
-            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
-             docs/getting-started/installation.md; rename it there too \
-             (CLAUDE.md SSOT alignment)"
         );
     }
 

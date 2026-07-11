@@ -35,7 +35,7 @@ Store the private key as `TAURI_SIGNING_PRIVATE_KEY`. The public key is already 
 - Apple/Windows signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open). Windows SmartScreen shows a warning.
 - Entitlements plists missing — builds and notarization succeed, but binaries crash at runtime when they attempt to use restricted platform APIs (Virtualization.framework, Apple Events, EventKit for Calendars/Reminders). This is NOT caught by CI — only by manual testing. The accompanying `Info.plist` TCC usage-description keys (`NSFileProviderDomainUsageDescription`, `NSAppleEventsUsageDescription`, `NSCalendarsUsageDescription`, etc.) are equally critical — without them macOS silently blocks the API without displaying a consent dialog.
 
-**Operational setup for Apple signing** (certificate generation, Keychain import, notary configuration, rotation) is documented in [Release Signing Guide](docs/contributing/release-signing.md). The architectural rationale — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md).
+The architectural rationale for signing — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md).
 
 ## How release-please Works
 

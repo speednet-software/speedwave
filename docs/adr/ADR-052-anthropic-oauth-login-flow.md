@@ -137,8 +137,7 @@ channels**:
 
 Both channels are **write-only by design**: OSC 52 paste/query would require a
 terminal-side response handshake most emulators reject and would leak host
-clipboard contents into the container. Out of scope. See
-`docs/architecture/security.md` "Authentication Gate".
+clipboard contents into the container. Out of scope.
 
 On macOS the Desktop spawn path additionally **prefers iTerm2** over
 Terminal.app (`oauth_login_cmd::open_terminal_with_command` probes

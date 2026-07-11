@@ -25,7 +25,6 @@ Per tool, `_meta` may carry the MCP-spec-compliant prefixed keys from mcp-shared
 - Single discovery path / no built-in split: `mcp-servers/hub/src/service-list.ts` now only enumerates enabled services from `ENABLED_SERVICES`; there is no built-in-service list or plugin check.
 - Empty-registry-instead-of-skeleton + 5-minute background refresh: `mcp-servers/hub/src/tool-registry.ts`. An unavailable worker leaves an empty registry entry that the periodic refresh populates once the worker comes up.
 - `deferLoading` filtering during discovery: `mcp-servers/hub/src/search-tools.ts`.
-- Plugin-author guidance: `docs/guides/integrations.md` ("Tool Policy via `_meta`").
 
 ## Impact on the plugin contract
 

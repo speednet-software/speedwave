@@ -353,7 +353,6 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_CONTEXT7_TMPFS}
     volumes:
       # Optional /tokens/api_key — anonymous mode (per-IP rate limit) if absent.
-      # See docs/architecture/security.md for the third-party data-flow note.
       - ${TOKENS_DIR}/context7:/tokens:ro
     environment:
       - PORT=${PORT_WORKER}
