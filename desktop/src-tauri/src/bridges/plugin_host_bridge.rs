@@ -54,16 +54,16 @@ pub enum PluginBridgeEvent {
 
 pub type PluginBridgeEventCallback = Arc<dyn Fn(PluginBridgeEvent) + Send + Sync + 'static>;
 
-/// Plugin-UI credentials (loopback URL + shared token).
-#[derive(Clone, Debug)]
+/// Plugin-UI credentials (loopback URL + shared token). No Debug: carries the bearer token.
+#[derive(Clone)]
 pub struct PluginBridgeCredentials {
     pub local_ui_url: String,
     pub token: String,
 }
 
 /// Raw bridge facts the compose layer combines with the env-var
-/// names declared in the plugin manifest.
-#[derive(Clone, Debug)]
+/// names declared in the plugin manifest. No Debug: carries the bearer token.
+#[derive(Clone)]
 pub struct PluginBridgeComposeInfo {
     pub port: u16,
     pub auth_token: String,
