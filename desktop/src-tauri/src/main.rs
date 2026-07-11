@@ -767,7 +767,7 @@ fn main() {
     }) {
         Ok(()) => {}
         Err(e) => {
-            log::error!("fatal: failed to set signal handler: {e}");
+            log::error!("failed to set signal handler, exiting: {e}");
             std::process::exit(1);
         }
     }
@@ -1337,7 +1337,7 @@ fn main() {
     let app = match app {
         Ok(app) => app,
         Err(e) => {
-            log::error!("fatal: Tauri application failed to start: {e}");
+            log::error!("Tauri application failed to start, exiting: {e}");
             std::process::exit(1);
         }
     };
