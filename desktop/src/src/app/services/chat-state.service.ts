@@ -23,6 +23,7 @@ import {
 import {
   chatInputFromText,
   chatInputToBlocks,
+  contextTokensFrom,
   type ChatInput,
   type ChatMessage,
   type MessageBlock,
@@ -126,15 +127,15 @@ export class ChatStateService {
   /** Read-only signal mirror so OnPush components re-render on stats changes. */
   readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
 
-  /** input_tokens from the most recent successful Result; survives stream reset. */
-  get lastSuccessfulInputTokens(): number | null {
-    return this._lastSuccessfulInputTokens;
+  /** Context tokens of the last main-chain API call; survives stream reset. */
+  get lastContextTokens(): number | null {
+    return this._lastContextTokens;
   }
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  private _lastSuccessfulInputTokens: number | null = null;
+  private _lastContextTokens: number | null = null;
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -785,10 +786,14 @@ export class ChatStateService {
           Number.isFinite(chunk.data.total_cost)
             ? chunk.data.total_cost
             : null;
+        // The parser retains the last main-chain call across turns; a Result
+        // without one (no API call yet) keeps the previous/seeded meter value.
+        const contextUsage = chunk.data.context_usage ?? this._sessionStats()?.context_usage;
         this._sessionStats.set({
           session_id: chunk.data.session_id,
           total_cost: livePreviewCost,
           usage: chunk.data.usage,
+          context_usage: contextUsage,
           model: resolvedModel,
           rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
@@ -799,8 +804,8 @@ export class ChatStateService {
           this._lastKnownSessionId = chunk.data.session_id;
           void this.flushDeferredQueue(chunk.data.session_id);
         }
-        if (typeof chunk.data.usage?.input_tokens === 'number') {
-          this._lastSuccessfulInputTokens = chunk.data.usage.input_tokens;
+        if (contextUsage) {
+          this._lastContextTokens = contextTokensFrom(contextUsage);
         }
         // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
@@ -1105,7 +1110,7 @@ export class ChatStateService {
     // The ready-triggered cache refresh is async and may still hold the previous
     // model's window — re-read so the fit decision sees the post-restart model.
     await this.refreshLlmConfigCache();
-    if (historyFitsTarget(this._lastSuccessfulInputTokens, this._persistedContextTokens)) {
+    if (historyFitsTarget(this._lastContextTokens, this._persistedContextTokens)) {
       void this.resumeConversation(id);
       return;
     }
@@ -1182,6 +1187,9 @@ export class ChatStateService {
       }
       // Seed session id immediately so retry/queue work without waiting for live Result.
       this.seedSessionId(sessionId);
+      // Ctx meter + fit-gate from the transcript's last per-call usage, so the
+      // footer is truthful before the first live Result of the resumed session.
+      this.seedContextFromTranscript();
     } catch (err) {
       // Drop the optimistic accent so a failed resume isn't shown as active.
       this._optimisticSessionId = null;
@@ -1290,6 +1298,19 @@ export class ChatStateService {
       { ...m, meta: { ...m.meta, cost: nextCost } },
       ...this._messages.slice(idx + 1),
     ];
+  }
+
+  /** Seeds `context_usage` from the loaded transcript's last assistant per-call usage. */
+  private seedContextFromTranscript(): void {
+    const usage = [...this._messages].reverse().find((m) => m.role === 'assistant' && m.meta?.usage)
+      ?.meta?.usage;
+    if (!usage) return;
+    this._lastContextTokens = contextTokensFrom(usage);
+    const cur = this._sessionStats();
+    if (cur) {
+      this._sessionStats.set({ ...cur, context_usage: usage });
+      this.notifyChange();
+    }
   }
 
   /**
