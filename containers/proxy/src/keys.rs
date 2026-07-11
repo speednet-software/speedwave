@@ -44,7 +44,10 @@ fn provider_key_for_env_name_in(dir: &std::path::Path, name: &str) -> Option<Str
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixture setup, failure aborts the test"
+)]
 mod tests {
     use super::*;
 

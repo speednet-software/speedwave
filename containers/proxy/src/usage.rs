@@ -222,7 +222,10 @@ fn append_usage_inner(path: &Path, line: &UsageLine) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test fixture setup, failure aborts the test"
+    )]
     use super::*;
     use serde_json::json;
 

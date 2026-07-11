@@ -74,13 +74,21 @@ pub struct Config {
     pub client: reqwest::Client,
 }
 
-/// Outbound forwarding client: rustls TLS, no redirects (SSRF defence).
+/// Outbound forwarding client: rustls TLS, no redirects (SSRF defence). Retries
+/// once without proxy env vars on build failure, then exits fatally.
 fn build_forward_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("building the proxy forward client must not fail at startup")
+    let build = || {
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .redirect(reqwest::redirect::Policy::none())
+    };
+    build().build().unwrap_or_else(|e| {
+        log::warn!("forward client build failed ({e}), retrying without proxy env vars");
+        build().no_proxy().build().unwrap_or_else(|e| {
+            log::error!("failed to build proxy forward client: {e}");
+            std::process::exit(1);
+        })
+    })
 }
 
 impl Default for Config {
@@ -136,7 +144,10 @@ pub fn resolve<'a>(cfg: &'a Config, model: &str) -> Option<&'a Route> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test fixture setup, failure aborts the test"
+    )]
     use super::*;
 
     fn fixture_config() -> Config {
