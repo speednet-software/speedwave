@@ -169,10 +169,6 @@ impl MixBuffer {
                 self.pending_health.push(t);
             }
         }
-        let gain = match source {
-            MixSource::System => self.sys_level.gain(samples),
-            MixSource::Mic => self.mic_level.gain(samples),
-        };
         let start = Self::index_of(offset_ns);
         let end = start.saturating_add(samples.len() as u64);
         // Index of the first sample we still keep.
@@ -194,6 +190,12 @@ impl MixBuffer {
             self.bump_filled(source, end);
             return;
         }
+        // Past the drop checks: the balancer only ever adapts to audio that
+        // actually lands in the mix.
+        let gain = match source {
+            MixSource::System => self.sys_level.gain(samples),
+            MixSource::Mic => self.mic_level.gain(samples),
+        };
         let buf = match source {
             MixSource::System => &mut self.sys,
             MixSource::Mic => &mut self.mic,
@@ -466,6 +468,21 @@ mod tests {
         b2.push(MixSource::System, 0, &[1.0; 16]);
         b2.push(MixSource::Mic, 0, &[0.0; 16]);
         assert_eq!(b2.pop(1, 1000).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn dropped_pushes_do_not_adapt_the_level_estimate() {
+        let mut b = MixBuffer::new();
+        // A loud over-cap push is dropped — it must not seed the balancer.
+        let one_hour_ns: u64 = 3600 * 1_000_000_000;
+        b.push(MixSource::System, one_hour_ns, &[0.5; 16]);
+        // The first kept chunk (quiet but active) seeds the estimate fresh and
+        // gets the full boost, as if the dropped chunk never existed.
+        b.push(MixSource::System, 0, &[0.01; 16]);
+        b.push(MixSource::Mic, 0, &[0.0; 16]);
+        let c = b.pop(1, 16).unwrap();
+        // Estimate seeds at 0.01 → wants 10×, clamps to 8×; 0.5·(0.01·8) = 0.04.
+        assert!(c.iter().all(|&s| (s - 0.04).abs() < 1e-6));
     }
 
     #[test]
