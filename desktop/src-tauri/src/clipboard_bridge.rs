@@ -259,9 +259,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("claude-home");
         let (watcher, _rx) = start_watcher(&root).unwrap();
-        // ReadDirectoryChangesW holds the watched dir open — removal must fail (the factory-reset bug).
-        let err = std::fs::remove_dir_all(&root).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        // Whether removal fails while watched is OS-version-dependent (modern std uses
+        // POSIX delete semantics + notify's FILE_SHARE_DELETE) — only drop-then-removable is load-bearing.
+        if let Err(e) = std::fs::remove_dir_all(&root) {
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(root.exists());
+        } else {
+            std::fs::create_dir_all(&root).unwrap();
+        }
         drop(watcher);
         remove_dir_all_when_released(&root);
         assert!(!root.exists());

@@ -1586,8 +1586,20 @@ mod tests {
         assert!(!data_dir.exists(), "data dir should be gone after healing");
     }
 
-    /// Windows companion: healing never clears READONLY (not a DACL problem), so a
-    /// readonly file still fails the wipe and the error still names the path.
+    /// Opens `path` with no share flags, so any other handle's delete attempt hits a
+    /// sharing violation — deterministic across Windows versions (unlike READONLY).
+    #[cfg(windows)]
+    fn hold_open_no_share(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("open with exclusive share mode")
+    }
+
+    /// Windows companion: an open handle with no delete sharing still blocks removal
+    /// (unlike READONLY, which modern std ignores), so the error still names the path.
     #[cfg(windows)]
     #[test]
     fn wipe_data_dir_names_failing_path_on_error() {
@@ -1595,22 +1607,12 @@ mod tests {
         let data_dir = tmp.path().join("speedwave-data");
         let locked_dir = data_dir.join("locked");
         std::fs::create_dir_all(&locked_dir).expect("create locked dir");
-        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
-
         let file_path = locked_dir.join("file.txt");
-        let mut perms = std::fs::metadata(&file_path)
-            .expect("stat file")
-            .permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&file_path, perms).expect("set readonly");
+        std::fs::write(&file_path, "data").expect("write file");
 
+        let guard = hold_open_no_share(&file_path);
         let result = wipe_data_dir(&data_dir);
-
-        let mut perms = std::fs::metadata(&file_path)
-            .expect("stat file")
-            .permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&file_path, perms).expect("clear readonly");
+        drop(guard);
 
         let err = result.expect_err("wipe should fail while the entry is locked");
         let message = err.to_string();
@@ -1622,8 +1624,8 @@ mod tests {
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
-    /// Windows: a readonly file is not fixed by healing, so the wipe still fails
-    /// overall — but the deletable sibling is removed regardless (best effort).
+    /// Windows: an open handle with no delete sharing is not fixed by healing, so the
+    /// wipe still fails overall — but the deletable sibling is removed regardless.
     #[cfg(windows)]
     #[test]
     fn wipe_data_dir_partial_failure_still_removes_deletable_sibling() {
@@ -1632,24 +1634,14 @@ mod tests {
         let locked_dir = data_dir.join("locked");
         let deletable_dir = data_dir.join("deletable");
         std::fs::create_dir_all(&locked_dir).expect("create locked dir");
-        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+        let file_path = locked_dir.join("file.txt");
+        std::fs::write(&file_path, "data").expect("write file");
         std::fs::create_dir_all(&deletable_dir).expect("create deletable dir");
         std::fs::write(deletable_dir.join("file.txt"), "data").expect("write file");
 
-        let file_path = locked_dir.join("file.txt");
-        let mut perms = std::fs::metadata(&file_path)
-            .expect("stat file")
-            .permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&file_path, perms).expect("set readonly");
-
+        let guard = hold_open_no_share(&file_path);
         let result = wipe_data_dir(&data_dir);
-
-        let mut perms = std::fs::metadata(&file_path)
-            .expect("stat file")
-            .permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&file_path, perms).expect("clear readonly");
+        drop(guard);
 
         assert!(result.is_err(), "wipe should still report the failure");
         assert!(
@@ -1736,31 +1728,22 @@ mod tests {
         assert!(!data_dir.exists(), "data dir should be gone after retry");
     }
 
-    /// Windows-only: healing does not clear READONLY, so the deep-probe naming
-    /// still applies — it can unlink the parent but must surface the readonly file.
+    /// Windows-only: an open handle with no delete sharing is not fixed by healing, so
+    /// the deep-probe naming still applies — it can unlink parents but must surface the file.
     #[cfg(windows)]
     #[test]
     fn wipe_data_dir_names_deep_undeletable_path_on_final_failure() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
         let data_dir = tmp.path().join("speedwave-data");
         let locked_dir = data_dir.join("locked");
-        let nested_file = locked_dir.join("nested.txt");
-        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        let deep_dir = locked_dir.join("deep");
+        let nested_file = deep_dir.join("nested.txt");
+        std::fs::create_dir_all(&deep_dir).expect("create nested dirs");
         std::fs::write(&nested_file, "data").expect("write file");
 
-        let mut perms = std::fs::metadata(&nested_file)
-            .expect("stat file")
-            .permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&nested_file, perms).expect("set readonly");
-
+        let guard = hold_open_no_share(&nested_file);
         let result = wipe_data_dir(&data_dir);
-
-        let mut perms = std::fs::metadata(&nested_file)
-            .expect("stat file")
-            .permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&nested_file, perms).expect("clear readonly");
+        drop(guard);
 
         let err = result.expect_err("wipe should fail while the entry is locked");
         let message = err.to_string();
@@ -1770,7 +1753,7 @@ mod tests {
         );
         assert!(
             message.contains(&nested_file.display().to_string()),
-            "on Windows the probe can unlink the parent so it must surface the readonly file, got: {message}"
+            "on Windows the probe can unlink parents so it must surface the held-open file, got: {message}"
         );
 
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
