@@ -503,11 +503,19 @@ fn ensure_data_dir_mount_sources(data_dir: &Path, yaml: &str) -> anyhow::Result<
         if rel.is_empty() {
             continue;
         }
-        let host = rel
-            .split('/')
-            .fold(data_dir.to_path_buf(), |p, seg| p.join(seg));
-        if !host.exists() {
-            std::fs::create_dir_all(&host)?;
+        create_missing_levels_owner_only(data_dir, rel)?;
+    }
+    Ok(())
+}
+
+/// Creates every missing path level from `data_dir` down through `rel` via
+/// [`crate::fs_perms::ensure_owner_only_dir`], so no level inherits an empty DACL.
+fn create_missing_levels_owner_only(data_dir: &Path, rel: &str) -> anyhow::Result<()> {
+    let mut level = data_dir.to_path_buf();
+    for seg in rel.split('/') {
+        level.push(seg);
+        if !level.exists() {
+            crate::fs_perms::ensure_owner_only_dir(&level)?;
         }
     }
     Ok(())
@@ -1537,6 +1545,62 @@ mod tests {
         assert!(data_dir.path().join("tokens/p/llm").is_dir());
         assert!(data_dir.path().join("claude-resources").is_dir());
         assert!(!Path::new("/workspace-elsewhere").exists());
+    }
+
+    /// Windows regression proof: a plain `create_dir_all` child under a protected
+    /// parent inherits an empty DACL — every newly created level must be owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_data_dir_mount_sources_sets_owner_only_on_every_created_level() {
+        use std::os::unix::fs::PermissionsExt;
+        let data_dir = tempfile::tempdir().unwrap();
+        let prefix = to_engine_path(data_dir.path()).unwrap();
+        let yaml = format!(
+            "services:\n  x:\n    volumes:\n      - {prefix}/tokens/projx/newsvc:/tokens:ro\n"
+        );
+
+        ensure_data_dir_mount_sources(data_dir.path(), &yaml).unwrap();
+
+        for created in ["tokens", "tokens/projx", "tokens/projx/newsvc"] {
+            let mode = std::fs::metadata(data_dir.path().join(created))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700 on {created}, got 0o{mode:o}");
+        }
+    }
+
+    /// A pre-existing level (e.g. a user-customized dir) must keep its current
+    /// permissions — only the newly created child levels are tightened.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_data_dir_mount_sources_leaves_pre_existing_level_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let data_dir = tempfile::tempdir().unwrap();
+        let prefix = to_engine_path(data_dir.path()).unwrap();
+        let tokens_dir = data_dir.path().join("tokens");
+        std::fs::create_dir_all(&tokens_dir).unwrap();
+        std::fs::set_permissions(&tokens_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let yaml = format!(
+            "services:\n  x:\n    volumes:\n      - {prefix}/tokens/projx/newsvc:/tokens:ro\n"
+        );
+
+        ensure_data_dir_mount_sources(data_dir.path(), &yaml).unwrap();
+
+        let tokens_mode = std::fs::metadata(&tokens_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            tokens_mode, 0o755,
+            "pre-existing dir perms must be untouched, got 0o{tokens_mode:o}"
+        );
+        for created in ["tokens/projx", "tokens/projx/newsvc"] {
+            let mode = std::fs::metadata(data_dir.path().join(created))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700 on {created}, got 0o{mode:o}");
+        }
     }
 
     #[test]

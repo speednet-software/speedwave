@@ -622,12 +622,34 @@ fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
     found
 }
 
+/// Best-effort: re-grants owner-only access down a failing tree so the next wipe
+/// pass can delete entries born with a broken DACL/mode. Heals itself before descending.
+fn heal_permissions_tree(path: &std::path::Path, depth: u32) {
+    let is_dir = path.is_dir();
+    let _ = if is_dir {
+        speedwave_runtime::fs_perms::set_owner_only_dir(path)
+    } else {
+        speedwave_runtime::fs_perms::set_owner_only(path)
+    };
+    if depth == 0 || !is_dir {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            heal_permissions_tree(&entry.path(), depth - 1);
+        }
+    }
+}
+
 /// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
 /// Best-effort per entry with bounded retries; the error names undeletable paths.
 fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let mut failed = wipe_pass(data_dir)?;
     let mut attempts = 1;
     while !failed.is_empty() && attempts < WIPE_MAX_ATTEMPTS {
+        for (path, _) in &failed {
+            heal_permissions_tree(path, WIPE_MAX_PROBE_DEPTH);
+        }
         std::thread::sleep(WIPE_RETRY_DELAY);
         failed = wipe_pass(data_dir)?;
         attempts += 1;
@@ -1442,6 +1464,95 @@ mod tests {
         assert!(tmp.path().exists(), "parent should still exist");
     }
 
+    /// Direct unit coverage: `heal_permissions_tree` must re-tighten a broken mode
+    /// on the root AND descend into children once the root is readable again.
+    #[cfg(unix)]
+    #[test]
+    fn heal_permissions_tree_fixes_root_and_descends_into_children() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let root = tmp.path().join("broken");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("create child dir");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o000))
+            .expect("break child perms");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+            .expect("break root perms");
+
+        heal_permissions_tree(&root, WIPE_MAX_PROBE_DEPTH);
+
+        let root_mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let child_mode = std::fs::metadata(&child).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            root_mode, 0o700,
+            "expected root healed to 0o700, got 0o{root_mode:o}"
+        );
+        assert_eq!(
+            child_mode, 0o700,
+            "expected child healed to 0o700, got 0o{child_mode:o}"
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleanup after test");
+    }
+
+    /// A depth of 0 must heal only the root itself, never descend.
+    #[cfg(unix)]
+    #[test]
+    fn heal_permissions_tree_depth_zero_heals_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let root = tmp.path().join("broken");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("create child dir");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o000))
+            .expect("break child perms");
+
+        heal_permissions_tree(&root, 0);
+
+        let root_mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let child_mode = std::fs::metadata(&child).unwrap().permissions().mode() & 0o777;
+        assert_eq!(root_mode, 0o700, "root must still be healed at depth 0");
+        assert_eq!(
+            child_mode, 0o000,
+            "child must be untouched when depth is exhausted at the root"
+        );
+
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700))
+            .expect("restore child perms for cleanup");
+        std::fs::remove_dir_all(&root).expect("cleanup after test");
+    }
+
+    /// A missing path is a silent no-op — never panics.
+    #[test]
+    fn heal_permissions_tree_missing_path_is_noop() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let missing = tmp.path().join("does-not-exist");
+        heal_permissions_tree(&missing, WIPE_MAX_PROBE_DEPTH);
+    }
+
+    /// Unix: a dir born with 0o555 (analogous to an empty-DACL dir on Windows) now
+    /// self-heals between retry passes, so the wipe SUCCEEDS instead of erroring.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_heals_locked_dir_between_retry_passes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        result.expect("heal between retry passes must let the wipe succeed");
+        assert!(!data_dir.exists(), "data dir should be gone after healing");
+    }
+
+    /// Windows companion: healing never clears READONLY (not a DACL problem), so a
+    /// readonly file still fails the wipe and the error still names the path.
+    #[cfg(windows)]
     #[test]
     fn wipe_data_dir_names_failing_path_on_error() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
@@ -1450,39 +1561,20 @@ mod tests {
         std::fs::create_dir_all(&locked_dir).expect("create locked dir");
         std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
-                .expect("make dir read-only");
-        }
-        #[cfg(windows)]
-        {
-            let file_path = locked_dir.join("file.txt");
-            let mut perms = std::fs::metadata(&file_path)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(&file_path, perms).expect("set readonly");
-        }
+        let file_path = locked_dir.join("file.txt");
+        let mut perms = std::fs::metadata(&file_path)
+            .expect("stat file")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file_path, perms).expect("set readonly");
 
         let result = wipe_data_dir(&data_dir);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
-                .expect("restore dir permissions");
-        }
-        #[cfg(windows)]
-        {
-            let file_path = locked_dir.join("file.txt");
-            let mut perms = std::fs::metadata(&file_path)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(false);
-            std::fs::set_permissions(&file_path, perms).expect("clear readonly");
-        }
+        let mut perms = std::fs::metadata(&file_path)
+            .expect("stat file")
+            .permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file_path, perms).expect("clear readonly");
 
         let err = result.expect_err("wipe should fail while the entry is locked");
         let message = err.to_string();
@@ -1494,6 +1586,9 @@ mod tests {
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
+    /// Windows: a readonly file is not fixed by healing, so the wipe still fails
+    /// overall — but the deletable sibling is removed regardless (best effort).
+    #[cfg(windows)]
     #[test]
     fn wipe_data_dir_partial_failure_still_removes_deletable_sibling() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
@@ -1505,39 +1600,20 @@ mod tests {
         std::fs::create_dir_all(&deletable_dir).expect("create deletable dir");
         std::fs::write(deletable_dir.join("file.txt"), "data").expect("write file");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
-                .expect("make dir read-only");
-        }
-        #[cfg(windows)]
-        {
-            let file_path = locked_dir.join("file.txt");
-            let mut perms = std::fs::metadata(&file_path)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(&file_path, perms).expect("set readonly");
-        }
+        let file_path = locked_dir.join("file.txt");
+        let mut perms = std::fs::metadata(&file_path)
+            .expect("stat file")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file_path, perms).expect("set readonly");
 
         let result = wipe_data_dir(&data_dir);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
-                .expect("restore dir permissions");
-        }
-        #[cfg(windows)]
-        {
-            let file_path = locked_dir.join("file.txt");
-            let mut perms = std::fs::metadata(&file_path)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(false);
-            std::fs::set_permissions(&file_path, perms).expect("clear readonly");
-        }
+        let mut perms = std::fs::metadata(&file_path)
+            .expect("stat file")
+            .permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file_path, perms).expect("clear readonly");
 
         assert!(result.is_err(), "wipe should still report the failure");
         assert!(
@@ -1546,6 +1622,29 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    /// Unix: the locked dir now self-heals between retry passes, so the whole wipe
+    /// succeeds — both the sibling and the formerly-locked dir are gone.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_heal_removes_both_locked_and_deletable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let deletable_dir = data_dir.join("deletable");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+        std::fs::create_dir_all(&deletable_dir).expect("create deletable dir");
+        std::fs::write(deletable_dir.join("file.txt"), "data").expect("write file");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        result.expect("heal between retry passes must let the wipe succeed");
+        assert!(!data_dir.exists(), "data dir should be gone after healing");
     }
 
     #[test]
@@ -1575,8 +1674,10 @@ mod tests {
         let unlock_dir = locked_dir.clone();
         let unlocker = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(700));
+            // On unix the retry-loop heal may already have unlocked (and removed) this
+            // dir before this thread wakes — that is the new success path, not a race bug.
             #[cfg(unix)]
-            {
+            if unlock_dir.exists() {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o755))
                     .expect("restore dir permissions");
@@ -1599,6 +1700,9 @@ mod tests {
         assert!(!data_dir.exists(), "data dir should be gone after retry");
     }
 
+    /// Windows-only: healing does not clear READONLY, so the deep-probe naming
+    /// still applies — it can unlink the parent but must surface the readonly file.
+    #[cfg(windows)]
     #[test]
     fn wipe_data_dir_names_deep_undeletable_path_on_final_failure() {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
@@ -1608,37 +1712,19 @@ mod tests {
         std::fs::create_dir_all(&locked_dir).expect("create locked dir");
         std::fs::write(&nested_file, "data").expect("write file");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
-                .expect("make dir read-only");
-        }
-        #[cfg(windows)]
-        {
-            let mut perms = std::fs::metadata(&nested_file)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(true);
-            std::fs::set_permissions(&nested_file, perms).expect("set readonly");
-        }
+        let mut perms = std::fs::metadata(&nested_file)
+            .expect("stat file")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&nested_file, perms).expect("set readonly");
 
         let result = wipe_data_dir(&data_dir);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
-                .expect("restore dir permissions");
-        }
-        #[cfg(windows)]
-        {
-            let mut perms = std::fs::metadata(&nested_file)
-                .expect("stat file")
-                .permissions();
-            perms.set_readonly(false);
-            std::fs::set_permissions(&nested_file, perms).expect("clear readonly");
-        }
+        let mut perms = std::fs::metadata(&nested_file)
+            .expect("stat file")
+            .permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&nested_file, perms).expect("clear readonly");
 
         let err = result.expect_err("wipe should fail while the entry is locked");
         let message = err.to_string();
@@ -1646,13 +1732,33 @@ mod tests {
             message.contains(&locked_dir.display().to_string()),
             "error message should name the locked subdir, got: {message}"
         );
-        #[cfg(windows)]
         assert!(
             message.contains(&nested_file.display().to_string()),
             "on Windows the probe can unlink the parent so it must surface the readonly file, got: {message}"
         );
 
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    /// Unix: a 0o555 parent with a nested file heals via the retry loop's recursive
+    /// walk, so the whole tree is removed instead of the deep probe naming anything.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_heals_nested_locked_dir_between_retry_passes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let nested_file = locked_dir.join("nested.txt");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(&nested_file, "data").expect("write file");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        result.expect("heal between retry passes must let the wipe succeed");
+        assert!(!data_dir.exists(), "data dir should be gone after healing");
     }
 
     #[test]
