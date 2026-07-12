@@ -505,20 +505,87 @@ pub fn factory_reset() -> anyhow::Result<()> {
     }
     // Windows CLI lives inside data_dir/bin/ — wipe_data_dir handles it.
 
+    // 3b. Kill running CLI processes — Windows cannot delete a running exe's image,
+    // which fails the wipe on bin\speedwave.exe (same class the installer sweep handles).
+    #[cfg(target_os = "windows")]
+    {
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        let cli_exe =
+            speedwave_runtime::consts::cli_install_path_for(true, &home, consts::data_dir());
+        let script = kill_processes_by_image_script(std::path::Path::new(&cli_exe));
+        if let Err(e) = speedwave_runtime::binary::run_powershell(
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ],
+            std::time::Duration::from_secs(15),
+        ) {
+            log::warn!("could not stop running CLI processes before the wipe: {e}");
+        }
+    }
+
     // 4. Wipe entire data directory (~/.speedwave/)
     wipe_data_dir(consts::data_dir())?;
 
     Ok(())
 }
 
+/// PowerShell that force-stops every process whose image path equals `exe` —
+/// scoped by exact path so unrelated speedwave installs are untouched.
+/// `exe` is a Windows path, so split on `\` rather than `Path::file_stem`
+/// (unit-tested on all hosts, where `\` is not a path separator).
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(
+        dead_code,
+        reason = "only called from the windows-cfg factory_reset step"
+    )
+)]
+fn kill_processes_by_image_script(exe: &std::path::Path) -> String {
+    let quoted = exe.to_string_lossy().replace('\'', "''");
+    let leaf = quoted.rsplit('\\').next().unwrap_or(&quoted);
+    let stem = leaf.strip_suffix(".exe").unwrap_or(leaf);
+    format!(
+        "Get-Process -Name '{stem}' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{quoted}' }} | Stop-Process -Force -ErrorAction SilentlyContinue"
+    )
+}
+
 /// Removes the entire data directory (`~/.speedwave/`).
-/// Idempotent: succeeds silently if the directory does not exist.
+/// Idempotent: succeeds silently if the directory does not exist. Best-effort:
+/// every deletable entry is removed even if some fail; failures name every path.
 fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
-    match std::fs::remove_dir_all(data_dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut failed: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let result = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = result {
+            failed.push(format!("{} ({e})", path.display()));
+        }
     }
+    if failed.is_empty() {
+        std::fs::remove_dir(data_dir)?;
+        return Ok(());
+    }
+    anyhow::bail!(
+        "could not remove {} entr{} under {}: {}",
+        failed.len(),
+        if failed.len() == 1 { "y" } else { "ies" },
+        data_dir.display(),
+        failed.join("; ")
+    );
 }
 
 // ── Step 7: Copy CLI binary to user PATH ──
@@ -1295,6 +1362,131 @@ mod tests {
 
         assert!(!data_dir.exists(), "data dir should be gone");
         assert!(tmp.path().exists(), "parent should still exist");
+    }
+
+    #[test]
+    fn wipe_data_dir_names_failing_path_on_error() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("make dir read-only");
+        }
+        #[cfg(windows)]
+        {
+            let file_path = locked_dir.join("file.txt");
+            let mut perms = std::fs::metadata(&file_path)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&file_path, perms).expect("set readonly");
+        }
+
+        let result = wipe_data_dir(&data_dir);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore dir permissions");
+        }
+        #[cfg(windows)]
+        {
+            let file_path = locked_dir.join("file.txt");
+            let mut perms = std::fs::metadata(&file_path)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&file_path, perms).expect("clear readonly");
+        }
+
+        let err = result.expect_err("wipe should fail while the entry is locked");
+        let message = err.to_string();
+        assert!(
+            message.contains(&locked_dir.display().to_string()),
+            "error message should name the failing path, got: {message}"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    #[test]
+    fn wipe_data_dir_partial_failure_still_removes_deletable_sibling() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let deletable_dir = data_dir.join("deletable");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+        std::fs::create_dir_all(&deletable_dir).expect("create deletable dir");
+        std::fs::write(deletable_dir.join("file.txt"), "data").expect("write file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("make dir read-only");
+        }
+        #[cfg(windows)]
+        {
+            let file_path = locked_dir.join("file.txt");
+            let mut perms = std::fs::metadata(&file_path)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&file_path, perms).expect("set readonly");
+        }
+
+        let result = wipe_data_dir(&data_dir);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore dir permissions");
+        }
+        #[cfg(windows)]
+        {
+            let file_path = locked_dir.join("file.txt");
+            let mut perms = std::fs::metadata(&file_path)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&file_path, perms).expect("clear readonly");
+        }
+
+        assert!(result.is_err(), "wipe should still report the failure");
+        assert!(
+            !deletable_dir.exists(),
+            "sibling deletable dir must be removed despite the locked entry (best effort)"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    #[test]
+    fn kill_processes_by_image_script_happy_path() {
+        let exe = std::path::Path::new("C:\\Users\\u\\.speedwave\\bin\\speedwave.exe");
+        let script = kill_processes_by_image_script(exe);
+        assert!(script.contains("-Name 'speedwave'"));
+        assert!(script.contains("C:\\Users\\u\\.speedwave\\bin\\speedwave.exe"));
+        assert!(script.contains("Stop-Process -Force"));
+    }
+
+    #[test]
+    fn kill_processes_by_image_script_escapes_single_quotes() {
+        let exe = std::path::Path::new("C:\\O'Brien\\.speedwave\\bin\\speedwave.exe");
+        let script = kill_processes_by_image_script(exe);
+        assert!(
+            script.contains("C:\\O''Brien\\.speedwave\\bin\\speedwave.exe"),
+            "single quote in path must be doubled for PowerShell, got: {script}"
+        );
     }
 
     // ── SetupState save/load roundtrip ──────────────────────────────────────
