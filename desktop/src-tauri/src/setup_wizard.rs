@@ -591,7 +591,9 @@ fn wipe_pass(data_dir: &std::path::Path) -> std::io::Result<Vec<(PathBuf, std::i
 /// most `depth` levels down), to name the actual locked object.
 fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    if depth == 0 {
+    // Never descend through a symlink: read_dir would follow it outside the wiped tree.
+    let is_symlink = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink());
+    if depth == 0 || is_symlink {
         return found;
     }
     let entries = match std::fs::read_dir(dir) {
@@ -677,7 +679,9 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
             break;
         }
         listed.push(format!("{} ({e})", path.display()));
-        if path.is_dir() {
+        // Non-following check: Path::is_dir() would send the probe through a symlink.
+        let is_real_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+        if is_real_dir {
             for deep in probe_deep_undeletable(path, WIPE_MAX_PROBE_DEPTH) {
                 if listed.len() >= WIPE_MAX_LISTED_PATHS {
                     break;
@@ -1564,6 +1568,65 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).expect("cleanup after test");
+    }
+
+    /// The probe must never read_dir through a symlink — that would attempt
+    /// deletions outside the wiped tree.
+    #[cfg(unix)]
+    #[test]
+    fn probe_deep_undeletable_returns_empty_for_symlink() {
+        let outside_tmp = tempfile::tempdir().expect("failed to create outside temp dir");
+        let target = outside_tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).expect("create outside target dir");
+        let outside_file = target.join("keep.txt");
+        std::fs::write(&outside_file, "data").expect("write outside file");
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let found = probe_deep_undeletable(&link, WIPE_MAX_PROBE_DEPTH);
+
+        assert!(found.is_empty(), "probe must not descend through a symlink");
+        assert!(
+            outside_file.exists(),
+            "probe must not delete files behind the symlink"
+        );
+    }
+
+    /// Final-failure reporting on a symlinked entry must not probe (and thus
+    /// delete) through the link target outside the data dir.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_final_report_does_not_probe_through_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let outside_tmp = tempfile::tempdir().expect("failed to create outside temp dir");
+        let target = outside_tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).expect("create outside target dir");
+        let outside_file = target.join("keep.txt");
+        std::fs::write(&outside_file, "data").expect("write outside file");
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::os::unix::fs::symlink(&target, data_dir.join("link")).expect("create symlink");
+        // Read-only data_dir blocks unlinking the symlink; heal fixes entries, never
+        // the parent, so the wipe reaches the final-failure reporting branch.
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make data dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore data dir perms");
+
+        assert!(result.is_err(), "wipe should fail on the undeletable entry");
+        assert!(
+            outside_file.exists(),
+            "reporting probe must not follow the symlink and delete outside files"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
     }
 
     /// Unix: a dir born with 0o555 (analogous to an empty-DACL dir on Windows) now
