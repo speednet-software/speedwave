@@ -231,7 +231,7 @@ fn spawn_background_teardown_with(
     }
 }
 
-/// Joins every in-flight background teardown — exit path only.
+/// Joins every in-flight background teardown — callers: exit path and factory reset.
 pub(crate) fn drain_pending_teardowns() {
     let handles: Vec<(String, std::thread::JoinHandle<()>)> =
         pending_teardowns_lock().drain().collect();
@@ -890,8 +890,16 @@ pub async fn factory_reset(
 
     // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
     let result = tokio::task::spawn_blocking(|| {
-        // 3c. Join in-flight background project teardowns so the wipe does not race them.
-        drain_pending_teardowns();
+        // 3c. Join in-flight background teardowns so the wipe does not race them,
+        // bounded — a hung compose_down must not wedge the reset (thread keeps draining).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drain_pending_teardowns();
+            let _ = tx.send(());
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(30)).is_err() {
+            log::warn!("background teardown drain did not finish within 30s, continuing with wipe");
+        }
         log::info!("starting factory reset wipe");
         setup_wizard::factory_reset().map_err(|e| {
             log::error!("factory reset failed: {e}");

@@ -238,6 +238,21 @@ mod tests {
 
     // -- watcher lifecycle: stop releases the watched directory --
 
+    /// Polls `remove_dir_all` with a bounded deadline: notify's watcher drop
+    /// closes the directory handle asynchronously on Windows.
+    fn remove_dir_all_when_released(root: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::fs::remove_dir_all(root) {
+                Ok(()) => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(e) => panic!("watched dir still not removable after watcher drop: {e}"),
+            }
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn watched_dir_cannot_be_removed_until_watcher_drops() {
@@ -248,7 +263,7 @@ mod tests {
         let err = std::fs::remove_dir_all(&root).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         drop(watcher);
-        std::fs::remove_dir_all(&root).unwrap();
+        remove_dir_all_when_released(&root);
         assert!(!root.exists());
     }
 
@@ -258,7 +273,7 @@ mod tests {
         let root = tmp.path().join("claude-home");
         let (watcher, _rx) = start_watcher(&root).unwrap();
         drop(watcher);
-        std::fs::remove_dir_all(&root).unwrap();
+        remove_dir_all_when_released(&root);
         assert!(!root.exists());
     }
 
