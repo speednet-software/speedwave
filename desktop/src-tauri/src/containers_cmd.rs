@@ -857,10 +857,14 @@ pub async fn factory_reset(
     app: tauri::AppHandle,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
+    oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
     // 1. Stop mcp-os watchdog
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // 1b. Stop the oauth watchdog too, so it cannot respawn workers mid-wipe.
+    crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // 2. Stop IDE Bridge
     if let Ok(mut guard) = ide_bridge.lock() {
@@ -882,7 +886,18 @@ pub async fn factory_reset(
         }
     }
 
-    // 3b. Stop the clipboard-bridge watcher — Windows cannot delete a watched
+    // 3b. Stop per-project oauth workers — they hold token-file handles under the
+    // data dir and the exit path already stops them (parity).
+    if let Ok(mut map) = oauth.lock() {
+        for (project, mut proc) in map.drain() {
+            if let Err(e) = proc.stop() {
+                log::warn!("oauth worker for '{project}' stop error during factory reset: {e}");
+            }
+            proc.cleanup_files();
+        }
+    }
+
+    // 3c. Stop the clipboard-bridge watcher — Windows cannot delete a watched
     // directory (os error 5), which made wipe_data_dir fail under claude-home.
     if let Ok(mut guard) = clipboard.lock() {
         drop(guard.take());
@@ -890,7 +905,7 @@ pub async fn factory_reset(
 
     // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
     let result = tokio::task::spawn_blocking(|| {
-        // 3c. Join in-flight background teardowns so the wipe does not race them,
+        // 3d. Join in-flight background teardowns so the wipe does not race them,
         // bounded — a hung compose_down must not wedge the reset (thread keeps draining).
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -3655,16 +3670,18 @@ mod tests {
     #[test]
     fn factory_reset_stops_clipboard_and_drains_teardowns_before_wipe() {
         // Ordering guard (same pattern as main.rs ExitRequested guard): the watcher
-        // stop and the teardown drain must precede the wipe inside factory_reset.
+        // stop, oauth stop, and the teardown drain must precede the wipe inside factory_reset.
         let src = include_str!("containers_cmd.rs");
         let body = &src[src
             .find("pub async fn factory_reset")
             .expect("factory_reset fn")..];
+        let oauth_stop = body.find("oauth.lock()").expect("oauth stop call");
         let clipboard_stop = body.find("clipboard.lock()").expect("clipboard stop call");
         let drain = body.find("drain_pending_teardowns();").expect("drain call");
         let wipe = body
             .find("starting factory reset wipe")
             .expect("wipe log line");
+        assert!(oauth_stop < wipe, "oauth workers must stop before the wipe");
         assert!(
             clipboard_stop < wipe,
             "clipboard bridge must stop before the wipe"

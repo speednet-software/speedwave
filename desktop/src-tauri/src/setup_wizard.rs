@@ -554,13 +554,25 @@ fn kill_processes_by_image_script(exe: &std::path::Path) -> String {
 
 /// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
 /// Best-effort per entry; the error names every undeletable path.
-fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
+/// Number of wipe attempts (1 initial pass + retries) before giving up.
+const WIPE_MAX_ATTEMPTS: u32 = 4;
+/// Delay between wipe passes — absorbs transient handle-release lag
+/// (WSL 9P teardown after `wsl --unregister`, AV scanning).
+const WIPE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Cap on undeletable paths listed in the final error message.
+const WIPE_MAX_LISTED_PATHS: usize = 8;
+/// Cap on nested descendants probed per failing top-level entry.
+const WIPE_MAX_DEEP_PROBE: usize = 3;
+
+/// Runs one best-effort removal pass over `data_dir`'s top-level entries.
+/// Returns the entries that failed to remove (empty = all removed).
+fn wipe_pass(data_dir: &std::path::Path) -> std::io::Result<Vec<(PathBuf, std::io::Error)>> {
     let entries = match std::fs::read_dir(data_dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let result = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -569,19 +581,83 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
             std::fs::remove_file(&path)
         };
         if let Err(e) = result {
-            failed.push(format!("{} ({e})", path.display()));
+            failed.push((path, e));
         }
     }
+    Ok(failed)
+}
+
+/// Probes up to [`WIPE_MAX_DEEP_PROBE`] undeletable descendants under `dir`, to
+/// name the actual locked object rather than just the top-level entry.
+fn probe_deep_undeletable(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return found,
+    };
+    for entry in entries.flatten() {
+        if found.len() >= WIPE_MAX_DEEP_PROBE {
+            break;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let result = if is_dir {
+            std::fs::remove_dir(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if result.is_err() {
+            if is_dir {
+                found.extend(probe_deep_undeletable(&path));
+            }
+            if found.len() < WIPE_MAX_DEEP_PROBE {
+                found.push(path);
+            }
+        }
+    }
+    found.truncate(WIPE_MAX_DEEP_PROBE);
+    found
+}
+
+fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let mut failed = wipe_pass(data_dir)?;
+    let mut attempts = 1;
+    while !failed.is_empty() && attempts < WIPE_MAX_ATTEMPTS {
+        std::thread::sleep(WIPE_RETRY_DELAY);
+        failed = wipe_pass(data_dir)?;
+        attempts += 1;
+    }
     if failed.is_empty() {
-        std::fs::remove_dir(data_dir)?;
+        if let Err(e) = std::fs::remove_dir(data_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
+        }
         return Ok(());
     }
+
+    let mut listed: Vec<String> = Vec::new();
+    for (path, e) in &failed {
+        if listed.len() >= WIPE_MAX_LISTED_PATHS {
+            break;
+        }
+        listed.push(format!("{} ({e})", path.display()));
+        if path.is_dir() {
+            for deep in probe_deep_undeletable(path) {
+                if listed.len() >= WIPE_MAX_LISTED_PATHS {
+                    break;
+                }
+                listed.push(deep.display().to_string());
+            }
+        }
+    }
     anyhow::bail!(
-        "could not remove {} entr{} under {}: {}",
+        "could not remove {} entr{} under {} after {attempts} attempt{}: {}",
         failed.len(),
         if failed.len() == 1 { "y" } else { "ies" },
         data_dir.display(),
-        failed.join("; ")
+        if attempts == 1 { "" } else { "s" },
+        listed.join("; ")
     );
 }
 
@@ -1462,6 +1538,113 @@ mod tests {
         assert!(
             !deletable_dir.exists(),
             "sibling deletable dir must be removed despite the locked entry (best effort)"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    #[test]
+    fn wipe_data_dir_retry_succeeds_after_transient_lock_clears() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("make dir read-only");
+        }
+        #[cfg(windows)]
+        {
+            let file_path = locked_dir.join("file.txt");
+            let mut perms = std::fs::metadata(&file_path)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&file_path, perms).expect("set readonly");
+        }
+
+        let unlock_dir = locked_dir.clone();
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o755))
+                    .expect("restore dir permissions");
+            }
+            #[cfg(windows)]
+            {
+                let file_path = unlock_dir.join("file.txt");
+                let mut perms = std::fs::metadata(&file_path)
+                    .expect("stat file")
+                    .permissions();
+                perms.set_readonly(false);
+                std::fs::set_permissions(&file_path, perms).expect("clear readonly");
+            }
+        });
+
+        let result = wipe_data_dir(&data_dir);
+        unlocker.join().expect("unlocker thread should not panic");
+
+        result.expect("wipe should succeed once the retry loop observes the released lock");
+        assert!(!data_dir.exists(), "data dir should be gone after retry");
+    }
+
+    #[test]
+    fn wipe_data_dir_names_deep_undeletable_path_on_final_failure() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let nested_file = locked_dir.join("nested.txt");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(&nested_file, "data").expect("write file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("make dir read-only");
+        }
+        #[cfg(windows)]
+        {
+            let mut perms = std::fs::metadata(&nested_file)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&nested_file, perms).expect("set readonly");
+        }
+
+        let result = wipe_data_dir(&data_dir);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore dir permissions");
+        }
+        #[cfg(windows)]
+        {
+            let mut perms = std::fs::metadata(&nested_file)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&nested_file, perms).expect("clear readonly");
+        }
+
+        let err = result.expect_err("wipe should fail while the entry is locked");
+        let message = err.to_string();
+        assert!(
+            message.contains(&locked_dir.display().to_string()),
+            "error message should name the locked subdir, got: {message}"
+        );
+        #[cfg(windows)]
+        assert!(
+            message.contains(&nested_file.display().to_string()),
+            "on Windows the probe can unlink the parent so it must surface the readonly file, got: {message}"
         );
 
         std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
