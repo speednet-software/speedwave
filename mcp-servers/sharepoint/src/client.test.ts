@@ -11,6 +11,7 @@ import {
   SharePointConfig,
   validateGraphSiteId,
   resolveCompositeSiteId,
+  GraphApiError,
 } from './client.js';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -308,6 +309,31 @@ describe('SharePointClient', () => {
     it('handles errors without message (truthy empty)', () => {
       expect(SharePointClient.formatError({ message: undefined })).toMatch(/SharePoint API error/);
     });
+
+    it('classifies a GraphApiError by its status, not by numeric substrings in the URL-bearing message', () => {
+      // A list-item id of "429"/"423" embedded in the Graph URL must not be mistaken for the
+      // HTTP status when the real status is a genuine, unrelated failure.
+      const notFoundOnItem429 = new GraphApiError(
+        'Graph API GET https://graph.microsoft.com/v1.0/sites/S1/lists/L1/items/429 failed: 404 Not Found',
+        404
+      );
+      expect(SharePointClient.formatError(notFoundOnItem429)).toMatch(/Resource not found/);
+      expect(SharePointClient.formatError(notFoundOnItem429)).not.toMatch(/Rate limited/);
+
+      const serverErrorOnItem423 = new GraphApiError(
+        'Graph API GET https://graph.microsoft.com/v1.0/sites/S1/lists/L1/items/423 failed: 500 Internal Server Error',
+        500
+      );
+      expect(SharePointClient.formatError(serverErrorOnItem423)).not.toMatch(/locked/i);
+    });
+
+    it('still classifies a genuine GraphApiError 429/423 by status', () => {
+      const rateLimited = new GraphApiError('Graph API GET https://x/items/1 failed: 429', 429);
+      expect(SharePointClient.formatError(rateLimited)).toMatch(/Rate limited/);
+
+      const locked = new GraphApiError('Graph API GET https://x/items/1 failed: 423', 423);
+      expect(SharePointClient.formatError(locked)).toMatch(/locked/i);
+    });
   });
 
   describe('callGraphAPI', () => {
@@ -337,6 +363,33 @@ describe('SharePointClient', () => {
       // A later call must go straight through without re-resolving.
       fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
       await expect(client.listFiles()).resolves.not.toThrow();
+    });
+
+    it('rewrites only the /sites/{siteId} path segment, not a coincidental substring match elsewhere in the URL', async () => {
+      // A stale siteId whose bare-word form ("Docs") could also legitimately appear as an
+      // unrelated URL segment (e.g. a folder path) — the fix must not touch that occurrence.
+      const staleSiteId = 'Docs:/sites/Docs:';
+      client.getConfig().siteId = staleSiteId;
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+      fetchMock
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await client.graphRequest('GET', `/sites/{site-id}/lists/L1/items?$filter=Docs:/sites/Docs:`);
+
+      const listUrl = fetchMock.mock.calls[1][0] as string;
+      // The /sites/{siteId} path segment must carry the freshly resolved composite id.
+      expect(listUrl).toContain(
+        '/sites/contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222/'
+      );
+      // The unrelated occurrence of the stale string later in the URL (the $filter value) must
+      // be left untouched — a naive whole-URL substring replace would have rewritten it too.
+      expect(listUrl).toContain('$filter=Docs:/sites/Docs:');
     });
 
     it('fails only the one call with a teaching error when the retry also fails', async () => {
@@ -411,6 +464,30 @@ describe('SharePointClient', () => {
       );
 
       await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+    });
+
+    it('arms the resolve cooldown on an OAuthScopeMismatchError too, throttling a tool-call burst', async () => {
+      vi.useFakeTimers();
+      try {
+        const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/ScopeBurst:';
+        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
+        mockAuthedRequest.mockRejectedValue(
+          new OAuthScopeMismatchError('Sites.Manage.All not granted')
+        );
+
+        await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+        const resolveCallsAfterFirst = mockAuthedRequest.mock.calls.length;
+
+        // A second call inside the cooldown must fail fast without a fresh network resolve,
+        // exactly like every other wedged-resolve failure mode.
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+        expect(mockAuthedRequest.mock.calls.length).toBe(resolveCallsAfterFirst);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not short-circuit when statusTracker is ok', async () => {
@@ -984,6 +1061,34 @@ describe('SharePointClient', () => {
       });
 
       await expect(client.getFileMetadata('file-1')).rejects.toThrow('Failed to get file metadata');
+    });
+
+    it('falls back to a generic message when the error body is not JSON', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON');
+        },
+      });
+
+      await expect(client.getFileMetadata('file-1')).rejects.toThrow('Failed to get file metadata');
+    });
+
+    it('tags the thrown error with the response status as a GraphApiError even on a non-JSON body', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON');
+        },
+      });
+
+      await expect(client.getFileMetadata('file-1')).rejects.toMatchObject({
+        status: 404,
+      });
     });
   });
 

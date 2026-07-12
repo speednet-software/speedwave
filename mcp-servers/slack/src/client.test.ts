@@ -216,6 +216,14 @@ describe('slack client', () => {
       const message = formatSlackError(error);
       expect(message).toBe('Channel not found in Slack.');
     });
+
+    it('does not resolve an inherited Object.prototype member as a message for an unmapped code', () => {
+      for (const code of ['constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+        const message = formatSlackError({ data: { error: code } });
+        expect(typeof message).toBe('string');
+        expect(message).toBe(`Slack API error: ${code}`);
+      }
+    });
   });
 
   describe('isSlackAuthExpiredError', () => {
@@ -1802,6 +1810,16 @@ describe('slack client', () => {
     it('routes names that merely look like Slack IDs to the findUsers teaching path', async () => {
       await expect(openDm(mockClients, { users: ['Wanda'] })).rejects.toThrow(/findUsers first/);
       await expect(openDm(mockClients, { users: ['Wojciech Nowak'] })).rejects.toThrow(
+        /findUsers first/
+      );
+      expect(mockClients.user.conversations.open).not.toHaveBeenCalled();
+    });
+
+    it('rejects an all-alphabetic word of 9+ chars starting with U/W, even case-insensitively (no digit, not a real ID shape)', async () => {
+      await expect(openDm(mockClients, { users: ['workspaces'] })).rejects.toThrow(
+        /findUsers first/
+      );
+      await expect(openDm(mockClients, { users: ['UNITEDSTATES'] })).rejects.toThrow(
         /findUsers first/
       );
       expect(mockClients.user.conversations.open).not.toHaveBeenCalled();

@@ -1,3 +1,6 @@
+//! Per-project LLM forwarder: relays native Anthropic `/v1/messages` verbatim,
+//! routes provider-prefixed models, and is the sole appender of the usage JSONL.
+
 use std::sync::Arc;
 
 use axum::{

@@ -1498,6 +1498,86 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
+# Stub: `plugin list --json` logs each invocation (to prove it was skipped),
+# reports nothing installed; `plugin install` records the target.
+_stub_claude_logging_plugin_list_calls() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
+    echo "call" >> "$TEST_HOME/plugin-list.log"
+    echo '[]'; exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
+    exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+}
+
+@test "an invalid bundled-plugin marketplace skips the plugin list subprocess entirely" {
+    _stub_claude_logging_plugin_list_calls
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="Bad/Marketplace"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/plugin-list.log" ]
+}
+
+@test "a restart with every bundled plugin already recorded skips the plugin list subprocess" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_logging_plugin_list_calls
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ -f "$TEST_HOME/plugin-list.log" ]
+    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+    [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
+
+    # Second start with the identical config: nothing left to install, so the
+    # subprocess (and its 30s timeout budget) is skipped entirely.
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
+}
+
+@test "missing jq warns and deterministically skips bundled-plugin install" {
+    rm -f "$STUBS_DIR/jq"
+    # The stub dir goes first on PATH (setup()); with the stub gone, jq only
+    # resolves if the bare test host itself ships one outside stripped homebrew/
+    # .local/bin locations — skip rather than assert on host-dependent behavior.
+    command -v jq &> /dev/null && skip "a non-stub jq is reachable on this test host"
+    _stub_claude_recording_plugin_installs
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: jq not found"* ]]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+}
+
+@test "a newly added bundled plugin still triggers plugin list on the next start" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_logging_plugin_list_calls
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    SPEEDWAVE_BUNDLED_PLUGINS="frontend-design" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
+
+    # A second bundled plugin appears (e.g. app update) — must still be checked.
+    SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev" run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 2 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
+}
+
 @test "does not reinstall a plugin already present (composite id, guard respects user disable)" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     # plugin list reports frontend-design already installed; install must be skipped.
@@ -1648,6 +1728,40 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     [ "$status" -eq 0 ]
     # Nothing managed anymore — the tracking manifest is removed.
     [ ! -e "${TEST_HOME}/.claude/.speedwave-managed-hooks" ]
+
+    rm -rf "$plugins_dir" "$patched"
+}
+
+@test "a user-added hook structurally identical to a managed one survives toggle-off" {
+    local plugins_dir patched
+    plugins_dir="$(mktemp -d)"
+    _make_hook_plugin "$plugins_dir" "my-plugin"
+    patched="$(_patch_plugins_dir "$plugins_dir")"
+
+    SPEEDWAVE_PLUGINS="my-plugin" run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # User independently adds a byte-identical copy of the managed group
+    # (minus the Speedwave marker field) under the same event.
+    node -e "
+const fs=require('fs');
+const p='${TEST_HOME}/.claude/settings.json';
+const s=JSON.parse(fs.readFileSync(p,'utf8'));
+const copy = JSON.parse(JSON.stringify(s.hooks.UserPromptSubmit[0]));
+delete copy._speedwaveHookId;
+s.hooks.UserPromptSubmit.push(copy);
+fs.writeFileSync(p,JSON.stringify(s,null,2));
+"
+    run _settings_check "s.hooks.UserPromptSubmit.length===2"
+    [ "$status" -eq 0 ]
+
+    unset SPEEDWAVE_PLUGINS
+    run bash "$patched" true
+    [ "$status" -eq 0 ]
+
+    # The managed (marker-tagged) copy is gone; the user's identical copy remains.
+    run _settings_check "s.hooks.UserPromptSubmit.length===1 && s.hooks.UserPromptSubmit[0]._speedwaveHookId===undefined"
+    [ "$status" -eq 0 ]
 
     rm -rf "$plugins_dir" "$patched"
 }

@@ -93,7 +93,8 @@ const listPipelineIdsTool: Tool = {
 
 const getPipelineFullTool: Tool = {
   name: 'getPipelineFull',
-  description: 'Get complete pipeline data. No truncation.',
+  description:
+    'Get complete pipeline data. Jobs are capped at the first 100; check the `truncated` field.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'pipeline', 'ci', 'details', 'jobs', 'status', 'full'],
@@ -142,6 +143,10 @@ const getPipelineFullTool: Tool = {
           },
         },
       },
+      truncated: {
+        type: 'boolean',
+        description: 'True when the pipeline has more than 100 jobs and `jobs` was capped',
+      },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -179,7 +184,11 @@ const getJobLogTool: Tool = {
         description:
           'Job ID as a number or string, e.g. 42 or "#42" (from the jobs array returned by getPipelineFull)',
       },
-      tail_lines: { type: 'number', description: 'Number of lines from end of log (default 100)' },
+      tail_lines: {
+        type: 'number',
+        minimum: 0,
+        description: 'Number of lines from end of log (default 100, 0 = all lines)',
+      },
     },
     required: ['project_id', 'job_id'],
   },

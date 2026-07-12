@@ -112,6 +112,11 @@ pub struct TranscriptDriver {
     next_pcm_warn_at: f32,
     /// End of the last committed live segment; the live view is append-only.
     published_until: Duration,
+    /// Text of the last committed segment — a wordless jittered re-decode
+    /// repeating it verbatim at the horizon is a duplicate, not new speech.
+    last_committed_text: String,
+    /// Draft (uncommitted tail) last published to the store.
+    last_draft: String,
 }
 
 impl TranscriptDriver {
@@ -128,6 +133,8 @@ impl TranscriptDriver {
             last_decode_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
             published_until: Duration::ZERO,
+            last_committed_text: String::new(),
+            last_draft: String::new(),
         }
     }
 
@@ -154,6 +161,8 @@ impl TranscriptDriver {
                 Ok(())
             }
             Err(e) => {
+                // Retract a stale draft before flipping to Failed — nothing will flush it now.
+                let _ = self.store.live_draft(self.id, String::new());
                 let _ = self.store.set_status(
                     self.id,
                     TranscriptStatus::Failed {
@@ -172,17 +181,15 @@ impl TranscriptDriver {
             if self.stop.is_stopped() {
                 return Ok(());
             }
-            let chunk = match self.audio.next_chunk() {
+            let next = self.audio.next_chunk();
+            // Drain queued health transitions before matching `next` — a stall that ends the
+            // stream with `Err` may have queued its warning on the same call.
+            self.forward_capture_health();
+            let chunk = match next {
                 Ok(Some(c)) => c,
                 Ok(None) => return Ok(()), // stream ended
                 Err(e) => return Err(DriverError::Capture(e.to_string())),
             };
-            for t in self.audio.take_health() {
-                let _ = match t {
-                    CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
-                    CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
-                };
-            }
             wav.write(&chunk.samples)?;
             self.pcm.extend_from_slice(&chunk.samples);
 
@@ -204,8 +211,21 @@ impl TranscriptDriver {
         }
     }
 
-    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm`, appending segments older than
-    /// [`LIVE_COMMIT_HOLDBACK`] (unstable tail → append-only). `flush` commits the held-back part.
+    /// Drains and forwards any capture-health transitions queued since the last call.
+    fn forward_capture_health(&mut self) {
+        for t in self.audio.take_health() {
+            let _ = match t {
+                CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
+                CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
+            };
+        }
+    }
+
+    /// Re-decodes the trailing `LIVE_WINDOW_SECS` of `pcm` and appends only
+    /// segments older than [`LIVE_COMMIT_HOLDBACK`] — the window tail is still
+    /// unstable between passes, so the live view stays append-only and never
+    /// flickers. The held-back tail goes out as a replace-only draft so the UI
+    /// shows text within one decode. `flush` commits the tail before finalize.
     fn decode_window(&mut self, flush: bool) -> Result<(), DriverError> {
         if self.pcm.is_empty() {
             return Ok(());
@@ -232,17 +252,76 @@ impl TranscriptDriver {
 
         let total = Duration::from_secs_f32(self.pcm.len() as f32 / SAMPLE_RATE_HZ as f32);
         let horizon = total.saturating_sub(LIVE_COMMIT_HOLDBACK);
-        let commit = uncommitted(&absolute, self.published_until)
-            .into_iter()
-            .filter(|s| flush || s.end <= horizon);
-        for seg in commit {
-            self.published_until = seg.end;
+        // Trim overlap and collect the whole decode-window's commits first, so they persist as
+        // one fsync'd save instead of one durable write per segment; the still-unstable tail
+        // (not yet ripe to commit) is streamed out separately as a replace-only draft.
+        let mut batch = Vec::new();
+        let mut draft = String::new();
+        for seg in uncommitted(&absolute, self.published_until) {
+            if flush || seg.end <= horizon {
+                let Some(seg) = trim_committed_overlap(seg, self.published_until) else {
+                    continue;
+                };
+                // Without word timestamps trim cannot shorten the text; a verbatim
+                // repeat hugging the horizon is a jittered re-decode, not new speech.
+                if seg.words.is_empty()
+                    && seg.start <= self.published_until + BOUNDARY_JITTER
+                    && seg.text == self.last_committed_text
+                {
+                    self.published_until = self.published_until.max(seg.end);
+                    continue;
+                }
+                self.published_until = seg.end;
+                self.last_committed_text = seg.text.clone();
+                batch.push(seg);
+            } else {
+                let Some(seg) = trim_committed_overlap(seg, self.published_until) else {
+                    continue;
+                };
+                if !draft.is_empty() {
+                    draft.push(' ');
+                }
+                draft.push_str(&seg.text);
+            }
+        }
+        if !batch.is_empty() {
             self.store
-                .append_segment(self.id, seg)
+                .append_segments(self.id, batch)
                 .map_err(|e| DriverError::Store(e.to_string()))?;
+        }
+        if draft != self.last_draft {
+            self.store
+                .live_draft(self.id, draft.clone())
+                .map_err(|e| DriverError::Store(e.to_string()))?;
+            self.last_draft = draft;
         }
         Ok(())
     }
+}
+
+/// Clamps a jittered segment's `start` to `published_until`, dropping any leading words already
+/// shown; returns `None` when it's a pure re-narration of already-committed audio.
+fn trim_committed_overlap(mut seg: Segment, published_until: Duration) -> Option<Segment> {
+    if seg.start >= published_until {
+        return Some(seg);
+    }
+    if seg.end <= published_until {
+        return None;
+    }
+    if !seg.words.is_empty() {
+        seg.words.retain(|w| w.end > published_until);
+        seg.text = seg
+            .words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if seg.text.is_empty() {
+            return None;
+        }
+    }
+    seg.start = published_until;
+    Some(seg)
 }
 
 /// A live segment is published once it is at least this much older than the
@@ -423,14 +502,14 @@ fn read_wav_to_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// `true` when the file is too small to hold any PCM (0-byte or header-only) —
-/// the signature of a recording that captured nothing.
+/// `true` when the file is too small to hold any PCM (0-byte or header-only).
+/// `false` when the size can't even be read, so that failure isn't masked as "no audio captured".
 fn wav_has_no_samples(path: &Path) -> bool {
     // A canonical 16 kHz mono int16 WAV header is 44 bytes; anything at or
     // below that carries no samples.
     std::fs::metadata(path)
         .map(|m| m.len() <= 44)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Tiny `hound`-backed WAV writer (16 kHz mono int16 — Whisper's canonical
@@ -578,6 +657,48 @@ mod tests {
     }
 
     #[test]
+    fn draft_events_stream_the_held_back_tail_and_clear_on_flush() {
+        let (_fixture_guard, fixture) = make_fixture_wav(20.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let mut sub = store.subscribe(id).unwrap();
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "s{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        driver
+            .run(&store.session_dir(id).join("audio.wav"))
+            .unwrap();
+
+        let mut drafts = Vec::new();
+        while let Ok(ev) = sub.events.try_recv() {
+            if let crate::transcription::transcript_store::TranscriptEvent::LiveDraft {
+                text, ..
+            } = ev
+            {
+                drafts.push(text);
+            }
+        }
+        // The held-back tail reaches the UI as a draft well before commit…
+        assert!(
+            drafts.iter().any(|d| !d.is_empty()),
+            "expected at least one non-empty draft, got {drafts:?}"
+        );
+        // …and the stop flush commits everything, clearing the draft.
+        assert_eq!(drafts.last().map(String::as_str), Some(""));
+        assert_eq!(store.get(id).unwrap().live_draft, "");
+    }
+
+    #[test]
     fn live_segments_stay_monotonic_and_unique_across_re_decodes() {
         // 30 s at 16 kHz: LIVE_DECODE_EVERY_SECS=5 re-decodes ~6 times, sliding past
         // LIVE_WINDOW_SECS; append-only commits must stay monotonic and never duplicate.
@@ -705,6 +826,49 @@ mod tests {
     }
 
     #[test]
+    fn a_decode_cycle_committing_several_segments_assigns_them_consecutive_seqs() {
+        // Decode 2 below commits two segments ("ala" and "ma kota") in one decode_window call —
+        // a batched persist must assign both consecutive seqs, not drop or reorder either.
+        let (_fixture_guard, fixture) = make_fixture_wav(15.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let sub = store.subscribe(id).unwrap();
+
+        let script = vec![
+            vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "mo kata")],
+            vec![seg_at(0.0, 2.0, "ala"), seg_at(3.0, 5.0, "ma kota")],
+            vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
+            vec![seg_at(0.0, 2.0, "ma kota"), seg_at(9.0, 11.0, "i psa")],
+        ];
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let mut rx = sub.events;
+        let mut seqs = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::transcription::TranscriptEvent::SegmentAppended { seq, .. } = ev {
+                seqs.push(seq);
+            }
+        }
+        assert_eq!(seqs.len(), 3, "ala, ma kota, i psa");
+        // Draft events share the seq counter, so committed seqs are strictly
+        // increasing but not dense.
+        for w in seqs.windows(2) {
+            assert!(w[1] > w[0], "seqs must be strictly increasing: {seqs:?}");
+        }
+        assert!(store.get(id).unwrap().last_seq >= *seqs.last().unwrap());
+    }
+
+    #[test]
     fn uncommitted_tolerates_boundary_jitter_but_drops_committed_redecodes() {
         let segs = vec![
             seg_at(0.0, 4.0, "merged redecode of committed audio"),
@@ -716,6 +880,192 @@ mod tests {
         let rest = uncommitted(&segs, Duration::from_secs(4));
         let texts: Vec<&str> = rest.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(texts, vec!["jittered boundary", "fresh"]);
+    }
+
+    #[test]
+    fn trim_committed_overlap_drops_a_segment_fully_covered_by_the_horizon() {
+        // A jittered segment that never reaches past published_until is pure
+        // re-narration of already-shown audio — must not be re-appended.
+        let seg = seg_at(3.5, 4.0, "jittered boundary");
+        assert!(trim_committed_overlap(seg, Duration::from_secs(4)).is_none());
+    }
+
+    #[test]
+    fn trim_committed_overlap_clamps_start_when_it_extends_past_the_horizon() {
+        let seg = seg_at(3.5, 6.0, "jittered boundary");
+        let trimmed = trim_committed_overlap(seg, Duration::from_secs(4)).unwrap();
+        assert_eq!(trimmed.start, Duration::from_secs(4));
+        assert_eq!(trimmed.end, Duration::from_secs(6));
+    }
+
+    #[test]
+    fn trim_committed_overlap_passes_through_a_segment_at_or_past_the_horizon() {
+        let seg = seg_at(4.0, 6.0, "fresh");
+        let trimmed = trim_committed_overlap(seg.clone(), Duration::from_secs(4)).unwrap();
+        assert_eq!(trimmed, seg);
+    }
+
+    #[test]
+    fn trim_committed_overlap_drops_leading_words_when_word_timestamps_are_present() {
+        use crate::transcription::transcriber::Word;
+        let seg = Segment {
+            start: Duration::from_secs_f32(3.5),
+            end: Duration::from_secs_f32(6.0),
+            text: "ma kota i psa".to_string(),
+            words: vec![
+                Word {
+                    text: "ma".to_string(),
+                    start: Duration::from_secs_f32(3.5),
+                    end: Duration::from_secs_f32(3.8),
+                },
+                Word {
+                    text: "kota".to_string(),
+                    start: Duration::from_secs_f32(3.8),
+                    end: Duration::from_secs_f32(4.2),
+                },
+                Word {
+                    text: "i".to_string(),
+                    start: Duration::from_secs_f32(4.2),
+                    end: Duration::from_secs_f32(4.4),
+                },
+                Word {
+                    text: "psa".to_string(),
+                    start: Duration::from_secs_f32(4.4),
+                    end: Duration::from_secs_f32(5.0),
+                },
+            ],
+        };
+        let trimmed = trim_committed_overlap(seg, Duration::from_secs(4)).unwrap();
+        assert_eq!(trimmed.start, Duration::from_secs(4));
+        assert_eq!(
+            trimmed.text, "kota i psa",
+            "the fully-past word 'ma' is dropped"
+        );
+        assert_eq!(trimmed.words.len(), 3);
+    }
+
+    #[test]
+    fn decode_window_does_not_duplicate_text_when_a_redecode_lands_in_the_jitter_window() {
+        // Decode 2 commits "ala ma kota" (published_until → 5.0). Decode 3 re-decodes it from
+        // 4.5 s (inside BOUNDARY_JITTER) but no further — must drop it, not duplicate it.
+        let (_fixture_guard, fixture) = make_fixture_wav(15.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+
+        let script = vec![
+            vec![seg_at(0.0, 4.5, "ala ma kota")],
+            vec![seg_at(0.0, 5.0, "ala ma kota")],
+            // Decodes 3-4 run with window_start ≈ 3 s, so these window-relative
+            // times land at abs 4.5-5.2 s: a wordless verbatim re-decode jittered
+            // across the 5.0 s horizon — trim can't shorten it, the guard drops it.
+            vec![seg_at(1.5, 2.2, "ala ma kota")],
+            vec![seg_at(1.5, 2.2, "ala ma kota")],
+        ];
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let texts: Vec<String> = store
+            .get(id)
+            .unwrap()
+            .live_segments
+            .iter()
+            .map(|s| s.text.clone())
+            .collect();
+        // "ala ma kota" appears exactly once — the jittered re-decode did not
+        // re-append it a second time.
+        assert_eq!(
+            texts.iter().filter(|t| t.as_str() == "ala ma kota").count(),
+            1,
+            "got: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn draft_trims_the_committed_prefix_of_a_jittered_re_decode() {
+        // Decode 1 commits "ala ma" (published_until -> 4.0 s). Decode 2's still-unripe tail
+        // re-decodes "ma" (jittered, with word timestamps) — the draft must drop it, not repeat it.
+        use crate::transcription::transcriber::Word;
+        let (_fixture_guard, fixture) = make_fixture_wav(15.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let sub = store.subscribe(id).unwrap();
+
+        let jittered_tail = Segment {
+            start: Duration::from_secs_f32(3.5),
+            end: Duration::from_secs_f32(6.0),
+            text: "ma kota i psa".to_string(),
+            words: vec![
+                Word {
+                    text: "ma".to_string(),
+                    start: Duration::from_secs_f32(3.5),
+                    end: Duration::from_secs_f32(3.8),
+                },
+                Word {
+                    text: "kota".to_string(),
+                    start: Duration::from_secs_f32(3.8),
+                    end: Duration::from_secs_f32(4.2),
+                },
+                Word {
+                    text: "i".to_string(),
+                    start: Duration::from_secs_f32(4.2),
+                    end: Duration::from_secs_f32(4.4),
+                },
+                Word {
+                    text: "psa".to_string(),
+                    start: Duration::from_secs_f32(4.4),
+                    end: Duration::from_secs_f32(6.0),
+                },
+            ],
+        };
+        let script = vec![
+            vec![seg_at(0.0, 4.0, "ala ma")],
+            vec![seg_at(0.0, 4.0, "ala ma"), jittered_tail],
+            // Decode 3 + flush run at a shifted window (window_start slides forward); an
+            // empty result keeps this test isolated to the decode-1/decode-2 interaction.
+            vec![],
+        ];
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        driver.run(&out_wav).unwrap();
+
+        let mut drafts = Vec::new();
+        let mut rx = sub.events;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::transcription::transcript_store::TranscriptEvent::LiveDraft {
+                text, ..
+            } = ev
+            {
+                drafts.push(text);
+            }
+        }
+        // Decode 1's pre-commit draft may show "ala ma" (nothing committed yet);
+        // once decode 2 commits it, the jittered tail's "ma" is trimmed away.
+        assert_eq!(
+            drafts,
+            vec![
+                "ala ma".to_string(),
+                "kota i psa".to_string(),
+                String::new()
+            ],
+            "draft sequence mismatch"
+        );
     }
 
     #[test]
@@ -761,6 +1111,10 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        // Seed a stale draft, as a real decode would leave one mid-recording.
+        store
+            .live_draft(id, "not yet committed".to_string())
+            .unwrap();
 
         let driver = TranscriptDriver::new(DriverConfig {
             id,
@@ -779,6 +1133,64 @@ mod tests {
             matches!(snap.status, TranscriptStatus::Failed { .. }),
             "got {:?}",
             snap.status
+        );
+        // The stale draft was retracted — nothing left to display for a failed session.
+        assert_eq!(
+            snap.live_draft, "",
+            "stale draft must be cleared on failure"
+        );
+    }
+
+    /// An `AudioStream` that queues a stall warning on the same call that then
+    /// fails — the health transition must still reach the store.
+    struct StallThenFailStream;
+    impl AudioStream for StallThenFailStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            Err(CaptureError::Failed("both streams stalled".to_string()))
+        }
+
+        fn take_health(&mut self) -> Vec<CaptureHealth> {
+            vec![CaptureHealth::Raised(
+                crate::transcription::CaptureWarning::SystemAudioStalled,
+            )]
+        }
+    }
+
+    #[test]
+    fn capture_health_queued_alongside_a_failing_chunk_still_reaches_the_store() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let sub = store.subscribe(id).unwrap();
+
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(StallThenFailStream),
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let err = driver.run(&out_wav).unwrap_err();
+        assert!(matches!(err, DriverError::Capture(_)), "got {err:?}");
+
+        let mut rx = sub.events;
+        let mut saw_raised = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::transcription::TranscriptEvent::CaptureWarning {
+                warning: crate::transcription::CaptureWarning::SystemAudioStalled,
+                ..
+            } = ev
+            {
+                saw_raised = true;
+            }
+        }
+        assert!(
+            saw_raised,
+            "the stall warning queued alongside the Err chunk must still be forwarded"
         );
     }
 
@@ -981,6 +1393,53 @@ mod tests {
             !reason.contains("read enough bytes"),
             "must not leak the raw hound error: {reason}"
         );
+    }
+
+    #[test]
+    fn finalize_with_a_corrupt_but_non_empty_wav_reports_the_real_read_error() {
+        // A file well past the 44-byte header threshold that is unparseable (crash mid-write)
+        // must surface the real cause, not the generic "no audio was captured" message.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let (id, wav) = seed_finalizing_session(&store, 4.0);
+        std::fs::write(&wav, vec![0xAAu8; 200]).unwrap(); // garbage, not a WAV header
+
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_path: wav,
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        let DriverError::Transcribe(reason) = err else {
+            panic!("expected Transcribe, got {err:?}")
+        };
+        assert!(
+            reason.starts_with("read audio:"),
+            "expected the real read error, got: {reason}"
+        );
+        assert!(
+            !reason.contains("no audio was captured"),
+            "must not mask a corrupt-file error as the empty-capture message: {reason}"
+        );
+    }
+
+    #[test]
+    fn wav_has_no_samples_is_true_for_a_small_file_and_false_when_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.wav");
+        std::fs::write(&small, vec![0u8; 10]).unwrap();
+        assert!(wav_has_no_samples(&small));
+
+        let big = dir.path().join("big.wav");
+        std::fs::write(&big, vec![0u8; 200]).unwrap();
+        assert!(!wav_has_no_samples(&big));
+
+        // A path whose metadata can't be read must not be reported as "no samples" —
+        // the caller falls through to the real I/O error instead.
+        let missing = dir.path().join("missing.wav");
+        assert!(!wav_has_no_samples(&missing));
     }
 
     /// A transcriber that always errors — to exercise the offline-decode failure

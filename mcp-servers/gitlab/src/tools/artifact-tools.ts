@@ -16,7 +16,7 @@ import { withValidation } from './validation.js';
 const listArtifactsTool: Tool = {
   name: 'listArtifacts',
   description:
-    'List artifacts from a pipeline, grouped by the job that produced them. Get pipeline_id from listPipelineIds or listMrPipelines.',
+    'List artifacts from a pipeline, grouped by the job that produced them. Scans only the first 100 jobs; check the `truncated` field. Get pipeline_id from listPipelineIds or listMrPipelines.',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'artifacts', 'pipeline', 'ci', 'build'],
@@ -53,6 +53,10 @@ const listArtifactsTool: Tool = {
           },
         },
       },
+      truncated: {
+        type: 'boolean',
+        description: 'True when the pipeline has more than 100 jobs and `artifacts` was capped',
+      },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -85,6 +89,7 @@ const downloadArtifactTool: Tool = {
       },
       tail_lines: {
         type: 'number',
+        minimum: 0,
         description: 'Number of last lines to return (default 500, 0 = all lines)',
       },
     },
@@ -159,7 +164,7 @@ export function createArtifactTools(client: GitLabClient | null): ToolDefinition
           pipeline_id: number;
         };
         const result = await c.listArtifacts(project_id, pipeline_id);
-        return jsonResult({ success: true, artifacts: result });
+        return jsonResult({ success: true, ...result });
       }),
     },
     {

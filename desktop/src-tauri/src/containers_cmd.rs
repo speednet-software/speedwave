@@ -191,8 +191,18 @@ fn clear_teardown_intent(project: &str) {
     }
 }
 
-/// Projects whose background teardown a previous process never finished.
+/// A `write-*` atomic-write tempfile older than this was orphaned by a crash
+/// between tempfile creation and rename, never an in-flight write.
+const STALE_ATOMIC_WRITE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Projects whose background teardown a previous process never finished. Also
+/// sweeps orphaned atomic-write tempfiles left in the data dir by a crash
+/// between tempfile creation and rename — no other path cleans those up.
 pub(crate) fn crashed_teardown_intents() -> Vec<String> {
+    speedwave_runtime::fs_perms::sweep_stale_atomic_write_temp_files(
+        speedwave_runtime::consts::data_dir(),
+        STALE_ATOMIC_WRITE_TEMP_AGE,
+    );
     let path = teardown_intents_path();
     std::fs::read_to_string(&path)
         .map(|c| c.lines().map(str::to_string).collect())
@@ -333,7 +343,8 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     });
     let expected_paths =
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_telemetry_locked(resolved.telemetry.any_locked);
     // OS prerequisite check
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
@@ -981,7 +992,9 @@ fn build_telemetry_response(
 }
 
 /// Applies each set field unless MDM locked it; returns the names of any locked
-/// fields the update tried to set (caller rejects the write when non-empty).
+/// fields the update tried to actually change (caller rejects the write when
+/// non-empty). A locked field submitted with its current resolved value is a
+/// no-op, never a rejection — it lets the frontend resend unlocked fields.
 fn apply_telemetry_update_with(
     user: &mut config::TelemetryConfig,
     update: TelemetryConfigUpdate,
@@ -990,10 +1003,12 @@ fn apply_telemetry_update_with(
     use speedwave_runtime::telemetry_env::TelemetryField as F;
     let mut rejected: Vec<&'static str> = Vec::new();
     macro_rules! set_field {
-        ($name:literal, $field:expr, $present:expr, $assign:expr) => {
+        ($name:literal, $field:expr, $present:expr, $unchanged:expr, $assign:expr) => {
             if $present {
                 if resolved.is_field_locked($field) {
-                    rejected.push($name);
+                    if !$unchanged {
+                        rejected.push($name);
+                    }
                 } else {
                     $assign;
                 }
@@ -1004,33 +1019,49 @@ fn apply_telemetry_update_with(
         "enabled",
         F::Enabled,
         update.enabled.is_some(),
+        update.enabled == Some(resolved.enabled),
         user.enabled = update.enabled
     );
     // endpoint tri-state: Some(None) clears, Some(Some) sets.
     if let Some(e) = update.endpoint {
-        set_field!("endpoint", F::Endpoint, true, user.endpoint = e);
+        set_field!(
+            "endpoint",
+            F::Endpoint,
+            true,
+            e == resolved.endpoint,
+            user.endpoint = e
+        );
     }
     set_field!(
         "protocol",
         F::Protocol,
         update.protocol.is_some(),
+        update.protocol == Some(resolved.protocol),
         user.protocol = update.protocol
     );
     set_field!(
         "export_metrics",
         F::ExportMetrics,
         update.export_metrics.is_some(),
+        update.export_metrics == Some(resolved.export_metrics),
         user.export_metrics = update.export_metrics
     );
     set_field!(
         "export_logs",
         F::ExportLogs,
         update.export_logs.is_some(),
+        update.export_logs == Some(resolved.export_logs),
         user.export_logs = update.export_logs
     );
     // Headers tri-state: Some(None) clears, Some(Some) sets.
     if let Some(h) = update.headers {
-        set_field!("headers", F::Headers, true, user.headers = h);
+        set_field!(
+            "headers",
+            F::Headers,
+            true,
+            h == resolved.headers,
+            user.headers = h
+        );
     }
     // resource_attributes tri-state: Some(None) clears, Some(Some) sets.
     if let Some(ra) = update.resource_attributes {
@@ -1038,6 +1069,7 @@ fn apply_telemetry_update_with(
             "resource_attributes",
             F::ResourceAttributes,
             true,
+            ra == resolved.resource_attributes,
             user.resource_attributes = ra
         );
     }
@@ -1045,30 +1077,35 @@ fn apply_telemetry_update_with(
         "include_account_uuid",
         F::IncludeAccountUuid,
         update.include_account_uuid.is_some(),
+        update.include_account_uuid == Some(resolved.include_account_uuid),
         user.include_account_uuid = update.include_account_uuid
     );
     set_field!(
         "log_user_prompts",
         F::LogUserPrompts,
         update.log_user_prompts.is_some(),
+        update.log_user_prompts == Some(resolved.log_user_prompts),
         user.log_user_prompts = update.log_user_prompts
     );
     set_field!(
         "log_assistant_responses",
         F::LogAssistantResponses,
         update.log_assistant_responses.is_some(),
+        update.log_assistant_responses == Some(resolved.log_assistant_responses),
         user.log_assistant_responses = update.log_assistant_responses
     );
     set_field!(
         "log_tool_details",
         F::LogToolDetails,
         update.log_tool_details.is_some(),
+        update.log_tool_details == Some(resolved.log_tool_details),
         user.log_tool_details = update.log_tool_details
     );
     set_field!(
         "log_raw_api_bodies",
         F::LogRawApiBodies,
         update.log_raw_api_bodies.is_some(),
+        update.log_raw_api_bodies == Some(resolved.log_raw_api_bodies),
         user.log_raw_api_bodies = update.log_raw_api_bodies
     );
     // Interval tri-state: Some(None) clears, Some(Some) sets.
@@ -1077,6 +1114,7 @@ fn apply_telemetry_update_with(
             "metric_export_interval_ms",
             F::MetricExportInterval,
             true,
+            v == resolved.metric_export_interval_ms,
             user.metric_export_interval_ms = v
         );
     }
@@ -1085,10 +1123,24 @@ fn apply_telemetry_update_with(
             "logs_export_interval_ms",
             F::LogsExportInterval,
             true,
+            v == resolved.logs_export_interval_ms,
             user.logs_export_interval_ms = v
         );
     }
     rejected
+}
+
+/// True when either layer sets a non-empty headers value. Symmetric across
+/// user and MDM sources — an empty-string policy must never read as "configured".
+fn compute_has_headers(
+    user: Option<&config::TelemetryConfig>,
+    managed: Option<&speedwave_runtime::config::ManagedTelemetryConfig>,
+) -> bool {
+    let non_empty = |h: &String| !h.is_empty();
+    user.and_then(|t| t.headers.as_ref()).is_some_and(non_empty)
+        || managed
+            .and_then(|m| m.headers.as_ref())
+            .is_some_and(non_empty)
 }
 
 /// Returns the effective telemetry the container will use (user + MDM merge),
@@ -1101,12 +1153,7 @@ pub fn get_telemetry_config() -> Result<TelemetryConfigResponse, String> {
         .and_then(|m| m.telemetry);
     let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())
         .map_err(|e| e.to_string())?;
-    let has_headers = user_config
-        .telemetry
-        .as_ref()
-        .and_then(|t| t.headers.as_ref())
-        .is_some_and(|h| !h.is_empty())
-        || managed.as_ref().and_then(|m| m.headers.as_ref()).is_some();
+    let has_headers = compute_has_headers(user_config.telemetry.as_ref(), managed.as_ref());
     Ok(build_telemetry_response(&resolved, has_headers))
 }
 
@@ -3380,6 +3427,41 @@ mod tests {
     }
 
     #[test]
+    fn apply_update_unchanged_locked_value_is_a_no_op_alongside_unlocked_edit() {
+        use speedwave_runtime::config::{
+            resolve_telemetry, ManagedTelemetryConfig, TelemetryConfig,
+        };
+        // MDM locks the master switch (enabled=true); endpoint stays free. A save
+        // that resends the resolved `enabled` value plus a real endpoint edit must
+        // succeed in full — the unchanged locked field is a no-op, not a rejection.
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let mut user = TelemetryConfig {
+            endpoint: Some("https://old-user:4318".into()),
+            ..Default::default()
+        };
+        let resolved = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
+        assert!(resolved.enabled, "MDM-forced enabled must resolve true");
+        let update = TelemetryConfigUpdate {
+            enabled: Some(true),
+            endpoint: Some(Some("https://new-user:4318".into())),
+            ..Default::default()
+        };
+        let rejected = apply_telemetry_update_with(&mut user, update, &resolved);
+        assert!(
+            rejected.is_empty(),
+            "resending the resolved locked value must not reject the whole save: {rejected:?}"
+        );
+        assert_eq!(
+            user.endpoint.as_deref(),
+            Some("https://new-user:4318"),
+            "the unlocked endpoint edit must still apply"
+        );
+    }
+
+    #[test]
     fn apply_update_no_rejections_when_nothing_locked() {
         use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
         let mut user = TelemetryConfig::default();
@@ -3511,5 +3593,45 @@ mod tests {
             !json.contains("SUPER_SECRET"),
             "headers value must never reach the frontend"
         );
+    }
+
+    #[test]
+    fn compute_has_headers_true_for_non_empty_user_or_managed() {
+        use speedwave_runtime::config::{ManagedTelemetryConfig, TelemetryConfig};
+        let user = TelemetryConfig {
+            headers: Some("Authorization=Bearer x".into()),
+            ..Default::default()
+        };
+        assert!(compute_has_headers(Some(&user), None));
+
+        let managed = ManagedTelemetryConfig {
+            headers: Some("Authorization=Bearer y".into()),
+            ..Default::default()
+        };
+        assert!(compute_has_headers(None, Some(&managed)));
+    }
+
+    #[test]
+    fn compute_has_headers_false_for_empty_string_on_either_side() {
+        use speedwave_runtime::config::{ManagedTelemetryConfig, TelemetryConfig};
+        let user_empty = TelemetryConfig {
+            headers: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            !compute_has_headers(Some(&user_empty), None),
+            "empty-string user headers must not report as configured"
+        );
+
+        let managed_empty = ManagedTelemetryConfig {
+            headers: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            !compute_has_headers(None, Some(&managed_empty)),
+            "empty-string MDM headers must not report as configured (symmetry with user branch)"
+        );
+
+        assert!(!compute_has_headers(None, None));
     }
 }

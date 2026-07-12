@@ -137,6 +137,15 @@ pub trait AudioStream: Send {
     }
 }
 
+/// RMS of a PCM span (0.0 for an empty span).
+pub fn rms(pcm: &[f32]) -> f32 {
+    if pcm.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum_sq / pcm.len() as f64).sqrt() as f32
+}
+
 /// Flags a system-audio stream that has been pure digital silence since start
 /// (the signature of a consent-broken CoreAudio tap or a wrong loopback device).
 #[derive(Debug, Default)]
@@ -435,6 +444,13 @@ fn resample_linear(src: &[f32], from: u32, to: u32) -> Vec<f32> {
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rms_of_known_signals() {
+        assert_eq!(rms(&[]), 0.0);
+        assert!((rms(&vec![0.5f32; 100]) - 0.5).abs() < 1e-6);
+        assert!((rms(&vec![-0.5f32; 100]) - 0.5).abs() < 1e-6);
+    }
 
     #[test]
     fn capture_warning_variants_match_ts_union() {

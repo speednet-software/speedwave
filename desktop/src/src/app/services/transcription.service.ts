@@ -24,6 +24,9 @@ import { LoggerService } from './logger.service';
 /** Event name the Rust backend emits per model-download progress update. */
 const MODEL_PROGRESS_EVENT = 'transcription_model_status';
 
+/** Poll interval for detecting completion of a download this webview did not itself start. */
+const RESUMED_DOWNLOAD_POLL_MS = 2000;
+
 /** Instruction prepended to a transcript sent to chat, per session language. */
 const SEND_TO_CHAT_INSTRUCTIONS: Record<Language, string> = {
   pl:
@@ -53,8 +56,12 @@ export class TranscriptionService {
   private readonly downloadingModelKeySignal = signal<string | null>(null);
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
   private downloadUnlisten: UnlistenFn | null = null;
+  private downloadPollTimer: ReturnType<typeof setInterval> | undefined;
   private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
   private readonly recordingSessionIdSignal = signal<string | null>(null);
+  private readonly recordingSourceSignal = signal<AudioSource | null>(null);
+  private readonly recordingLanguageSignal = signal<Language | null>(null);
+  private readonly liveDraftSignal = signal<string>('');
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
@@ -65,8 +72,18 @@ export class TranscriptionService {
    */
   readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
 
+  /**
+   * Source/language of the in-progress recording — service-level so a remounted
+   * `RecordingControlsComponent` can restore its picker selection instead of showing defaults.
+   */
+  readonly recordingSource: Signal<AudioSource | null> = this.recordingSourceSignal.asReadonly();
+  readonly recordingLanguage: Signal<Language | null> = this.recordingLanguageSignal.asReadonly();
+
   /** Latest capture-health warning for the active session (null = none). */
   readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
+
+  /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
+  readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
 
   /**
    * Download-in-flight key — service-level so it survives component remounts.
@@ -97,8 +114,24 @@ export class TranscriptionService {
       params: { source, language },
     });
     this.activateSnapshot(ack.snapshot);
+    try {
+      await this.attachListener(ack.event_name);
+    } catch (e) {
+      // The backend capture already runs; stop it rather than orphan it.
+      try {
+        await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
+        this.recordingSessionIdSignal.set(null);
+        this.recordingSourceSignal.set(null);
+        this.recordingLanguageSignal.set(null);
+      } catch {
+        // Stop failed — keep the id so the Stop control still targets the session.
+        this.recordingSessionIdSignal.set(ack.session_id);
+      }
+      throw e;
+    }
     this.recordingSessionIdSignal.set(ack.session_id);
-    await this.attachListener(ack.event_name);
+    this.recordingSourceSignal.set(source);
+    this.recordingLanguageSignal.set(language);
     return ack;
   }
 
@@ -112,6 +145,8 @@ export class TranscriptionService {
     } finally {
       if (this.recordingSessionIdSignal() === sessionId) {
         this.recordingSessionIdSignal.set(null);
+        this.recordingSourceSignal.set(null);
+        this.recordingLanguageSignal.set(null);
       }
     }
   }
@@ -126,10 +161,15 @@ export class TranscriptionService {
   }
 
   /**
-   * Subscribes to an existing session's snapshot + live event stream.
+   * Subscribes to an existing session's snapshot + live event stream. Refuses to switch away
+   * from an in-progress recording's own session, which would otherwise drop its live listener.
    * @param sessionId - the session to attach to.
    */
   async subscribeToTranscript(sessionId: string): Promise<SubscribeAck> {
+    const recordingId = this.recordingSessionIdSignal();
+    if (recordingId !== null && recordingId !== sessionId) {
+      throw new Error('a recording is in progress — stop it before viewing another session');
+    }
     const ack = await this.tauri.invoke<SubscribeAck>('subscribe_transcript', { sessionId });
     this.activateSnapshot(ack.snapshot);
     await this.attachListener(ack.event_name);
@@ -217,16 +257,44 @@ export class TranscriptionService {
 
   /**
    * Re-attaches progress tracking to a download the backend reports as still running (webview
-   * reloaded mid-download — the invoke promise is gone).
+   * reloaded mid-download), then polls until it settles since no owning caller will clear it.
    * @param modelId - catalogue key the backend flagged as `downloading`.
    */
   async resumeDownloadTracking(modelId: string): Promise<void> {
     if (this.downloadingModelKeySignal() === modelId) return;
     await this.beginDownloadTracking(modelId);
+    this.stopDownloadPoll();
+    this.downloadPollTimer = setInterval(
+      () => void this.pollResumedDownload(modelId),
+      RESUMED_DOWNLOAD_POLL_MS
+    );
+  }
+
+  private async pollResumedDownload(modelId: string): Promise<void> {
+    if (this.downloadingModelKeySignal() !== modelId) {
+      this.stopDownloadPoll();
+      return;
+    }
+    try {
+      const ack = await this.recommendedModel();
+      if (ack.key === modelId && !ack.downloading) {
+        this.clearDownloadTracking();
+      }
+    } catch (e) {
+      this.log.warn(`resumed download poll failed: ${String(e)}`);
+    }
+  }
+
+  private stopDownloadPoll(): void {
+    if (this.downloadPollTimer !== undefined) {
+      clearInterval(this.downloadPollTimer);
+      this.downloadPollTimer = undefined;
+    }
   }
 
   /** Drops download tracking (used when the backend no longer reports one). */
   clearDownloadTracking(): void {
+    this.stopDownloadPoll();
     if (this.downloadUnlisten) {
       try {
         this.downloadUnlisten();
@@ -279,12 +347,16 @@ export class TranscriptionService {
   }
 
   /**
-   * Applies a freshly-received snapshot (resets lastSeq).
+   * Applies a freshly-received snapshot (resets lastSeq). Keeps the live draft when
+   * re-subscribing to the same in-progress recording — the snapshot never carries one.
    * @param snapshot - server-supplied current state.
    */
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
     this.captureWarningSignal.set(null); // warnings are per-session
+    if (snapshot.id !== this.recordingSessionIdSignal()) {
+      this.liveDraftSignal.set(''); // a genuinely different session starts with no draft
+    }
     this.activeSignal.set(snapshot);
   }
 
@@ -308,8 +380,15 @@ export class TranscriptionService {
       case 'segment_appended':
         next.live_segments = [...cur.live_segments, ev.segment];
         break;
+      case 'live_draft':
+        this.liveDraftSignal.set(ev.text);
+        break;
       case 'status_changed':
         next.status = ev.status;
+        // A draft is only meaningful while recording (e.g. stale on failure).
+        if (ev.status.state !== 'recording') {
+          this.liveDraftSignal.set('');
+        }
         break;
       case 'finalize_progress':
         next.status = { state: 'finalizing', progress: ev.progress };
@@ -320,6 +399,7 @@ export class TranscriptionService {
         break;
       case 'finished':
         next.status = { state: 'done' };
+        this.liveDraftSignal.set('');
         break;
       case 'capture_warning':
         this.captureWarningSignal.set(ev.warning);

@@ -84,8 +84,7 @@ final class NotesTests: XCTestCase {
 
     func testSearchNotesCommandAcceptsFolderIdKey() {
         let handler = NotesCLI.commands["search_notes"]!
-        // Missing "query" must still be rejected even when folder_id is present,
-        // proving folder_id no longer bypasses required-field validation.
+        // folder_id must not exempt search_notes from the required "query" field.
         XCTAssertThrowsError(try handler(["folder_id": "Work"])) { error in
             guard case NotesCLIError.missingField("query") = error else {
                 return XCTFail("expected missingField(query), got \(error)")
@@ -254,11 +253,13 @@ final class NotesTests: XCTestCase {
         }
     }
 
-    func testRunNoteScriptMapsFolderNotFoundToTeachingErrorWhenFolderPassed() {
-        // Real osascript wording (curly apostrophe) for a nonexistent folder, with a
-        // folder actually supplied, must map to the folder teaching error.
+    func testRunNoteScriptMapsFolderNotFoundToTeachingErrorWhenProbeConfirmsMissing() {
+        // Real osascript wording (curly apostrophe) for a nonexistent folder, plus a
+        // probe confirming the folder is absent, must map to the folder teaching error.
         let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Nope\\\". (-1728)\""
-        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, folder: "Nope")) { error in
+        XCTAssertThrowsError(
+            try runNoteScript(script, timeout: 5, folder: "Nope", folderMissing: { true })
+        ) { error in
             guard case CLIError.notFound(let msg) = error else {
                 return XCTFail("expected CLIError.notFound, got \(error)")
             }
@@ -266,11 +267,13 @@ final class NotesTests: XCTestCase {
         }
     }
 
-    func testRunNoteScriptMapsStaleNoteIdToNoteNotFoundWhenNoteIdPassed() {
-        // An id-scoped lookup (getNote/updateNote/deleteNote) whose -1728 names the id
-        // must yield the note-not-found teaching error.
+    func testRunNoteScriptMapsStaleNoteIdToNoteNotFoundWhenProbeConfirmsMissing() {
+        // An id-scoped lookup (getNote/updateNote/deleteNote) whose -1728 names the id,
+        // plus a probe confirming the note is absent, must yield the note-not-found error.
         let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"stale-id\\\". (-1728)\""
-        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, noteId: "stale-id")) { error in
+        XCTAssertThrowsError(
+            try runNoteScript(script, timeout: 5, noteId: "stale-id", noteMissing: { true })
+        ) { error in
             guard case CLIError.notFound(let msg) = error else {
                 return XCTFail("expected CLIError.notFound, got \(error)")
             }
@@ -291,9 +294,36 @@ final class NotesTests: XCTestCase {
     }
 
     func testRunNoteScriptPropagatesFolderMissWhenNameNotNamed() {
-        // A -1728 that does not name the scoped folder is an unrelated miss and propagates.
+        // A -1728 that does not name the scoped folder is an unrelated miss and propagates,
+        // even when the (never-consulted) probe would say the folder is missing.
         let script = "error \"Notes got an error: Can\u{2019}t get note id \\\"x\\\". (-1728)\""
-        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, folder: "Work")) { error in
+        XCTAssertThrowsError(
+            try runNoteScript(script, timeout: 5, folder: "Work", folderMissing: { true })
+        ) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
+        }
+    }
+
+    func testRunNoteScriptPropagatesWhenFolderProbeSaysPresent() {
+        // A -1728 that names the scoped folder but whose probe confirms the folder still
+        // exists (e.g. a per-note property read failure) must surface its real cause.
+        let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Work\\\". (-1728)\""
+        XCTAssertThrowsError(
+            try runNoteScript(script, timeout: 5, folder: "Work", folderMissing: { false })
+        ) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
+        }
+    }
+
+    func testRunNoteScriptDefaultProbesNeverRewriteWithoutInjection() {
+        // The default folderMissing/noteMissing closures are `{ false }` — a caller that
+        // passes folder/noteId without wiring a real probe must still see the raw failure.
+        let script = "error \"Notes got an error: Can\u{2019}t get folder \\\"Nope\\\". (-1728)\""
+        XCTAssertThrowsError(try runNoteScript(script, timeout: 5, folder: "Nope")) { error in
             guard case ScriptError.scriptFailed = error else {
                 return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
             }
@@ -303,7 +333,9 @@ final class NotesTests: XCTestCase {
     func testRunNoteScriptPassesThroughGenericScriptFailed() {
         // A syntax error (not -1728-shaped) must surface as the raw .scriptFailed,
         // not get rewritten into either teaching error.
-        XCTAssertThrowsError(try runNoteScript("this is not valid AppleScript", timeout: 5, folder: "Work")) { error in
+        XCTAssertThrowsError(
+            try runNoteScript("this is not valid AppleScript", timeout: 5, folder: "Work", folderMissing: { true })
+        ) { error in
             guard case ScriptError.scriptFailed = error else {
                 return XCTFail("expected .scriptFailed, got \(error)")
             }

@@ -121,8 +121,10 @@ mod imp {
             AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler);
         }
         // The user may ponder the prompt for minutes; the cap is only a hang guard.
+        // On timeout, re-query live status instead of assuming denial — a late
+        // completion callback would otherwise be silently lost on the dropped `rx`.
         rx.recv_timeout(std::time::Duration::from_secs(600))
-            .unwrap_or(false)
+            .unwrap_or_else(|_| status_decision() == Ok(StatusDecision::Granted))
     }
 }
 
@@ -308,6 +310,31 @@ mod tests {
         assert_eq!(
             status_from_decision(StatusDecision::Denied),
             MicPermissionStatus::Denied
+        );
+    }
+
+    // Drift guard: a late completion callback past the recv_timeout hang guard must
+    // not be silently discarded as a false denial — re-query live status instead.
+    #[test]
+    fn request_access_blocking_reconciles_timeout_with_live_status() {
+        let source = include_str!("mic_permission_cmd.rs");
+        let fn_start = source
+            .find("fn request_access_blocking(")
+            .expect("request_access_blocking must exist");
+        let fn_end = source[fn_start..]
+            .find("\n}\n")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            !fn_body.contains(
+                "recv_timeout(std::time::Duration::from_secs(600))\n            .unwrap_or(false)"
+            ),
+            "timeout fallback must not hard-default to denied without checking live status"
+        );
+        assert!(
+            fn_body.contains("status_decision()"),
+            "on timeout, request_access_blocking must re-query live AVAuthorizationStatus"
         );
     }
 

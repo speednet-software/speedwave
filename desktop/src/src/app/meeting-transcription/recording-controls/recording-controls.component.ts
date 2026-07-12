@@ -212,11 +212,20 @@ export class RecordingControlsComponent implements OnInit {
       this.backends.set(caps.backends);
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
-      // Default to "Whole meeting" (mixed) if offered, else "System
-      // (everything)", else the first entry.
-      const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
-      const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
-      this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
+      const inProgressSource = this.transcription.recordingSource();
+      if (inProgressSource) {
+        // A recording started before this instance existed (remount) — restore its
+        // picker selection instead of showing the compile-time defaults.
+        this.restoreFromInProgressRecording(list, inProgressSource);
+      } else {
+        // Default to "Whole meeting" (mixed) if offered, else "System
+        // (everything)", else the first entry.
+        const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
+        const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
+        this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
+      }
+      const inProgressLanguage = this.transcription.recordingLanguage();
+      if (inProgressLanguage) this.language.set(inProgressLanguage);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
@@ -224,6 +233,18 @@ export class RecordingControlsComponent implements OnInit {
     }
     await this.refreshModelAvailability();
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Restores `sourceIndex`/`micDevice` to match the source of a recording already in progress.
+   * @param list - the freshly-loaded source list.
+   * @param source - the in-progress recording's source.
+   */
+  private restoreFromInProgressRecording(list: AudioSourceInfo[], source: AudioSource): void {
+    const idx = list.findIndex((s) => s.source.kind === source.kind);
+    if (idx >= 0) this.sourceIndex.set(idx);
+    if (source.kind === 'mixed') this.micDevice.set(source.mic);
+    else if (source.kind === 'microphone') this.micDevice.set(source.device);
   }
 
   /**

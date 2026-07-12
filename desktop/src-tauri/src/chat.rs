@@ -241,6 +241,16 @@ pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
 pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
 
+/// True when a parsed `assistant` line is a sidechain (subagent) call —
+/// checked via BOTH the live stream-json marker (`parent_tool_use_id`) and
+/// the on-disk transcript marker (`isSidechain`), since either can appear
+/// depending on source (live CLI stream vs resumed JSONL transcript).
+/// SSOT for both `capture_context_usage` (chat.rs) and the resume-snapshot
+/// / assistant-message readers (history.rs) — never re-check one field alone.
+pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
+    !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
+}
+
 /// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
 /// malformed fields. `None` when `usage` is not a JSON object.
 pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
@@ -470,7 +480,7 @@ impl StreamParser {
     /// Track `message.usage` of main-chain assistant events (last one wins).
     /// Sidechain (subagent) calls and all-zero usage never move the meter.
     fn capture_context_usage(&mut self, parsed: &serde_json::Value) {
-        if !parsed["parent_tool_use_id"].is_null() {
+        if is_sidechain_event(parsed) {
             return;
         }
         if let Some(u) = turn_usage_from_jsonl(&parsed["message"]["usage"]) {
@@ -4924,6 +4934,45 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    // ── is_sidechain_event: shared heuristic (chat.rs live stream + history.rs transcript) ──
+
+    #[test]
+    fn is_sidechain_event_true_via_parent_tool_use_id() {
+        let v = serde_json::json!({"parent_tool_use_id": "toolu_1"});
+        assert!(is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_true_via_is_sidechain_flag() {
+        let v = serde_json::json!({"isSidechain": true});
+        assert!(is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_true_when_both_signals_present() {
+        let v = serde_json::json!({"parent_tool_use_id": "toolu_1", "isSidechain": true});
+        assert!(is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_false_when_neither_signal_present() {
+        let v = serde_json::json!({"type": "assistant"});
+        assert!(!is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_false_for_null_parent_and_false_is_sidechain() {
+        let v = serde_json::json!({"parent_tool_use_id": null, "isSidechain": false});
+        assert!(!is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_false_for_non_boolean_is_sidechain() {
+        // Malformed/unexpected type on isSidechain must not be treated as truthy.
+        let v = serde_json::json!({"isSidechain": "true"});
+        assert!(!is_sidechain_event(&v));
     }
 
     #[test]

@@ -1298,8 +1298,7 @@ export class ChatStateService {
 
   /** Seeds `context_usage` from the loaded transcript's last assistant per-call usage. */
   private seedContextFromTranscript(): void {
-    const usage = [...this._messages].reverse().find((m) => m.role === 'assistant' && m.meta?.usage)
-      ?.meta?.usage;
+    const usage = findLastNonZeroAssistantUsage(this._messages);
     if (!usage) return;
     this._lastContextTokens = contextTokensFrom(usage);
     const cur = this._sessionStats();
@@ -1500,6 +1499,32 @@ function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
     if (m.role === 'user' && !m.uuid) return i;
   }
   return -1;
+}
+
+/**
+ * Last assistant per-call usage that isn't all-zero, matching the live-stream path's
+ * `TurnUsage::default()` skip (chat.rs) so an aborted/errored call doesn't seed a false ctx=0%.
+ * @param msgs The conversation messages, oldest first.
+ */
+function findLastNonZeroAssistantUsage(msgs: readonly ChatMessage[]): TurnUsage | undefined {
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const usage = msgs[i].role === 'assistant' ? msgs[i].meta?.usage : undefined;
+    if (usage && !isZeroUsage(usage)) return usage;
+  }
+  return undefined;
+}
+
+/**
+ * True when every field of `u` is zero, mirroring Rust's `TurnUsage::default()`.
+ * @param u The per-call usage to test.
+ */
+function isZeroUsage(u: TurnUsage): boolean {
+  return (
+    u.input_tokens === 0 &&
+    u.output_tokens === 0 &&
+    u.cache_read_tokens === 0 &&
+    u.cache_write_tokens === 0
+  );
 }
 
 /** Snapshot of the legacy `ChatStateService` fields needed for projection. */

@@ -257,6 +257,18 @@ describe('officeToPdf', () => {
     );
   });
 
+  it('does not mislabel a failure whose echoed file path contains a space before "password"', async () => {
+    resolveInputFile.mockResolvedValueOnce('/workspace/my password-protected backup.docx');
+    runOk.mockRejectedValueOnce(
+      new Error(
+        'soffice exited with code 1: source file could not be loaded: /workspace/my password-protected backup.docx'
+      )
+    );
+    await expect(officeToPdf('a.docx')).rejects.toThrow(
+      /LibreOffice conversion failed.*feature LibreOffice cannot render/s
+    );
+  });
+
   it('does not mislabel a failure where "encrypt" is only a substring of an unrelated word', async () => {
     resolveInputFile.mockResolvedValueOnce('/workspace/a.docx');
     runOk.mockRejectedValueOnce(

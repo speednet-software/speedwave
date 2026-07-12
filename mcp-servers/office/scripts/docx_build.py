@@ -57,6 +57,9 @@ def _edit(src: str, output: str, ops: list) -> None:
     from docx import Document
 
     doc = Document(src)
+    # `find` strings already replaced earlier in this batch: a later op with the same `find`
+    # legitimately sees zero matches once consumed, and that is idempotent success, not a failure.
+    already_replaced: set[str] = set()
     for op in ops:
         kind = op.get("op")
         if kind == "append":
@@ -81,12 +84,14 @@ def _edit(src: str, output: str, ops: list) -> None:
                         if find in cell.text:
                             matches += 1
                             cell.text = cell.text.replace(find, replace)
-            if matches == 0:
+            if matches == 0 and find not in already_replaced:
                 fail(
                     f"replace_text: '{find}' was not found in any paragraph or table cell "
                     "-- text may be split across runs (e.g. mixed formatting mid-phrase); "
                     "use readDocument first to confirm the exact text"
                 )
+            if matches > 0:
+                already_replaced.add(find)
         elif kind == "delete_paragraph":
             idx = int(op["index"])
             paras = doc.paragraphs

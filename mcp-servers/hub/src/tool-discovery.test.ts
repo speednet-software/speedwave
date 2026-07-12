@@ -654,6 +654,30 @@ describe('tool-discovery', () => {
       expect(result['listIssueIds'].currentUserTool).toBe('getCurrentUser');
     });
 
+    it('normalizes a currentUserTool given as the worker snake_case tool name', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false, currentUserTool: 'get_current_user' },
+        },
+        {
+          name: 'get_current_user',
+          description: 'Get current Redmine user',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+
+      const result = await discoverAndMergeService('redmine');
+      expect(result['listIssueIds'].currentUserTool).toBe('getCurrentUser');
+    });
+
     it('drops a dangling currentUserTool and warns when the target tool does not exist', async () => {
       process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
 

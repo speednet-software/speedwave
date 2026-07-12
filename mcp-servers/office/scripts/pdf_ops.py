@@ -121,18 +121,47 @@ def _watermark(src: str, watermark: str, output: str) -> None:
     ok(path=output, pages=len(writer.pages))
 
 
+def _qualified_field_name(node) -> str:
+    """Full dotted field name for `node`, walking `/Parent` the way pypdf's own
+    `_get_qualified_field_name` does (and `get_fields()` keys its result by)."""
+    visited: set[int] = set()
+    parts: list[str] = []
+    while node is not None and id(node) not in visited:
+        visited.add(id(node))
+        if "/TM" in node:
+            parts.append(str(node["/TM"]))
+            break
+        parts.append(str(node.get("/T", "")))
+        parent = node.get("/Parent")
+        node = parent.get_object() if parent is not None else None
+    return ".".join(reversed(parts))
+
+
+def _annotation_field_names(annot) -> set[str]:
+    """Every name pypdf's `update_page_form_field_values` would match `annot` against:
+    its fully-qualified dotted name and the bare `/T` of the widget or its immediate parent."""
+    if "/FT" in annot and "/T" in annot:
+        parent_annotation = annot
+    else:
+        parent = annot.get("/Parent")
+        parent_annotation = parent.get_object() if parent is not None else {}
+    names: set[str] = set()
+    qualified = _qualified_field_name(parent_annotation)
+    if qualified:
+        names.add(qualified)
+    bare = parent_annotation.get("/T") if hasattr(parent_annotation, "get") else None
+    if bare is not None:
+        names.add(str(bare))
+    return names
+
+
 def _page_field_names(page) -> set[str]:
-    """Names of AcroForm widget annotations directly on `page` (best-effort, via `/T` or its `/Parent`)."""
+    """Names of AcroForm widget annotations on `page`, in the same name-space pypdf's
+    `get_fields()` and `update_page_form_field_values` use (qualified and bare `/T`)."""
     names: set[str] = set()
     for annot_ref in page.get("/Annots") or []:
         annot = annot_ref.get_object()
-        name = annot.get("/T")
-        if name is None:
-            parent = annot.get("/Parent")
-            if parent is not None:
-                name = parent.get_object().get("/T")
-        if name is not None:
-            names.add(str(name))
+        names |= _annotation_field_names(annot)
     return names
 
 
@@ -143,7 +172,11 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
-    known_fields = reader.get_fields() or {}
+    # Same widget-walking name-space update_page_form_field_values matches against, not
+    # reader.get_fields() alone: a hierarchical field's bare name would else be falsely "unknown".
+    known_fields: set[str] = set()
+    for page in writer.pages:
+        known_fields |= _page_field_names(page)
     fill_warnings: list[str] = []
     if known_fields:
         fill_warnings = [

@@ -52,7 +52,7 @@ Speedwave uses only **User** (its defaults) and leaves **Project** to teams. Bec
 
 ## See also
 
-- [Bundled Resources](../architecture/bundled-resources.md) — the reference for this design: full resource catalog (source path, target, mechanism, overridable?), the container filesystem layout, and the volume mounts with their read-only / read-write access levels.
+- The Bundled Resources reference at <https://speedwave.dev/docs>: full resource catalog (source path, target, mechanism, overridable?), the container filesystem layout, and the volume mounts with their read-only / read-write access levels.
 - [ADR-009](ADR-009-per-project-isolation-preserved.md) — container hardening and per-project isolation.
 - [ADR-015](ADR-015-plugin-system.md) — how plugin-provided resources layer onto the same user scope.
 

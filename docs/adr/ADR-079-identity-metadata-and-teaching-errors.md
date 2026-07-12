@@ -41,7 +41,7 @@ This is the contract for new validation/teaching-error paths: missing or malform
 - `mcp-servers/shared/src/teaching-errors.ts`: `teachingErrorResult`, `teachingToolResult`, `missingParamResult`, `MAX_RECEIVED_LENGTH`.
 - Discovery-time pointer validation: `mcp-servers/hub/src/tool-discovery.ts` (`dropDanglingCurrentUserTool`, `dropDanglingSelfParam`, `warnMissingIdentityCompanion`).
 - Rendering into `search_tools` output: `mcp-servers/hub/src/search-tools.ts` (`renderDescriptionWithIdentity`, `buildSearchResult`).
-- Per-worker adoption: gitlab, github, redmine, atlassian, slack, sharepoint each declare the trio on their identity-dependent tools; see [Identity-first behavior](../guides/integrations.md#identity-first-behavior) for the current per-service tool names.
+- Per-worker adoption: gitlab, github, redmine, atlassian, slack, sharepoint each declare the trio on their identity-dependent tools; see the Integrations guide's Identity-first behavior section at <https://speedwave.dev/docs> for the current per-service tool names.
 
 ## Consequences
 

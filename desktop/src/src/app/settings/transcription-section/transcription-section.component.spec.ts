@@ -241,6 +241,34 @@ describe('TranscriptionSectionComponent', () => {
     expect(svc.clearDownloadTracking).toHaveBeenCalled();
   });
 
+  it('ngOnInit runs refresh() and refreshPermissions() concurrently, not sequentially', async () => {
+    const order: string[] = [];
+    svc.recommendedModel.mockImplementationOnce(async () => {
+      order.push('recommendedModel:start');
+      await new Promise((r) => setTimeout(r, 0));
+      order.push('recommendedModel:end');
+      return notDownloaded;
+    });
+    const tauri = TestBed.inject(TauriService);
+    vi.spyOn(tauri, 'invoke').mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_platform') {
+        order.push('get_platform:start');
+        await new Promise((r) => setTimeout(r, 0));
+        order.push('get_platform:end');
+        return platform;
+      }
+      return undefined;
+    });
+    await component.ngOnInit();
+    // Both start before either finishes — proves they ran in parallel, not
+    // one-after-another. (Index-based: framework CD may re-run the hook.)
+    expect(order.indexOf('get_platform:start')).toBeGreaterThan(-1);
+    expect(order.indexOf('get_platform:start')).toBeLessThan(order.indexOf('recommendedModel:end'));
+    expect(order.indexOf('recommendedModel:start')).toBeLessThan(
+      order.indexOf('recommendedModel:end')
+    );
+  });
+
   it('size() formats GB and MB', () => {
     expect(component.size({ ...notDownloaded, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
     expect(component.size({ ...notDownloaded, size_bytes: 488_000_000 })).toBe('465.4 MB');

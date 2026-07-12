@@ -165,6 +165,19 @@ describe('dm-tools', () => {
       }
     });
 
+    it('openDirectMessage rejects a missing users param via the schema-driven guard before the handler runs', async () => {
+      const tools = createDmTools(presentClients());
+      const handler = tools.find((t) => t.tool.name === 'openDirectMessage')!.handler;
+
+      const result = await handler({});
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('MISSING_PARAM');
+      expect(parsed.message).toContain('for openDirectMessage');
+      expect(client.openDm).not.toHaveBeenCalled();
+    });
+
     it('forwards the users array to openDm verbatim (cap enforced in client)', async () => {
       // minItems/maxItems is a model hint only; the runtime cap lives in openDm (client.ts),
       // so the handler forwards as-is and surfaces a cap violation as OPEN_FAILED.

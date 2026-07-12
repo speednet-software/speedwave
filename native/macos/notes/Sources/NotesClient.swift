@@ -11,6 +11,22 @@ enum NotesClient {
         return "of folder \"\(escapeAppleScript(f))\""
     }
 
+    /// True only when a probe confirms the folder is absent; a probe error returns false
+    /// so an unrelated -1728 surfaces its real cause rather than a wrong folder message.
+    static func folderDefinitelyMissing(_ name: String) -> Bool {
+        let script = "tell application \"Notes\" to return (exists folder \"\(escapeAppleScript(name))\")"
+        guard let out = try? ScriptRunner.run(script, timeout: 10) else { return false }
+        return out == "false"
+    }
+
+    /// True only when a probe confirms the note id is absent; a probe error returns false
+    /// so an unrelated -1728 surfaces its real cause rather than a wrong note message.
+    static func noteDefinitelyMissing(_ id: String) -> Bool {
+        let script = "tell application \"Notes\" to return (exists note id \"\(escapeAppleScript(id))\")"
+        guard let out = try? ScriptRunner.run(script, timeout: 10) else { return false }
+        return out == "false"
+    }
+
     static func listFolders() throws -> [String: Any] {
         let script = """
         tell application "Notes"
@@ -57,7 +73,10 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30, folder: folder)
+        let output = try runNoteScript(
+            script, timeout: 30, folder: folder,
+            folderMissing: { folder.map { Self.folderDefinitelyMissing($0) } ?? false }
+        )
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -83,7 +102,10 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30, noteId: id)
+        let output = try runNoteScript(
+            script, timeout: 30, noteId: id,
+            noteMissing: { Self.noteDefinitelyMissing(id) }
+        )
         // Split on || but body (HTML) might contain || so we use |||| as body separator
         let mainParts = output.components(separatedBy: "||||")
         guard mainParts.count >= 2 else {
@@ -133,7 +155,10 @@ enum NotesClient {
         end tell
         """
 
-        let output = try runNoteScript(script, timeout: 30, folder: folder)
+        let output = try runNoteScript(
+            script, timeout: 30, folder: folder,
+            folderMissing: { folder.map { Self.folderDefinitelyMissing($0) } ?? false }
+        )
         let notes = parseDelimited(output, fields: ["id", "name", "modified", "folder"])
         return ["notes": notes]
     }
@@ -150,7 +175,10 @@ enum NotesClient {
         end tell
         """
 
-        let noteId = try runNoteScript(script, timeout: 30, folder: folder)
+        let noteId = try runNoteScript(
+            script, timeout: 30, folder: folder,
+            folderMissing: { folder.map { Self.folderDefinitelyMissing($0) } ?? false }
+        )
         return [
             "id": noteId.trimmingCharacters(in: .whitespacesAndNewlines),
             "status": "created",
@@ -179,7 +207,10 @@ enum NotesClient {
         end tell
         """
 
-        _ = try runNoteScript(script, timeout: 30, noteId: id)
+        _ = try runNoteScript(
+            script, timeout: 30, noteId: id,
+            noteMissing: { Self.noteDefinitelyMissing(id) }
+        )
         return ["status": "updated"]
     }
 
@@ -191,29 +222,39 @@ enum NotesClient {
         end tell
         """
 
-        _ = try runNoteScript(script, timeout: 30, noteId: id)
+        _ = try runNoteScript(
+            script, timeout: 30, noteId: id,
+            noteMissing: { Self.noteDefinitelyMissing(id) }
+        )
         return ["status": "deleted"]
     }
 }
 
-/// Runs a Notes-scoped AppleScript. A -1728 "Can't get" failure maps to a folder-/note-not-found
-/// teaching error only when it names the scoped `folder`/`noteId`; an unscoped miss propagates as-is.
+/// Runs a Notes-scoped AppleScript. A -1728 "Can't get" failure that names the scoped
+/// `folder`/`noteId` maps to a not-found teaching error only when a probe confirms it's
+/// actually absent — a per-note read failure inside the same script keeps its real cause.
 func runNoteScript(
     _ script: String,
     timeout: TimeInterval,
     folder: String? = nil,
-    noteId: String? = nil
+    noteId: String? = nil,
+    folderMissing: () -> Bool = { false },
+    noteMissing: () -> Bool = { false }
 ) throws -> String {
     do { return try ScriptRunner.run(script, timeout: timeout) }
     catch ScriptError.timeout(let seconds, _) {
         throw ScriptError.timeout(seconds, "note may contain large attachments")
     }
-    catch ScriptError.scriptFailed(let msg) where folder != nil && appleScriptNotFoundNames(msg, folder!) {
+    catch ScriptError.scriptFailed(let msg)
+        where folder != nil && appleScriptNotFoundNames(msg, folder!) && folderMissing()
+    {
         throw CLIError.notFound(
             "Folder not found. List valid folders via listNoteFolders and use their name field as folder_id."
         )
     }
-    catch ScriptError.scriptFailed(let msg) where noteId != nil && appleScriptNotFoundNames(msg, noteId!) {
+    catch ScriptError.scriptFailed(let msg)
+        where noteId != nil && appleScriptNotFoundNames(msg, noteId!) && noteMissing()
+    {
         throw CLIError.notFound(
             "Note not found. List notes via listNotes/searchNotes and use its id."
         )

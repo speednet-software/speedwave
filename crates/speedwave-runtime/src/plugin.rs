@@ -2092,6 +2092,23 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
 fn read_changelog_for_ui(plugin_dir: &Path) -> Option<String> {
     use std::io::Read;
     let path = plugin_dir.join(consts::PLUGIN_CHANGELOG_FILE);
+    // Stat before open: a FIFO (or other special file) blocks indefinitely in
+    // `File::open` itself, before any post-open check could run.
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => {
+            log::warn!(
+                "plugin changelog {} is not a regular file — withholding from UI",
+                path.display()
+            );
+            return None;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            log::warn!("cannot stat plugin changelog {}: {e}", path.display());
+            return None;
+        }
+    }
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -4307,6 +4324,30 @@ mod tests {
             [0xff, 0xfe, 0x00, 0x9f],
         )
         .unwrap();
+        assert_eq!(read_changelog_for_ui(dir.path()), None);
+    }
+
+    #[test]
+    fn read_changelog_for_ui_rejects_non_regular_file() {
+        // A directory at the changelog path is a non-regular file on every
+        // platform — must be withheld, never opened as if it were the changelog.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(consts::PLUGIN_CHANGELOG_FILE)).unwrap();
+        assert_eq!(read_changelog_for_ui(dir.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_changelog_for_ui_skips_fifo_without_blocking() {
+        // A FIFO with no writer blocks File::open indefinitely if opened
+        // unconditionally; the file-type stat must reject it first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(consts::PLUGIN_CHANGELOG_FILE);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo must succeed in this test");
         assert_eq!(read_changelog_for_ui(dir.path()), None);
     }
 

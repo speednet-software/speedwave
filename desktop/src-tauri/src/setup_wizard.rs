@@ -301,7 +301,8 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?;
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {

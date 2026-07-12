@@ -244,6 +244,41 @@ describe('pipeline-tools', () => {
       expect(durationProp.description).toContain('running');
     });
 
+    it('documents the jobs-list truncation cap in both the description and output schema', () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'getPipelineFull')?.tool;
+
+      expect(tool?.description).toContain('truncated');
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      expect(outputProps).toHaveProperty('truncated');
+    });
+
+    it('surfaces truncated: true from the client when the jobs page was capped', async () => {
+      mockClient.showPipeline.mockResolvedValue({
+        pipeline: { id: 123, status: 'success' },
+        jobs: [],
+        truncated: true,
+      });
+
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getPipelineFull')?.handler;
+
+      const result = await handler!({ project_id: 'test-project', pipeline_id: 123 });
+
+      expect(result).toEqual({
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              { pipeline: { id: 123, status: 'success' }, jobs: [], truncated: true },
+              null,
+              2
+            ),
+          },
+        ],
+      });
+    });
+
     it('handles non-existent pipeline', async () => {
       mockClient.showPipeline.mockRejectedValue(new Error('404 Pipeline not found'));
 
@@ -386,6 +421,14 @@ describe('pipeline-tools', () => {
         content: [{ type: 'text', text: 'Error: Log file not available' }],
         isError: true,
       });
+    });
+
+    it('declares a non-negative minimum for tail_lines in the input schema', () => {
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'getJobLog')?.tool;
+
+      const inputProps = tool?.inputSchema?.properties as Record<string, { minimum?: number }>;
+      expect(inputProps.tail_lines.minimum).toBe(0);
     });
   });
 

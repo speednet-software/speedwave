@@ -15,6 +15,7 @@ use super::{container_user, resolve_tokens_dir_in};
 pub struct SecurityExpectedPaths {
     project_engine_path: String,
     tokens_engine_dir: String,
+    telemetry_locked: bool,
 }
 
 impl SecurityExpectedPaths {
@@ -34,6 +35,7 @@ impl SecurityExpectedPaths {
         Ok(Self {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
             tokens_engine_dir: to_engine_path(&tokens_dir)?,
+            telemetry_locked: false,
         })
     }
 
@@ -42,7 +44,15 @@ impl SecurityExpectedPaths {
         Self {
             project_engine_path: project_engine_path.to_string(),
             tokens_engine_dir: tokens_engine_dir.to_string(),
+            telemetry_locked: false,
         }
+    }
+
+    /// Marks that the resolved telemetry policy locks a field — `SecurityCheck::run`
+    /// then REQUIRES the managed-settings.json mount, not merely validates it if present.
+    pub fn with_telemetry_locked(mut self, locked: bool) -> Self {
+        self.telemetry_locked = locked;
+        self
     }
 }
 
@@ -448,7 +458,12 @@ impl SecurityCheck {
             // proxy mount profile (ADR-073)
             Self::check_proxy_volumes(&doc, expected_paths),
             // MDM telemetry managed-settings mount profile
-            Self::check_claude_managed_settings(&doc, data_dir, project),
+            Self::check_claude_managed_settings(
+                &doc,
+                data_dir,
+                project,
+                expected_paths.telemetry_locked,
+            ),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -1069,11 +1084,13 @@ impl SecurityCheck {
     }
 
     /// When present, the managed-settings mount must be `:ro` at the exact target
-    /// and sourced from `<data_dir>/claude-managed/<project>/` (ADR-076).
+    /// and sourced from `<data_dir>/claude-managed/<project>/` (ADR-076). When
+    /// `telemetry_locked` is true the mount is REQUIRED, not merely validated if present.
     fn check_claude_managed_settings(
         doc: &serde_yaml_ng::Value,
         data_dir: &std::path::Path,
         project: &str,
+        telemetry_locked: bool,
     ) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let Some(services) = get_services(doc) else {
@@ -1082,19 +1099,34 @@ impl SecurityCheck {
         let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
             return violations;
         };
-        let Some(vols) = claude.get("volumes").and_then(|v| v.as_sequence()) else {
-            return violations;
-        };
+        let vols = claude
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
         let target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
+        // A path-resolution failure must fail closed: never let an unverifiable
+        // mount source pass through as if the mount were merely absent.
         let expected_source = match to_engine_path(&crate::claude_managed::managed_settings_path(
             data_dir, project,
         )) {
             Ok(p) => p,
-            Err(_) => return violations,
+            Err(e) => {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ManagedSettingsMount,
+                    message: format!("cannot resolve expected managed-settings source: {e}"),
+                    remediation:
+                        "Ensure the data directory path is resolvable by the container engine.",
+                });
+                return violations;
+            }
         };
-        for vol in vols {
+        let mut found = false;
+        for vol in &vols {
             let Some(s) = vol.as_str() else { continue };
             if let Some((host, mode)) = extract_volume_for_target(s, &target) {
+                found = true;
                 if mode.as_deref() != Some("ro") {
                     violations.push(SecurityViolation {
                         container: "claude".into(),
@@ -1115,6 +1147,16 @@ impl SecurityCheck {
                     });
                 }
             }
+        }
+        if !found && telemetry_locked {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ManagedSettingsMount,
+                message:
+                    "MDM policy locks telemetry but the managed-settings.json mount is missing"
+                        .into(),
+                remediation: "Re-render compose so the managed-settings.json mount is applied.",
+            });
         }
         violations
     }
@@ -1703,7 +1745,7 @@ mod tests {
             managed_source(data_dir, "p")
         );
         let doc = claude_doc_with_volume(&mount);
-        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
         assert!(v.is_empty(), "correct mount must pass, got: {v:?}");
     }
 
@@ -1715,7 +1757,7 @@ mod tests {
             managed_source(data_dir, "p")
         );
         let doc = claude_doc_with_volume(&mount);
-        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
         assert!(
             v.iter()
                 .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
@@ -1736,7 +1778,7 @@ mod tests {
         .unwrap();
         let mount = format!("{bad}:/etc/claude-code/managed-settings.json:ro");
         let doc = claude_doc_with_volume(&mount);
-        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
         assert!(
             v.iter()
                 .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
@@ -1745,10 +1787,96 @@ mod tests {
     }
 
     #[test]
-    fn managed_settings_absent_is_ok() {
+    fn managed_settings_absent_is_ok_when_not_locked() {
         let data_dir = std::path::Path::new("/data");
         let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
-        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p");
-        assert!(v.is_empty(), "no managed-settings mount = no violation");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(
+            v.is_empty(),
+            "no managed-settings mount = no violation when policy doesn't lock"
+        );
+    }
+
+    #[test]
+    fn managed_settings_absent_fails_when_locked() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "MDM-locked telemetry with no mount must fail"
+        );
+    }
+
+    #[test]
+    fn managed_settings_no_volumes_key_fails_when_locked() {
+        // The claude service has no `volumes:` block at all, not merely an unrelated mount.
+        let data_dir = std::path::Path::new("/data");
+        let doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "MDM-locked telemetry with no volumes key at all must fail, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn managed_settings_present_and_locked_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!(
+            "{}:/etc/claude-code/managed-settings.json:ro",
+            managed_source(data_dir, "p")
+        );
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(
+            v.is_empty(),
+            "correct mount under lock must pass, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn run_requires_managed_settings_mount_when_expected_paths_lock_telemetry() {
+        let doc = "services:\n  claude:\n    volumes: []\n";
+        let data_dir = std::path::Path::new("/data");
+        let expected = SecurityExpectedPaths::from_raw("/p", "/t").with_telemetry_locked(true);
+        let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, data_dir);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "SecurityCheck::run must require the mount when SecurityExpectedPaths locks telemetry, \
+             got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn run_does_not_require_managed_settings_mount_by_default() {
+        let doc = "services:\n  claude:\n    volumes: []\n";
+        let data_dir = std::path::Path::new("/data");
+        let expected = SecurityExpectedPaths::from_raw("/p", "/t");
+        let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, data_dir);
+        assert!(
+            !v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "an unlocked policy must not require the mount, got: {v:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn managed_settings_unresolvable_source_fails_closed() {
+        // A network UNC data_dir makes `to_engine_path` return `Err` on Windows —
+        // must fail closed (an empty violation list would fail-open).
+        let data_dir = std::path::Path::new(r"\\fileserver\share");
+        let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "an unresolvable expected source must fail closed, got: {v:?}"
+        );
     }
 }

@@ -1273,6 +1273,60 @@ describe('executor', () => {
       expect(result.error?.message).toContain('[file]');
       expect(result.error?.message).not.toContain('/etc/secrets/token');
     });
+
+    it('redacts a path preceded by a colon', async () => {
+      const code = `throw new Error('path:/home/user/.speedwave/tokens/proj/slack/token not found');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/home/user/.speedwave/tokens');
+    });
+
+    it('redacts a path preceded by an equals sign', async () => {
+      const code = `throw new Error('failed value=/etc/secrets/some/path here');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/etc/secrets/some/path');
+    });
+
+    it('redacts a path preceded by a semicolon', async () => {
+      const code = `throw new Error('failed;/home/user/.speedwave/tokens/proj/slack/token not found');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/home/user/.speedwave/tokens');
+    });
+
+    it('redacts a single-segment sensitive path like /tokens', async () => {
+      const code = `throw new Error('mount /tokens missing');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/tokens missing');
+    });
+
+    it('redacts a Windows drive-letter path', async () => {
+      const code = String.raw`throw new Error('boom at C:\\Users\\bob\\.speedwave\\tokens\\proj\\slack\\token in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('C:\\Users\\bob');
+    });
+
+    it('redacts a Windows UNC path', async () => {
+      const code = String.raw`throw new Error('boom at \\\\host\\share\\file.txt in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('\\\\host\\share');
+    });
   });
 
   describe('smart error — underscore match when service not in sandbox', () => {

@@ -1434,13 +1434,37 @@ describe('GitLabClient', () => {
       expect(mockGitlabInstance.Pipelines.show).toHaveBeenCalledWith(1, 1);
       expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, {
         pipelineId: 1,
-        perPage: 100,
+        perPage: 101,
         maxPages: 1,
       });
       expect(result).toEqual({
         pipeline: mockPipeline,
         jobs: mockJobs,
+        truncated: false,
       });
+    });
+
+    it('exactly the cap of jobs is not flagged truncated', async () => {
+      const mockJobs = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, name: `job-${i}` }));
+
+      mockGitlabInstance.Pipelines.show.mockResolvedValue({ id: 1 });
+      mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+
+      const result = await client.showPipeline(1, 1);
+
+      expect((result as { truncated: boolean }).truncated).toBe(false);
+    });
+
+    it('flags truncated and caps jobs when the sentinel row is present', async () => {
+      const mockJobs = Array.from({ length: 101 }, (_, i) => ({ id: i + 1, name: `job-${i}` }));
+
+      mockGitlabInstance.Pipelines.show.mockResolvedValue({ id: 1 });
+      mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+
+      const result = (await client.showPipeline(1, 1)) as { jobs: unknown[]; truncated: boolean };
+
+      expect(result.truncated).toBe(true);
+      expect(result.jobs).toHaveLength(100);
     });
   });
 
@@ -1480,6 +1504,19 @@ describe('GitLabClient', () => {
       const result = await client.getJobLog(1, 1, 100);
 
       expect(result).toBe(mockLog);
+    });
+
+    it('falls back to the default tail when tailLines is negative', async () => {
+      const mockLog = Array.from({ length: 200 }, (_, i) => `Line ${i + 1}`).join('\n');
+
+      mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
+
+      const result = await client.getJobLog(1, 1, -5);
+
+      const lines = result.split('\n');
+      expect(lines).toHaveLength(100);
+      expect(lines[0]).toBe('Line 101');
+      expect(lines[99]).toBe('Line 200');
     });
   });
 
@@ -2426,11 +2463,12 @@ describe('GitLabClient', () => {
 
       expect(mockGitlabInstance.Jobs.all).toHaveBeenCalledWith(1, {
         pipelineId: 100,
-        perPage: 100,
+        perPage: 101,
         maxPages: 1,
       });
-      expect(result).toHaveLength(2);
-      expect(result[0]).toEqual({
+      expect(result.truncated).toBe(false);
+      expect(result.artifacts).toHaveLength(2);
+      expect(result.artifacts[0]).toEqual({
         job_id: 1,
         job_name: 'build',
         artifacts: [{ filename: 'artifact.zip' }],
@@ -2447,7 +2485,21 @@ describe('GitLabClient', () => {
 
       const result = await client.listArtifacts(1, 100);
 
-      expect(result).toHaveLength(0);
+      expect(result.artifacts).toHaveLength(0);
+    });
+
+    it('flags truncated only past the cap, never at exactly the cap', async () => {
+      const mockJobs = Array.from({ length: 101 }, (_, i) => ({
+        id: i + 1,
+        name: `job-${i}`,
+        artifacts: [],
+      }));
+
+      mockGitlabInstance.Jobs.all.mockResolvedValue(mockJobs);
+
+      const result = await client.listArtifacts(1, 100);
+
+      expect(result.truncated).toBe(true);
     });
   });
 
@@ -2496,6 +2548,17 @@ describe('GitLabClient', () => {
       mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
 
       const result = await client.downloadArtifact(1, 123);
+
+      expect(result.content).toBe(lines.slice(-500).join('\n'));
+    });
+
+    it('falls back to the default tail when tailLines is negative', async () => {
+      const lines = Array.from({ length: 600 }, (_, i) => `line ${i}`);
+      const mockLog = lines.join('\n');
+
+      mockGitlabInstance.Jobs.showLog.mockResolvedValue(mockLog);
+
+      const result = await client.downloadArtifact(1, 123, -5);
 
       expect(result.content).toBe(lines.slice(-500).join('\n'));
     });

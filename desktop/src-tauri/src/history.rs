@@ -380,7 +380,7 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     let model = message["model"].as_str().map(String::from);
     // JSONL field names differ from TurnUsage; chat SSOT remaps on parse. Sidechain (subagent)
     // calls have their own context — never attach their usage or resume seed reads a foreign size.
-    let usage = if parsed["isSidechain"].as_bool() == Some(true) {
+    let usage = if crate::chat::is_sidechain_event(parsed) {
         None
     } else {
         message
@@ -813,7 +813,7 @@ fn compute_resume_snapshot_impl(
             "assistant" => {
                 // Last main-chain call's usage = context occupancy; sidechain
                 // (subagent) lines have their own context and are skipped.
-                if parsed["isSidechain"].as_bool() != Some(true) {
+                if !crate::chat::is_sidechain_event(&parsed) {
                     if let Some(u) = crate::chat::turn_usage_from_jsonl(&parsed["message"]["usage"])
                     {
                         if u != crate::chat::TurnUsage::default() {
@@ -1172,6 +1172,16 @@ mod tests {
         assert!(msg.usage.is_none());
         // Non-usage metadata is unaffected.
         assert_eq!(msg.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn parse_assistant_message_parent_tool_use_id_line_also_drops_usage() {
+        // The on-disk transcript path shares `is_sidechain_event` with the live
+        // stream-json path — `parent_tool_use_id` alone (no `isSidechain`) must
+        // also drop usage, not just the transcript-native `isSidechain` marker.
+        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.usage.is_none());
     }
 
     #[test]
@@ -2179,6 +2189,29 @@ mod tests {
         assert_eq!(cu.output_tokens, 1660);
         assert_eq!(cu.cache_read_tokens, 66844);
         assert_eq!(cu.cache_write_tokens, 4920);
+    }
+
+    #[test]
+    fn compute_resume_snapshot_skips_sidechain_marked_via_parent_tool_use_id_only() {
+        // Same exclusion as `isSidechain`, but via the live-stream marker with
+        // no `isSidechain` field at all — proves the shared `is_sidechain_event`
+        // helper (not a transcript-local `isSidechain` check) drives this path.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":2,"output_tokens":1660,"cache_read_input_tokens":66844,"cache_creation_input_tokens":4920}}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        let cu = snap.context_usage.expect("context_usage must be present");
+        assert_eq!(cu.cache_read_tokens, 66844);
     }
 
     #[test]

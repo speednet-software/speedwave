@@ -202,8 +202,8 @@ export class AtlassianClient {
   }
 
   /**
-   * Upload a Jira issue attachment (multipart, hand-built body, `X-Atlassian-Token: no-check`). Not retried.
-   * `contentType` rejected unless a well-formed `type/subtype` so it cannot break out of the header line.
+   * Upload a Jira issue attachment (multipart, fully buffered in memory, `X-Atlassian-Token: no-check`). Not retried.
+   * `contentType` rejected unless a well-formed `type/subtype`; callers must bound `data`'s size themselves.
    * @param issueIdOrKey - Target issue key or numeric ID.
    * @param filename - Attachment file name (CR/LF/quote/backslash are stripped).
    * @param data - Raw file bytes.

@@ -8,6 +8,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   META_KEYS,
+  type ResultValidationOptions,
 } from '@speedwave/mcp-shared';
 import { withValidation, withClients, missingParamResult, ToolResult } from './validation.js';
 import { SlackClients, listDms, openDm, formatSlackError } from '../client.js';
@@ -163,6 +164,14 @@ export async function handleOpenDirectMessage(
 }
 
 /**
+ * Required-param options for {@link withValidation}, driven by the tool's own declared `inputSchema.required` so the guard can never drift from the schema.
+ * @param tool - The tool whose schema drives the required-param set.
+ */
+function requiredOf(tool: Tool): ResultValidationOptions {
+  return { required: tool.inputSchema.required ?? [], toolName: tool.name };
+}
+
+/**
  * Tool factory (shared NOT_CONFIGURED gating).
  * @param clients - The Slack client container.
  */
@@ -176,7 +185,10 @@ export function createDmTools(clients: SlackClients): ToolDefinition[] {
     },
     {
       tool: openDirectMessageTool,
-      handler: withValidation<OpenDirectMessageParams>(gate(handleOpenDirectMessage)),
+      handler: withValidation<OpenDirectMessageParams>(
+        gate(handleOpenDirectMessage),
+        requiredOf(openDirectMessageTool)
+      ),
     },
   ];
 }

@@ -4,7 +4,12 @@ import { provideRouter } from '@angular/router';
 import { signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
-import type { CaptureWarning, TranscriptSession } from '../models/transcript';
+import type {
+  AudioSource,
+  CaptureWarning,
+  Language,
+  TranscriptSession,
+} from '../models/transcript';
 
 describe('MeetingTranscriptionComponent', () => {
   let component: MeetingTranscriptionComponent;
@@ -24,10 +29,14 @@ describe('MeetingTranscriptionComponent', () => {
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     captureWarning: typeof captureWarningSig;
     recordingSessionId: typeof recordingSessionIdSig;
+    recordingSource: typeof recordingSourceSig;
+    recordingLanguage: typeof recordingLanguageSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
   const captureWarningSig = signal<CaptureWarning | null>(null);
   const recordingSessionIdSig = signal<string | null>(null);
+  const recordingSourceSig = signal<AudioSource | null>(null);
+  const recordingLanguageSig = signal<Language | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -46,6 +55,8 @@ describe('MeetingTranscriptionComponent', () => {
     activeSig.set(null);
     captureWarningSig.set(null);
     recordingSessionIdSig.set(null);
+    recordingSourceSig.set(null);
+    recordingLanguageSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
@@ -68,6 +79,8 @@ describe('MeetingTranscriptionComponent', () => {
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       captureWarning: captureWarningSig,
       recordingSessionId: recordingSessionIdSig,
+      recordingSource: recordingSourceSig,
+      recordingLanguage: recordingLanguageSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
@@ -132,6 +145,16 @@ describe('MeetingTranscriptionComponent', () => {
     fixture.detectChanges();
     expect(component.modelReady()).toBe(true);
     expect(fixture.nativeElement.querySelector('[data-testid="model-required-gate"]')).toBeNull();
+  });
+
+  it('registers the focus/visibility listeners even if resumeActiveRecording rejects', async () => {
+    svc.resumeActiveRecording.mockRejectedValueOnce(new Error('subscribe_transcript failed'));
+    await component.ngOnInit();
+    // A rejection above must not have prevented the listeners from being wired up.
+    svc.listModels.mockClear();
+    window.dispatchEvent(new Event('focus'));
+    await Promise.resolve();
+    expect(svc.listModels).toHaveBeenCalled();
   });
 
   it('removes the focus/visibility listeners on destroy', async () => {

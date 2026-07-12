@@ -4,8 +4,10 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
 import type {
+  AudioSource,
   AudioSourceInfo,
   CapabilitiesAck,
+  Language,
   MicPermission,
   StartAck,
 } from '../../models/transcript';
@@ -51,6 +53,8 @@ describe('RecordingControlsComponent', () => {
   let component: RecordingControlsComponent;
   let fixture: ComponentFixture<RecordingControlsComponent>;
   let recordingSessionId: ReturnType<typeof signal<string | null>>;
+  let recordingSource: ReturnType<typeof signal<AudioSource | null>>;
+  let recordingLanguage: ReturnType<typeof signal<Language | null>>;
   let svc: {
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
@@ -60,6 +64,8 @@ describe('RecordingControlsComponent', () => {
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     recordingSessionId: typeof recordingSessionId;
+    recordingSource: typeof recordingSource;
+    recordingLanguage: typeof recordingLanguage;
   };
 
   const caps: CapabilitiesAck = {
@@ -83,13 +89,17 @@ describe('RecordingControlsComponent', () => {
 
   beforeEach(async () => {
     recordingSessionId = signal<string | null>(null);
+    recordingSource = signal<AudioSource | null>(null);
+    recordingLanguage = signal<Language | null>(null);
     svc = {
       getCapabilities: vi.fn(async () => caps),
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
       // Mirror the real service: start/stop drive the shared recording signal.
-      startRecording: vi.fn(async (): Promise<StartAck> => {
+      startRecording: vi.fn(async (source: AudioSource, language: Language): Promise<StartAck> => {
         recordingSessionId.set('sess-1');
+        recordingSource.set(source);
+        recordingLanguage.set(language);
         return {
           session_id: 'sess-1',
           event_name: 'transcript_event::sess-1',
@@ -97,11 +107,17 @@ describe('RecordingControlsComponent', () => {
         };
       }),
       stopRecording: vi.fn(async (id: string) => {
-        if (recordingSessionId() === id) recordingSessionId.set(null);
+        if (recordingSessionId() === id) {
+          recordingSessionId.set(null);
+          recordingSource.set(null);
+          recordingLanguage.set(null);
+        }
       }),
       requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       recordingSessionId,
+      recordingSource,
+      recordingLanguage,
     };
     await TestBed.configureTestingModule({
       imports: [RecordingControlsComponent],
@@ -266,6 +282,36 @@ describe('RecordingControlsComponent', () => {
     // And Stop targets the session the service is tracking, not a lost local id.
     await component.stop();
     expect(svc.stopRecording).toHaveBeenCalledWith('sess-live');
+  });
+
+  it('a freshly-mounted control restores source/mic/language of a recording in progress', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' });
+    recordingLanguage.set('en');
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.sources()[component.sourceIndex()].source.kind).toBe('microphone');
+    expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
+    expect(component.language()).toBe('en');
+  });
+
+  it('a freshly-mounted control restores a mixed-source recording mic', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: 'AppleUSBAudioEngine:USB MIC:1' });
+    recordingLanguage.set('pl');
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
+    expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
+  });
+
+  it('a freshly-mounted control with no recording keeps the compile-time defaults', async () => {
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    await component.ngOnInit();
+    expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
+    expect(component.language()).toBe('pl');
   });
 
   it('surfaces a start error instead of swallowing it', async () => {

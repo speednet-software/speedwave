@@ -29,6 +29,20 @@ function pick(rec: Record<string, unknown>, camel: string, snake: string): unkno
   return rec[camel] ?? rec[snake];
 }
 
+/**
+ * Normalizes a tail-lines count: 0 means "all lines" (kept as 0); a negative,
+ * non-finite, or non-numeric value falls back to `def`; other values are floored.
+ * @param value - Raw tailLines input.
+ * @param def - Default to use when `value` is invalid.
+ */
+function clampTailLines(value: number | undefined, def: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return def;
+  return Math.floor(value);
+}
+
+/** Max jobs fetched in one page for a pipeline's job list (`listArtifacts`, `showPipeline`). */
+const JOB_LIST_PAGE_CAP = 100;
+
 /** Minimal user identity shape shared by an MR's author, assignees, and reviewers. */
 export interface GitLabUserSummary {
   id: number;
@@ -1051,20 +1065,31 @@ export class GitLabClient {
   // ── Artifacts ─────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Lists all artifacts from jobs in a pipeline.
+   * Lists all artifacts from jobs in a pipeline. Only the first {@link JOB_LIST_PAGE_CAP} jobs
+   * of the pipeline are scanned; `truncated` is `true` when that cap was hit.
    * @param projectId - Project ID or path (e.g. 123 or "group/project").
    * @param pipelineId - Pipeline ID to list artifacts from.
    */
-  async listArtifacts(projectId: string | number, pipelineId: number): Promise<unknown[]> {
-    const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId, perPage: 100, maxPages: 1 });
-    // Filter jobs that have artifacts
-    return jobs
+  async listArtifacts(
+    projectId: string | number,
+    pipelineId: number
+  ): Promise<{ artifacts: unknown[]; truncated: boolean }> {
+    // One row over the cap is fetched purely as a truncation sentinel.
+    const jobs = await this.gitlab.Jobs.all(projectId, {
+      pipelineId,
+      perPage: JOB_LIST_PAGE_CAP + 1,
+      maxPages: 1,
+    });
+    const truncated = jobs.length > JOB_LIST_PAGE_CAP;
+    const artifacts = jobs
+      .slice(0, JOB_LIST_PAGE_CAP)
       .filter((j: Record<string, unknown>) => j.artifacts && (j.artifacts as unknown[]).length > 0)
       .map((j: Record<string, unknown>) => ({
         job_id: j.id,
         job_name: j.name,
         artifacts: j.artifacts,
       }));
+    return { artifacts, truncated };
   }
 
   /**
@@ -1079,11 +1104,11 @@ export class GitLabClient {
     jobId: number,
     tailLines: number = 500
   ): Promise<{ content: string; size: number; filename: string }> {
+    const tail = clampTailLines(tailLines, 500);
     const trace = await this.gitlab.Jobs.showLog(projectId, jobId);
     const full = String(trace);
     const lines = full.split('\n');
-    const content =
-      tailLines && lines.length > tailLines ? lines.slice(-tailLines).join('\n') : full;
+    const content = tail && lines.length > tail ? lines.slice(-tail).join('\n') : full;
     return {
       content,
       size: Buffer.byteLength(full, 'utf-8'),
@@ -1322,15 +1347,22 @@ export class GitLabClient {
   }
 
   /**
-   * Gets detailed pipeline information including all its jobs.
+   * Gets detailed pipeline information including its jobs. Only the first
+   * {@link JOB_LIST_PAGE_CAP} jobs are returned; `truncated` is `true` when that cap was hit.
    * @param projectId - Project ID or path (e.g. 123 or "group/project").
    * @param pipelineId - Pipeline ID to retrieve.
    */
   async showPipeline(projectId: string | number, pipelineId: number): Promise<unknown> {
     this.validateRequired({ project_id: projectId, pipeline_id: pipelineId });
     const pipeline = await this.gitlab.Pipelines.show(projectId, pipelineId);
-    const jobs = await this.gitlab.Jobs.all(projectId, { pipelineId, perPage: 100, maxPages: 1 });
-    return { pipeline, jobs };
+    // One row over the cap is fetched purely as a truncation sentinel.
+    const fetched = await this.gitlab.Jobs.all(projectId, {
+      pipelineId,
+      perPage: JOB_LIST_PAGE_CAP + 1,
+      maxPages: 1,
+    });
+    const truncated = fetched.length > JOB_LIST_PAGE_CAP;
+    return { pipeline, jobs: fetched.slice(0, JOB_LIST_PAGE_CAP), truncated };
   }
 
   /**
@@ -1345,11 +1377,12 @@ export class GitLabClient {
     tailLines: number = 100
   ): Promise<string> {
     this.validateRequired({ project_id: projectId, job_id: jobId });
+    const tail = clampTailLines(tailLines, 100);
     const log = await this.gitlab.Jobs.showLog(projectId, jobId);
     const logStr = String(log);
     const lines = logStr.split('\n');
-    if (tailLines && lines.length > tailLines) {
-      return lines.slice(-tailLines).join('\n');
+    if (tail && lines.length > tail) {
+      return lines.slice(-tail).join('\n');
     }
     return logStr;
   }

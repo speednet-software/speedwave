@@ -174,7 +174,7 @@ fn ensure_worker_auth_token(
             to_engine_path(&token_path)?,
             token_file_name
         ),
-    );
+    )?;
 
     Ok(())
 }
@@ -383,7 +383,7 @@ pub(crate) fn apply_worker_config(
             "{}:/secrets/{secret_name}:ro",
             to_engine_path(token_mount_path)?
         ),
-    );
+    )?;
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 

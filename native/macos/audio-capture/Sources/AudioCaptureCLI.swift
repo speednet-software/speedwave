@@ -733,11 +733,22 @@ func startMicEngine(session: RecordSession, selector: MicSelector, streamIndex: 
     session.micEngine = engine
 }
 
+/// A real configuration change stops the engine (AVAudioEngine contract); binding
+/// a named device posts a spurious startup notification with the engine still running.
+@available(macOS 14.4, *)
+func micRestartNeeded(_ engine: AVAudioEngine?) -> Bool {
+    !(engine?.isRunning ?? false)
+}
+
 /// Restarts the mic engine after the audio configuration changed (AVAudioEngine
 /// invalidates its graph when the default input device switches mid-session).
 @available(macOS 14.4, *)
 func restartMicEngine(session: RecordSession, selector: MicSelector, streamIndex: UInt32) {
     guard activeSession === session else { return }
+    guard micRestartNeeded(session.micEngine) else {
+        logErr("audio configuration change ignored — the microphone engine is still running")
+        return
+    }
     logErr("audio configuration changed — restarting the microphone capture")
     if let engine = session.micEngine {
         engine.inputNode.removeTap(onBus: 0)

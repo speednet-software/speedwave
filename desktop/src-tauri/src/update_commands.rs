@@ -58,7 +58,7 @@ pub(crate) async fn install_update_and_reconcile(
                     Ok(retained) => retained,
                     Err(restore_error) => {
                         log::error!("failed to restore projects after stop error: {restore_error}");
-                        Vec::new()
+                        running_projects.clone()
                     }
                 };
 
@@ -77,8 +77,9 @@ pub(crate) async fn install_update_and_reconcile(
 
     if let Err(install_error) = updater::install_update(&app, expected_version).await {
         let projects_to_restore = running_projects.clone();
+        let projects_for_task = projects_to_restore.clone();
         let restore_result = tokio::task::spawn_blocking(move || {
-            if projects_to_restore.is_empty() {
+            if projects_for_task.is_empty() {
                 return Ok::<Vec<String>, String>(Vec::new());
             }
 
@@ -90,12 +91,15 @@ pub(crate) async fn install_update_and_reconcile(
                 );
             }
 
-            reconcile::restore_projects(&projects_to_restore, &rt)
+            reconcile::restore_projects(&projects_for_task, &rt)
         })
         .await
         .map_err(|e| e.to_string())?;
 
-        let retained = restore_result.as_ref().ok().cloned().unwrap_or_default();
+        let retained = restore_result
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|_| projects_to_restore.clone());
         let clear_state_error = tokio::task::spawn_blocking(move || {
             let mut state = bundle::load_bundle_state();
             state.phase = bundle::BundleReconcilePhase::Done;
@@ -198,5 +202,36 @@ mod tests {
         assert!(msg.starts_with("install failed"));
         assert!(msg.contains("restore boom"));
         assert!(msg.contains("state boom"));
+    }
+
+    #[test]
+    fn stop_error_branch_retains_running_projects_when_restore_also_fails() {
+        let source = include_str!("update_commands.rs");
+        let anchor = source
+            .find("if let Err(stop_error) = reconcile::stop_projects(")
+            .expect("stop_projects call must exist");
+        let restore_arm = source[anchor..]
+            .find("Err(restore_error) => {")
+            .expect("restore-error arm must exist");
+        let window = &source[anchor + restore_arm..anchor + restore_arm + 200];
+        assert!(
+            window.contains("running_projects.clone()"),
+            "a failed restore after a failed stop must retain running_projects, \
+             never drop them to Vec::new()"
+        );
+    }
+
+    #[test]
+    fn install_error_branch_retains_projects_to_restore_when_restore_also_fails() {
+        let source = include_str!("update_commands.rs");
+        let anchor = source
+            .find("let retained = restore_result")
+            .expect("post-install retained binding must exist");
+        let window = &source[anchor..anchor + 300];
+        assert!(
+            window.contains("unwrap_or_else(|_| projects_to_restore.clone())"),
+            "a failed restore after a failed install must retain projects_to_restore, \
+             never fall back to an empty Vec via unwrap_or_default"
+        );
     }
 }

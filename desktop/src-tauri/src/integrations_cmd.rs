@@ -670,10 +670,19 @@ fn check_os_permission_with_timeout_in(
     // stdout/stderr draining in one call.
     let output =
         speedwave_runtime::binary::run_with_timeout_capture(&mut cmd, timeout).map_err(|e| {
-            log::warn!(
-                "{service}-cli run failed: {e} (binary={})",
-                binary_path.display()
-            );
+            // Timeout is an expected degraded case (slow TCC prompt); spawn/pipe/wait
+            // failures are hard errors that abort the enable flow.
+            if e.to_string().contains("timed out after") {
+                log::warn!(
+                    "{service}-cli run failed: {e} (binary={})",
+                    binary_path.display()
+                );
+            } else {
+                log::error!(
+                    "{service}-cli run failed: {e} (binary={})",
+                    binary_path.display()
+                );
+            }
             format!(
                 "Failed to run permission check for {service}: {e}. Binary: {}",
                 binary_path.display()
@@ -2780,6 +2789,29 @@ mod tests {
         assert!(
             result.unwrap_err().contains("timed out"),
             "should report timeout"
+        );
+    }
+
+    // Drift guard: a hard run_with_timeout_capture failure (spawn/pipe/wait) must log
+    // at error! since it aborts the enable flow; only the timeout case may log warn!.
+    #[test]
+    fn check_os_permission_run_failure_logs_error_not_just_warn() {
+        let source = include_str!("integrations_cmd.rs");
+        let fn_start = source
+            .find("fn check_os_permission_with_timeout_in(")
+            .expect("check_os_permission_with_timeout_in must exist");
+        let fn_end = source[fn_start..]
+            .find("#[tauri::command]")
+            .map(|i| fn_start + i)
+            .unwrap_or(source.len());
+        let fn_body = &source[fn_start..fn_end];
+        assert!(
+            fn_body.contains("log::error!"),
+            "check_os_permission_with_timeout_in must log::error! on a hard run failure"
+        );
+        assert!(
+            fn_body.contains("contains(\"timed out after\")"),
+            "check_os_permission_with_timeout_in must distinguish timeout from other run failures"
         );
     }
 

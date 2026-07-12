@@ -539,10 +539,13 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     console.error(`${ts()} ❌ Execution error: ${message}`);
     console.error(`${ts()}    Code: ${code.substring(0, 200)}${code.length > 200 ? '...' : ''}`);
 
-    // Redact every absolute host path (any or no extension); keep user-code
-    // positions like "<anonymous>:3:7" — they teach where the snippet broke.
+    // Redact every absolute POSIX/Windows host path regardless of preceding punctuation;
+    // keep user-code positions like "<anonymous>:3:7", they teach where the snippet broke.
     let sanitizedMessage = message
-      .replace(/(^|[\s'"`([])(?:\/[a-zA-Z0-9_\-.]+){2,}/g, '$1[file]')
+      .replace(
+        /(?<![A-Za-z0-9_\-.\\])(?:(?:\/[a-zA-Z0-9_\-.]+)+|(?:[A-Za-z]:\\|\\\\)(?:[a-zA-Z0-9_\-.]+\\)*[a-zA-Z0-9_\-.]+)/g,
+        '[file]'
+      )
       .replace(/\[file\]:\d+:\d+/g, '[file]')
       .replace(/(\/[^\s:'"]+):\d+:\d+/g, '$1')
       .substring(0, 500);

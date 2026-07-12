@@ -374,6 +374,30 @@ FULL_RATE_LIMITED_JSON='{"model":{"display_name":"Opus 4.6 (1M context)","name":
     [[ "$output" =~ CTX.*38% ]]
 }
 
+@test "rate_limits before context_window AND used_percentage absent shows CTX 0%, never a trailing key" {
+    # Reversed key order (rate_limits first) combined with a missing used_percentage in
+    # context_window: a substring-scoped scan with no jq falls through to unrelated trailing JSON.
+    local input='{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1775580120}},"context_window":{"context_window_size":1000000},"trailing":{"used_percentage":77}}'
+    run bash -c "echo '$input' | bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ CTX.*0%.*5h.*12% ]]
+    [[ "$output" != *"77%"* ]]
+}
+
+@test "context extraction falls back to regex scan when jq is unavailable" {
+    local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":38,"context_window_size":1000000}}'
+    local fake_bin="$BATS_TEST_TMPDIR/nojq-bin"
+    mkdir -p "$fake_bin"
+    for tool in bash cat tr date git awk grep sed mkdir rm mktemp printf; do
+        [ -x "/usr/bin/$tool" ] && ln -sf "/usr/bin/$tool" "$fake_bin/$tool" 2>/dev/null
+        [ -x "/bin/$tool" ] && ln -sf "/bin/$tool" "$fake_bin/$tool" 2>/dev/null
+    done
+    run bash -c "echo '$input' | PATH='$fake_bin' bash $STATUSLINE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CTX"* ]]
+    [[ "$output" == *"38%"* ]]
+}
+
 @test "cost with decimal places passed through" {
     local input='{"model":{"display_name":"Test"},"context_window":{"used_percentage":10,"context_window_size":1000000},"cost":{"total_cost_usd":12.345}}'
     run bash -c "echo '$input' | bash $STATUSLINE"
@@ -567,6 +591,7 @@ JSON
     ! grep -q 'settings.json' "$STATUSLINE"
 }
 
-@test "script does not use jq" {
-    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE '\bjq\b'
+@test "script uses jq only for local JSON parsing, never as a network/exec sink" {
+    grep -qE '\bjq\b' "$STATUSLINE"
+    ! grep -v '^\s*#' "$STATUSLINE" | grep -qE 'jq[^|]*(-r?[a-zA-Z]*\s+)?["\x27]\s*\$\('
 }

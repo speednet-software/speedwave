@@ -431,6 +431,17 @@ describe('list-tools handlers — error paths', () => {
     expect(parsed.message).not.toContain('single-quoted string literals');
   });
 
+  it('listItems does not append the misleading quote hint when a double quote is nested inside an already-correct single-quoted literal', async () => {
+    const graph = vi.fn().mockRejectedValueOnce(new GraphApiError('400 Bad Request', 400));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: `fields/Title eq 'Say "Hi"'` });
+    const parsed = parseContent(result) as { message: string };
+    expect(parsed.message).not.toContain('single-quoted string literals');
+  });
+
   // A double-quoted filter that fails with 401/403/429 (not 400) is not a syntax error.
   it.each([401, 403, 429] as const)(
     'listItems does not append the quote hint on a %s error even with a double-quoted filter',

@@ -4,6 +4,8 @@
 
 **Date:** 2026-07-06
 
+> **Amendment 1:** Pure structural (key-order-insensitive) matching let a user-authored hook that happened to be byte-identical to a managed one be removed on the managing source's toggle-off, or be silently treated as already-registered instead of getting its own tracked copy. Each managed group now carries a `_speedwaveHookId` field (`<source-dir>#<event>#<index>`, deterministic per source/event/position) set by the entrypoint; removal and registration-dedupe match on this id instead of full structural equality. This supersedes the "No sentinel is added inside hook objects" statement below: the field is a harmless pass-through key on the group wrapper, not on the `{type, command}` hook object itself, and Claude Code already tolerates unrecognized fields on that wrapper (`matcher`, `timeout`).
+
 ## Context
 
 Claude Code auto-discovers `skills/`, `commands/`, and `agents/` from `~/.claude/`, but hooks work differently: a hook runs only when it is registered under the `hooks` key of a settings file (user, project, local, or managed scope) or shipped by a native Claude Code plugin as `hooks/hooks.json` next to a `.claude-plugin/plugin.json` manifest.[^1][^2] There is no auto-discovery of a `~/.claude/hooks/` directory.

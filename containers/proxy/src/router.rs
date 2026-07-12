@@ -249,6 +249,28 @@ mod tests {
     }
 
     #[test]
+    fn build_forward_client_succeeds_on_primary_path() {
+        // Reaching a Client proves the primary build() attempt succeeded.
+        let _client = build_forward_client();
+    }
+
+    #[test]
+    fn build_forward_client_no_proxy_fallback_chain_builds() {
+        // Same builder chain as the retry branch's no_proxy() fallback.
+        let build = || {
+            reqwest::Client::builder()
+                .use_rustls_tls()
+                .redirect(reqwest::redirect::Policy::none())
+        };
+        let result = build().no_proxy().build();
+        assert!(
+            result.is_ok(),
+            "no_proxy() fallback chain must build a client: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
     fn config_deserializes_from_proxy_json_format() {
         let json = r#"{
             "routes": [

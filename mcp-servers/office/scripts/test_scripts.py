@@ -132,6 +132,39 @@ def _make_broken_widget_form_pdf(path: Path, field_name: str) -> None:
         writer.write(fh)
 
 
+def _make_nested_form_pdf(path: Path, parent_name: str, child_name: str, *, broken: bool = False) -> None:
+    """Write a one-page PDF with a hierarchical AcroForm field: a parent `/T` node with a single
+    child text-widget kid. `get_fields()` keys this by the dotted qualified name
+    (`f"{parent_name}.{child_name}"`); the widget's own bare `/T` is `child_name`. When `broken` is
+    True the widget is missing `/Rect`, so writing to it raises `KeyError: '/Rect'`."""
+    from pypdf import PdfWriter
+    from pypdf.generic import ArrayObject, BooleanObject, DictionaryObject, NameObject, NumberObject, TextStringObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    parent_field = DictionaryObject({NameObject("/T"): TextStringObject(parent_name), NameObject("/Kids"): ArrayObject()})
+    parent_ref = writer._add_object(parent_field)
+    child: dict = {
+        NameObject("/FT"): NameObject("/Tx"),
+        NameObject("/T"): TextStringObject(child_name),
+        NameObject("/Subtype"): NameObject("/Widget"),
+        NameObject("/Parent"): parent_ref,
+    }
+    if not broken:
+        child[NameObject("/Rect")] = ArrayObject([NumberObject(10), NumberObject(10), NumberObject(100), NumberObject(30)])
+    child_ref = writer._add_object(DictionaryObject(child))
+    parent_field[NameObject("/Kids")] = ArrayObject([child_ref])
+    page[NameObject("/Annots")] = ArrayObject([child_ref])
+    writer._root_object[NameObject("/AcroForm")] = DictionaryObject(
+        {
+            NameObject("/Fields"): ArrayObject([parent_ref]),
+            NameObject("/NeedAppearances"): BooleanObject(True),
+        }
+    )
+    with open(path, "wb") as fh:
+        writer.write(fh)
+
+
 def run_script(name: str, *args: str) -> dict:
     """Run `scripts/<name>` with the current interpreter; assert exit 0; return the parsed stdout JSON."""
     proc = subprocess.run(
@@ -260,6 +293,28 @@ def test_docx_replace_text_zero_matches_is_a_reported_failure(tmp_path: Path) ->
     assert "not-present" in result["error"]
     assert "was not found" in result["error"]
     assert not out.exists()
+
+
+def test_docx_replace_text_duplicate_op_in_same_batch_is_idempotent(tmp_path: Path) -> None:
+    """A second replace_text op with a `find` already consumed by an earlier op in the same batch
+    is a no-op success (the text is already gone), not a batch-aborting zero-match failure."""
+    src = tmp_path / "src.docx"
+    run_script(
+        "docx_build.py",
+        "create",
+        str(src),
+        json.dumps({"elements": [{"type": "paragraph", "text": "{{name}}"}]}),
+    )
+    out = tmp_path / "edited.docx"
+    ops = [
+        {"op": "replace_text", "find": "{{name}}", "replace": "Acme"},
+        {"op": "replace_text", "find": "{{name}}", "replace": "Beta"},
+    ]
+    run_script("docx_build.py", "edit", str(src), str(out), json.dumps(ops))
+    from docx import Document
+
+    texts = [p.text for p in Document(str(out)).paragraphs]
+    assert texts == ["Acme"]
 
 
 def test_docx_replace_text_zero_matches_when_present_only_in_a_table_cell_is_a_reported_failure(tmp_path: Path) -> None:
@@ -545,6 +600,42 @@ def test_pdf_fillform_genuine_write_failure_on_a_matching_page_is_not_silently_a
     assert "applicant_name" in result["error"]
     assert "KeyError" in result["error"]
     # Must not be misreported as the unrelated "no fields on this page" case.
+    assert "no AcroForm fields found" not in result["error"]
+    assert not out.exists()
+
+
+def test_pdf_fillform_hierarchical_field_bare_name_is_not_reported_unknown(tmp_path: Path) -> None:
+    """A caller-supplied bare name for a nested (/Parent-chained) field is written correctly by
+    pypdf even though get_fields() only exposes the dotted qualified name; it must not be warned
+    about as unknown."""
+    form = tmp_path / "nested-form.pdf"
+    _make_nested_form_pdf(form, "section", "applicant_name")
+    out = tmp_path / "filled.pdf"
+    res = run_script(
+        "pdf_ops.py", "fillform", str(form), str(out), "0", json.dumps({"applicant_name": "Ada"})
+    )
+    assert is_pdf(out)
+    assert res["fill_warnings"] is None
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(out))
+    fields = reader.get_fields() or {}
+    assert fields["section.applicant_name"].get("/V") == "Ada"
+
+
+def test_pdf_fillform_hierarchical_field_write_failure_is_not_silently_absorbed(tmp_path: Path) -> None:
+    """A genuine write failure on a page whose only matching field is nested (name only reachable
+    by walking the full /Parent chain) must still surface via fail(), not be swallowed as the
+    unrelated 'no fields on this page' case."""
+    form = tmp_path / "broken-nested-form.pdf"
+    _make_nested_form_pdf(form, "section", "applicant_name", broken=True)
+    out = tmp_path / "filled.pdf"
+    result = run_script_expect_fail(
+        "pdf_ops.py", "fillform", str(form), str(out), "0", json.dumps({"applicant_name": "Ada"})
+    )
+    assert "applicant_name" in result["error"]
+    assert "KeyError" in result["error"]
     assert "no AcroForm fields found" not in result["error"]
     assert not out.exists()
 

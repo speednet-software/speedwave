@@ -225,8 +225,12 @@ fn apply_wsl_utf8(command: &mut Command, program: &str) {
     }
 }
 
+/// Poll interval shared by `run_with_timeout` and `run_with_timeout_capture` — how often
+/// each loop checks `child.try_wait()` against the deadline.
+const TIMEOUT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Runs a command with a timeout, killing the process if it exceeds the deadline. Polls
-/// `child.try_wait()` every 200ms; no stdout/stderr capture. Avoid `Stdio::piped()` (deadlock).
+/// `child.try_wait()` at `TIMEOUT_POLL_INTERVAL`; no stdout/stderr capture (avoid `Stdio::piped()`).
 pub fn run_with_timeout(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
@@ -249,7 +253,7 @@ pub fn run_with_timeout(
                         timeout.as_secs()
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::thread::sleep(TIMEOUT_POLL_INTERVAL);
             }
         }
     }
@@ -314,7 +318,7 @@ pub fn run_with_timeout_capture(
                         timeout.as_secs()
                     );
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(TIMEOUT_POLL_INTERVAL);
             }
         }
     };
@@ -893,6 +897,11 @@ pub(crate) mod tests {
         )
         .expect("nonzero exit is not a spawn error");
         assert!(!out.status.success());
+    }
+
+    #[test]
+    fn timeout_poll_interval_is_shorter_than_smallest_tested_deadline() {
+        assert!(TIMEOUT_POLL_INTERVAL < std::time::Duration::from_millis(200));
     }
 
     #[test]
