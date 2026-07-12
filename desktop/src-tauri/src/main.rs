@@ -13,6 +13,8 @@ mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
+#[cfg(any(test, feature = "e2e"))]
+mod e2e_support;
 mod firewall;
 mod git_cmd;
 mod health;
@@ -766,6 +768,20 @@ fn main() {
         Arc::new(Mutex::new(None));
     let exit_cleanup_handle_window = exit_cleanup_handle.clone();
     let exit_cleanup_handle_runevent = exit_cleanup_handle.clone();
+
+    // A relaunch (factory reset, settings restart) races the dying instance for
+    // the WebDriver port; wait until it is free so the plugin's one-shot bind succeeds.
+    #[cfg(feature = "e2e")]
+    {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], e2e_support::E2E_WEBDRIVER_PORT));
+        if let Err(e) = e2e_support::wait_until_port_free(
+            addr,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(200),
+        ) {
+            log::error!("webdriver port {addr} still unavailable at startup: {e}");
+        }
+    }
 
     let builder = tauri::Builder::default();
 
