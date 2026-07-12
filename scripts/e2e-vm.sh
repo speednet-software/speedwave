@@ -216,6 +216,7 @@ $ErrorActionPreference = "Continue"
 
 # Kill processes that may hold file locks in the build/install tree
 Stop-Process -Name "speedwave-desktop" -Force -ErrorAction SilentlyContinue
+Stop-Process -Name "speedwave" -Force -ErrorAction SilentlyContinue
 Stop-Process -Name "node" -Force -ErrorAction SilentlyContinue
 Stop-Process -Name "esbuild" -Force -ErrorAction SilentlyContinue
 Stop-Process -Name "cargo" -Force -ErrorAction SilentlyContinue
