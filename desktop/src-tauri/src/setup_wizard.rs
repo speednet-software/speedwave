@@ -624,8 +624,16 @@ fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
 
 /// Best-effort: re-grants owner-only access down a failing tree so the next wipe
 /// pass can delete entries born with a broken DACL/mode. Heals itself before descending.
+/// Never follows symlinks: unlinking one never needs the target's permissions healed.
 fn heal_permissions_tree(path: &std::path::Path, depth: u32) {
-    let is_dir = path.is_dir();
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    let is_dir = metadata.is_dir();
     let _ = if is_dir {
         speedwave_runtime::fs_perms::set_owner_only_dir(path)
     } else {
@@ -1528,6 +1536,34 @@ mod tests {
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
         let missing = tmp.path().join("does-not-exist");
         heal_permissions_tree(&missing, WIPE_MAX_PROBE_DEPTH);
+    }
+
+    /// A symlink inside the tree must never be healed or followed: chmod'ing
+    /// its target would let a planted symlink widen an attacker-chosen path.
+    #[cfg(unix)]
+    #[test]
+    fn heal_permissions_tree_does_not_follow_symlink_to_outside_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let outside_tmp = tempfile::tempdir().expect("failed to create outside temp dir");
+        let target = outside_tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).expect("create outside target dir");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("set outside target perms");
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let root = tmp.path().join("broken");
+        std::fs::create_dir_all(&root).expect("create root dir");
+        std::os::unix::fs::symlink(&target, root.join("link")).expect("create symlink");
+
+        heal_permissions_tree(&root, WIPE_MAX_PROBE_DEPTH);
+
+        let target_mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            target_mode, 0o755,
+            "symlink target must be untouched, got 0o{target_mode:o}"
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleanup after test");
     }
 
     /// Unix: a dir born with 0o555 (analogous to an empty-DACL dir on Windows) now

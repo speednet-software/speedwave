@@ -446,6 +446,9 @@ jobs:
           windows_detects_build_context_marker
           options_derive_metadata_and_container_uid_from_ssot
           watched_dir_cannot_be_removed_until_watcher_drops
+          wipe_data_dir_names_deep_undeletable_path_on_final_failure
+          wipe_data_dir_names_failing_path_on_error
+          wipe_data_dir_partial_failure_still_removes_deletable_sibling
 
       # installer_hooks tests run on macOS; cargo check above already validates
       # the Windows compile of every target.
