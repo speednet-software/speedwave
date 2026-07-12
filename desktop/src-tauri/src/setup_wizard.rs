@@ -535,9 +535,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
 }
 
 /// PowerShell that force-stops every process whose image path equals `exe` —
-/// scoped by exact path so unrelated speedwave installs are untouched.
-/// `exe` is a Windows path, so split on `\` rather than `Path::file_stem`
-/// (unit-tested on all hosts, where `\` is not a path separator).
+/// exact-path scoped; stem split on `\` (`file_stem` won't, on non-Windows hosts).
 #[cfg_attr(
     not(any(windows, test)),
     expect(
@@ -554,9 +552,8 @@ fn kill_processes_by_image_script(exe: &std::path::Path) -> String {
     )
 }
 
-/// Removes the entire data directory (`~/.speedwave/`).
-/// Idempotent: succeeds silently if the directory does not exist. Best-effort:
-/// every deletable entry is removed even if some fail; failures name every path.
+/// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
+/// Best-effort per entry; the error names every undeletable path.
 fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let entries = match std::fs::read_dir(data_dir) {
         Ok(e) => e,
