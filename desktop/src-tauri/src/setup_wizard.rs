@@ -552,8 +552,6 @@ fn kill_processes_by_image_script(exe: &std::path::Path) -> String {
     )
 }
 
-/// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
-/// Best-effort per entry; the error names every undeletable path.
 /// Number of wipe attempts (1 initial pass + retries) before giving up.
 const WIPE_MAX_ATTEMPTS: u32 = 4;
 /// Delay between wipe passes — absorbs transient handle-release lag
@@ -563,6 +561,8 @@ const WIPE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5
 const WIPE_MAX_LISTED_PATHS: usize = 8;
 /// Cap on nested descendants probed per failing top-level entry.
 const WIPE_MAX_DEEP_PROBE: usize = 3;
+/// Max directory depth the deep probe descends into a failing entry.
+const WIPE_MAX_PROBE_DEPTH: u32 = 6;
 
 /// Runs one best-effort removal pass over `data_dir`'s top-level entries.
 /// Returns the entries that failed to remove (empty = all removed).
@@ -587,10 +587,13 @@ fn wipe_pass(data_dir: &std::path::Path) -> std::io::Result<Vec<(PathBuf, std::i
     Ok(failed)
 }
 
-/// Probes up to [`WIPE_MAX_DEEP_PROBE`] undeletable descendants under `dir`, to
-/// name the actual locked object rather than just the top-level entry.
-fn probe_deep_undeletable(dir: &std::path::Path) -> Vec<PathBuf> {
+/// Probes up to [`WIPE_MAX_DEEP_PROBE`] undeletable descendants under `dir` (at
+/// most `depth` levels down), to name the actual locked object.
+fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
     let mut found = Vec::new();
+    if depth == 0 {
+        return found;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return found,
@@ -608,7 +611,7 @@ fn probe_deep_undeletable(dir: &std::path::Path) -> Vec<PathBuf> {
         };
         if result.is_err() {
             if is_dir {
-                found.extend(probe_deep_undeletable(&path));
+                found.extend(probe_deep_undeletable(&path, depth - 1));
             }
             if found.len() < WIPE_MAX_DEEP_PROBE {
                 found.push(path);
@@ -619,6 +622,8 @@ fn probe_deep_undeletable(dir: &std::path::Path) -> Vec<PathBuf> {
     found
 }
 
+/// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
+/// Best-effort per entry with bounded retries; the error names undeletable paths.
 fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let mut failed = wipe_pass(data_dir)?;
     let mut attempts = 1;
@@ -643,7 +648,7 @@ fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
         }
         listed.push(format!("{} ({e})", path.display()));
         if path.is_dir() {
-            for deep in probe_deep_undeletable(path) {
+            for deep in probe_deep_undeletable(path, WIPE_MAX_PROBE_DEPTH) {
                 if listed.len() >= WIPE_MAX_LISTED_PATHS {
                     break;
                 }
