@@ -711,6 +711,7 @@ fn main() {
     // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project oauth
     // workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
+    let clipboard_bridge_slot: clipboard_bridge::SharedClipboardBridge = Arc::new(Mutex::new(None));
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
@@ -816,6 +817,7 @@ fn main() {
         }))
         .manage(initial_session)
         .manage(ide_bridge.clone())
+        .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
         .manage(oauth.clone())
@@ -841,7 +843,9 @@ fn main() {
                 log::warn!("LLM config heal failed: {e:#}");
             }
 
-            clipboard_bridge::spawn(app.handle().clone());
+            if let Ok(mut slot) = clipboard_bridge_slot.lock() {
+                *slot = clipboard_bridge::spawn(app.handle().clone());
+            }
 
             // Hard-fail on tampered plugins: `plugin::audit_all` re-verifies every plugin,
             // collects failures into one blocking dialog, then exits. Recovery is CLI/manual deletion.

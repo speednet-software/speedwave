@@ -857,6 +857,7 @@ pub async fn factory_reset(
     app: tauri::AppHandle,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
+    clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
     // 1. Stop mcp-os watchdog
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -881,8 +882,16 @@ pub async fn factory_reset(
         }
     }
 
+    // 3b. Stop the clipboard-bridge watcher — Windows cannot delete a watched
+    // directory (os error 5), which made wipe_data_dir fail under claude-home.
+    if let Ok(mut guard) = clipboard.lock() {
+        drop(guard.take());
+    }
+
     // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
     let result = tokio::task::spawn_blocking(|| {
+        // 3c. Join in-flight background project teardowns so the wipe does not race them.
+        drain_pending_teardowns();
         log::info!("starting factory reset wipe");
         setup_wizard::factory_reset().map_err(|e| {
             log::error!("factory reset failed: {e}");
@@ -3633,5 +3642,28 @@ mod tests {
         );
 
         assert!(!compute_has_headers(None, None));
+    }
+
+    #[test]
+    fn factory_reset_stops_clipboard_and_drains_teardowns_before_wipe() {
+        // Ordering guard (same pattern as main.rs ExitRequested guard): the watcher
+        // stop and the teardown drain must precede the wipe inside factory_reset.
+        let src = include_str!("containers_cmd.rs");
+        let body = &src[src
+            .find("pub async fn factory_reset")
+            .expect("factory_reset fn")..];
+        let clipboard_stop = body.find("clipboard.lock()").expect("clipboard stop call");
+        let drain = body.find("drain_pending_teardowns();").expect("drain call");
+        let wipe = body
+            .find("starting factory reset wipe")
+            .expect("wipe log line");
+        assert!(
+            clipboard_stop < wipe,
+            "clipboard bridge must stop before the wipe"
+        );
+        assert!(
+            drain < wipe,
+            "pending teardowns must be joined before the wipe"
+        );
     }
 }
