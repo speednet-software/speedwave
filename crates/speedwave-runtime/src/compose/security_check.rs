@@ -295,6 +295,12 @@ pub enum SecurityRule {
     ))]
     ManagedSettingsMount,
 
+    /// The claude `/workspace` mount source is exactly the project dir and no
+    /// extra host root is mounted (guards path-injected volume entries).
+    #[strum(to_string = "CLAUDE_WORKSPACE_MOUNT")]
+    #[strum(props(description = "claude /workspace mount source is exactly the project dir"))]
+    ClaudeWorkspaceMount,
+
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
@@ -464,6 +470,8 @@ impl SecurityCheck {
                 project,
                 expected_paths.telemetry_locked,
             ),
+            // claude /workspace mount source == exact project dir
+            Self::check_claude_workspace_mount(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -1156,6 +1164,53 @@ impl SecurityCheck {
                     "MDM policy locks telemetry but the managed-settings.json mount is missing"
                         .into(),
                 remediation: "Re-render compose so the managed-settings.json mount is applied.",
+            });
+        }
+        violations
+    }
+
+    /// The claude `/workspace` mount must come from exactly the expected project
+    /// dir; extra volume entries injected via a control char in the path are rejected.
+    fn check_claude_workspace_mount(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
+            return violations;
+        };
+        let vols = claude
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        let expected = expected_paths.project_engine_path();
+        let mut matches = 0;
+        for vol in &vols {
+            let Some(s) = vol.as_str() else { continue };
+            let Some((host, _mode)) = extract_volume_for_target(s, "/workspace") else {
+                continue;
+            };
+            matches += 1;
+            if host != expected {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: format!("/workspace source '{host}' != expected '{expected}'"),
+                    remediation:
+                        "The claude /workspace mount must come from exactly the project directory.",
+                });
+            }
+        }
+        if matches != 1 {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!("claude must have exactly one /workspace mount, found {matches}"),
+                remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
             });
         }
         violations

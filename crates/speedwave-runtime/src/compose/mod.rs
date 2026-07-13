@@ -1207,7 +1207,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 47;
+    const SECURITY_RULE_COUNT: usize = 48;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1914,7 +1914,7 @@ services:
       - /tmp:noexec,nosuid,size=512m
     volumes:
       - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
-      - /home/user/projects/test:/workspace
+      - /test/project:/workspace:rw
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
     environment:
       - CLAUDE_VERSION=1.0.3
@@ -2046,6 +2046,51 @@ networks:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_claude_workspace_mount_flags_injected_extra_mount() {
+        // Simulates H-02: a control char in the project path injected an extra
+        // /:/host:ro volume plus a second /workspace entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = valid_compose_yaml().replace(
+            "      - /test/project:/workspace:rw\n",
+            "      - /test/project:/workspace:rw\n      - /:/host:ro\n      - /evil:/workspace:rw\n",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount),
+            "injected extra /workspace mount must fire CLAUDE_WORKSPACE_MOUNT: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_claude_workspace_mount_flags_wrong_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml =
+            valid_compose_yaml().replacen("/test/project:/workspace:rw", "/etc:/workspace:rw", 1);
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("!= expected")),
+            "a wrong /workspace source must fire CLAUDE_WORKSPACE_MOUNT: {violations:?}"
         );
     }
 
@@ -9543,7 +9588,7 @@ services:
       - /tmp:noexec,nosuid,size=512m
     volumes:
       - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
-      - /home/user/projects/test:/workspace
+      - /home/user/projects/test:/workspace:rw
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
     environment:
       - CLAUDE_VERSION=1.0.3
