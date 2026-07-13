@@ -15,6 +15,8 @@ pub(crate) struct DiagnosticsInput {
     pub compose_path: Option<std::path::PathBuf>,
     /// Path to the Claude session log file.
     pub claude_session_log: Option<std::path::PathBuf>,
+    /// Path to the container entrypoint's startup diagnostics log.
+    pub entrypoint_log: Option<std::path::PathBuf>,
 }
 
 /// Writes one ZIP entry; content always passes through `log_sanitizer::sanitize()` first
@@ -83,10 +85,16 @@ pub(crate) fn build_diagnostics_zip(
         (&input.mcp_os_log, "mcp-os"),
         (&input.claude_session_log, "claude"),
         (&input.compose_path, "compose-yml"),
+        (&input.entrypoint_log, "entrypoint"),
     ];
     for (maybe_path, key) in single_files {
         if let Some(path) = maybe_path {
-            if path.exists() {
+            // claude-home is container-writable: a symlinked source could pull an
+            // arbitrary host file into the diagnostics ZIP.
+            let is_regular_file = std::fs::symlink_metadata(path)
+                .map(|m| m.file_type().is_file())
+                .unwrap_or(false);
+            if is_regular_file {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     write_sanitized_entry(&mut zip, options, zip_entry(key), &content)?;
                 }
@@ -146,6 +154,7 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             mcp_os_log: resolve("mcp-os"),
             compose_path: resolve("compose-yml"),
             claude_session_log: resolve("claude"),
+            entrypoint_log: resolve("entrypoint"),
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -248,6 +257,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -316,6 +326,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -360,6 +371,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -400,6 +412,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -430,6 +443,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -457,6 +471,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -484,6 +499,7 @@ mod tests {
             mcp_os_log: Some(mcp_os_log),
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -517,6 +533,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: Some(session_log),
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -530,6 +547,34 @@ mod tests {
         let content = read_zip_entry(&zip_path, "claude/claude-session.log").unwrap();
         assert!(content.contains("SESSION: started"), "content: {content}");
         assert!(content.contains("TOOL: start"), "content: {content}");
+    }
+
+    #[test]
+    fn diagnostics_zip_includes_entrypoint_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join(".speedwave-entrypoint.log");
+        std::fs::write(
+            &log,
+            "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n",
+        )
+        .unwrap();
+        let out = tmp.path().join("diag.zip");
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: None,
+            entrypoint_log: Some(log),
+        };
+        build_diagnostics_zip(&out, &input).unwrap();
+
+        let names = zip_entry_names(&out);
+        assert!(
+            names.iter().any(|n| n == "claude/entrypoint.log"),
+            "got: {names:?}"
+        );
     }
 
     /// Matrix guard: a secret planted in EVERY textual source must be redacted
@@ -557,6 +602,7 @@ mod tests {
             "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000",
             "password=hunter2hunter2",
             "Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "xoxp-another-secret-token-value",
         ];
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
@@ -566,6 +612,7 @@ mod tests {
             compose_path: Some(mk("compose.yml", secrets[0])),
             // Carries the Bearer token (secrets[4]).
             claude_session_log: Some(mk("claude.log", secrets[4])),
+            entrypoint_log: Some(mk("entrypoint.log", secrets[5])),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -605,6 +652,7 @@ mod tests {
             mcp_os_log: Some(mk("mcp.log")),
             compose_path: Some(mk("compose.yml")),
             claude_session_log: Some(mk("claude.log")),
+            entrypoint_log: Some(mk("entrypoint.log")),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
