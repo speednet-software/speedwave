@@ -11,35 +11,58 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 const BRIDGE_FILENAME: &str = ".clipboard-bridge";
 const MAX_PAYLOAD_BYTES: u64 = 64 * 1024;
 
-/// Spawns the watcher thread. Should be called once at desktop startup.
-pub fn spawn(app: AppHandle) {
-    std::thread::spawn(move || match run(app) {
-        Ok(()) => log::warn!("clipboard bridge: watcher channel closed; disabled for this session"),
-        Err(e) => log::error!(
-            "clipboard bridge: watcher exited: {e}. Clipboard integration disabled for this session"
-        ),
-    });
+/// Handle to the running bridge. Dropping it stops the watcher; the event-loop
+/// thread then exits because its channel disconnects.
+pub struct ClipboardBridge {
+    _watcher: RecommendedWatcher,
 }
 
-fn run(app: AppHandle) -> anyhow::Result<()> {
+/// Shared slot so `factory_reset` can stop the bridge before wiping the data dir.
+pub type SharedClipboardBridge = std::sync::Arc<std::sync::Mutex<Option<ClipboardBridge>>>;
+
+/// Starts the watcher thread. `None` means the watcher could not start and
+/// clipboard integration is disabled for this session (already logged).
+pub fn spawn(app: AppHandle) -> Option<ClipboardBridge> {
     let root =
         speedwave_runtime::consts::data_dir().join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR);
-    std::fs::create_dir_all(&root)?;
+    let (watcher, rx) = match start_watcher(&root) {
+        Ok(pair) => pair,
+        Err(e) => {
+            log::error!(
+                "clipboard bridge watcher failed to start: {e}. Clipboard integration disabled for this session"
+            );
+            return None;
+        }
+    };
+    log::info!("clipboard bridge started: watching {}", root.display());
+    std::thread::spawn(move || {
+        run(app, rx);
+        log::warn!("clipboard bridge watcher channel closed; disabled for this session");
+    });
+    Some(ClipboardBridge { _watcher: watcher })
+}
 
+/// Creates the recursive watcher on `root` (created if absent). Split from
+/// `spawn` so tests can exercise the watcher without an `AppHandle`.
+fn start_watcher(
+    root: &Path,
+) -> anyhow::Result<(RecommendedWatcher, mpsc::Receiver<notify::Result<Event>>)> {
+    std::fs::create_dir_all(root)?;
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(tx)?;
-    watcher.watch(&root, RecursiveMode::Recursive)?;
+    watcher.watch(root, RecursiveMode::Recursive)?;
+    Ok((watcher, rx))
+}
 
+fn run(app: AppHandle, rx: mpsc::Receiver<notify::Result<Event>>) {
     // Dedup key: the last content pushed to the clipboard.
     let mut last_content = String::new();
-    log::info!("clipboard bridge started: watching {}", root.display());
-
     while let Ok(res) = rx.recv() {
         let event = match res {
             Ok(e) => e,
             Err(e) => {
                 // Watcher error (inotify exhaustion, permission loss); events dropped.
-                log::warn!("clipboard bridge: watcher error: {e}");
+                log::warn!("clipboard bridge watcher error: {e}");
                 continue;
             }
         };
@@ -52,7 +75,6 @@ fn run(app: AppHandle) -> anyhow::Result<()> {
             }
         }
     }
-    Ok(())
 }
 
 /// Reads up to `MAX_PAYLOAD_BYTES + 1` bytes in one open to detect oversized
@@ -212,5 +234,78 @@ mod tests {
     fn bridge_filename_matches_shell_wrapper_literal() {
         // SSOT: containers/osc52-copy.sh and _tests/entrypoint/osc52-copy.bats depend on this value.
         assert_eq!(BRIDGE_FILENAME, ".clipboard-bridge");
+    }
+
+    // -- watcher lifecycle: stop releases the watched directory --
+
+    /// Polls `remove_dir_all` with a bounded deadline: notify's watcher drop
+    /// closes the directory handle asynchronously on Windows.
+    fn remove_dir_all_when_released(root: &std::path::Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match std::fs::remove_dir_all(root) {
+                Ok(()) => return,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(e) => panic!("watched dir still not removable after watcher drop: {e}"),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watched_dir_cannot_be_removed_until_watcher_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("claude-home");
+        let (watcher, _rx) = start_watcher(&root).unwrap();
+        // Whether removal fails while watched is OS-version-dependent (modern std uses
+        // POSIX delete semantics + notify's FILE_SHARE_DELETE) — only drop-then-removable is load-bearing.
+        if let Err(e) = std::fs::remove_dir_all(&root) {
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(root.exists());
+        } else {
+            std::fs::create_dir_all(&root).unwrap();
+        }
+        drop(watcher);
+        remove_dir_all_when_released(&root);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn dropped_watcher_releases_watched_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("claude-home");
+        let (watcher, _rx) = start_watcher(&root).unwrap();
+        drop(watcher);
+        remove_dir_all_when_released(&root);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn start_watcher_creates_missing_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("claude-home");
+        assert!(!root.exists());
+        let (_watcher, _rx) = start_watcher(&root).unwrap();
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn watcher_drop_closes_event_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("claude-home");
+        let (watcher, rx) = start_watcher(&root).unwrap();
+        drop(watcher);
+        // Drain queued events; the channel must then disconnect so the bridge thread exits.
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("channel not closed after watcher drop")
+                }
+            }
+        }
     }
 }

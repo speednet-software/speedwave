@@ -13,6 +13,8 @@ mod cloudstorage_cmd;
 mod container_logs_cmd;
 mod containers_cmd;
 mod diagnostics;
+#[cfg(any(test, feature = "e2e"))]
+mod e2e_support;
 mod firewall;
 mod git_cmd;
 mod health;
@@ -711,6 +713,7 @@ fn main() {
     // Shared state: IDE Bridge, host-bridged plugins, mcp-os, per-project oauth
     // workers, auto-check handle.
     let ide_bridge: SharedIdeBridge = Arc::new(Mutex::new(None));
+    let clipboard_bridge_slot: clipboard_bridge::SharedClipboardBridge = Arc::new(Mutex::new(None));
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
@@ -766,6 +769,20 @@ fn main() {
     let exit_cleanup_handle_window = exit_cleanup_handle.clone();
     let exit_cleanup_handle_runevent = exit_cleanup_handle.clone();
 
+    // A relaunch (factory reset, settings restart) races the dying instance for
+    // the WebDriver port; wait until it is free so the plugin's one-shot bind succeeds.
+    #[cfg(feature = "e2e")]
+    {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], e2e_support::E2E_WEBDRIVER_PORT));
+        if let Err(e) = e2e_support::wait_until_port_free(
+            addr,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(200),
+        ) {
+            log::error!("webdriver port {addr} still unavailable at startup: {e}");
+        }
+    }
+
     let builder = tauri::Builder::default();
 
     // WebDriver server for E2E tests on 127.0.0.1:4445; only compiled under the "e2e" feature.
@@ -816,6 +833,7 @@ fn main() {
         }))
         .manage(initial_session)
         .manage(ide_bridge.clone())
+        .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
         .manage(oauth.clone())
@@ -841,7 +859,9 @@ fn main() {
                 log::warn!("LLM config heal failed: {e:#}");
             }
 
-            clipboard_bridge::spawn(app.handle().clone());
+            if let Ok(mut slot) = clipboard_bridge_slot.lock() {
+                *slot = clipboard_bridge::spawn(app.handle().clone());
+            }
 
             // Hard-fail on tampered plugins: `plugin::audit_all` re-verifies every plugin,
             // collects failures into one blocking dialog, then exits. Recovery is CLI/manual deletion.
