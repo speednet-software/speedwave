@@ -110,9 +110,8 @@ fn invalidate_cache_all() {
     lock_cache().clear();
 }
 
-/// Verifies a plugin's Ed25519 signature, caching the verdict keyed by
-/// canonicalised path AND SHA-256 digest. Debug-only `SPEEDWAVE_ALLOW_UNSIGNED=1`
-/// skips verification.
+/// Verifies a plugin's Ed25519 signature, caching the verdict keyed by canonicalised path AND SHA-256 digest.
+/// Debug-only `SPEEDWAVE_ALLOW_UNSIGNED=1` skips verification.
 pub fn verify_plugin_signature_cached(plugin_dir: &Path) -> anyhow::Result<()> {
     if unsigned_bypass_active() {
         log::warn!("SPEEDWAVE_ALLOW_UNSIGNED set — skipping signature verification");
@@ -284,7 +283,11 @@ pub fn sign_plugin(plugin_dir: &Path, private_key_bytes: &[u8]) -> anyhow::Resul
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
     use base64::Engine;
@@ -499,9 +502,8 @@ mod tests {
         assert_eq!(d1, d2, "SIGNATURE file must be excluded from digest");
     }
 
-    /// Pins that `CHANGELOG.md` — surfaced verbatim in the Desktop UI — is
-    /// covered by the digest: a future exclusion would let a local tamper of
-    /// the rendered changelog survive verification unnoticed.
+    /// Pins that `CHANGELOG.md` (surfaced verbatim in the Desktop UI) is covered by the digest:
+    /// excluding it would let a local tamper of the rendered changelog survive verification.
     #[test]
     fn test_compute_digest_includes_changelog_md() {
         let tmp = tempfile::tempdir().unwrap();

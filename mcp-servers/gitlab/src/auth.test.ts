@@ -1,8 +1,6 @@
 /**
- * GitLab worker auth wiring tests (SEC-035)
- *
- * Verifies that mcp-gitlab reads MCP_GITLAB_AUTH_TOKEN and passes it to createMCPServer.
- * Middleware correctness is covered by shared/src/server.test.ts — here we test wiring only.
+ * GitLab worker auth wiring tests (SEC-035): verifies mcp-gitlab reads MCP_GITLAB_AUTH_TOKEN and
+ * passes it to createMCPServer. Middleware correctness is covered by shared/src/server.test.ts.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

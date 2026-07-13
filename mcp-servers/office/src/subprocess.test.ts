@@ -1,6 +1,5 @@
 /**
- * Tests for the hardened subprocess wrapper: capture, timeout/SIGKILL, output cap,
- * non-zero-exit, stdin, cwd/env, spawn-error.
+ * Tests for the hardened subprocess wrapper: capture, timeout/SIGKILL, output cap, non-zero-exit, stdin, cwd/env, spawn-error.
  * @module mcp-office/subprocess.test
  */
 

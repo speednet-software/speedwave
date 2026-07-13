@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 /**
- * Speedwave MCP Hub — code executor exposing 2 meta-tools instead of 44+ (~25K→~600 tokens, ~97.6% reduction).
- * Based on Anthropic "Code Execution with MCP": https://www.anthropic.com/engineering/code-execution-with-mcp
- * Security: AsyncFunction sandbox, PII tokenization, container network isolation, 100 req/min per session.
- * @module index
+ * Speedwave MCP Hub — code executor exposing 2 meta-tools instead of 44+ (Anthropic's Code
+ * Execution with MCP pattern). Security: AsyncFunction sandbox, PII tokenization, net isolation.
  */
 
 import express, { Express, NextFunction, Request, Response } from 'express';
@@ -22,6 +20,9 @@ import {
 // Import handlers
 import { createCodeExecutorHandlers } from './handlers.js';
 
+// Detail-level SSOT (powers the TS union, this JSON-schema enum, and the validator)
+import { DETAIL_LEVELS } from './search-tools.js';
+
 // Import bridge initialization
 import { initializeBridges } from './executor.js';
 
@@ -31,19 +32,13 @@ import { initializeRegistry } from './tool-registry.js';
 // Import auth token loader
 import { loadAuthTokens } from './auth-tokens.js';
 
-// Import PII policy loader
 import { loadPolicy } from './policy.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Constants & Configuration
-//═════════════════════════════════════════════════════════════════════════════════
+// ── Constants & Configuration ────────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
-/**
- * MCP server name identifier.
- * @constant {string}
- */
+/** MCP server name identifier. */
 const SERVER_NAME = 'speedwave-code-executor-mcp';
 
 const SERVER_INFO = {
@@ -56,17 +51,17 @@ const HUB_RATE_LIMIT_MAX = 100;
 /** Rate-limit window in milliseconds (1 minute). */
 const HUB_RATE_LIMIT_WINDOW_MS = 60_000;
 
-//═══════════════════════════════════════════════════════════════════════════════
-// MCP Tool Definitions (2 Meta-Tools)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── MCP Tool Definitions (2 Meta-Tools) ──────────────────────────────────────────────────────────
 
 const TOOLS: Tool[] = [
   {
     name: 'search_tools',
-    description: `Search available MCP tools by keyword. Returns tool names, descriptions, and optionally full schemas.
+    description: `Search available MCP tools by keyword or short phrase. Returns tool names, descriptions, and optionally full schemas.
 Use this to discover tools before executing code. Start with 'names_only' for efficiency.
 
 Built-in services: slack, sharepoint, redmine, gitlab, github, atlassian, office, playwright, context7, os. Plugin services (if enabled) are also searchable.
+
+Matching is tokenized and ranked (each word matched independently against name/keywords/description), so a natural phrase like "my logged hours" also works. A zero-match result includes a 'hint' with next steps.
 
 Examples:
 - search_tools({ query: "slack", detail_level: "names_only" })
@@ -82,7 +77,7 @@ Examples:
         },
         detail_level: {
           type: 'string',
-          enum: ['names_only', 'with_descriptions', 'full_schema'],
+          enum: [...DETAIL_LEVELS],
           description:
             "Level of detail. Use 'names_only' first, then 'full_schema' for specific tools.",
         },
@@ -202,13 +197,10 @@ return { total: results.length, failed: errors.length };
   },
 ];
 
-//═══════════════════════════════════════════════════════════════════════════════
-// HTTP Server Setup
-//═══════════════════════════════════════════════════════════════════════════════
+// ── HTTP Server Setup ────────────────────────────────────────────────────────────────────────────
 
-/**
- * Main server initialization and startup
- */
+/** Main server initialization and startup. */
+/* c8 ignore start: server bootstrap (registry/bridge init + listen); exercised by container run */
 async function main() {
   console.log(`${ts()} 🚀 Starting Speedwave Code Executor MCP Server...`);
   console.log(`${ts()} 📊 Token reduction: 44 tools → 2 meta-tools (97.6% reduction)`);
@@ -244,9 +236,7 @@ async function main() {
   // Create Express app using shared transport utilities
   const app = createHubApp(rpcHandler);
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Start Server
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Start Server ───────────────────────────────────────────────────────────────────────────────
 
   // bind all interfaces — must be reachable from the container network
   const server = app.listen(PORT, '0.0.0.0', () => {
@@ -265,7 +255,6 @@ async function main() {
   });
 
   // Graceful shutdown handler.
-  /* c8 ignore start */
   const gracefulShutdown = (signal: string) => {
     console.log(`${ts()} \n📴 Received ${signal}, shutting down gracefully...`);
     server.close(() => {
@@ -281,17 +270,14 @@ async function main() {
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  /* c8 ignore stop */
 }
+/* c8 ignore stop */
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Hub Express App Factory
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Hub Express App Factory ──────────────────────────────────────────────────────────────────────
 
 /**
  * Sliding-window rate limiter keyed by MCP session id (IP fallback before a
  * session exists). Returns 429 with Retry-After once the window cap is reached.
- * @returns Express middleware enforcing {@link HUB_RATE_LIMIT_MAX} per window
  */
 export function createSessionRateLimiter() {
   const hits = new Map<string, number[]>();
@@ -320,7 +306,6 @@ export function createSessionRateLimiter() {
 /**
  * Create the Hub Express app with MCP transport endpoints.
  * @param rpcHandler - JSON-RPC handler to process incoming requests
- * @returns Configured Express app
  */
 export function createHubApp(rpcHandler: JSONRPCHandler): Express {
   const app = express();
@@ -330,23 +315,17 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
 
   app.use(express.json({ limit: '1mb' })); // Allow larger payloads for code
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Health Check Endpoint
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Health Check Endpoint ──────────────────────────────────────────────────────────────────────
 
   app.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok' });
   });
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Rate Limiting (sliding window, per MCP session — falls back to IP pre-session)
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Rate Limiting (sliding window, per MCP session — falls back to IP pre-session) ─────────────
 
   app.use(createSessionRateLimiter());
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // MCP Protocol Endpoints (Streamable HTTP)
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── MCP Protocol Endpoints (Streamable HTTP) ───────────────────────────────────────────────────
 
   app.post('/', async (req: Request, res: Response) => {
     await handleMCPPost(rpcHandler, req, res);
@@ -356,9 +335,7 @@ export function createHubApp(rpcHandler: JSONRPCHandler): Express {
     handleMCPDelete(req, res);
   });
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Method Not Allowed (405 for unsupported HTTP methods on /)
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Method Not Allowed (405 for unsupported HTTP methods on /) ─────────────────────────────────
 
   app.all('/', (_req: Request, res: Response) => {
     res.setHeader('Allow', 'POST, DELETE');

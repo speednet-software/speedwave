@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -14,10 +15,8 @@ import { GitHubWorkflowRun } from '../types.js';
 import { withValidation } from './validation.js';
 
 /**
- * Maps a normalized workflow run to the compact summary returned by `listWorkflowRuns`
- * (drops `created_at`/`updated_at` — those are exposed by `getWorkflowRun`).
- * @param r - Normalized workflow run from the GitHub client
- * @returns Compact `{ id, name, status, conclusion, head_branch, head_sha, html_url }` summary
+ * Maps a normalized workflow run to the compact summary for `listWorkflowRuns` (drops `created_at`/`updated_at`, exposed by `getWorkflowRun`).
+ * @param r - Normalized workflow run
  */
 function runSummary(r: GitHubWorkflowRun): Omit<GitHubWorkflowRun, 'created_at' | 'updated_at'> {
   return {
@@ -36,7 +35,7 @@ const listWorkflowRunsTool: Tool = {
   description:
     'List GitHub Actions workflow runs for a repository, optionally filtered by branch or status.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'actions', 'workflow', 'runs', 'ci', 'cd', 'list', 'builds'],
   example:
     'const { runs, count } = await github.listWorkflowRuns({ owner: "octocat", repo: "hello", status: "failure" })',
@@ -50,7 +49,10 @@ const listWorkflowRunsTool: Tool = {
         type: 'string',
         description: 'e.g. queued, in_progress, completed, success, failure',
       },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -104,7 +106,7 @@ const getWorkflowRunTool: Tool = {
   name: 'getWorkflowRun',
   description: 'Get detailed information about a single workflow run.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'actions', 'workflow', 'run', 'get', 'details', 'ci'],
   example:
     'const run = await github.getWorkflowRun({ owner: "octocat", repo: "hello", run_id: 123456 })',
@@ -113,7 +115,10 @@ const getWorkflowRunTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      run_id: { type: 'number', description: 'Workflow run ID' },
+      run_id: {
+        type: 'number',
+        description: 'Workflow run ID. Obtain from listWorkflowRuns.',
+      },
     },
     required: ['owner', 'repo', 'run_id'],
   },
@@ -155,7 +160,7 @@ const getRunLogsTool: Tool = {
   description:
     "Returns a URL to download the run's logs as a ZIP archive (the URL is short-lived). The worker does not fetch or unpack the archive.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'actions', 'workflow', 'run', 'logs', 'download', 'debug'],
   example:
     'const { download_url } = await github.getRunLogs({ owner: "octocat", repo: "hello", run_id: 123456 })',
@@ -164,7 +169,10 @@ const getRunLogsTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      run_id: { type: 'number', description: 'Workflow run ID' },
+      run_id: {
+        type: 'number',
+        description: 'Workflow run ID. Obtain from listWorkflowRuns.',
+      },
     },
     required: ['owner', 'repo', 'run_id'],
   },
@@ -198,7 +206,7 @@ const rerunWorkflowTool: Tool = {
   name: 'rerunWorkflow',
   description: 'Re-runs a workflow run.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'actions', 'workflow', 'run', 'rerun', 'retry', 'ci'],
   example: 'await github.rerunWorkflow({ owner: "octocat", repo: "hello", run_id: 123456 })',
   inputSchema: {
@@ -206,7 +214,10 @@ const rerunWorkflowTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      run_id: { type: 'number', description: 'Workflow run ID' },
+      run_id: {
+        type: 'number',
+        description: 'Workflow run ID. Obtain from listWorkflowRuns.',
+      },
     },
     required: ['owner', 'repo', 'run_id'],
   },
@@ -239,7 +250,7 @@ const triggerWorkflowTool: Tool = {
   name: 'triggerWorkflow',
   description: 'Triggers a workflow_dispatch event for a workflow that supports manual runs.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'actions', 'workflow', 'trigger', 'dispatch', 'run', 'ci'],
   example:
     'await github.triggerWorkflow({ owner: "octocat", repo: "hello", workflow_id: "ci.yml", ref: "main" })',
@@ -299,7 +310,7 @@ const listWorkflowRunArtifactsTool: Tool = {
   name: 'listWorkflowRunArtifacts',
   description: 'List the artifacts produced by a workflow run.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'actions', 'artifacts', 'workflow', 'run', 'list', 'downloads'],
   example:
     'const { artifacts, count } = await github.listWorkflowRunArtifacts({ owner: "octocat", repo: "hello", run_id: 123456 })',
@@ -308,8 +319,14 @@ const listWorkflowRunArtifactsTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      run_id: { type: 'number', description: 'Workflow run ID' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      run_id: {
+        type: 'number',
+        description: 'Workflow run ID. Obtain from listWorkflowRuns.',
+      },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo', 'run_id'],
   },
@@ -355,7 +372,7 @@ const downloadArtifactTool: Tool = {
   description:
     'Returns a short-lived URL to download an artifact ZIP. The worker does not fetch the archive.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'actions', 'artifact', 'download', 'zip', 'url'],
   example:
     'const { download_url } = await github.downloadArtifact({ owner: "octocat", repo: "hello", artifact_id: 42 })',
@@ -364,7 +381,10 @@ const downloadArtifactTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      artifact_id: { type: 'number', description: 'Artifact ID' },
+      artifact_id: {
+        type: 'number',
+        description: 'Artifact ID. Obtain from listWorkflowRunArtifacts.',
+      },
     },
     required: ['owner', 'repo', 'artifact_id'],
   },

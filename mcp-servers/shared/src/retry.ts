@@ -1,6 +1,6 @@
 /**
- * Retry utility for MCP client initialization.
- * Exponential backoff with jitter for transient failures (DNS, network, timeout).
+ * Retry utility for MCP client initialization: exponential backoff with jitter for transient
+ * failures (DNS, network, timeout).
  * @module shared/retry
  */
 
@@ -19,16 +19,11 @@ export interface RetryOptions {
 }
 
 /**
- * Retry an async function with exponential backoff and jitter.
- *
- * The initial call counts as attempt 0. If it returns `null` **or throws**,
- * and `maxRetries` has not been reached, the function is retried after an
- * increasing delay.
- *
- * Exceptions from `fn` are caught and logged — they do **not** propagate.
- * @param fn - Async function to retry. Must return `T` on success or `null` on failure.
- * @param options - Retry configuration
- * @returns The result of `fn`, or `null` if all attempts failed
+ * Retry an async function with exponential backoff and jitter. The initial call is attempt 0; if it
+ * returns `null` or throws, it retries (increasing delay) until `maxRetries`. Exceptions never propagate.
+ * @param fn - async function to retry; returns `T` on success or `null` on failure
+ * @param options - retry configuration
+ * @returns the result of `fn`, or `null` if all attempts failed
  */
 export async function retryAsync<T>(
   fn: () => Promise<T | null>,
@@ -60,9 +55,9 @@ export async function retryAsync<T>(
 }
 
 /**
- * Call `fn`, catching any exception and returning `null`.
- * @param fn - Function to call
- * @param label - Label for log messages
+ * Call `fn`, catching any exception (logged with `label`) and returning `null`.
+ * @param fn - function to call
+ * @param label - label for log messages
  */
 async function tryCall<T>(fn: () => Promise<T | null>, label: string): Promise<T | null> {
   try {

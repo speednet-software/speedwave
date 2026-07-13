@@ -12,9 +12,7 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 const STABLE_ENDPOINT: &str =
     "https://github.com/speednet-software/speedwave/releases/latest/download/latest.json";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ── Types ──
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateInfo {
@@ -57,9 +55,7 @@ impl UpdateSettings {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Settings persistence
-// ---------------------------------------------------------------------------
+// ── Settings persistence ──
 
 fn settings_path() -> Option<PathBuf> {
     Some(consts::data_dir().join("update-settings.json"))
@@ -99,19 +95,12 @@ fn save_update_settings_inner(settings: &UpdateSettings) -> Result<(), String> {
     let mut clamped = settings.clone();
     clamped.normalize();
     let json = serde_json::to_string_pretty(&clamped).map_err(|e| e.to_string())?;
-    // Atomic write: temp file in the same directory, then rename.
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp_path, &path).map_err(|e| e.to_string())
+    speedwave_runtime::fs_perms::write_shared_file_atomic(&path, &json).map_err(|e| e.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Install method detection
-// ---------------------------------------------------------------------------
+// ── Install method detection ──
 
-// ---------------------------------------------------------------------------
-// Update check / install
-// ---------------------------------------------------------------------------
+// ── Update check / install ──
 
 /// Returns `true` if the release body contains `[CRITICAL]` or `[SECURITY]` (case-insensitive).
 fn detect_critical(body: &Option<String>) -> bool {
@@ -216,12 +205,14 @@ pub async fn install_update(app: &AppHandle, expected_version: String) -> Result
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Background auto-check loop
-// ---------------------------------------------------------------------------
+// ── Background auto-check loop ──
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only assertions"
+)]
 mod tests {
     use super::*;
 
@@ -479,33 +470,50 @@ mod tests {
     }
 }
 
+/// Last auto-check state; the poll loop logs only when this changes.
+#[derive(PartialEq)]
+enum AutoCheckState {
+    Disabled,
+    UpdateAvailable(String),
+    UpToDate,
+    Error(String),
+}
+
 pub fn spawn_auto_check(app_handle: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         // Delay the first check to avoid a network call at startup.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let mut last_state: Option<AutoCheckState> = None;
 
         loop {
             let mut settings = load_update_settings();
             settings.normalize();
             if !settings.auto_check {
-                log::info!("auto-check disabled, sleeping");
+                if last_state != Some(AutoCheckState::Disabled) {
+                    log::info!("update auto-check disabled, sleeping");
+                    last_state = Some(AutoCheckState::Disabled);
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 continue;
             }
 
-            log::info!("checking for updates");
-            match check_for_update(&app_handle).await {
+            let state = match check_for_update(&app_handle).await {
                 Ok(UpdateCheckOutcome::UpdateAvailable(info)) => {
-                    log::info!("new version available: {}", info.version);
                     use tauri::Emitter;
                     let _ = app_handle.emit("update_available", &info);
+                    AutoCheckState::UpdateAvailable(info.version)
                 }
-                Ok(UpdateCheckOutcome::UpToDate) => {
-                    log::info!("already up to date");
+                Ok(UpdateCheckOutcome::UpToDate) => AutoCheckState::UpToDate,
+                Err(e) => AutoCheckState::Error(e.to_string()),
+            };
+            if last_state.as_ref() != Some(&state) {
+                match &state {
+                    AutoCheckState::UpdateAvailable(v) => log::info!("new version available: {v}"),
+                    AutoCheckState::UpToDate => log::info!("update check: already up to date"),
+                    AutoCheckState::Error(e) => log::error!("update check failed: {e}"),
+                    AutoCheckState::Disabled => {}
                 }
-                Err(e) => {
-                    log::error!("check failed: {e}");
-                }
+                last_state = Some(state);
             }
 
             // Sleep in 60-second increments so settings changes take effect within a minute.

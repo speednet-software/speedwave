@@ -9,6 +9,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
@@ -20,7 +21,7 @@ const listProjectsTool: Tool = {
   description:
     'List Jira projects visible to the account (restricted to the configured project allowlist, if any).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['jira', 'projects', 'list', 'browse'],
   example: 'const { projects } = await atlassian.listProjects({ query: "platform" })',
   inputSchema: {
@@ -50,7 +51,7 @@ const getProjectTool: Tool = {
   name: 'getProject',
   description: 'Get a single Jira project by key or ID.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'project', 'get', 'show', 'detail'],
   example: 'const project = await atlassian.getProject({ projectIdOrKey: "PROJ" })',
   inputSchema: {
@@ -75,9 +76,10 @@ const getProjectTool: Tool = {
 
 const listIssueTypesTool: Tool = {
   name: 'listIssueTypes',
-  description: 'List the issue types available in a Jira project.',
+  description:
+    'List the issue types available in a Jira project. Restricted to the configured project allowlist, if any (errors if the project is out of scope).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'issue types', 'list', 'project', 'metadata'],
   example: 'const { issue_types } = await atlassian.listIssueTypes({ projectIdOrKey: "PROJ" })',
   inputSchema: {
@@ -100,7 +102,6 @@ const listIssueTypesTool: Tool = {
 /**
  * Build the Jira project tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for projects.
  */
 export function createJiraProjectTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [listProjectsTool, getProjectTool, listIssueTypesTool];

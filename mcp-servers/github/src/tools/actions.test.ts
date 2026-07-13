@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createActionsTools } from './actions-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -83,12 +83,12 @@ describe('actions-tools', () => {
   it('eagerly loads only listWorkflowRuns', () => {
     const tools = createActionsTools(null);
     expect(tools.find((t) => t.tool.name === 'listWorkflowRuns')!.tool._meta).toEqual({
-      deferLoading: false,
+      [META_KEYS.DEFER_LOADING]: false,
     });
     expect(
       tools
         .filter((t) => t.tool.name !== 'listWorkflowRuns')
-        .every((t) => t.tool._meta!.deferLoading === true)
+        .every((t) => t.tool._meta![META_KEYS.DEFER_LOADING] === true)
     ).toBe(true);
   });
 

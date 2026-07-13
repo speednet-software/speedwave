@@ -1,12 +1,6 @@
 /**
- * Auth Tokens - Per-Service Authentication
- * @module auth-tokens
- *
- * Reads per-service auth tokens from /secrets/<service>-auth-token files.
- * These files are bind-mounted into the hub container by compose.rs.
- *
- * Used by http-bridge.ts to add Authorization headers when calling
- * workers that require authentication (e.g., mcp-os running on host).
+ * Reads per-service tokens from /secrets/<service>-auth-token (bind-mounted by compose.rs).
+ * Used by http-bridge.ts for Authorization headers on workers requiring auth (e.g. mcp-os).
  */
 
 import { readFileSync, existsSync } from 'fs';
@@ -15,10 +9,7 @@ import { ts } from '@speedwave/mcp-shared';
 
 const AUTH_TOKENS: Map<string, string> = new Map();
 
-/**
- * Load auth tokens from /secrets/<service>-auth-token files.
- * Called once at server startup.
- */
+/** Load auth tokens from /secrets/<service>-auth-token files. Called once at server startup. */
 export function loadAuthTokens(): void {
   for (const service of getAllServiceNames()) {
     const path = `/secrets/${service}-auth-token`;
@@ -42,26 +33,22 @@ export function loadAuthTokens(): void {
 }
 
 /**
- * Get auth token for a service.
- * @param service - Service name
- * @returns Token string or undefined if no token is configured
+ * Get auth token for a service; returns undefined if none is configured.
+ * @param service - Service name.
  */
 export function getAuthToken(service: string): string | undefined {
   return AUTH_TOKENS.get(service);
 }
 
 /**
- * Check if a service has an auth token configured.
- * @param service - Service name
- * @returns True if token exists
+ * True if a service has an auth token configured.
+ * @param service - Service name.
  */
 export function hasAuthToken(service: string): boolean {
   return AUTH_TOKENS.has(service);
 }
 
-/**
- * Clear all loaded auth tokens (for testing only).
- */
+/** Clear all loaded auth tokens (for testing only). */
 export function clearAuthTokens(): void {
   AUTH_TOKENS.clear();
 }

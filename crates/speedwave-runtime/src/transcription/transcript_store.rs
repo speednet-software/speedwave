@@ -1,10 +1,8 @@
-//! Per-session state store + live event stream (snapshot + seq, like
-//! ADR-043's history_plus_stream). Mutators atomically: update session, bump
-//! seq, push event, persist.
+//! Per-session state store + live event stream (snapshot + seq, like ADR-043's
+//! history_plus_stream). Mutators atomically: update session, bump seq, push event, persist.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -14,14 +12,12 @@ use uuid::Uuid;
 use crate::transcription::transcriber::Segment;
 use crate::transcription::transcript::{TranscriptSession, TranscriptStatus};
 
-/// Capacity of each session's `broadcast` channel — generous enough that a
-/// slow subscriber falls behind only after thousands of events; if it does,
-/// it re-subscribes via the snapshot path.
+/// Capacity of each session's `broadcast` channel — generous enough that a slow subscriber
+/// falls behind only after thousands of events; if it does, it re-subscribes via the snapshot.
 const CHANNEL_CAPACITY: usize = 4096;
 
-/// Live events on a transcript stream. Every event carries a `seq` (1-indexed,
-/// monotonic per session). Consumers apply events idempotently: ignore
-/// `seq <= last_applied`.
+/// Live events on a transcript stream. Every event carries a `seq` (1-indexed, monotonic per
+/// session). Consumers apply events idempotently: ignore `seq <= last_applied`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TranscriptEvent {
@@ -32,14 +28,13 @@ pub enum TranscriptEvent {
         /// The segment.
         segment: Segment,
     },
-    /// The sliding window re-decoded its tail; replace the trailing range.
-    SegmentsReplaced {
+    /// The not-yet-committed tail of the latest live decode — replace-only
+    /// display state; an empty string clears it.
+    LiveDraft {
         /// Monotonic seq.
         seq: u64,
-        /// Index in `live_segments` at which to splice in `segments`.
-        from_index: usize,
-        /// The replacement segments.
-        segments: Vec<Segment>,
+        /// The draft text.
+        text: String,
     },
     /// The lifecycle status changed.
     StatusChanged {
@@ -68,6 +63,20 @@ pub enum TranscriptEvent {
         /// Monotonic seq.
         seq: u64,
     },
+    /// A non-fatal capture-health warning (silent tap, one side stalled).
+    CaptureWarning {
+        /// Monotonic seq.
+        seq: u64,
+        /// What degraded.
+        warning: crate::transcription::CaptureWarning,
+    },
+    /// A previously-raised capture-health warning recovered.
+    CaptureWarningCleared {
+        /// Monotonic seq.
+        seq: u64,
+        /// What recovered.
+        warning: crate::transcription::CaptureWarning,
+    },
 }
 
 impl TranscriptEvent {
@@ -75,18 +84,19 @@ impl TranscriptEvent {
     pub fn seq(&self) -> u64 {
         match self {
             TranscriptEvent::SegmentAppended { seq, .. }
-            | TranscriptEvent::SegmentsReplaced { seq, .. }
+            | TranscriptEvent::LiveDraft { seq, .. }
             | TranscriptEvent::StatusChanged { seq, .. }
             | TranscriptEvent::FinalizeProgress { seq, .. }
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
-            | TranscriptEvent::Finished { seq, .. } => *seq,
+            | TranscriptEvent::Finished { seq, .. }
+            | TranscriptEvent::CaptureWarning { seq, .. }
+            | TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
         }
     }
 }
 
-/// What `subscribe()` returns: a current-state snapshot plus a stream of
-/// future events. Consumers replay the snapshot first, then apply events with
-/// `seq > snapshot.last_seq` idempotently.
+/// What `subscribe()` returns: a current-state snapshot plus a stream of future events.
+/// Consumers replay the snapshot first, then apply events with `seq > snapshot.last_seq`.
 #[derive(Debug)]
 pub struct Subscription {
     /// Current session state.
@@ -112,13 +122,8 @@ struct Entry {
     tx: broadcast::Sender<TranscriptEvent>,
 }
 
-/// Per-session state store + live event stream.
-///
-/// `<root>/<uuid>/transcript.json` + `<root>/<uuid>/audio.wav`. The store
-/// caches the active session in memory; `list()` walks the disk for inactive
-/// ones. `subscribe()` returns a snapshot + receiver — mutators bump seq,
-/// emit, and persist atomically so the snapshot, the stream, and the disk
-/// state never drift.
+/// Per-session state store + live event stream: `<root>/<uuid>/{transcript.json,audio.wav}`.
+/// Caches active sessions (`list()` walks disk for inactive); mutators bump seq, emit, persist.
 pub struct TranscriptStore {
     root: PathBuf,
     sessions: Arc<DashMap<Uuid, Entry>>,
@@ -174,9 +179,8 @@ impl TranscriptStore {
         Ok(TranscriptSession::load(&dir)?)
     }
 
-    /// Walks `<root>/` and returns one snapshot per session directory.
-    /// Corrupt `transcript.json` files are skipped (logged warn — runtime
-    /// recovery, not panic).
+    /// Walks `<root>/` and returns one snapshot per session directory. Corrupt
+    /// `transcript.json` files are skipped (logged warn — runtime recovery, not panic).
     pub fn list(&self) -> Vec<TranscriptSession> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Vec::new();
@@ -230,9 +234,8 @@ impl TranscriptStore {
         self.sessions.len()
     }
 
-    /// Loads `id` into cache if needed; returns its `Entry`. Atomic against
-    /// concurrent callers: the entry actually living in `sessions` is the one
-    /// returned, so subscribers can never end up holding an orphaned `tx`.
+    /// Loads `id` into cache if needed; returns its `Entry`. Atomic against concurrent callers:
+    /// the entry living in `sessions` is the one returned, so no subscriber holds an orphaned `tx`.
     fn activate(&self, id: Uuid) -> Result<EntryHandle, StoreError> {
         use dashmap::mapref::entry::Entry as MapEntry;
         match self.sessions.entry(id) {
@@ -267,21 +270,57 @@ impl TranscriptStore {
     where
         F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
     {
-        // `activate` loads from disk on a cache miss, so mutators work on
-        // sessions persisted by an earlier run (a cache-only lookup returned
-        // NotFound for them — the "no such transcript session" on any mutator).
+        self.with_session_batch(id, |s, next_seq| vec![mutate(s, next_seq)])
+            .map(|_| ())
+    }
+
+    /// Like [`Self::with_session`], but `mutate` (called with the next seq) returns every event
+    /// to emit for one lock + save — one fsync'd write for the whole batch.
+    fn with_session_batch<F>(&self, id: Uuid, mutate: F) -> Result<Vec<TranscriptEvent>, StoreError>
+    where
+        F: FnOnce(&mut TranscriptSession, u64) -> Vec<TranscriptEvent>,
+    {
+        self.with_session_inner(id, true, mutate)
+    }
+
+    /// Like [`Self::with_session`], but never touches disk — for `#[serde(skip)]` fields (e.g.
+    /// `live_draft`) where a save would persist nothing. Seq still bumps in-memory and broadcasts.
+    fn with_session_no_save<F>(&self, id: Uuid, mutate: F) -> Result<(), StoreError>
+    where
+        F: FnOnce(&mut TranscriptSession, u64) -> TranscriptEvent,
+    {
+        self.with_session_inner(id, false, |s, next_seq| vec![mutate(s, next_seq)])
+            .map(|_| ())
+    }
+
+    /// Shared lock-mutate-persist-emit body; `save` toggles the disk write.
+    fn with_session_inner<F>(
+        &self,
+        id: Uuid,
+        save: bool,
+        mutate: F,
+    ) -> Result<Vec<TranscriptEvent>, StoreError>
+    where
+        F: FnOnce(&mut TranscriptSession, u64) -> Vec<TranscriptEvent>,
+    {
+        // `activate` loads from disk on a cache miss, so mutators work on sessions persisted
+        // by an earlier run (a cache-only lookup would return NotFound for them).
         let h = self.activate(id)?;
         let dir = self.session_dir(id);
-        let event;
+        let events;
         {
             let mut s = h.session.write();
-            s.last_seq += 1;
-            let seq = s.last_seq;
-            event = mutate(&mut s, seq);
-            s.save(&dir)?;
+            let next_seq = s.last_seq + 1;
+            events = mutate(&mut s, next_seq);
+            s.last_seq += events.len() as u64;
+            if save {
+                s.save(&dir)?;
+            }
         }
-        let _ = h.tx.send(event);
-        Ok(())
+        for event in &events {
+            let _ = h.tx.send(event.clone());
+        }
+        Ok(events)
     }
 
     /// Appends a new live segment.
@@ -295,36 +334,38 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Splice point for a window re-decode: first segment overlapping the
-    /// window (`end > threshold`). Keying on `end` (not `start`) drops segments
-    /// whose text runs into the window, which would otherwise duplicate.
-    pub fn live_splice_at(&self, id: Uuid, threshold: Duration) -> Result<usize, StoreError> {
-        let entry = self.sessions.get(&id).ok_or(StoreError::NotFound(id))?;
-        let session = entry.session.read();
-        Ok(session
-            .live_segments
-            .iter()
-            .position(|s| s.end > threshold)
-            .unwrap_or(session.live_segments.len()))
-    }
-
-    /// Replaces the tail of `live_segments` starting at `from_index`.
-    pub fn replace_segments(
+    /// Appends multiple live segments as a single fsync'd save (one decode-window's commits at
+    /// once). Returns each segment's assigned seq, in order; a no-op when `segments` is empty.
+    pub fn append_segments(
         &self,
         id: Uuid,
-        from_index: usize,
         segments: Vec<Segment>,
-    ) -> Result<u64, StoreError> {
+    ) -> Result<Vec<u64>, StoreError> {
+        if segments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let events = self.with_session_batch(id, |s, first_seq| {
+            segments
+                .into_iter()
+                .enumerate()
+                .map(|(i, segment)| {
+                    let seq = first_seq + i as u64;
+                    s.live_segments.push(segment.clone());
+                    TranscriptEvent::SegmentAppended { seq, segment }
+                })
+                .collect()
+        })?;
+        Ok(events.iter().map(TranscriptEvent::seq).collect())
+    }
+
+    /// Publishes the uncommitted live-decode tail (replace-only; `""` clears it). Called on every
+    /// ~5s decode cycle while the draft churns, so this never hits disk — see `with_session_no_save`.
+    pub fn live_draft(&self, id: Uuid, text: String) -> Result<u64, StoreError> {
         let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
+        self.with_session_no_save(id, |s, seq| {
             seq_out = seq;
-            s.live_segments.truncate(from_index);
-            s.live_segments.extend(segments.iter().cloned());
-            TranscriptEvent::SegmentsReplaced {
-                seq,
-                from_index,
-                segments,
-            }
+            s.live_draft = text.clone();
+            TranscriptEvent::LiveDraft { seq, text }
         })?;
         Ok(seq_out)
     }
@@ -340,6 +381,34 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
+    /// Emits a capture-health warning event (session state is unchanged).
+    pub fn capture_warning(
+        &self,
+        id: Uuid,
+        warning: crate::transcription::CaptureWarning,
+    ) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::CaptureWarning { seq, warning }
+        })?;
+        Ok(seq_out)
+    }
+
+    /// Emits a capture-health recovery event (session state is unchanged).
+    pub fn capture_warning_cleared(
+        &self,
+        id: Uuid,
+        warning: crate::transcription::CaptureWarning,
+    ) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::CaptureWarningCleared { seq, warning }
+        })?;
+        Ok(seq_out)
+    }
+
     /// Finalize-progress signal.
     pub fn finalize_progress(&self, id: Uuid, progress: f32) -> Result<u64, StoreError> {
         let mut seq_out = 0;
@@ -351,9 +420,8 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Installs the offline pass's `final_segments` and emits
-    /// `FinalSegmentsReady` so an open UI swaps the live transcript for the
-    /// higher-quality one.
+    /// Installs the offline pass's `final_segments` and emits `FinalSegmentsReady` so an open
+    /// UI swaps the live transcript for the higher-quality one.
     pub fn set_final_segments(
         &self,
         id: Uuid,
@@ -393,17 +461,16 @@ struct EntryHandle {
 }
 
 fn restrict_dir_perms(dir: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    if let Err(e) = crate::fs_perms::set_owner_only_dir(dir) {
+        log::warn!("failed to restrict permissions on {}: {e}", dir.display());
     }
-    #[cfg(not(unix))]
-    let _ = dir;
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: unwrap on fixtures is the sanctioned boundary"
+)]
 mod tests {
     use super::*;
     use crate::transcription::audio::{AudioSource, AudioSourceInfo};
@@ -427,6 +494,48 @@ mod tests {
             text: text.to_string(),
             words: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn capture_warning_bumps_seq_broadcasts_and_persists_last_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        let seq = store
+            .capture_warning(id, crate::transcription::CaptureWarning::MicrophoneStalled)
+            .unwrap();
+        assert_eq!(seq, 1);
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::CaptureWarning { seq: s, warning } => {
+                assert_eq!(s, seq);
+                assert_eq!(
+                    warning,
+                    crate::transcription::CaptureWarning::MicrophoneStalled
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        // Session state is untouched apart from the persisted seq.
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.last_seq, seq);
+        assert!(snap.live_segments.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_sets_owner_only_perms_on_session_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+
+        let mode = std::fs::metadata(store.session_dir(id))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
     }
 
     #[tokio::test]
@@ -488,6 +597,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_segments_persists_a_whole_batch_as_one_save_with_monotonic_seqs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut rx = store.subscribe(id).unwrap().events;
+
+        let seqs = store
+            .append_segments(
+                id,
+                vec![
+                    seg(0.0, 1.0, "one"),
+                    seg(1.0, 2.0, "two"),
+                    seg(2.0, 3.0, "three"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(seqs, vec![1, 2, 3]);
+
+        // All three segments landed, in order, on disk in a single save.
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.last_seq, 3);
+        let texts: Vec<&str> = snap.live_segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["one", "two", "three"]);
+
+        // And each segment still emitted its own event, in order, on the broadcast stream.
+        for (expected_seq, expected_text) in [(1, "one"), (2, "two"), (3, "three")] {
+            let ev = rx.recv().await.unwrap();
+            match ev {
+                TranscriptEvent::SegmentAppended { seq, segment } => {
+                    assert_eq!(seq, expected_seq);
+                    assert_eq!(segment.text, expected_text);
+                }
+                other => panic!("expected SegmentAppended, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn append_segments_with_an_empty_batch_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+
+        let seqs = store.append_segments(id, vec![]).unwrap();
+        assert!(seqs.is_empty());
+        // last_seq untouched — no save, no event.
+        assert_eq!(store.get(id).unwrap().last_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn append_segments_continues_the_seq_sequence_from_a_prior_mutator() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let seq0 = store.append_segment(id, seg(0.0, 1.0, "zero")).unwrap();
+        assert_eq!(seq0, 1);
+
+        let seqs = store
+            .append_segments(id, vec![seg(1.0, 2.0, "a"), seg(2.0, 3.0, "b")])
+            .unwrap();
+        assert_eq!(seqs, vec![2, 3]);
+        assert_eq!(store.get(id).unwrap().last_seq, 3);
+    }
+
+    #[tokio::test]
     async fn every_mutator_bumps_seq_and_persists_and_emits() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
@@ -495,7 +669,7 @@ mod tests {
         let mut rx = store.subscribe(id).unwrap().events;
         let s1 = store.append_segment(id, seg(0.0, 1.0, "a")).unwrap();
         let s2 = store
-            .replace_segments(id, 0, vec![seg(0.0, 1.0, "A")])
+            .capture_warning(id, crate::transcription::CaptureWarning::SystemAudioSilent)
             .unwrap();
         let s3 = store
             .set_status(id, TranscriptStatus::Finalizing { progress: 0.5 })
@@ -520,7 +694,7 @@ mod tests {
         let snap = store.get(id).unwrap();
         assert_eq!(snap.last_seq, s5);
         assert!(matches!(snap.status, TranscriptStatus::Done));
-        assert_eq!(snap.live_segments[0].text, "A");
+        assert_eq!(snap.live_segments[0].text, "a");
         // Persisted on disk (cache-independent).
         let loaded = TranscriptSession::load(&store.session_dir(id)).unwrap();
         assert_eq!(loaded.last_seq, s5);
@@ -591,9 +765,8 @@ mod tests {
         ));
     }
 
-    /// Regression: a session persisted by an earlier run (on disk, never in
-    /// this store's cache) is still mutable. Cache-only lookup returned
-    /// NotFound — the "no such transcript session" on a mutator.
+    /// Regression: a session persisted by an earlier run (on disk, never in this store's cache)
+    /// is still mutable — a cache-only lookup used to return NotFound for it.
     #[tokio::test]
     async fn mutators_work_on_a_disk_only_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -610,9 +783,8 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_subscribe_on_a_disk_only_session_yields_a_single_entry() {
-        // Guards against the previous activate() race: two concurrent
-        // subscribers used to load the session twice and the first caller
-        // could end up holding a tx that was not the one in the map.
+        // Guards against the previous activate() race: two concurrent subscribers used to load
+        // the session twice, and the first caller could hold a tx that wasn't the one in the map.
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
@@ -658,10 +830,9 @@ mod tests {
                 seq: 1,
                 segment: seg(0.0, 1.0, "x"),
             },
-            TranscriptEvent::SegmentsReplaced {
+            TranscriptEvent::LiveDraft {
                 seq: 2,
-                from_index: 0,
-                segments: vec![],
+                text: "tail".to_string(),
             },
             TranscriptEvent::StatusChanged {
                 seq: 4,
@@ -676,14 +847,24 @@ mod tests {
                 segments: vec![seg(0.0, 1.0, "f")],
             },
             TranscriptEvent::Finished { seq: 9 },
+            TranscriptEvent::CaptureWarning {
+                seq: 11,
+                warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+            },
+            TranscriptEvent::CaptureWarningCleared {
+                seq: 12,
+                warning: crate::transcription::CaptureWarning::SystemAudioSilent,
+            },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
-                TranscriptEvent::SegmentsReplaced { seq, .. } => *seq,
+                TranscriptEvent::LiveDraft { seq, .. } => *seq,
                 TranscriptEvent::StatusChanged { seq, .. } => *seq,
                 TranscriptEvent::FinalizeProgress { seq, .. } => *seq,
                 TranscriptEvent::FinalSegmentsReady { seq, .. } => *seq,
                 TranscriptEvent::Finished { seq } => *seq,
+                TranscriptEvent::CaptureWarning { seq, .. } => *seq,
+                TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
             };
             assert_eq!(ev.seq(), expected);
         }
@@ -767,24 +948,76 @@ mod tests {
         );
     }
 
-    /// Regression: a kept segment whose text spans into the re-decode window
-    /// (start before threshold, end after) must be spliced out so the fresh
-    /// decode doesn't duplicate it. Splicing on `start` wrongly kept it.
-    #[tokio::test]
-    async fn live_splice_drops_segment_overlapping_the_window() {
+    #[test]
+    fn live_draft_emits_sets_snapshot_and_never_persists() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
         let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        let json_path = store.session_dir(id).join("transcript.json");
+        let before = std::fs::read_to_string(&json_path).unwrap();
+        let mtime_before = std::fs::metadata(&json_path).unwrap().modified().unwrap();
+
         store
-            .append_segment(id, seg(0.0, 10.0, "long packed"))
+            .live_draft(id, "not yet committed".to_string())
             .unwrap();
-        store.append_segment(id, seg(10.0, 12.0, "after")).unwrap();
-        let at = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
-        assert_eq!(at, 0, "segment overlapping the window must be spliced out");
-        store
-            .replace_segments(id, 0, vec![seg(0.0, 8.0, "kept")])
-            .unwrap();
-        let at2 = store.live_splice_at(id, Duration::from_secs(8)).unwrap();
-        assert_eq!(at2, 1, "a segment ending exactly at the threshold is kept");
+
+        let ev = sub.events.try_recv().unwrap();
+        match &ev {
+            TranscriptEvent::LiveDraft { text, .. } => assert_eq!(text, "not yet committed"),
+            other => panic!("expected LiveDraft, got {other:?}"),
+        }
+        // Snapshot carries the draft for late subscribers…
+        assert_eq!(store.get(id).unwrap().live_draft, "not yet committed");
+        // …but the durable transcript.json is untouched — no rewrite, no fsync.
+        let after = std::fs::read_to_string(&json_path).unwrap();
+        let mtime_after = std::fs::metadata(&json_path).unwrap().modified().unwrap();
+        assert_eq!(after, before, "live_draft must not rewrite transcript.json");
+        assert_eq!(
+            mtime_after, mtime_before,
+            "live_draft must not touch the file's mtime"
+        );
+        assert!(!after.contains("live_draft"));
+        assert!(!after.contains("not yet committed"));
+        // A fresh store (app restart) reloads without any draft.
+        let store2 = TranscriptStore::with_root(dir.path());
+        assert_eq!(store2.get(id).unwrap().live_draft, "");
+    }
+
+    #[test]
+    fn live_draft_still_bumps_seq_monotonically_alongside_saved_mutators() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+
+        let seq1 = store.append_segment(id, seg(0.0, 1.0, "a")).unwrap();
+        let seq2 = store.live_draft(id, "tail".to_string()).unwrap();
+        let seq3 = store.live_draft(id, "longer tail".to_string()).unwrap();
+        let seq4 = store.append_segment(id, seg(1.0, 2.0, "b")).unwrap();
+
+        assert_eq!(
+            [seq1, seq2, seq3, seq4],
+            [1, 2, 3, 4],
+            "seq stays dense and monotonic"
+        );
+        // The saved mutator after the drafts still persists the cumulative last_seq.
+        let loaded = TranscriptSession::load(&store.session_dir(id)).unwrap();
+        assert_eq!(loaded.last_seq, 4);
+    }
+
+    #[test]
+    fn live_draft_serde_round_trip_and_ts_mirror() {
+        let ev = TranscriptEvent::LiveDraft {
+            seq: 9,
+            text: "tail".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"kind\":\"live_draft\""));
+        assert_eq!(serde_json::from_str::<TranscriptEvent>(&json).unwrap(), ev);
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("kind: 'live_draft'"),
+            "TS TranscriptEvent union must carry the live_draft kind"
+        );
     }
 }

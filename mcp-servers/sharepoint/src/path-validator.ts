@@ -3,7 +3,7 @@
 import path from 'path';
 import { ts } from '@speedwave/mcp-shared';
 
-/** Denied paths within /workspace; prefix-matched except '/workspace/.env' which is exact-match only. */
+/** Denied paths within /workspace; prefix-matched except '/workspace/.env' (exact-match only). */
 const DENYLIST: string[] = [
   '/workspace/.git',
   '/workspace/.env',
@@ -17,9 +17,9 @@ const DENYLIST: string[] = [
 /** Validates paths against traversal, absolute paths, null bytes, and URL-encoded attacks. */
 export class PathValidator {
   /**
-   * Validate SharePoint path: rejects traversal, absolute paths, null bytes, URL-encoded sequences.
-   * @param {string} pathStr - Path to validate
-   * @returns {boolean} True if path is safe, false otherwise
+   * Validate SharePoint path: rejects traversal, absolute paths, null bytes, URL-encoded input.
+   * @param pathStr - path to validate
+   * @returns true if the path is safe, false otherwise
    */
   validatePath(pathStr: string): boolean {
     if (!pathStr || typeof pathStr !== 'string') {
@@ -101,8 +101,8 @@ export class PathValidator {
 
   /**
    * Validate local path: must be within /workspace and not on the denylist.
-   * @param {string} localPath - Local path to validate
-   * @returns {boolean} True if path is safe, false otherwise
+   * @param localPath - local path to validate
+   * @returns true if the path is safe, false otherwise
    */
   validateLocalPath(localPath: string): boolean {
     if (!localPath || typeof localPath !== 'string') {

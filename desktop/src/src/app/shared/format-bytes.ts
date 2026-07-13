@@ -1,7 +1,6 @@
 /**
- * Pretty-prints a byte count as a short B/KB/MB/GB string (binary units,
- * 1024-based). Shared by the attachment strip and the transcription section.
- * @param bytes - size in bytes.
+ * Pretty-prints a byte count as a short B/KB/MB/GB string (binary units, 1024-based); shared by the attachment strip and the transcription section.
+ * @param bytes - Size in bytes.
  */
 export function formatBytes(bytes: number): string {
   const KB = 1024;

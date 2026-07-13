@@ -1,8 +1,10 @@
-//! Drift detector: test code must never resolve the production data dir via
-//! `consts::data_dir()`. Catches only literal tokens; transitive resolution is
-//! backstopped by `prod_data_dir_untouched.rs`. Bypass with `// SSOT-allow:`.
+//! Drift detector: test code must never resolve the production data dir via `consts::data_dir()`.
+//! Literal tokens only (see `prod_data_dir_untouched.rs` for transitive). Bypass: `// SSOT-allow:`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::path::{Path, PathBuf};
 
@@ -88,9 +90,8 @@ fn has_allow_marker(line: &str, prev: Option<&&str>) -> bool {
     line.contains("// SSOT-allow:") || prev.is_some_and(|p| p.contains("// SSOT-allow:"))
 }
 
-/// Integration-test binaries that legitimately set `SPEEDWAVE_DATA_DIR` to a
-/// tempdir to exercise env-var wiring, plus this detector's own self-exclusion
-/// (it carries `consts::data_dir()` in `PATTERNS` as data, not a call).
+/// Integration-test binaries that legitimately set `SPEEDWAVE_DATA_DIR` to a tempdir, plus this
+/// detector's own self-exclusion (`consts::data_dir()` appears in `PATTERNS` as data, not a call).
 const ALLOWLISTED_FILES: &[&str] = &[
     "crates/speedwave-runtime/tests/apply_transaction_behaviour.rs",
     "crates/speedwave-runtime/tests/data_dir_integration.rs",

@@ -1,18 +1,6 @@
 #!/usr/bin/env bash
-# Validates PR title for PRs targeting `main`.
-#
-# The desktop updater installs only when latest.json.version is strictly newer
-# than the installed version. A dev -> main squash commit must therefore use a
-# release-triggering Conventional Commit type; otherwise release-please may
-# produce no version bump, no release, and no update for end users.
-#
-# Env vars:
-#   PR_TITLE — the PR title to validate
-#   HEAD_REF — the source branch name (for exemption logic)
-#
-# Exit codes:
-#   0 — valid (or exempt)
-#   1 — invalid
+# Validates PR title for PRs targeting `main`: dev->main squash needs a release-triggering
+# Conventional Commit type or release-please skips the bump. Env: PR_TITLE, HEAD_REF. Exit: 0/1.
 
 set -euo pipefail
 

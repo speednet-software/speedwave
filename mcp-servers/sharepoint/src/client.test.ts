@@ -11,6 +11,7 @@ import {
   SharePointConfig,
   validateGraphSiteId,
   resolveCompositeSiteId,
+  GraphApiError,
 } from './client.js';
 import fs from 'fs/promises';
 import { createWriteStream } from 'fs';
@@ -105,9 +106,7 @@ describe('SharePointClient', () => {
     vi.restoreAllMocks();
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Constructor & Configuration
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Constructor & Configuration ────────────────────────────────────────────────────────────────
 
   describe('constructor', () => {
     it('should initialize with valid config', () => {
@@ -280,6 +279,20 @@ describe('SharePointClient', () => {
       );
     });
 
+    it('rewrites 429 / activityLimitReached with a retry hint', () => {
+      expect(SharePointClient.formatError(new Error('429 Too Many Requests'))).toMatch(
+        /Rate limited.*retry/
+      );
+      expect(SharePointClient.formatError(new Error('activityLimitReached'))).toMatch(
+        /Rate limited/
+      );
+    });
+
+    it('rewrites 423 / resourceLocked', () => {
+      expect(SharePointClient.formatError(new Error('423 Locked'))).toMatch(/locked/i);
+      expect(SharePointClient.formatError(new Error('resourceLocked'))).toMatch(/locked/i);
+    });
+
     it('rewrites security check / traversal errors', () => {
       expect(SharePointClient.formatError(new Error('security check failed'))).toMatch(
         /security check failed/
@@ -296,9 +309,203 @@ describe('SharePointClient', () => {
     it('handles errors without message (truthy empty)', () => {
       expect(SharePointClient.formatError({ message: undefined })).toMatch(/SharePoint API error/);
     });
+
+    it('classifies a GraphApiError by its status, not by numeric substrings in the URL-bearing message', () => {
+      // A list-item id of "429"/"423" embedded in the Graph URL must not be mistaken for the
+      // HTTP status when the real status is a genuine, unrelated failure.
+      const notFoundOnItem429 = new GraphApiError(
+        'Graph API GET https://graph.microsoft.com/v1.0/sites/S1/lists/L1/items/429 failed: 404 Not Found',
+        404
+      );
+      expect(SharePointClient.formatError(notFoundOnItem429)).toMatch(/Resource not found/);
+      expect(SharePointClient.formatError(notFoundOnItem429)).not.toMatch(/Rate limited/);
+
+      const serverErrorOnItem423 = new GraphApiError(
+        'Graph API GET https://graph.microsoft.com/v1.0/sites/S1/lists/L1/items/423 failed: 500 Internal Server Error',
+        500
+      );
+      expect(SharePointClient.formatError(serverErrorOnItem423)).not.toMatch(/locked/i);
+    });
+
+    it('still classifies a genuine GraphApiError 429/423 by status', () => {
+      const rateLimited = new GraphApiError('Graph API GET https://x/items/1 failed: 429', 429);
+      expect(SharePointClient.formatError(rateLimited)).toMatch(/Rate limited/);
+
+      const locked = new GraphApiError('Graph API GET https://x/items/1 failed: 423', 423);
+      expect(SharePointClient.formatError(locked)).toMatch(/locked/i);
+    });
   });
 
   describe('callGraphAPI', () => {
+    it('retries the resolve and unwedges when a failed tracker retry succeeds', async () => {
+      // Simulate a prior warmup failure on a path-form siteId.
+      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Retry:';
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+      fetchMock
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await expect(client.listFiles()).resolves.not.toThrow();
+
+      expect(client.statusTracker.getStatus()).toBe('ok');
+      // The retried list call must target the refreshed composite siteId, not the
+      // stale path-form id embedded in the URL the caller built before the resolve.
+      const listUrl = fetchMock.mock.calls[1][0] as string;
+      expect(listUrl).toContain(
+        'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222'
+      );
+      expect(listUrl).not.toContain(':/sites/Retry:');
+      // A later call must go straight through without re-resolving.
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      await expect(client.listFiles()).resolves.not.toThrow();
+    });
+
+    it('rewrites only the /sites/{siteId} path segment, not a coincidental substring match elsewhere in the URL', async () => {
+      // A stale siteId whose bare-word form ("Docs") could also legitimately appear as an
+      // unrelated URL segment (e.g. a folder path) — the fix must not touch that occurrence.
+      const staleSiteId = 'Docs:/sites/Docs:';
+      client.getConfig().siteId = staleSiteId;
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+      fetchMock
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+          }),
+        })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+      await client.graphRequest('GET', `/sites/{site-id}/lists/L1/items?$filter=Docs:/sites/Docs:`);
+
+      const listUrl = fetchMock.mock.calls[1][0] as string;
+      // The /sites/{siteId} path segment must carry the freshly resolved composite id.
+      expect(listUrl).toContain(
+        '/sites/contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222/'
+      );
+      // The unrelated occurrence of the stale string later in the URL (the $filter value) must
+      // be left untouched — a naive whole-URL substring replace would have rewritten it too.
+      expect(listUrl).toContain('$filter=Docs:/sites/Docs:');
+    });
+
+    it('fails only the one call with a teaching error when the retry also fails', async () => {
+      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/StillDown:';
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 404'));
+      fetchMock.mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
+
+      await expect(client.listFiles()).rejects.toThrow(
+        /SharePoint site connection is not established/
+      );
+      expect(client.statusTracker.getStatus()).toBe('failed');
+    });
+
+    it('skips the resolve within the cooldown window after a failed retry (fail-fast)', async () => {
+      vi.useFakeTimers();
+      try {
+        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Cooldown:';
+        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 429'));
+        fetchMock.mockResolvedValue({ ok: false, status: 429, statusText: 'Too Many Requests' });
+
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+        const callsAfterFirst = fetchMock.mock.calls.length;
+
+        // A second call inside the cooldown fails fast without re-running the resolve.
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+        expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries the resolve again once the cooldown elapses', async () => {
+      vi.useFakeTimers();
+      try {
+        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Recover:';
+        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 429'));
+        fetchMock.mockResolvedValue({ ok: false, status: 429, statusText: 'Too Many Requests' });
+
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+
+        // Past the cooldown the worker attempts the resolve again rather than staying wedged.
+        await vi.advanceTimersByTimeAsync(30_000);
+        fetchMock.mockReset();
+        fetchMock
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              id: 'contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+            }),
+          })
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+
+        await expect(client.listFiles()).resolves.not.toThrow();
+        expect(client.statusTracker.getStatus()).toBe('ok');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rethrows OAuthScopeMismatchError from the resolve retry, not the generic config error', async () => {
+      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+      client.getConfig().siteId = 'contoso.sharepoint.com:/sites/Scope:';
+      client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
+      mockAuthedRequest.mockRejectedValueOnce(
+        new OAuthScopeMismatchError('Sites.Manage.All not granted')
+      );
+
+      await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+    });
+
+    it('arms the resolve cooldown on an OAuthScopeMismatchError too, throttling a tool-call burst', async () => {
+      vi.useFakeTimers();
+      try {
+        const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+        client.getConfig().siteId = 'contoso.sharepoint.com:/sites/ScopeBurst:';
+        client.statusTracker.setFailed(new Error('SharePoint siteId resolve failed: 401'));
+        mockAuthedRequest.mockRejectedValue(
+          new OAuthScopeMismatchError('Sites.Manage.All not granted')
+        );
+
+        await expect(client.listFiles()).rejects.toBeInstanceOf(OAuthScopeMismatchError);
+        const resolveCallsAfterFirst = mockAuthedRequest.mock.calls.length;
+
+        // A second call inside the cooldown must fail fast without a fresh network resolve,
+        // exactly like every other wedged-resolve failure mode.
+        await expect(client.listFiles()).rejects.toThrow(
+          /SharePoint site connection is not established/
+        );
+        expect(mockAuthedRequest.mock.calls.length).toBe(resolveCallsAfterFirst);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not short-circuit when statusTracker is ok', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      client.statusTracker.setOk();
+
+      await expect(client.listFiles()).resolves.not.toThrow();
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    it('does not short-circuit when statusTracker is unknown (default)', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ value: [] }) });
+      expect(client.statusTracker.getStatus()).toBe('unknown');
+
+      await expect(client.listFiles()).resolves.not.toThrow();
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
     it('should call Graph API with authorization header', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -476,9 +683,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Path Handling
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Path Handling ──────────────────────────────────────────────────────────────────────────────
 
   describe('encodeGraphPath', () => {
     it('should encode path segments for Graph API', async () => {
@@ -638,9 +843,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Tool Implementations
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Tool Implementations ───────────────────────────────────────────────────────────────────────
 
   describe('listFiles', () => {
     it('should list files in base directory', async () => {
@@ -858,6 +1061,34 @@ describe('SharePointClient', () => {
       });
 
       await expect(client.getFileMetadata('file-1')).rejects.toThrow('Failed to get file metadata');
+    });
+
+    it('falls back to a generic message when the error body is not JSON', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON');
+        },
+      });
+
+      await expect(client.getFileMetadata('file-1')).rejects.toThrow('Failed to get file metadata');
+    });
+
+    it('tags the thrown error with the response status as a GraphApiError even on a non-JSON body', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: async () => {
+          throw new SyntaxError('Unexpected token < in JSON');
+        },
+      });
+
+      await expect(client.getFileMetadata('file-1')).rejects.toMatchObject({
+        status: 404,
+      });
     });
   });
 
@@ -1140,7 +1371,7 @@ describe('SharePointClient', () => {
       );
     });
 
-    it('throws when no download URL in metadata', async () => {
+    it('throws when no download URL in metadata, with a hint on likely causes', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -1151,7 +1382,7 @@ describe('SharePointClient', () => {
       });
 
       await expect(client.downloadFile('docs/file.txt', '/workspace/file.txt')).rejects.toThrow(
-        'No download URL available for file'
+        'No download URL available for file. This can happen if the item is a folder, is checked out to another user, or is an online-only document type; verify with getFileFull or listFileIds first.'
       );
     });
 
@@ -1457,9 +1688,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Empty Folder Support
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Empty Folder Support ───────────────────────────────────────────────────────────────────────
 
   describe('createRemoteFolder', () => {
     it('should create a new folder successfully', async () => {
@@ -1668,9 +1897,7 @@ describe('SharePointClient', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Factory & Initialization
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Factory & Initialization ───────────────────────────────────────────────────────────────────
 
   describe('initializeSharePointClient', () => {
     const originalEnv = process.env.TOKENS_DIR;
@@ -2126,6 +2353,18 @@ describe('SharePointClient', () => {
       // The non-Error value made it into the warning message verbatim.
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('non-error string failure'));
       warnSpy.mockRestore();
+    });
+
+    it('propagates OAuthScopeMismatchError instead of masking it as a network error', async () => {
+      const { OAuthScopeMismatchError } = await import('@speedwave/mcp-shared');
+      global.fetch = vi.fn() as unknown as typeof fetch;
+      mockAuthedRequest.mockRejectedValueOnce(
+        new OAuthScopeMismatchError('Sites.Manage.All not granted')
+      );
+
+      await expect(
+        resolveCompositeSiteId('contoso.sharepoint.com:/sites/X:', 'tok', { refreshOn401: true })
+      ).rejects.toBeInstanceOf(OAuthScopeMismatchError);
     });
 
     it('passes an AbortSignal to the cold-start fetch (timeout guard against hangs)', async () => {

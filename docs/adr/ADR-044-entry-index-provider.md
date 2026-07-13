@@ -1,6 +1,6 @@
 # ADR-044: EntryIndexProvider — Atomic Counter for Stable Entry Keys
 
-> **Status:** Retired (2026-06-10) — `EntryIndexProvider` was deleted together with the JSON-Patch wire transport (see the [ADR-042](ADR-042-json-patch-stream-protocol.md) status note). The `index` field survives on the state-tree shape; the frontend projection assigns it sequentially during `rebuildStateTree()`. This document records the original design.
+> **Status:** Retired (2026-06-10) — `EntryIndexProvider` was deleted together with the JSON-Patch wire transport (see the [ADR-042](ADR-042-json-patch-stream-protocol.md) status note). The `index` field survives on the state-tree shape; the frontend projection assigns it sequentially during `rebuildStateTree()` (`desktop/src/src/app/services/chat-state.service.ts`). This document records the original design.
 > **Context:** Every conversation entry needs one stable identifier that works both as a JSON-Patch path segment and as a monotonic ordering key.
 
 ## Decision
@@ -9,10 +9,10 @@ Each session owns a single `EntryIndexProvider`, a shared atomic counter that ha
 
 ## Why
 
-- **Patch addressing (ADR-042).** Patch paths look like `/entries/<N>/blocks/0/content` and must keep pointing at the same entry across many patches. A monotonic index embeds trivially in those paths.
+- **Patch addressing (ADR-042).** Patch paths look like `/entries/<N>/blocks/0/content`, a JSON Pointer[^1] used as the address in a JSON Patch operation[^2], and must keep pointing at the same entry across many patches. A monotonic index embeds trivially in those paths.
 - **Stable across removes (ADR-046 retry).** A removed entry's index is never recycled, so a still-open patch can never silently retarget a different entry.
 - **Monotonic ordering for free.** The reducer and the MsgStore history cap (ADR-043) both assume later patches address later-or-existing entries; one integer carries both identity and order, keeping the reducer simple.
-- **`Relaxed` atomic ordering is sufficient.** Indices are identifiers, not synchronization primitives — `next()` only needs to return a unique value. The MsgStore broadcast channel already provides the happens-before ordering of the patches themselves, as long as a handler calls `next()` before pushing the patch that uses the index.
+- **`Relaxed` atomic ordering[^3] is sufficient.** Indices are identifiers, not synchronization primitives — `next()` only needs to return a unique value. The MsgStore broadcast channel already provides the happens-before ordering of the patches themselves, as long as a handler calls `next()` before pushing the patch that uses the index.
 - **Recovery without persisted state.** On resume, `start_from` rebuilds the next value from the store's history rather than persisting a separate "next index".
 
 ## How recovery works
@@ -46,6 +46,9 @@ Two integers coexist per entry: the logical `ConversationEntry.index` (monotonic
 - [ADR-042](ADR-042-json-patch-stream-protocol.md) — JSON Patch stream protocol (patch paths)
 - [ADR-043](ADR-043-msgstore-history-plus-stream.md) — MsgStore history cap and replay
 - [ADR-046](ADR-046-native-session-resume-for-retry.md) — session resume and retry removes
-- RFC 6902 — JSON Patch: https://datatracker.ietf.org/doc/html/rfc6902
-- RFC 6901 — JSON Pointer: https://datatracker.ietf.org/doc/html/rfc6901
-- `std::sync::atomic::Ordering::Relaxed`: https://doc.rust-lang.org/std/sync/atomic/enum.Ordering.html#variant.Relaxed
+
+[^1]: [RFC 6901: JavaScript Object Notation (JSON) Pointer](https://datatracker.ietf.org/doc/html/rfc6901) - defines the `/entries/0/blocks/0/content`-style path syntax used to address a value within a JSON document.
+
+[^2]: [RFC 6902: JavaScript Object Notation (JSON) Patch](https://datatracker.ietf.org/doc/html/rfc6902) - defines the `add`/`replace`/`remove`-style patch operations, each addressed by a JSON Pointer path.
+
+[^3]: [`std::sync::atomic::Ordering::Relaxed`](https://doc.rust-lang.org/std/sync/atomic/enum.Ordering.html#variant.Relaxed) - Rust standard library docs: "no ordering constraints, only atomic operations," i.e. it guarantees atomicity of the operation but no cross-thread ordering guarantee beyond that.

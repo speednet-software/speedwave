@@ -8,13 +8,12 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-//=============================================================================
-// Types
-//=============================================================================
+// ── Types ──────────────────────────────────────────────────────────────
 
 /** Input parameters for the listCalendars tool (no params required). */
 type ListCalendarsParams = Record<string, never>;
@@ -77,15 +76,17 @@ interface DeleteEventParams {
   id: string;
 }
 
-//=============================================================================
-// Tool Definitions
-//=============================================================================
+// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listCalendarsTool: Tool = {
   name: 'listCalendars',
   description: 'List all calendars available on this device',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'calendar' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'calendar',
+  },
   keywords: ['os', 'calendar', 'calendars', 'list', 'schedule'],
   example: 'const { calendars } = await os.listCalendars()',
   inputSchema: {
@@ -120,18 +121,26 @@ const listCalendarsTool: Tool = {
 
 const listEventsTool: Tool = {
   name: 'listEvents',
-  description: 'List calendar events within a date range',
+  description:
+    'List calendar events within a date range. If start/end are omitted, defaults to the range [now, now+7 days).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'calendar' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'calendar',
+  },
   keywords: ['os', 'calendar', 'events', 'list', 'schedule', 'meetings', 'appointments'],
   example:
     'const { events } = await os.listEvents({ start: "2025-01-13T00:00:00Z", end: "2025-01-17T23:59:59Z" })',
   inputSchema: {
     type: 'object',
     properties: {
-      calendar_id: { type: 'string', description: 'Filter by calendar ID' },
-      start: { type: 'string', description: 'Start date in ISO8601 format' },
-      end: { type: 'string', description: 'End date in ISO8601 format' },
+      calendar_id: {
+        type: 'string',
+        description: 'Filter by calendar id or its exact display name',
+      },
+      start: { type: 'string', description: 'Start date in ISO8601 format (default: now)' },
+      end: { type: 'string', description: 'End date in ISO8601 format (default: now + 7 days)' },
       limit: { type: 'number', description: 'Max events to return (default 20)' },
     },
   },
@@ -178,13 +187,21 @@ const getEventTool: Tool = {
   name: 'getEvent',
   description: 'Get a specific calendar event by ID',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'calendar' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'calendar',
+  },
   keywords: ['os', 'calendar', 'event', 'get', 'detail', 'show', 'meeting'],
   example: 'const event = await os.getEvent({ id: "evt-123" })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Event ID' },
+      id: {
+        type: 'string',
+        description:
+          'Event ID (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
     },
     required: ['id'],
   },
@@ -216,7 +233,11 @@ const createEventTool: Tool = {
   name: 'createEvent',
   description: 'Create a new calendar event',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'calendar' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'calendar',
+  },
   keywords: ['os', 'calendar', 'event', 'create', 'new', 'add', 'meeting', 'schedule'],
   example:
     'const { id } = await os.createEvent({ summary: "Team standup", start: "2025-01-15T09:00:00Z", end: "2025-01-15T09:30:00Z" })',
@@ -226,7 +247,11 @@ const createEventTool: Tool = {
       summary: { type: 'string', description: 'Event title' },
       start: { type: 'string', description: 'Start time in ISO8601 format' },
       end: { type: 'string', description: 'End time in ISO8601 format' },
-      calendar_id: { type: 'string', description: 'Target calendar ID (uses default if omitted)' },
+      calendar_id: {
+        type: 'string',
+        description:
+          'Target calendar id or its exact display name (uses default calendar if omitted)',
+      },
       location: { type: 'string', description: 'Event location' },
       description: { type: 'string', description: 'Event description/notes' },
       all_day: { type: 'boolean', description: 'Whether this is an all-day event' },
@@ -268,14 +293,22 @@ const updateEventTool: Tool = {
   name: 'updateEvent',
   description: 'Update an existing calendar event',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'calendar' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'calendar',
+  },
   keywords: ['os', 'calendar', 'event', 'update', 'edit', 'modify', 'reschedule'],
   example:
     'await os.updateEvent({ id: "evt-123", summary: "Updated meeting title", start: "2025-01-15T10:00:00Z", end: "2025-01-15T11:00:00Z" })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Event ID to update' },
+      id: {
+        type: 'string',
+        description:
+          'Event ID to update (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
       summary: { type: 'string', description: 'New event title' },
       start: { type: 'string', description: 'New start time in ISO8601 format' },
       end: { type: 'string', description: 'New end time in ISO8601 format' },
@@ -313,13 +346,21 @@ const deleteEventTool: Tool = {
   name: 'deleteEvent',
   description: 'Delete a calendar event',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'calendar' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'calendar',
+  },
   keywords: ['os', 'calendar', 'event', 'delete', 'remove', 'cancel'],
   example: 'await os.deleteEvent({ id: "evt-123" })',
   inputSchema: {
     type: 'object',
     properties: {
-      id: { type: 'string', description: 'Event ID to delete' },
+      id: {
+        type: 'string',
+        description:
+          'Event ID to delete (must be the exact id returned by a list/get/create call; names are not accepted)',
+      },
     },
     required: ['id'],
   },
@@ -337,9 +378,7 @@ const deleteEventTool: Tool = {
   ],
 };
 
-//=============================================================================
-// Handlers
-//=============================================================================
+// ── Handlers ──────────────────────────────────────────────────────────
 
 /**
  * Lists all calendars available on this device.
@@ -439,9 +478,7 @@ export async function handleDeleteEvent(params: DeleteEventParams): Promise<Tool
   return { success: true, data: result.parsed };
 }
 
-//=============================================================================
-// Export
-//=============================================================================
+// ── Export ────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all calendar operations. */
 export function createCalendarTools(): ToolDefinition[] {

@@ -138,16 +138,14 @@ impl LlmConfig {
         self.active_provider().is_none()
     }
 
-    /// Narrower than [`is_unconfigured`](Self::is_unconfigured): true only for an
-    /// explicit logout (v2-shaped, active cleared) vs. never-configured. Exists
-    /// solely to pick bail wording in `apply_llm_config_in` — not a gate.
+    /// Narrower than [`is_unconfigured`](Self::is_unconfigured): true only for explicit logout
+    /// (v2-shaped, active cleared). Picks bail wording in `apply_llm_config_in` — not a gate.
     pub(crate) fn is_logged_out(&self) -> bool {
         self.is_v2_shaped() && self.active.is_none()
     }
 
-    /// Selects an Anthropic provider as active, adding an `anthropic` OAuth
-    /// entry if none exists. The active pointer mirrors the entry's own model
-    /// (provenance, ADR-073; foreign shapes cleared). True when state changed.
+    /// Selects an Anthropic provider active, adding an `anthropic` OAuth entry if none exists
+    /// (mirrors the entry's own model, ADR-073; foreign shapes cleared). Returns true if changed.
     pub fn set_active_to_anthropic(&mut self) -> bool {
         let (id, model) = match self.providers.iter().find(|p| p.kind.is_anthropic()) {
             Some(entry) => (entry.id.clone(), entry.model.clone()),
@@ -670,7 +668,7 @@ pub enum OtlpProtocol {
 
 /// User-layer OTLP telemetry config. Top-level user-only, like `ui`. Field
 /// semantics mirror [`TelemetryField`](crate::telemetry_env::TelemetryField).
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct TelemetryConfig {
     /// Master switch: emit telemetry at all.
     pub enabled: Option<bool>,
@@ -702,9 +700,48 @@ pub struct TelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
+// Manual Debug (headers is a secret); exhaustive destructure so a new field
+// cannot be added without updating this impl.
+impl std::fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            endpoint,
+            protocol,
+            export_metrics,
+            export_logs,
+            headers,
+            resource_attributes,
+            include_account_uuid,
+            log_user_prompts,
+            log_assistant_responses,
+            log_tool_details,
+            log_raw_api_bodies,
+            metric_export_interval_ms,
+            logs_export_interval_ms,
+        } = self;
+        f.debug_struct("TelemetryConfig")
+            .field("enabled", enabled)
+            .field("endpoint", endpoint)
+            .field("protocol", protocol)
+            .field("export_metrics", export_metrics)
+            .field("export_logs", export_logs)
+            .field("headers", &headers.as_ref().map(|_| "[redacted]"))
+            .field("resource_attributes", resource_attributes)
+            .field("include_account_uuid", include_account_uuid)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_assistant_responses", log_assistant_responses)
+            .field("log_tool_details", log_tool_details)
+            .field("log_raw_api_bodies", log_raw_api_bodies)
+            .field("metric_export_interval_ms", metric_export_interval_ms)
+            .field("logs_export_interval_ms", logs_export_interval_ms)
+            .finish()
+    }
+}
+
 /// MDM-layer telemetry policy. Presence IS the lock; unknown keys are rejected
 /// (fail-closed) so a misspelled admin key never silently unlocks (ADR-076).
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedTelemetryConfig {
     /// Force the master switch (kill-switch when `false`).
@@ -737,6 +774,45 @@ pub struct ManagedTelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
+// Manual Debug (headers is a secret); exhaustive destructure so a new field
+// cannot be added without updating this impl.
+impl std::fmt::Debug for ManagedTelemetryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            endpoint,
+            protocol,
+            export_metrics,
+            export_logs,
+            headers,
+            resource_attributes,
+            include_account_uuid,
+            log_user_prompts,
+            log_assistant_responses,
+            log_tool_details,
+            log_raw_api_bodies,
+            metric_export_interval_ms,
+            logs_export_interval_ms,
+        } = self;
+        f.debug_struct("ManagedTelemetryConfig")
+            .field("enabled", enabled)
+            .field("endpoint", endpoint)
+            .field("protocol", protocol)
+            .field("export_metrics", export_metrics)
+            .field("export_logs", export_logs)
+            .field("headers", &headers.as_ref().map(|_| "[redacted]"))
+            .field("resource_attributes", resource_attributes)
+            .field("include_account_uuid", include_account_uuid)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_assistant_responses", log_assistant_responses)
+            .field("log_tool_details", log_tool_details)
+            .field("log_raw_api_bodies", log_raw_api_bodies)
+            .field("metric_export_interval_ms", metric_export_interval_ms)
+            .field("logs_export_interval_ms", logs_export_interval_ms)
+            .finish()
+    }
+}
+
 /// User-layer PII policy selection: a named template plus optional custom
 /// overrides. `None` (no `policy` key) resolves to the compiled-in default.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
@@ -763,7 +839,7 @@ pub struct ManagedPiiPolicyConfig {
 }
 
 /// Fully resolved telemetry after the per-field merge + cross-field gates.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 pub struct ResolvedTelemetry {
     /// Resolved master switch.
     pub enabled: bool,
@@ -801,6 +877,51 @@ pub struct ResolvedTelemetry {
     pub kill_switch: bool,
 }
 
+// Manual Debug (headers is a secret); exhaustive destructure so a new field
+// cannot be added without updating this impl.
+impl std::fmt::Debug for ResolvedTelemetry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            endpoint,
+            protocol,
+            export_metrics,
+            export_logs,
+            headers,
+            resource_attributes,
+            include_account_uuid,
+            log_user_prompts,
+            log_assistant_responses,
+            log_tool_details,
+            log_raw_api_bodies,
+            metric_export_interval_ms,
+            logs_export_interval_ms,
+            locked_keys,
+            any_locked,
+            kill_switch,
+        } = self;
+        f.debug_struct("ResolvedTelemetry")
+            .field("enabled", enabled)
+            .field("endpoint", endpoint)
+            .field("protocol", protocol)
+            .field("export_metrics", export_metrics)
+            .field("export_logs", export_logs)
+            .field("headers", &headers.as_ref().map(|_| "[redacted]"))
+            .field("resource_attributes", resource_attributes)
+            .field("include_account_uuid", include_account_uuid)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_assistant_responses", log_assistant_responses)
+            .field("log_tool_details", log_tool_details)
+            .field("log_raw_api_bodies", log_raw_api_bodies)
+            .field("metric_export_interval_ms", metric_export_interval_ms)
+            .field("logs_export_interval_ms", logs_export_interval_ms)
+            .field("locked_keys", locked_keys)
+            .field("any_locked", any_locked)
+            .field("kill_switch", kill_switch)
+            .finish()
+    }
+}
+
 impl ResolvedTelemetry {
     /// All-off value used as the fail-closed placeholder when resolution fails;
     /// the invalid policy is hard-stopped at boot, not carried onward.
@@ -821,11 +942,8 @@ impl ResolvedTelemetry {
 
 /// Advisory only: gRPC conventionally serves :4317, HTTP :4318. A mismatch often
 /// means the export silently fails at the collector; never a hard error.
-fn warn_on_protocol_port_mismatch(protocol: OtlpProtocol, endpoint: Option<&str>) {
-    let Some(port) = endpoint
-        .and_then(|e| e.parse::<url::Url>().ok())
-        .and_then(|u| u.port())
-    else {
+fn warn_on_protocol_port_mismatch(protocol: OtlpProtocol, port: Option<u16>) {
+    let Some(port) = port else {
         return;
     };
     let mismatch = match protocol {
@@ -986,16 +1104,14 @@ pub fn resolve_telemetry(
     }
 
     // Cross-field gate: enabled=true needs a valid endpoint (fail-closed).
-    match &endpoint_opt {
-        Some(ep) => {
-            crate::url_validation::validate_collector_url(
-                ep,
-                crate::url_validation::PrivatePolicy::AllowLoopback,
-            )
-            .map_err(|e| anyhow::anyhow!("invalid OTLP endpoint: {e}"))?;
-        }
+    let parsed_endpoint = match &endpoint_opt {
+        Some(ep) => crate::url_validation::validate_collector_url(
+            ep,
+            crate::url_validation::PrivatePolicy::AllowLoopback,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid OTLP endpoint: {e}"))?,
         None => anyhow::bail!("telemetry enabled but no OTLP endpoint configured"),
-    }
+    };
     if let Some(h) = &headers_opt {
         if h.chars().any(|c| c.is_control()) {
             anyhow::bail!("OTLP headers must not contain control characters");
@@ -1005,7 +1121,7 @@ pub fn resolve_telemetry(
     if metric_export_interval_ms == Some(0) || logs_export_interval_ms == Some(0) {
         anyhow::bail!("OTLP export interval must be greater than 0");
     }
-    warn_on_protocol_port_mismatch(protocol, endpoint_opt.as_deref());
+    warn_on_protocol_port_mismatch(protocol, parsed_endpoint.port());
 
     Ok(ResolvedTelemetry {
         enabled: true,
@@ -1028,12 +1144,29 @@ pub fn resolve_telemetry(
     })
 }
 
+/// True when MDM is actually implicated in a `resolve_telemetry` failure: MDM is
+/// present AND the same user config resolves cleanly without it.
+fn telemetry_error_implicates_mdm(
+    user: Option<&TelemetryConfig>,
+    managed: Option<&ManagedTelemetryConfig>,
+) -> bool {
+    managed.is_some() && resolve_telemetry(user, None).is_ok()
+}
+
 /// Global boot gate: resolves the telemetry policy once so every MDM error class
 /// fails closed at startup. A malformed user config degrades to defaults (ADR-076).
 pub fn check_telemetry_policy_at_boot() -> anyhow::Result<()> {
     let user = load_user_config().unwrap_or_default();
     let managed = crate::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
-    resolve_telemetry(user.telemetry.as_ref(), managed.as_ref())?;
+    if let Err(e) = resolve_telemetry(user.telemetry.as_ref(), managed.as_ref()) {
+        if telemetry_error_implicates_mdm(user.telemetry.as_ref(), managed.as_ref()) {
+            return Err(e);
+        }
+        // A pure user-config error must not be mislabeled as an org policy error.
+        return Err(anyhow::anyhow!(
+            "invalid local telemetry configuration (no organization policy involved): {e}"
+        ));
+    }
     Ok(())
 }
 
@@ -1117,9 +1250,8 @@ pub fn resolve_project_config(
     )
 }
 
-/// Testable variant of [`resolve_project_config`] with an explicit data dir —
-/// every on-disk lookup (legacy-key migration, has_api_key disk-sync, anthropic
-/// secret) resolves under `data_dir` so the migrate→sync ordering can be tested.
+/// Testable variant of [`resolve_project_config`] with an explicit data dir — legacy-key migration,
+/// has_api_key disk-sync, and anthropic secret lookups resolve under it so ordering is testable.
 pub(crate) fn resolve_project_config_in(
     data_dir: &Path,
     project_dir: &Path,
@@ -1237,12 +1369,27 @@ pub(crate) fn resolve_project_config_in_with_managed(
 
     // Re-force: strip any user value for an MDM-locked key, then set the locked
     // value from the built map — this is what the user cannot beat.
-    if let Ok(tel) = &resolved_tel {
-        env.retain(|k, _| !tel.locked_keys.contains(k));
-        for (k, v) in &tel_env {
-            if tel.locked_keys.contains(k) {
-                env.insert(k.clone(), v.clone());
+    match &resolved_tel {
+        Ok(tel) => {
+            env.retain(|k, _| !tel.locked_keys.contains(k));
+            for (k, v) in &tel_env {
+                if tel.locked_keys.contains(k) {
+                    env.insert(k.clone(), v.clone());
+                }
             }
+        }
+        // Fail closed: an unresolvable policy strips any telemetry-shaped key the
+        // user layer set directly, then re-forces the all-off map.
+        Err(_) => {
+            for f in crate::telemetry_env::TelemetryField::ALL {
+                if let Some(k) = crate::telemetry_env::env_key_for(*f) {
+                    env.remove(k);
+                }
+            }
+            env.remove(crate::telemetry_env::ENABLE_KEY);
+            env.extend(crate::telemetry_env::telemetry_env_map(
+                &ResolvedTelemetry::disabled(),
+            ));
         }
     }
 
@@ -1253,21 +1400,28 @@ pub(crate) fn resolve_project_config_in_with_managed(
     );
     apply_repo_model_suggestion(&mut llm, repo_model_suggestion);
 
-    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the
-    // disk-sync below — otherwise the sync re-derives has_api_key from the (still
-    // empty) new path and the migration, gated on the new file, never runs.
+    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the disk-sync below —
+    // otherwise sync re-derives has_api_key from the still-empty new path and migration never runs.
     crate::compose::migrate_legacy_local_key_in(data_dir, project_name, &llm);
 
-    // Re-derive each provider's `has_api_key` from disk — the key file is the
-    // SSOT, the persisted flag only an echo. Every renderer (proxy/compose
-    // injection) reads the resolved config, so this is the single sync point.
+    // Re-derive each provider's `has_api_key` from disk — the key file is SSOT, the persisted flag
+    // only an echo. Every renderer (proxy/compose) reads resolved config; the single sync point.
     llm.sync_has_api_key_from_disk_in(data_dir, project_name);
 
-    // Local LLMs get the full default Claude Code system prompt.
-    let flags: Vec<String> = defaults::DEFAULT_FLAGS
+    // Local LLMs keep the full default system prompt; two local-only additions
+    // help small open models: stable prompt prefix (KV cache) + skill recall.
+    let mut flags: Vec<String> = defaults::DEFAULT_FLAGS
         .iter()
         .map(|s| s.to_string())
         .collect();
+    if llm
+        .active_provider()
+        .is_some_and(|e| e.kind == LlmProviderKind::Local)
+    {
+        flags.push("--exclude-dynamic-system-prompt-sections".to_string());
+        flags.push("--append-system-prompt".to_string());
+        flags.push(crate::prompts::local_llm_skills_nudge().to_string());
+    }
 
     // Fail-closed: an unresolvable policy degrades to disabled(); the invalid
     // policy is hard-stopped at boot by check_telemetry_policy_at_boot.
@@ -1625,8 +1779,56 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
     })
 }
 
+/// Test-only seam: injects `managed = None` so tests never read the real host
+/// `managed-config.json` (production has no such override — MDM stays un-bypassable).
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+fn resolve_project_config_in_for_test(
+    data_dir: &Path,
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
+    resolve_project_config_in_with_managed(data_dir, project_dir, user_config, project_name, None)
+}
+
+#[cfg(test)]
+fn resolve_project_config_for_test(
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
+    resolve_project_config_in_for_test(
+        crate::consts::data_dir(),
+        project_dir,
+        user_config,
+        project_name,
+    )
+}
+
+#[cfg(test)]
+fn resolve_claude_config_for_test(
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+) -> ResolvedClaudeConfig {
+    resolve_project_config_for_test(project_dir, user_config, project_name).0
+}
+
+#[cfg(test)]
+fn resolve_integrations_for_test(
+    project_dir: &Path,
+    user_config: &SpeedwaveUserConfig,
+    project_name: &str,
+) -> ResolvedIntegrationsConfig {
+    resolve_project_config_for_test(project_dir, user_config, project_name).1
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -1666,9 +1868,8 @@ mod tests {
 
     #[test]
     fn is_unconfigured_true_for_dangling_active() {
-        // Dangling active (points at a missing entry) is unconfigured: render
-        // must refuse rather than silently fall back to the Anthropic default
-        // for a config that names a provider id which doesn't exist.
+        // Dangling active (missing entry) is unconfigured: render must refuse rather than silently
+        // fall back to the Anthropic default for a nonexistent provider id.
         let llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![],
@@ -2140,7 +2341,7 @@ mod tests {
     fn test_resolve_without_any_overrides() {
         let user_config = SpeedwaveUserConfig::default();
         let tmp = tempfile::tempdir().unwrap();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         assert_eq!(resolved.env.get("ANTHROPIC_MODEL"), None);
         assert!(resolved
             .flags
@@ -2174,7 +2375,7 @@ mod tests {
         .unwrap();
 
         let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         assert_eq!(
             resolved.env.get("ANTHROPIC_MODEL"),
             Some(&"claude-opus-4-6".to_string())
@@ -2227,7 +2428,7 @@ mod tests {
             telemetry: None,
         };
 
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         // User override wins over both repo (.speedwave.json) and base_env.
         assert_eq!(
             resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
@@ -2360,6 +2561,44 @@ mod tests {
     }
 
     #[test]
+    fn mdm_implicated_false_for_pure_user_error_no_managed_present() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("ftp://x/".into()),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&user), None).is_err());
+        assert!(!telemetry_error_implicates_mdm(Some(&user), None));
+    }
+
+    #[test]
+    fn mdm_implicated_false_when_user_error_persists_without_mdm() {
+        // MDM present but not the cause: the same user config still fails once MDM is removed.
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("ftp://x/".into()),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            log_user_prompts: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(Some(&user), Some(&managed)).is_err());
+        assert!(!telemetry_error_implicates_mdm(Some(&user), Some(&managed)));
+    }
+
+    #[test]
+    fn mdm_implicated_true_when_removing_mdm_fixes_it() {
+        // MDM locks enabled=true with no endpoint of its own; the user layer alone is fine.
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(None, Some(&managed)).is_err());
+        assert!(telemetry_error_implicates_mdm(None, Some(&managed)));
+    }
+
+    #[test]
     fn telemetry_mdm_enabled_lock_is_in_locked_keys_both_directions() {
         let off = ManagedTelemetryConfig {
             enabled: Some(false),
@@ -2405,6 +2644,31 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_telemetry(Some(&u), None).is_err());
+    }
+
+    #[test]
+    fn telemetry_debug_impls_redact_headers() {
+        let secret = "Authorization=Bearer tok-3ns";
+        let user = TelemetryConfig {
+            headers: Some(secret.into()),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            headers: Some(secret.into()),
+            ..Default::default()
+        };
+        let resolved = ResolvedTelemetry {
+            headers: Some(secret.into()),
+            ..Default::default()
+        };
+        for dbg in [
+            format!("{user:?}"),
+            format!("{managed:?}"),
+            format!("{resolved:?}"),
+        ] {
+            assert!(!dbg.contains("tok-3ns"), "leaked: {dbg}");
+            assert!(dbg.contains("[redacted]"));
+        }
     }
 
     #[test]
@@ -2590,6 +2854,59 @@ mod tests {
     }
 
     #[test]
+    fn resolve_telemetry_err_strips_raw_user_env_telemetry_keys() {
+        // MDM locks enabled=true with no endpoint of its own -> resolve_telemetry errs.
+        // A direct user claude.env override must not survive that failure unfiltered.
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: Some(ClaudeOverrides {
+                    env: Some(HashMap::from([
+                        ("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "1".into()),
+                        (
+                            "OTEL_EXPORTER_OTLP_ENDPOINT".into(),
+                            "https://user-picked-host.example.com".into(),
+                        ),
+                    ])),
+                    settings: None,
+                    llm: None,
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(resolve_telemetry(None, Some(&managed)).is_err());
+        let resolved = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Some(&managed),
+        )
+        .0;
+        assert_eq!(
+            resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
+            Some(&"0".to_string()),
+            "an unresolvable policy must force the master switch off, not pass the user's raw value"
+        );
+        assert!(
+            !resolved.env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            "a raw user-set OTEL endpoint must not survive a failed telemetry resolve"
+        );
+        assert!(!resolved.telemetry.enabled);
+    }
+
+    #[test]
     fn user_telemetry_endpoint_reaches_env_without_mdm() {
         let tmp = tempfile::tempdir().unwrap();
         let user_config = SpeedwaveUserConfig {
@@ -2653,7 +2970,7 @@ mod tests {
         .0;
         assert!(
             !resolved.telemetry.enabled
-                && resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_none(),
+                && !resolved.env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"),
             "telemetry must fail closed (disabled, no OTEL env) when the MDM policy cannot be read"
         );
     }
@@ -2740,7 +3057,7 @@ mod tests {
             telemetry: None,
         };
 
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         // User config wins; v1→v2 migration normalises `ollama` to `local`.
         assert_eq!(resolved.llm.provider.as_deref(), Some("local"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
@@ -2779,7 +3096,7 @@ mod tests {
         .unwrap();
 
         let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         // Repo provider/base_url ignored (SSRF, ADR-040): with no user-side
         // override either, the project has no real config — stays unconfigured.
         assert_eq!(resolved.llm.provider, None);
@@ -2816,7 +3133,7 @@ mod tests {
         .unwrap();
 
         let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         assert!(
             !resolved.llm.providers.iter().any(|p| p.id == "evil"),
             "repo must not inject providers: {:?}",
@@ -3590,7 +3907,7 @@ mod tests {
         .unwrap();
 
         let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         // base_url from repo config must be ignored
         assert_eq!(resolved.llm.base_url, None);
         // model from repo config is allowed
@@ -3624,7 +3941,7 @@ mod tests {
         .unwrap();
 
         let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
 
         for stripped in [
             "ANTHROPIC_BASE_URL",
@@ -3669,7 +3986,7 @@ mod tests {
         )
         .unwrap();
         let user_config = SpeedwaveUserConfig::default();
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         assert!(!resolved.env.contains_key("ld_preload"));
         assert!(!resolved.env.contains_key("Anthropic_Base_Url"));
     }
@@ -3707,7 +4024,7 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         assert_eq!(
             resolved.env.get("ANTHROPIC_BASE_URL"),
             Some(&"http://host.docker.internal:11434".to_string())
@@ -4045,18 +4362,176 @@ mod tests {
     }
 
     #[test]
-    fn resolve_does_not_inject_provider_specific_flags_for_local_provider() {
-        // Local providers are configured via env vars (compose::apply_llm_config), not CLI flags.
+    fn resolve_never_replaces_prompt_or_pins_model_for_local_provider() {
+        // Routing/model stay env-driven (compose::apply_llm_config); only the
+        // append-style skill nudge is allowed as a CLI flag.
         let tmp = tempfile::tempdir().unwrap();
         let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
-        for forbidden in ["--system-prompt-file", "--append-system-prompt", "--model"] {
+        for forbidden in ["--system-prompt-file", "--model"] {
             assert!(
                 !flags.iter().any(|f| f == forbidden),
                 "must not inject {forbidden} for local provider; flags: {flags:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_injects_skills_nudge_and_dynamic_section_exclusion_for_local_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        assert!(
+            flags
+                .iter()
+                .any(|f| f == "--exclude-dynamic-system-prompt-sections"),
+            "local provider must get the dynamic-section exclusion; flags: {flags:?}"
+        );
+        let pos = flags
+            .iter()
+            .position(|f| f == "--append-system-prompt")
+            .unwrap_or_else(|| panic!("expected --append-system-prompt; flags: {flags:?}"));
+        assert_eq!(
+            flags.get(pos + 1).map(String::as_str),
+            Some(crate::prompts::local_llm_skills_nudge()),
+            "append flag must carry the skills nudge as its value"
+        );
+    }
+
+    #[test]
+    fn resolve_injects_no_local_only_flags_for_openrouter_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut user_config = make_ollama_user_config(tmp.path(), None);
+        user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "openrouter".to_string(),
+                kind: LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("qwen/qwen3-coder".to_string()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        for forbidden in [
+            "--append-system-prompt",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
+            assert!(
+                !flags.iter().any(|f| f == forbidden),
+                "must not inject {forbidden} for openrouter provider; flags: {flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_injects_no_local_only_flags_when_local_entry_present_but_inactive() {
+        // A Local entry sitting unused in `providers` must not leak its flags onto a different
+        // active provider: the discriminator is `active`, not mere presence of a Local kind.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut user_config = make_ollama_user_config(tmp.path(), None);
+        user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "ollama".to_string(),
+                    kind: LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("llama3.3".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "openrouter".to_string(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("qwen/qwen3-coder".to_string()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "openrouter".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        for forbidden in [
+            "--append-system-prompt",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
+            assert!(
+                !flags.iter().any(|f| f == forbidden),
+                "inactive Local entry must not inject {forbidden}; flags: {flags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_injects_local_only_flags_when_active_local_coexists_with_other_provider() {
+        // Mirror case: Local IS active alongside a non-Local sibling entry: flags must still land,
+        // keyed off `active`, not the list's first/only entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut user_config = make_ollama_user_config(tmp.path(), None);
+        user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "openrouter".to_string(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("qwen/qwen3-coder".to_string()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "ollama".to_string(),
+                    kind: LlmProviderKind::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("llama3.3".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "ollama".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        });
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
+        let flags = &resolved.flags;
+        assert!(
+            flags
+                .iter()
+                .any(|f| f == "--exclude-dynamic-system-prompt-sections"),
+            "active Local entry must get the dynamic-section exclusion even with a sibling provider; flags: {flags:?}"
+        );
+        let pos = flags
+            .iter()
+            .position(|f| f == "--append-system-prompt")
+            .unwrap_or_else(|| panic!("expected --append-system-prompt; flags: {flags:?}"));
+        assert_eq!(
+            flags.get(pos + 1).map(String::as_str),
+            Some(crate::prompts::local_llm_skills_nudge()),
+            "append flag must carry the skills nudge as its value"
+        );
     }
 
     #[test]
@@ -4088,9 +4563,14 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let resolved = resolve_claude_config(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
         let flags = &resolved.flags;
-        for forbidden in ["--system-prompt-file", "--append-system-prompt", "--model"] {
+        for forbidden in [
+            "--system-prompt-file",
+            "--append-system-prompt",
+            "--model",
+            "--exclude-dynamic-system-prompt-sections",
+        ] {
             assert!(
                 !flags.iter().any(|f| f == forbidden),
                 "must not inject {forbidden} for anthropic provider; flags: {flags:?}"
@@ -4265,7 +4745,7 @@ mod tests {
     fn test_resolve_integrations_defaults_without_config() {
         let user_config = SpeedwaveUserConfig::default();
         let tmp = tempfile::tempdir().unwrap();
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
         assert_all_integrations_disabled(&resolved);
     }
 
@@ -4314,7 +4794,7 @@ mod tests {
             telemetry: None,
         };
 
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
         assert!(resolved.slack); // user override wins
         assert!(!resolved.gitlab); // repo stays
         assert!(!resolved.sharepoint); // default is disabled
@@ -4389,7 +4869,7 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
         assert!(!resolved.os_reminders); // explicitly disabled
         assert!(!resolved.os_calendar); // default is disabled
         assert!(!resolved.os_mail); // explicitly disabled
@@ -4428,7 +4908,7 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
         assert!(resolved.slack);
         assert!(!resolved.sharepoint);
         assert!(!resolved.redmine);
@@ -4546,7 +5026,7 @@ mod tests {
 
         let user_config = SpeedwaveUserConfig::default();
         let (claude, integrations) =
-            resolve_project_config(tmp.path(), &user_config, "test-project");
+            resolve_project_config_for_test(tmp.path(), &user_config, "test-project");
 
         assert_eq!(
             claude.env.get("ANTHROPIC_MODEL"),
@@ -4792,7 +5272,7 @@ mod tests {
             telemetry: None,
         };
 
-        let resolved = resolve_integrations(tmp.path(), &user_config, "test-project");
+        let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
         assert!(resolved.is_plugin_enabled("example-plugin"));
         assert!(!resolved.is_plugin_enabled("unknown"));
         assert_eq!(
@@ -5161,7 +5641,11 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod plugin_order_tests {
     use super::*;
 
@@ -5181,10 +5665,8 @@ mod plugin_order_tests {
         }
     }
 
-    /// Locks the real bug site: on a v1→v3 upgrade with a legacy local key on
-    /// disk, the full resolve must end with has_api_key==true. This fails if the
-    /// migrate→sync ordering in resolve_project_config_in is reversed (the
-    /// original bug). Drives the real resolve, unlike the proxy.rs unit test.
+    /// Locks the real bug site: a v1→v3 upgrade with a legacy local key must end has_api_key==true;
+    /// fails on reversed migrate→sync order. Real resolve, unlike proxy.rs's unit test.
     #[test]
     fn resolve_migrates_legacy_local_key_then_syncs_flag_true() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -5227,8 +5709,12 @@ mod plugin_order_tests {
             telemetry: None,
         };
 
-        let (resolved, _) =
-            resolve_project_config_in(data_dir.path(), data_dir.path(), &user_config, project);
+        let (resolved, _) = resolve_project_config_in_for_test(
+            data_dir.path(),
+            data_dir.path(),
+            &user_config,
+            project,
+        );
 
         let local = resolved
             .llm

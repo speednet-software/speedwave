@@ -1,18 +1,13 @@
 /**
- * Atlassian content-format helpers: Atlassian Document Format (Jira Cloud v3
- * write payloads) and Confluence "storage representation" bodies.
- *
- * Access-control / scope-enforcement primitives live in `./scope.ts`.
+ * Atlassian Document Format (Jira v3) and Confluence storage-representation body helpers; scope enforcement lives in `./scope.ts`.
  * @module mcp-atlassian/adf
  */
 
 import type { AdfDoc, AdfNode } from './types.js';
 
 /**
- * Convert plain text to a minimal ADF document: one paragraph per line, blank
- * lines collapsed to empty paragraphs. No inline marks — this is the "good
- * enough" representation for tool-generated content; callers needing rich
- * formatting pass a raw ADF object via {@link toAdf}.
+ * Convert plain text to a minimal ADF doc: one paragraph per line, blanks collapsed to empty ones.
+ * No inline marks; callers needing rich formatting pass a raw ADF object via {@link toAdf}.
  * @param text - Plain text (may contain `\n`).
  * @returns ADF document.
  */
@@ -42,8 +37,7 @@ export function isAdfDoc(value: unknown): value is AdfDoc {
 }
 
 /**
- * Resolve a body to ADF: pass through a pre-built ADF doc, otherwise convert
- * from plain text via {@link textToAdf}.
+ * Resolve a body to ADF: pass through a pre-built doc, else convert text via {@link textToAdf}.
  * @param body - Plain text or a raw ADF object.
  * @returns ADF document.
  */
@@ -52,10 +46,8 @@ export function toAdf(body: string | AdfDoc): AdfDoc {
 }
 
 /**
- * Wrap a value as a Confluence "storage representation" body object.
- * The caller is responsible for the content already being valid storage XHTML
- * (for tool-generated plain text, escape it first via {@link textToStorage} or
- * use {@link resolveBodyPayload}).
+ * Wrap a value as a Confluence "storage representation" body object. Caller must ensure it is
+ * already valid storage XHTML (escape via {@link textToStorage} or use {@link resolveBodyPayload}).
  * @param value - Storage-format body string.
  * @returns Confluence body value object.
  */
@@ -64,9 +56,8 @@ export function storageBody(value: string): { representation: 'storage'; value: 
 }
 
 /**
- * Minimal HTML escaping for turning plain text into a safe Confluence storage
- * body (wrapped in a single `<p>`). Not a sanitizer — only for text the worker
- * itself produces from tool input.
+ * Minimal HTML escaping for plain text into a safe Confluence storage body (single `<p>` wrap).
+ * Not a sanitizer — only for text the worker itself produces from tool input.
  * @param text - Plain text.
  * @returns A `<p>`-wrapped, HTML-escaped paragraph.
  */
@@ -82,10 +73,8 @@ export function textToStorage(text: string): string {
 export type StorageBodyInput = { storage?: string; text?: string };
 
 /**
- * Resolve a {@link StorageBodyInput} to a Confluence storage-representation body
- * object: `storage` (raw XHTML) takes precedence; otherwise `text` is HTML-escaped
- * and wrapped in a `<p>`. The single source of truth for body resolution shared
- * by the Confluence page and content domains.
+ * Resolve a {@link StorageBodyInput}: `storage` (raw XHTML) wins, else `text` is HTML-escaped and
+ * wrapped in `<p>`. SSOT for body resolution shared by the Confluence page and content domains.
  * @param body - The body input (`storage` and/or `text`).
  * @returns The Confluence body value object.
  */

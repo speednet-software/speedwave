@@ -1,6 +1,5 @@
 //! Shared log-file utilities — chmod-600 append handles, timestamped lines,
-//! size-bounded rotation. Used by Desktop's claude-session log and the
-//! mcp-os drain.
+//! size-bounded rotation. Used by Desktop's claude-session log and the mcp-os drain.
 
 use std::path::Path;
 
@@ -23,9 +22,8 @@ pub fn open_log_file(path: &Path) -> Option<std::fs::File> {
     }
 }
 
-/// Write `<ISO> [prefix: ]line` to the log. Errors silently ignored.
-/// Unbracketed ISO so `/logs` view's `ISO_TIME_RE` matches.
-/// `line` passes through `log_sanitizer::sanitize` so secrets never reach disk.
+/// Write `<ISO> [prefix: ]line` to the log (errors silently ignored); unbracketed ISO so
+/// `/logs`'s `ISO_TIME_RE` matches. `line` passes through `log_sanitizer::sanitize` first.
 pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str) {
     use std::io::Write;
     if let Some(ref mut f) = file {
@@ -39,9 +37,8 @@ pub fn write_log_line(file: &mut Option<std::fs::File>, prefix: &str, line: &str
     }
 }
 
-/// Rotate a log file if it exceeds `max_bytes` by keeping the last half
-/// (line-aligned). Best-effort. Stat-only when under threshold; full read
-/// only if truncation needed.
+/// Rotate a log file if it exceeds `max_bytes` by keeping the last half (line-aligned).
+/// Best-effort; stat-only when under threshold, full read only if truncation is needed.
 pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
     match std::fs::metadata(path) {
         Ok(m) if m.len() > max_bytes => {}
@@ -59,12 +56,14 @@ pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
     let _ = std::fs::write(path, tail);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
 

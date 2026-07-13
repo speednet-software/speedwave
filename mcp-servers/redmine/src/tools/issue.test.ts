@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
-import { ProjectScopeError } from '../client.js';
-import type { RedmineClient } from '../client.js';
+import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listIssues: Mock;
@@ -225,17 +224,20 @@ describe('issue-tools', () => {
       });
     });
 
-    it('skips resolution when resolveUser returns null', async () => {
-      mockClient.listIssues.mockResolvedValue({ issues: [], total_count: 0 });
+    it('returns a teaching error instead of silently dropping an unresolvable assigned_to', async () => {
       mockClient.resolveUser.mockResolvedValue(null);
 
       const tools = createIssueTools(mockClient as unknown as RedmineClient);
       const handler = tools.find((t) => t.tool.name === 'listIssueIds')?.handler;
 
-      await handler!({ assigned_to: 'nonexistent' });
+      const result = await handler!({ assigned_to: 'nonexistent' });
 
       expect(mockClient.resolveUser).toHaveBeenCalledWith('nonexistent');
-      expect(mockClient.listIssues).toHaveBeenCalledWith({});
+      expect(mockClient.listIssues).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ isError: true });
+      const text = (result as { content: Array<{ text: string }> }).content[0].text;
+      expect(text).toContain('nonexistent');
+      expect(text).toContain('Get a valid value from resolveUser.');
     });
 
     it('preserves assigned_to_id when already provided', async () => {
@@ -375,6 +377,29 @@ describe('issue-tools', () => {
       });
     });
 
+    it("include enum covers every value Redmine's issue show endpoint documents", () => {
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const getIssueFullTool = tools.find((t) => t.tool.name === 'getIssueFull')!;
+      const includeSchema = (
+        getIssueFullTool.tool.inputSchema.properties as Record<
+          string,
+          { items?: { enum?: string[] } }
+        >
+      ).include;
+
+      expect(includeSchema.items!.enum!.sort()).toEqual(
+        [
+          'journals',
+          'attachments',
+          'relations',
+          'children',
+          'watchers',
+          'changesets',
+          'allowed_statuses',
+        ].sort()
+      );
+    });
+
     it('handles non-existent issue', async () => {
       mockClient.showIssue.mockRejectedValue(new Error('Resource not found in Redmine.'));
 
@@ -387,6 +412,18 @@ describe('issue-tools', () => {
         content: [{ type: 'text', text: 'Error: Resource not found in Redmine.' }],
         isError: true,
       });
+    });
+
+    it('passes issue_id as formatError context on failure', async () => {
+      mockClient.showIssue.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'getIssueFull')?.handler;
+
+      await handler!({ issue_id: 9999 });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
     });
   });
 
@@ -531,6 +568,26 @@ describe('issue-tools', () => {
         subject: 'Assigned Issue',
         assigned_to_id: 42,
       });
+    });
+
+    it('returns a teaching error instead of silently creating an unassigned issue', async () => {
+      mockClient.resolveUser.mockResolvedValue(null);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssue')?.handler;
+
+      const result = await handler!({
+        project_id: 'test-project',
+        subject: 'Assigned Issue',
+        assigned_to: 'nonexistent',
+      });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('nonexistent');
+      expect(mockClient.createIssue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ isError: true });
+      const text = (result as { content: Array<{ text: string }> }).content[0].text;
+      expect(text).toContain('nonexistent');
+      expect(text).toContain('Get a valid value from resolveUser.');
     });
 
     it('handles parent_id to parent_issue_id conversion', async () => {
@@ -687,6 +744,25 @@ describe('issue-tools', () => {
       });
     });
 
+    it('returns a teaching error instead of silently no-oping the reassignment', async () => {
+      mockClient.resolveUser.mockResolvedValue(null);
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')?.handler;
+
+      const result = await handler!({
+        issue_id: 1,
+        assigned_to: 'nonexistent',
+      });
+
+      expect(mockClient.resolveUser).toHaveBeenCalledWith('nonexistent');
+      expect(mockClient.updateIssue).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ isError: true });
+      const text = (result as { content: Array<{ text: string }> }).content[0].text;
+      expect(text).toContain('nonexistent');
+      expect(text).toContain('Get a valid value from resolveUser.');
+    });
+
     it('handles non-existent issue', async () => {
       mockClient.updateIssue.mockRejectedValue(new Error('Resource not found in Redmine.'));
 
@@ -702,6 +778,18 @@ describe('issue-tools', () => {
         content: [{ type: 'text', text: 'Error: Resource not found in Redmine.' }],
         isError: true,
       });
+    });
+
+    it('passes issue_id as formatError context on failure', async () => {
+      mockClient.updateIssue.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')?.handler;
+
+      await handler!({ issue_id: 9999, subject: 'Updated' });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
     });
   });
 
@@ -743,6 +831,18 @@ describe('issue-tools', () => {
         content: [{ type: 'text', text: 'Error: Permission denied' }],
         isError: true,
       });
+    });
+
+    it('passes issue_id as formatError context on failure', async () => {
+      mockClient.commentIssue.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'commentIssue')?.handler;
+
+      await handler!({ issue_id: 1, notes: 'Comment' });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 1 });
     });
   });
 

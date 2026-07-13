@@ -31,15 +31,15 @@ This removes a whole axis of complexity at once: the relabel-loss bug, the echo/
 - the `.sherpa-onnx-version` SSOT file and its CLAUDE.md SSOT-alignment chain;
 - the MD-Release CRT-alignment prefetch scripts (`scripts/lib/fetch-sherpa-onnx-md.sh`, `scripts/dev-fetch-sherpa-cache.sh`) and the `download-sherpa-onnx` CI composite action;
 - the `tar` and `bzip2` crate dependencies, which existed only to unpack the sherpa diarization `.tar.bz2` archives;
-- the bundled `sherpa-onnx-LICENSE` and `onnxruntime-LICENSE` files, and the speaker-diarization-models section of `transcription-models-LICENSE`;
+- the bundled `sherpa-onnx-LICENSE` (Apache-2.0[^1]) and `onnxruntime-LICENSE` (MIT[^2]) files, and the speaker-diarization-models section of `transcription-models-LICENSE`;
 - the `diarizer.rs` runtime module, the Tauri `relabel_speaker` command, and the `expected_speakers` parameter.
 
-Because sherpa-onnx was the only library that forced the `/MT`-vs-`/MD` C-runtime mismatch on Windows MSVC builds,[^1] removing it **supersedes** [ADR-061](ADR-061-windows-crt-runtime-alignment.md): with no `/MT` prebuilt in the link, the remaining native dependency (`whisper-rs`/`whisper-rs-sys`, which builds whisper.cpp from source via cmake-rs and follows the platform-default dynamic CRT) needs no alignment workaround. The prefetch step and `SHERPA_ONNX_LIB_DIR` override are gone.
+Because sherpa-onnx was the only library that forced the `/MT`-vs-`/MD` C-runtime mismatch on Windows MSVC builds,[^3] removing it **supersedes** [ADR-061](ADR-061-windows-crt-runtime-alignment.md): with no `/MT` prebuilt in the link, the remaining native dependency (`whisper-rs`/`whisper-rs-sys`, which builds whisper.cpp from source via cmake-rs and follows the platform-default dynamic CRT) needs no alignment workaround. The prefetch step and `SHERPA_ONNX_LIB_DIR` override are gone.
 
 ### What stays
 
-- **whisper.cpp / `whisper-rs`** — speech-to-text is the core of the feature and is unaffected.[^2]
-- **`cpal`** — Windows WASAPI loopback capture; unrelated to diarization.[^3]
+- **whisper.cpp / `whisper-rs`** — speech-to-text is the core of the feature and is unaffected.[^4]
+- **`cpal`** — Windows WASAPI loopback capture; unrelated to diarization.[^5]
 - All audio-capture, permission, model-download, and live-transcript-transport decisions from ADR-056.
 
 ## Consequences
@@ -47,7 +47,7 @@ Because sherpa-onnx was the only library that forced the `/MT`-vs-`/MD` C-runtim
 - **Simpler product surface.** No speaker chips, no rename UI, no provisional-label disclaimer, no diarization model downloads. The model manager lists Whisper GGML models only.
 - **Smaller dependency and bundle footprint.** Two native libraries (`sherpa-onnx`, plus the `onnxruntime` it pulled in) and two archive-unpacking crates (`tar`, `bzip2`) leave the tree.
 - **Windows builds simplify.** The CRT-alignment prefetch is removed from every Windows build path; ADR-061's failure mode can no longer occur.
-- **Backward compatibility.** Existing `transcript.json` files written by the previous version may carry `speaker`, `speaker_names`, or `expected_speakers` fields. These still load: serde ignores unknown fields on deserialization,[^4] so an old transcript opens as a plain timestamped transcript with the stale speaker data silently dropped. No migration is required.
+- **Backward compatibility.** Existing `transcript.json` files written by the previous version may carry `speaker`, `speaker_names`, or `expected_speakers` fields. These still load: serde ignores unknown fields on deserialization,[^6] so an old transcript opens as a plain timestamped transcript with the stale speaker data silently dropped. No migration is required.
 - **No "who spoke" in-product.** Users who relied on the (provisional) labels lose them. This is an accepted trade — the labels were explicitly unreliable, and Claude can reconstruct turns from the transcript when asked.
 
 ## Alternatives considered
@@ -56,10 +56,14 @@ Because sherpa-onnx was the only library that forced the `/MT`-vs-`/MD` C-runtim
 - **Swap sherpa-onnx for a different diarization engine.** Any acoustic diarizer faces the same crosstalk/echo limits and re-introduces a second model set and native dependency. The problem is acoustic diarization itself, not the specific library.
 - **Defer attribution to the LLM but still ship sherpa as a hint.** Keeping sherpa "just for a hint" retains the entire dependency chain and the Windows CRT workaround for marginal value. Rejected on KISS/YAGNI grounds.
 
-[^1]: https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-error-lnk2038 — Microsoft Learn: LNK2038 "mismatch detected for 'RuntimeLibrary'", the link error produced by mixing `/MT` and `/MD` C-runtime objects (the failure ADR-061 worked around).
+[^1]: https://github.com/k2-fsa/sherpa-onnx - `sherpa-onnx`, Apache-2.0-licensed, was the diarization engine; the removed `sherpa-onnx-LICENSE` bundled its license text.
 
-[^2]: https://github.com/tazz4843/whisper-rs — `whisper-rs`, MIT-licensed Rust bindings for whisper.cpp; retained as the transcription engine.
+[^2]: https://github.com/microsoft/onnxruntime/blob/main/LICENSE - ONNX Runtime, MIT-licensed, was pulled in as a `sherpa-onnx` dependency; the removed `onnxruntime-LICENSE` bundled its license text.
 
-[^3]: https://github.com/RustAudio/cpal — `cpal`, cross-platform audio I/O library (dual-licensed Apache-2.0 OR MIT); retained for Windows WASAPI loopback capture.
+[^3]: https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-error-lnk2038 - Microsoft Learn: LNK2038 "mismatch detected for 'RuntimeLibrary'", the link error produced by mixing `/MT` and `/MD` C-runtime objects (the failure ADR-061 worked around).
 
-[^4]: https://serde.rs/container-attrs.html#deny_unknown_fields — serde container attributes: by default unknown fields are ignored during deserialization (only `#[serde(deny_unknown_fields)]` rejects them), so older transcripts with `speaker`/`speaker_names`/`expected_speakers` still deserialize.
+[^4]: https://github.com/tazz4843/whisper-rs - `whisper-rs`, MIT-licensed Rust bindings for whisper.cpp; retained as the transcription engine.
+
+[^5]: https://github.com/RustAudio/cpal - `cpal`, cross-platform audio I/O library (dual-licensed Apache-2.0 OR MIT); retained for Windows WASAPI loopback capture.
+
+[^6]: https://serde.rs/container-attrs.html#deny_unknown_fields - serde container attributes: by default unknown fields are ignored during deserialization (only `#[serde(deny_unknown_fields)]` rejects them), so older transcripts with `speaker`/`speaker_names`/`expected_speakers` still deserialize.

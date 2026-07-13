@@ -8,15 +8,17 @@ import {
   jsonResult,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const listMrCommitsTool: Tool = {
   name: 'listMrCommits',
   description: 'List commits in a merge request',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'commits', 'history'],
   example:
     'const commits = await gitlab.listMrCommits({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -24,7 +26,10 @@ const listMrCommitsTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       limit: { type: 'number', description: 'Max results (default 20)' },
     },
     required: ['project_id', 'mr_iid'],
@@ -61,7 +66,7 @@ const listMrPipelinesTool: Tool = {
   name: 'listMrPipelines',
   description: 'List pipelines associated with a merge request',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'pipelines', 'ci'],
   example:
     'const pipelines = await gitlab.listMrPipelines({ project_id: "speedwave/core", mr_iid: 42 })',
@@ -69,7 +74,10 @@ const listMrPipelinesTool: Tool = {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       limit: { type: 'number', description: 'Max results (default 10)' },
     },
     required: ['project_id', 'mr_iid'],
@@ -106,14 +114,17 @@ const listMrNotesTool: Tool = {
   name: 'listMrNotes',
   description: 'List notes/comments on a merge request',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'merge', 'request', 'notes', 'comments'],
   example: 'const notes = await gitlab.listMrNotes({ project_id: "speedwave/core", mr_iid: 42 })',
   inputSchema: {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       limit: { type: 'number', description: 'Max results (default 20)' },
     },
     required: ['project_id', 'mr_iid'],
@@ -148,16 +159,24 @@ const listMrNotesTool: Tool = {
 
 const createMrNoteTool: Tool = {
   name: 'createMrNote',
-  description: 'Add a comment/note to a merge request',
+  description:
+    'Add a comment/note to a merge request. Posted as the currently authenticated GitLab user (the configured token owner).',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
   keywords: ['gitlab', 'merge', 'request', 'comment', 'note'],
   example: 'await gitlab.createMrNote({ project_id: "speedwave/core", mr_iid: 42, body: "LGTM!" })',
   inputSchema: {
     type: 'object',
     properties: {
       project_id: { type: ['string', 'number'], description: 'Project ID or path' },
-      mr_iid: { type: 'number', description: 'Merge request IID' },
+      mr_iid: {
+        type: ['number', 'string'],
+        description: 'Merge request IID as a number or string, e.g. 42 or "#42"',
+      },
       body: { type: 'string', description: 'Comment body' },
     },
     required: ['project_id', 'mr_iid', 'body'],

@@ -2,7 +2,13 @@
  * Repository Tools - 3 tools for GitLab repository operations
  */
 
-import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  READ_ONLY_ANNOTATIONS,
+  META_KEYS,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
@@ -10,7 +16,7 @@ const getTreeTool: Tool = {
   name: 'getTree',
   description: 'Get repository file tree',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'tree', 'files', 'repository', 'ls'],
   example: 'const tree = await gitlab.getTree({ project_id: "speedwave/core", path: "src" })',
   inputSchema: {
@@ -61,7 +67,7 @@ const getFileTool: Tool = {
   name: 'getFile',
   description: 'Get file content from repository',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'file', 'content', 'read', 'cat'],
   example:
     'const file = await gitlab.getFile({ project_id: "speedwave/core", file_path: "README.md" })',
@@ -78,17 +84,12 @@ const getFileTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      file: {
-        type: 'object',
-        properties: {
-          file_name: { type: 'string' },
-          file_path: { type: 'string' },
-          size: { type: 'number' },
-          encoding: { type: 'string' },
-          content: { type: 'string' },
-          ref: { type: 'string' },
-        },
-      },
+      file_name: { type: 'string' },
+      file_path: { type: 'string' },
+      size: { type: 'number' },
+      encoding: { type: 'string' },
+      content: { type: 'string' },
+      ref: { type: 'string' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -113,7 +114,7 @@ const getBlameTool: Tool = {
   name: 'getBlame',
   description: 'Get git blame for a file',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'blame', 'annotate', 'history', 'git'],
   example:
     'const blame = await gitlab.getBlame({ project_id: "speedwave/core", file_path: "src/index.ts" })',
@@ -181,7 +182,7 @@ export function createRepositoryTools(client: GitLabClient | null): ToolDefiniti
           ref?: string;
         };
         const result = await c.getFile(project_id, file_path, ref);
-        return jsonResult(result);
+        return jsonResult({ success: true, ...result });
       }),
     },
     {

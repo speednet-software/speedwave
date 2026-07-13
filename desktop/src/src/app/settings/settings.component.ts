@@ -250,10 +250,9 @@ export class SettingsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Smooth-scrolls the section with `id` into view, retrying while a deferred
-   * (beta-gated) section mounts.
-   * @param id - the section anchor id; null/empty does nothing.
-   * @param attempt - internal retry counter.
+   * Smooth-scrolls the section with `id` into view, retrying while a deferred (beta-gated) section mounts.
+   * @param id - the fragment id to scroll to; null/empty does nothing
+   * @param attempt - internal retry counter
    */
   private scrollToFragment(id: string | null, attempt = 0): void {
     // Cancel any retry from a previous fragment so it can't fire post-destroy.

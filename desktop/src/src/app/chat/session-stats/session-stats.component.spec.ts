@@ -86,11 +86,12 @@ describe('SessionStatsComponent', () => {
       expect(txt).toContain('out:');
     });
 
-    it('renders ctx bar from per-step usage', () => {
+    it('renders ctx bar from the last API call usage', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.05,
-        usage: {
+        usage: { input_tokens: 3, output_tokens: 65 },
+        context_usage: {
           input_tokens: 3,
           output_tokens: 65,
           cache_read_tokens: 11204,
@@ -175,7 +176,12 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        usage: { input_tokens: 100, output_tokens: 0, cache_read_tokens: 116_000 },
+        context_usage: {
+          input_tokens: 100,
+          output_tokens: 0,
+          cache_read_tokens: 116_000,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200_000,
         total_output_tokens: 0,
       });
@@ -184,41 +190,48 @@ describe('SessionStatsComponent', () => {
     });
   });
 
-  // ── regression: `in:` must not echo the context numerator ───────────────
-  describe('in: vs ctx separation (regression)', () => {
-    it('reproduces the screenshot: short chat shows small `in:` but full ctx gauge', () => {
-      // `in:` shows only the 181 new tokens, not the 181,713 gauge numerator.
+  // ── regression: ctx must ignore the per-turn `usage` sums ───────────────
+  describe('turn-sum usage vs ctx separation (regression)', () => {
+    it('one tool-heavy turn: turn-sum usage exceeds the window but ctx stays truthful', () => {
+      // Real capture: 1 user turn = 11 API calls; summed usage (474k) is over
+      // twice the 200k window, while the last call's context is ~74k (37%).
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0.5,
         usage: {
-          input_tokens: 181,
-          output_tokens: 65,
-          cache_read_tokens: 181_532,
-          cache_write_tokens: 0,
+          input_tokens: 4_864,
+          output_tokens: 1_808,
+          cache_read_tokens: 464_000,
+          cache_write_tokens: 5_500,
         },
-        context_window_size: 1_000_000,
-        total_output_tokens: 1621,
+        context_usage: {
+          input_tokens: 2,
+          output_tokens: 1_660,
+          cache_read_tokens: 66_844,
+          cache_write_tokens: 4_920,
+        },
+        context_window_size: 200_000,
+        total_output_tokens: 1_808,
       });
       fixture.detectChanges();
-      // ctx gauge unchanged — full occupancy is correct.
-      expect(component.ctxTotal()).toBe(181_713);
-      expect(component.ctxPct()).toBe(18);
-      expect(component.ctxUsedMax()).toBe('182k/1M');
-      // `in:` shows only the new uncached input, not the gauge numerator.
-      expect(component.inboundTokens()).toBe(181);
-      const txt = rootText();
-      expect(txt).toContain('181');
-      expect(txt).not.toContain('181,713');
+      expect(component.ctxTotal()).toBe(71_766);
+      expect(component.ctxPct()).toBe(36); // never the clamped 100%
+      expect(component.ctxUsedMax()).toBe('72k/200k');
+      // `in:` keeps the per-turn fresh-input total.
+      expect(component.inboundTokens()).toBe(4_864);
     });
 
-    it('does not sum input across turns — gauge reflects only the latest turn', () => {
-      // Gauge tracks the latest turn (replacement), never the running sum.
+    it('gauge tracks the latest call (replacement), never a running sum', () => {
       const set = (cacheRead: number) =>
         fixture.componentRef.setInput('stats', {
           session_id: 'abc',
           total_cost: 0,
-          usage: { input_tokens: 200, output_tokens: 50, cache_read_tokens: cacheRead },
+          context_usage: {
+            input_tokens: 200,
+            output_tokens: 0,
+            cache_read_tokens: cacheRead,
+            cache_write_tokens: 0,
+          },
           context_window_size: 1_000_000,
           total_output_tokens: 50,
         });
@@ -230,17 +243,22 @@ describe('SessionStatsComponent', () => {
       expect(component.ctxPct()).toBe(9);
       set(181_000);
       fixture.detectChanges();
-      // Latest turn → 181,200 / 1M = 18%. NOT the sum (~291k → 29%).
+      // Latest call → 181,200 / 1M = 18%. NOT the sum (~291k → 29%).
       expect(component.ctxTotal()).toBe(181_200);
       expect(component.ctxPct()).toBe(18);
     });
 
-    it('handles a local model (no prompt cache): in: equals the whole prompt', () => {
-      // No prompt cache → `in:` equals input_tokens and the gauge matches it.
+    it('handles a local model (no prompt cache): the whole prompt fills the gauge', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
         usage: { input_tokens: 4500, output_tokens: 120 },
+        context_usage: {
+          input_tokens: 4500,
+          output_tokens: 120,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 32_768,
         total_output_tokens: 120,
       });
@@ -369,7 +387,12 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        usage: { input_tokens: 3, output_tokens: 0, cache_read_tokens: 20000 },
+        context_usage: {
+          input_tokens: 3,
+          output_tokens: 0,
+          cache_read_tokens: 20000,
+          cache_write_tokens: 0,
+        },
         context_window_size: 1_000_000,
         total_output_tokens: 0,
       });
@@ -378,11 +401,29 @@ describe('SessionStatsComponent', () => {
       expect(component.ctxPct()).toBe(2);
     });
 
-    it('clamps ctxPct to 100 when usage exceeds window', () => {
+    it('ignores the per-turn usage sums entirely — no context_usage means 0%', () => {
+      // The inflated turn-sum alone must not move the gauge (the 100%-after-
+      // one-query bug); only `context_usage` may.
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
         usage: { input_tokens: 500_000, output_tokens: 0, cache_read_tokens: 500_000 },
+        context_window_size: 200_000,
+        total_output_tokens: 0,
+      });
+      expect(component.ctxPct()).toBe(0);
+    });
+
+    it('clamps ctxPct to 100 when a genuine overflow is reported', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0,
+        context_usage: {
+          input_tokens: 150_000,
+          output_tokens: 0,
+          cache_read_tokens: 60_000,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200_000,
         total_output_tokens: 0,
       });
@@ -396,7 +437,12 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        usage: { input_tokens: 20000, output_tokens: 0 },
+        context_usage: {
+          input_tokens: 20000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200000, // 10%
         total_output_tokens: 0,
       });
@@ -451,7 +497,12 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        usage: { input_tokens: 60_000, output_tokens: 0 },
+        context_usage: {
+          input_tokens: 60_000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200_000, // 30%
         total_output_tokens: 0,
       });
@@ -463,7 +514,12 @@ describe('SessionStatsComponent', () => {
       fixture.componentRef.setInput('stats', {
         session_id: 'abc',
         total_cost: 0,
-        usage: { input_tokens: 160_000, output_tokens: 0 },
+        context_usage: {
+          input_tokens: 160_000,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
         context_window_size: 200_000, // 80%
         total_output_tokens: 0,
       });

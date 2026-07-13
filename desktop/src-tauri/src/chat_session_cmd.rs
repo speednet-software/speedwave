@@ -33,11 +33,11 @@ fn start_session_inner(
     }
 
     // Per-project compose lock serialises auth check with concurrent compose ops.
-    log::info!("start_session_inner: acquiring compose lock");
+    log::info!("acquiring compose lock");
     let rt = speedwave_runtime::runtime::detect_runtime();
     // `_rt` unused: `check_claude_auth` builds its own (reentrant via HELD_LOCKS).
     rt.transaction(project, |_rt| -> anyhow::Result<()> {
-        log::info!("start_session_inner: compose lock acquired, checking auth");
+        log::info!("compose lock acquired, checking auth");
         let authed = setup_wizard::check_claude_auth(project)?;
         if !authed {
             anyhow::bail!("{}", MSG_NOT_AUTHENTICATED);
@@ -47,26 +47,26 @@ fn start_session_inner(
     .map_err(|e| e.to_string())?;
 
     // Extract old session and stop it outside the lock.
-    log::info!("start_session_inner: extracting old session");
+    log::info!("extracting old session");
     let mut old_session = {
         let mut guard = session_arc
             .lock()
             .map_err(|e| format!("Lock poisoned: {e}"))?;
         std::mem::replace(&mut *guard, ChatSession::new(project))
     };
-    log::info!("start_session_inner: stopping old session (outside lock)");
+    log::info!("stopping old session (outside lock)");
     old_session.stop().map_err(|e| e.to_string())?;
     drop(old_session);
 
     // Start the new session under the lock.
-    log::info!("start_session_inner: starting new session");
+    log::info!("starting new session");
     let mut session = session_arc
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     let result = session
         .start(app_handle, resume_session_id)
         .map_err(|e| e.to_string());
-    log::info!("start_session_inner: session.start result={result:?}");
+    log::info!("session.start result={result:?}");
     result
 }
 
@@ -78,7 +78,7 @@ pub(crate) async fn start_chat(
     oauth: tauri::State<'_, SharedOauth>,
 ) -> Result<(), String> {
     check_project(&project)?;
-    log::info!("start_chat: project={project}");
+    log::info!("starting chat for project={project}");
     let session_arc = state.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
@@ -99,17 +99,17 @@ pub(crate) async fn send_message(
         return Err("Message too long".to_string());
     }
     log::info!(
-        "send_message: blocks={}, display_len={}",
+        "sending message: blocks={}, display_len={}",
         blocks.len(),
         display_text.len()
     );
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let mut session = session_arc.try_lock().map_err(|_| {
-            log::info!("send_message: try_lock failed (session busy)");
+            log::info!("try_lock failed sending message (session busy)");
             "no active session (session is being started)".to_string()
         })?;
-        log::info!("send_message: lock acquired, sending");
+        log::info!("lock acquired, sending message");
         session.send_message(&blocks).map_err(|e| e.to_string())
     })
     .await
@@ -149,7 +149,7 @@ fn stop_chat_inner(session_arc: SharedChatSession) -> Result<(), String> {
 /// Tauri command — delegates to [`ChatSession::interrupt`].
 #[tauri::command]
 pub(crate) async fn stop_chat(state: tauri::State<'_, SharedChatSession>) -> Result<(), String> {
-    log::info!("stop_chat: interrupting turn");
+    log::info!("interrupting chat turn");
     let session_arc = state.inner().clone();
     tokio::task::spawn_blocking(move || stop_chat_inner(session_arc))
         .await
@@ -166,7 +166,7 @@ pub(crate) async fn resume_conversation(
 ) -> Result<(), String> {
     check_project(&project)?;
     crate::history::validate_session_id(&session_id).map_err(|e| e.to_string())?;
-    log::info!("resume_conversation: project={project}");
+    log::info!("resuming conversation for project={project}");
     let session_arc = state.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
@@ -182,12 +182,14 @@ pub(crate) async fn resume_conversation(
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

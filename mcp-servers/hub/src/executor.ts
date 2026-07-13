@@ -1,8 +1,6 @@
 /**
  * Executes model-generated JavaScript in a restricted AsyncFunction sandbox: forbidden-pattern
- * validation, prototype-chain hardening (ADR-029), timeout, policy-driven PII tokenization,
- * container isolation.
- * @module executor
+ * validation, prototype-chain hardening (ADR-029), timeout, policy-driven PII tokenization, container isolation.
  */
 
 import { IToolResult } from './hub-types.js';
@@ -37,17 +35,11 @@ import {
   WrapBridgeCallFn,
 } from './tool-registry.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Global Bridge State
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Global Bridge State ───────────────────────────────────────────────────────────────────────
 
 let bridgesInitialized = false;
 
-/**
- * Initialize HTTP bridges to workers (called once at startup)
- * @returns Promise that resolves when bridges are initialized
- * @throws {Error} Error if bridge initialization fails
- */
+/** Initialize HTTP bridges to workers (called once at startup); throws on init failure. */
 export async function initializeBridges(): Promise<void> {
   if (bridgesInitialized) return;
 
@@ -78,9 +70,7 @@ export interface ExecuteCodeParams {
   timeoutMs: number;
 }
 
-// Captured once at module load — this is executor-internal code, NOT user-submitted.
-// FORBIDDEN_PATTERNS validation applies only to user-supplied code strings, not this bootstrap.
-// The anonymous async function body is never called; it only provides the prototype reference.
+// Captured at module load, executor-internal not user code; FORBIDDEN_PATTERNS applies to input.
 /* c8 ignore next */
 const AsyncFunction: new (...args: string[]) => (...a: unknown[]) => Promise<unknown> =
   Object.getPrototypeOf(async function () {}).constructor;
@@ -120,17 +110,15 @@ const FORBIDDEN_PATTERNS = [
   /\[\s*['"`]prototype['"`]\s*\]/,
 ];
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Audit Logging
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Audit Logging ─────────────────────────────────────────────────────────────────────────────
 
 /** Operation category derived from tool annotations */
 type AuditCategory = 'READ' | 'WRITE' | 'DELETE';
 
 /**
- * Derive audit category from a tool's annotations in the registry.
- * @param service - Service name (e.g., 'redmine', 'gitlab')
- * @param tool - camelCase tool method name (e.g., 'createIssue')
+ * Derive audit category from a tool's registry annotations (service, camelCase tool name).
+ * @param service - Service name (e.g. 'redmine', 'gitlab').
+ * @param tool - camelCase tool method name (e.g. 'createIssue').
  */
 function deriveAuditCategory(service: string, tool: string): AuditCategory {
   const meta = getToolMetadata(service, tool);
@@ -165,11 +153,7 @@ interface AuditContext {
   log: (service: string, tool: string, params: unknown) => void;
 }
 
-/**
- * Create audit context for tracking tool executions.
- * Logs each tool call; sensitive data is protected by the PII Tokenizer before reaching Claude.
- * @returns A new audit context instance
- */
+/** Create audit context: logs each tool call; PII Tokenizer protects sensitive data first. */
 function createAuditContext(): AuditContext {
   const entries: AuditEntry[] = [];
   return {
@@ -190,9 +174,8 @@ function createAuditContext(): AuditContext {
 }
 
 /**
- * Validate code before execution
- * @param code - The JavaScript code to validate
- * @returns Validation result with error message if invalid
+ * Validate code before execution; returns an error message when a forbidden pattern is found.
+ * @param code - The JavaScript code to validate.
  */
 function validateCode(code: string): { valid: boolean; error?: string } {
   for (const pattern of FORBIDDEN_PATTERNS) {
@@ -206,18 +189,11 @@ function validateCode(code: string): { valid: boolean; error?: string } {
   return { valid: true };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Error Formatting
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Error Formatting ──────────────────────────────────────────────────────────────────────────
 
 /**
- * Formats an error into a human-readable string message.
- * Handles cases where error.message is an object (common with API errors like GitBeaker).
- * @param {unknown} error - The error to format (Error object, plain object, or primitive)
- * @returns {string} A formatted error message suitable for display
- * @example
- * formatErrorMessage(new Error('Simple error')) // → 'Simple error'
- * formatErrorMessage({ message: { error: 'API failed' } }) // → '{"error":"API failed"}'
+ * Formats an error to a readable string, handling object `.message` values (e.g. GitBeaker).
+ * @param error - The error to format (Error object, plain object, or primitive).
  */
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -235,11 +211,7 @@ function formatErrorMessage(error: unknown): string {
   return String(error);
 }
 
-/**
- * Check if we're running in development mode.
- * Development mode is enabled when NODE_ENV=development or DEBUG is set.
- * @returns {boolean} True if in development mode
- */
+/** True when NODE_ENV=development or DEBUG is set. */
 function isDevelopmentMode(): boolean {
   const nodeEnv = process.env.NODE_ENV;
   const debug = process.env.DEBUG;
@@ -247,11 +219,9 @@ function isDevelopmentMode(): boolean {
 }
 
 /**
- * Log error with conditional verbosity based on environment.
- * Production: logs minimal error info (name, message, code).
- * Development (NODE_ENV=development or DEBUG set): logs full stack traces.
- * @param {string} context - Context identifier (e.g., service name)
- * @param {unknown} error - The error to log
+ * Logs minimal error info in production; full stack traces in development (NODE_ENV/DEBUG).
+ * @param context - Context identifier (e.g. service name).
+ * @param error - The error to log.
  */
 function logErrorDebug(context: string, error: unknown): void {
   const isDev = isDevelopmentMode();
@@ -275,12 +245,11 @@ function logErrorDebug(context: string, error: unknown): void {
 }
 
 /**
- * Create tool wrappers for sandbox execution (PII tokenization, audit logging).
- * @param piiContext - PII tokenization context for this execution
- * @param auditContext - Audit logging context for tracking tool calls
- * @param executionStartTime - Start time of execution (Date.now())
- * @param timeoutMs - Total timeout for this execution in milliseconds
- * @returns Object containing tool wrappers for all services
+ * Create tool wrappers (PII tokenization, audit logging) for sandbox execution, per service.
+ * @param piiContext - PII tokenization context for this execution.
+ * @param auditContext - Audit logging context for tracking tool calls.
+ * @param executionStartTime - Start time of execution (Date.now()).
+ * @param timeoutMs - Total timeout for this execution in milliseconds.
  */
 function createToolWrappers(
   piiContext: PIIContext,
@@ -288,10 +257,7 @@ function createToolWrappers(
   executionStartTime: number,
   timeoutMs: number
 ) {
-  /**
-   * Calculate remaining timeout for worker calls.
-   * Returns at least MIN_TIMEOUT_MS to allow short operations to complete.
-   */
+  /** Remaining timeout for worker calls; at least MIN_TIMEOUT_MS so short operations complete. */
   const getRemainingTimeout = (): number => {
     const elapsed = Date.now() - executionStartTime;
     const remaining = timeoutMs - elapsed;
@@ -312,9 +278,9 @@ function createToolWrappers(
   }
 
   /**
-   * Generic wrapper for bridge calls with PII handling
-   * @param bridgeCall - Function that makes the bridge call to execute
-   * @param serviceName - Name of the service being called for error reporting
+   * Generic wrapper for bridge calls with PII handling; `serviceName` labels error reports.
+   * @param bridgeCall - Function that makes the bridge call to execute.
+   * @param serviceName - Name of the service being called for error reporting.
    */
   const wrapBridgeCall: WrapBridgeCallFn = async <T>(
     bridgeCall: () => Promise<T>,
@@ -341,11 +307,10 @@ function createToolWrappers(
   };
 
   /**
-   * Wrap tool with audit logging
-   * Logs service, tool name, and parameters for each call
-   * @param service - Service name for audit tracking (e.g., 'gitlab', 'slack')
-   * @param tool - Tool name for audit tracking (e.g., 'getMrFull', 'sendChannel')
-   * @param fn - Function to wrap with audit logging
+   * Wrap a tool with audit logging: logs service, tool name, and parameters for each call.
+   * @param service - Service name for audit tracking (e.g. 'gitlab', 'slack').
+   * @param tool - Tool name for audit tracking (e.g. 'getMrFull', 'sendChannel').
+   * @param fn - Function to wrap with audit logging.
    */
   const wrapWithAudit: WrapWithAuditFn = <TParams, TResult>(
     service: string,
@@ -358,9 +323,7 @@ function createToolWrappers(
     };
   };
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Generate tool wrappers from registry (SSOT)
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Generate tool wrappers from registry (SSOT) ──────────────────────────────────────────────
 
   type ServiceTools = Record<string, (params?: Record<string, unknown>) => Promise<unknown>>;
 
@@ -385,11 +348,7 @@ function createToolWrappers(
   return tools;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Parallel Execution Helpers
-// Based on: Anthropic "Advanced Tool Use" pattern
-// Eliminates 19+ inference passes when orchestrating 20+ tool calls
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Parallel Execution Helpers (Anthropic "Advanced Tool Use" pattern) ──────────────────────────
 
 /**
  * Batch result interface for partial failure handling
@@ -402,15 +361,8 @@ interface BatchResult<T> {
 }
 
 /**
- * Execute operations in parallel with partial failure support
- * Returns structured results: { results: T[], errors: [...] }
- * @param operations - Array of promises to execute in parallel
- * @returns Batch result containing successful results and errors
- * @example
- * const { results, errors } = await batch([
- *   redmine.showIssue({ issue_id: 123 }),
- *   redmine.showIssue({ issue_id: 999 })  // may not exist
- * ]);
+ * Execute operations in parallel with partial failure support: `{ results, errors }`.
+ * @param operations - Array of promises to execute in parallel.
  */
 const batch = async <T>(operations: Promise<T>[]): Promise<BatchResult<T>> => {
   const settled = await Promise.allSettled(operations);
@@ -432,10 +384,54 @@ const batch = async <T>(operations: Promise<T>[]): Promise<BatchResult<T>> => {
 };
 
 /**
- * Execute code in sandbox
- * Uses AsyncFunction for async/await support
- * @param params - Code execution parameters
- * @returns Tool result with execution data or error
+ * Levenshtein edit distance, capped for speed since candidate lists are short method names.
+ * @param a - First string.
+ * @param b - Second string.
+ */
+function levenshteinLite(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+
+  for (let i = 0; i < rows; i++) dp[i][0] = i;
+  for (let j = 0; j < cols; j++) dp[0][j] = j;
+
+  for (let i = 1; i < rows; i++) {
+    for (let j = 1; j < cols; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+
+  return dp[rows - 1][cols - 1];
+}
+
+/** Longest attempted name worth suggesting for; bounds the DP cost on attacker-sized input. */
+const MAX_SUGGESTION_INPUT_LENGTH = 100;
+
+/**
+ * Find the N closest candidate names to an attempted name by edit distance (ascending),
+ * dropping suggestions whose best distance exceeds half the attempted name's length.
+ * @param attempted - The name that failed to resolve.
+ * @param candidates - Available names to rank against.
+ * @param limit - Maximum number of suggestions to return.
+ */
+export function closestMatches(attempted: string, candidates: string[], limit = 3): string[] {
+  if (attempted.length > MAX_SUGGESTION_INPUT_LENGTH) return [];
+  const maxDistance = Math.max(1, Math.floor(attempted.length / 2));
+  const attemptedLower = attempted.toLowerCase();
+  return [...candidates]
+    .filter((c) => Math.abs(c.length - attempted.length) <= maxDistance)
+    .map((c) => ({ name: c, distance: levenshteinLite(attemptedLower, c.toLowerCase()) }))
+    .filter((c) => c.distance <= maxDistance)
+    .sort((x, y) => x.distance - y.distance || x.name.localeCompare(y.name))
+    .slice(0, limit)
+    .map((c) => c.name);
+}
+
+/**
+ * Execute code in sandbox, using AsyncFunction for async/await support.
+ * @param params - Code execution parameters.
  */
 export async function executeCode(params: ExecuteCodeParams): Promise<IToolResult<unknown>> {
   const { code, timeoutMs } = params;
@@ -549,10 +545,15 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     console.error(`${ts()} ❌ Execution error: ${message}`);
     console.error(`${ts()}    Code: ${code.substring(0, 200)}${code.length > 200 ? '...' : ''}`);
 
-    // Sanitize error message (remove paths, line numbers)
+    // Redact every absolute POSIX/Windows host path regardless of preceding punctuation;
+    // keep user-code positions like "<anonymous>:3:7", they teach where the snippet broke.
     let sanitizedMessage = message
-      .replace(/\/[a-zA-Z0-9_\-./]+\.(ts|js|json)/g, '[file]')
-      .replace(/:\d+:\d+/g, '')
+      .replace(
+        /(?<![A-Za-z0-9_\-.\\])(?:(?:\/[a-zA-Z0-9_\-.]+)+|(?:[A-Za-z]:\\|\\\\)(?:[a-zA-Z0-9_\-.]+\\)*[a-zA-Z0-9_\-.]+)/g,
+        '[file]'
+      )
+      .replace(/\[file\]:\d+:\d+/g, '[file]')
+      .replace(/(\/[^\s:'"]+):\d+:\d+/g, '$1')
       .substring(0, 500);
 
     // Smart error enhancement: if "X.Y is not a function", show available methods
@@ -566,8 +567,11 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
           (k) => typeof (serviceTools as Record<string, unknown>)[k] === 'function'
         );
 
-        if (availableMethods.length > 0) {
-          sanitizedMessage = `${serviceName}.${attemptedMethod} is not a function. Available ${serviceName} methods: ${availableMethods.join(', ')}`;
+        if (availableMethods.length > 0 && attemptedMethod.length <= MAX_SUGGESTION_INPUT_LENGTH) {
+          const suggestions = closestMatches(attemptedMethod, availableMethods);
+          const didYouMean =
+            suggestions.length > 0 ? ` Did you mean: ${suggestions.join(', ')}?` : '';
+          sanitizedMessage = `${serviceName}.${attemptedMethod} is not a function.${didYouMean} Available ${serviceName} methods: ${availableMethods.join(', ')}`;
         }
       }
     }
@@ -580,13 +584,8 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       const serviceTools = sandboxContext[serviceName as keyof typeof sandboxContext];
 
       if (serviceTools && typeof serviceTools === 'object') {
-        // Convert underscore method name to camelCase (e.g., save_chunk_result -> saveChunkResult).
-        // The greedy regex splits at the last underscore, so `methodName` never contains
-        // underscores when the service name is simple (no underscores) — the callback
-        // is a safety net for hypothetical multi-underscore service/method combinations.
-        /* c8 ignore next — greedy-regex split puts last segment in methodName;
-         * camelCase callback only fires if methodName itself contains underscores,
-         * which cannot happen with single-underscore service names */
+        // Convert underscore to camelCase; single-underscore names mean methodName has none.
+        /* c8 ignore next — camelCase callback only fires if methodName contains underscores */
         const camelMethod = methodName.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
         const availableMethods = Object.keys(serviceTools).filter(
           (k) => typeof (serviceTools as Record<string, unknown>)[k] === 'function'
@@ -611,9 +610,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Test Exports
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Test Exports ──────────────────────────────────────────────────────────────────────────────
 
 /**
  * Export formatErrorMessage for testing purposes only.

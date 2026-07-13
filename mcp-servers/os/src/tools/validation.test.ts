@@ -103,7 +103,9 @@ describe('validation', () => {
       const result = requireFields({ name: 'test' }, ['name', 'id']);
       expect(result.valid).toBe(false);
       if (!result.valid) {
-        expect(result.error.error?.message).toContain('id');
+        expect(result.error.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error.error?.message).toContain('Invalid id');
+        expect(result.error.error?.message).toContain('Provide a non-empty string for id');
       }
     });
 
@@ -112,7 +114,8 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('EMPTY_FIELDS');
-        expect(result.error.error?.message).toContain('name');
+        expect(result.error.error?.message).toContain('Invalid name');
+        expect(result.error.error?.message).toContain('Provide a non-empty value for name');
       }
     });
 
@@ -155,6 +158,50 @@ describe('validation', () => {
         expect(result.error.error?.message).toContain('a');
         expect(result.error.error?.message).toContain('b');
         expect(result.error.error?.message).toContain('c');
+        expect(result.error.error?.message).toContain('Provide a non-empty string for a, b, c');
+      }
+    });
+
+    it('shows the received value of every missing/wrong-typed field, not just the first', () => {
+      const result = requireFields({ a: 123, b: true }, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error.error?.message).toContain('"a":123');
+        expect(result.error.error?.message).toContain('"b":true');
+      }
+    });
+
+    it('shows the received value of every empty field, not just the first', () => {
+      const result = requireFields({ a: '', b: '   ' }, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('EMPTY_FIELDS');
+        expect(result.error.error?.message).toContain('"a":""');
+        expect(result.error.error?.message).toContain('"b":"   "');
+      }
+    });
+
+    it('renders a genuinely-undefined field by omitting it from the received map', () => {
+      // b is absent (genuinely undefined); JSON.stringify drops it, but both names still
+      // appear in the next-step guidance derived from the single offending list.
+      const result = requireFields({ a: 123 }, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('MISSING_FIELDS');
+        expect(result.error.error?.message).toContain('"a":123');
+        expect(result.error.error?.message).not.toContain('"b"');
+        expect(result.error.error?.message).toContain('Provide a non-empty string for a, b');
+      }
+    });
+
+    it('names every offending field consistently in paramName and next step', () => {
+      const result = requireFields({}, ['a', 'b']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        // The "Invalid ..." prefix and the next step derive from one joined list.
+        expect(result.error.error?.message).toContain('Invalid a, b');
+        expect(result.error.error?.message).toContain('Provide a non-empty string for a, b');
       }
     });
   });
@@ -240,7 +287,10 @@ describe('validation', () => {
     it('rejects string exceeding max length', () => {
       const result = validateStringFields({ name: 'a'.repeat(101) }, [['name', 100, false]]);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('FIELD_TOO_LONG');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('FIELD_TOO_LONG');
+        expect(result.error.error?.message).toContain('Shorten name to at most 100 characters');
+      }
     });
 
     it('accepts string exactly at max length (boundary)', () => {
@@ -251,7 +301,12 @@ describe('validation', () => {
     it('rejects null byte (\\x00)', () => {
       const result = validateStringFields({ name: 'test\x00val' }, [['name', 100, false]]);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+        expect(result.error.error?.message).toContain(
+          'Remove control characters and newlines from name'
+        );
+      }
     });
 
     it('rejects bell character (\\x07)', () => {
@@ -284,7 +339,12 @@ describe('validation', () => {
     it('body mode: rejects \\x00', () => {
       const result = validateStringFields({ body: 'test\x00val' }, [['body', 1000, true]]);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+        expect(result.error.error?.message).toContain(
+          'tabs, newlines, and carriage returns are allowed'
+        );
+      }
     });
 
     it('body mode: rejects \\x07 (not \\n\\t\\r)', () => {
@@ -300,7 +360,9 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('name must be a string');
+        expect(result.error.error?.message).toContain('Invalid name');
+        expect(result.error.error?.message).toContain('42');
+        expect(result.error.error?.message).toContain('Pass name as a string.');
       }
     });
 
@@ -321,7 +383,7 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('name must be a string');
+        expect(result.error.error?.message).toContain('Pass name as a string.');
       }
     });
   });
@@ -358,13 +420,21 @@ describe('validation', () => {
     it('rejects value below min', () => {
       const result = validateNumberFields({ limit: 0 }, [['limit', 1, 10000]]);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('OUT_OF_RANGE');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('OUT_OF_RANGE');
+        expect(result.error.error?.message).toContain(
+          'Pass limit as a number between 1 and 10000.'
+        );
+      }
     });
 
     it('rejects value above max', () => {
       const result = validateNumberFields({ limit: 10001 }, [['limit', 1, 10000]]);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('OUT_OF_RANGE');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('OUT_OF_RANGE');
+        expect(result.error.error?.message).toContain('received: 10001');
+      }
     });
 
     it('accepts boundary values (min and max)', () => {
@@ -392,7 +462,12 @@ describe('validation', () => {
     it('rejects string "true"', () => {
       const result = validateBooleanFields({ flag: 'true' }, ['flag']);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_TYPE');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain(
+          'Pass flag as a literal boolean (true or false), not a string or number.'
+        );
+      }
     });
 
     it('rejects 1 and null', () => {
@@ -448,7 +523,7 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('must be an array');
+        expect(result.error.error?.message).toContain('Pass tags as an array of strings.');
       }
     });
 
@@ -457,7 +532,8 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('must be an array');
+        expect(result.error.error?.message).toContain('Pass tags as an array of strings.');
+        expect(result.error.error?.message).toContain('"not-array"');
       }
     });
 
@@ -476,7 +552,10 @@ describe('validation', () => {
     it('rejects array exceeding max items', () => {
       const result = validateStringArrayFields({ tags: Array(51).fill('x') }, spec);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('ARRAY_TOO_LONG');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('ARRAY_TOO_LONG');
+        expect(result.error.error?.message).toContain('Trim tags to at most 50 items.');
+      }
     });
 
     it('rejects non-string element (number)', () => {
@@ -485,6 +564,7 @@ describe('validation', () => {
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
         expect(result.error.error?.message).toContain('tags[1]');
+        expect(result.error.error?.message).toContain('Pass tags[1] as a string.');
       }
     });
 
@@ -493,7 +573,7 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('tags[1] must be a string');
+        expect(result.error.error?.message).toContain('Pass tags[1] as a string.');
       }
     });
 
@@ -502,7 +582,7 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('tags[1] must be a string');
+        expect(result.error.error?.message).toContain('Pass tags[1] as a string.');
       }
     });
 
@@ -511,7 +591,7 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_TYPE');
-        expect(result.error.error?.message).toContain('tags[1] must be a string');
+        expect(result.error.error?.message).toContain('Pass tags[1] as a string.');
       }
     });
 
@@ -521,13 +601,19 @@ describe('validation', () => {
       if (!result.valid) {
         expect(result.error.error?.code).toBe('EMPTY_FIELDS');
         expect(result.error.error?.message).toContain('tags[1]');
+        expect(result.error.error?.message).toContain(
+          'Provide a non-empty value for tags[1], or remove it from tags.'
+        );
       }
     });
 
     it('rejects whitespace-only element', () => {
       const result = validateStringArrayFields({ tags: ['ok', '   '] }, spec);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('EMPTY_FIELDS');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('EMPTY_FIELDS');
+        expect(result.error.error?.message).toContain('tags[1]');
+      }
     });
 
     it('rejects element exceeding max length', () => {
@@ -536,13 +622,21 @@ describe('validation', () => {
       if (!result.valid) {
         expect(result.error.error?.code).toBe('FIELD_TOO_LONG');
         expect(result.error.error?.message).toContain('tags[0]');
+        expect(result.error.error?.message).toContain(
+          'Shorten tags[0] to at most 1000 characters.'
+        );
       }
     });
 
     it('rejects null byte in element', () => {
       const result = validateStringArrayFields({ tags: ['ok\x00bad'] }, spec);
       expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+        expect(result.error.error?.message).toContain(
+          'Remove control characters and newlines from tags[0].'
+        );
+      }
     });
 
     it('rejects bell char in element', () => {
@@ -795,7 +889,11 @@ describe('validation', () => {
       expect(result.valid).toBe(false);
       if (!result.valid) {
         expect(result.error.error?.code).toBe('INVALID_DATE');
-        expect(result.error.error?.message).toContain('start');
+        expect(result.error.error?.message).toContain('Invalid start');
+        expect(result.error.error?.message).toContain('"Feb 20, 2026"');
+        expect(result.error.error?.message).toContain(
+          'Pass start as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".'
+        );
       }
     });
 

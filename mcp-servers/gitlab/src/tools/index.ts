@@ -1,24 +1,12 @@
 /**
- * GitLab Tools Aggregator
- *
- * Exports all 46 tools organized by domain:
- * - Project: 3 tools (list_project_ids, get_project_full, search_code)
- * - Merge Request: 7 tools (list_mr_ids, get_mr_full, create_merge_request, approve_merge_request, merge_merge_request, update_merge_request, get_mr_changes)
- * - MR Notes: 4 tools (list_mr_commits, list_mr_pipelines, list_mr_notes, create_mr_note)
- * - Discussion: 2 tools (list_mr_discussions, create_mr_discussion)
- * - Branch: 5 tools (list_branches, get_branch, create_branch, delete_branch, compare_branches)
- * - Commit: 4 tools (list_branch_commits, list_commits, search_commits, get_commit_diff)
- * - Pipeline: 5 tools (list_pipeline_ids, get_pipeline_full, get_job_log, retry_pipeline, trigger_pipeline)
- * - Repository: 3 tools (get_tree, get_file, get_blame)
- * - Artifact: 3 tools (list_artifacts, download_artifact, delete_artifacts)
- * - Issue: 5 tools (list_issues, get_issue, create_issue, update_issue, close_issue)
- * - Label: 2 tools (list_labels, create_label)
- * - Release: 3 tools (create_tag, delete_tag, create_release)
+ * GitLab Tools Aggregator: combines every domain's tool definitions into one list.
+ * The exact tool count is pinned by `metadata.test.ts`, not restated here.
  */
 
 import { ToolDefinition } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { createProjectTools } from './project-tools.js';
+import { createUserTools } from './user-tools.js';
 import { createMrTools } from './mr-tools.js';
 import { createMrNotesTools } from './mr-notes-tools.js';
 import { createDiscussionTools } from './discussion-tools.js';
@@ -38,6 +26,7 @@ import { createReleaseTools } from './release-tools.js';
 export function createToolDefinitions(client: GitLabClient | null): ToolDefinition[] {
   return [
     ...createProjectTools(client),
+    ...createUserTools(client),
     ...createMrTools(client),
     ...createMrNotesTools(client),
     ...createDiscussionTools(client),
@@ -53,6 +42,7 @@ export function createToolDefinitions(client: GitLabClient | null): ToolDefiniti
 }
 
 export { createProjectTools } from './project-tools.js';
+export { createUserTools } from './user-tools.js';
 export { createMrTools } from './mr-tools.js';
 export { createMrNotesTools } from './mr-notes-tools.js';
 export { createDiscussionTools } from './discussion-tools.js';

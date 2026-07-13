@@ -9,7 +9,7 @@
 
 ## Why
 
-- On macOS Tauri runs the command on the main thread, so a synchronous multi-GB build froze the UI (beachball) for minutes; offloading to `spawn_blocking` keeps the UI responsive.
+- On macOS Tauri runs the command on the main thread[^1], so a synchronous multi-GB build froze the UI (beachball) for minutes; offloading to `spawn_blocking`[^2] keeps the UI responsive.
 - A typed sequence of phases lets the overlay show which step is running and surface a build failure distinctly from a fatal install failure.
 - A failed image build should not lose the on-disk plugin — it is marked pending and retried on the next launch instead of forcing a reinstall.
 
@@ -46,3 +46,7 @@ The Rust SSOT `ALL_PLUGIN_INSTALL_PHASES` is mirrored by `PLUGIN_INSTALL_PHASES`
 
 - Live `nerdctl build` log streaming through the same `plugin_install_status` channel (needs WSL2 UTF-16LE decoding, chunk-boundary line buffering, and per-line vs per-blob sanitization).
 - Cancellable installs via a stored child handle and a `cancel_install` command.
+
+[^1]: Tauri v2 docs, "Calling Rust from the Frontend": "Commands without the async keyword are executed on the main thread unless defined with #[tauri::command(async)]." https://v2.tauri.app/develop/calling-rust/
+
+[^2]: Tokio docs, `tokio::task::spawn_blocking`: "This function runs the provided closure on a thread dedicated to blocking operations." https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createRepositoryTools } from './repository-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -43,7 +43,7 @@ describe('repository-tools', () => {
       'getFileContents',
       'createOrUpdateFile',
     ]);
-    expect(tools.every((t) => t.tool._meta!.deferLoading === true)).toBe(true);
+    expect(tools.every((t) => t.tool._meta![META_KEYS.DEFER_LOADING] === true)).toBe(true);
   });
 
   describe('unconfigured client', () => {

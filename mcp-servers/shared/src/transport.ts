@@ -1,7 +1,6 @@
 /**
- * MCP Streamable HTTP Transport Utilities
- * Implements JSON-RPC 2.0 batch support, DELETE session handling, and
- * proper content negotiation per MCP spec 2025-11-25.
+ * MCP Streamable HTTP Transport Utilities: JSON-RPC 2.0 batch support, DELETE session
+ * handling, and content negotiation per MCP spec 2025-11-25.
  */
 
 import type { Request, Response } from 'express';
@@ -14,11 +13,9 @@ import { createSSEStream, sendJSONResponse } from './sse.js';
 import { ts } from './logger.js';
 
 /**
- * Read the session ID from request headers.
- * Checks `Mcp-Session-Id` first, falls back to `x-mcp-session-id` for
- * backward compatibility. Invalid formats are treated as absent.
- * @param req - Express request
- * @returns Validated session ID or null
+ * Read the session ID from request headers (`Mcp-Session-Id`, falling back to
+ * `x-mcp-session-id`); invalid formats are treated as absent.
+ * @param req - Express request.
  */
 export function readSessionId(req: Request): string | null {
   const raw =
@@ -28,16 +25,11 @@ export function readSessionId(req: Request): string | null {
 }
 
 /**
- * Handle an MCP POST request with support for single and batch JSON-RPC.
- *
- * - Single request: process and return JSON or SSE based on Accept header
- * - Notification (no id): return 202 Accepted
- * - Batch (array): process each item, filter null responses (notifications),
- *   return array or 202 if all were notifications
- * - Empty batch: return InvalidRequest error per JSON-RPC 2.0 section 6
- * @param rpcHandler - The JSON-RPC handler to process individual messages
- * @param req - Express request
- * @param res - Express response
+ * Handle an MCP POST request with support for single and batch JSON-RPC: single requests
+ * return JSON/SSE per Accept header, notifications return 202, empty batch = InvalidRequest.
+ * @param rpcHandler - The JSON-RPC handler to process individual messages.
+ * @param req - Express request.
+ * @param res - Express response.
  */
 export async function handleMCPPost(
   rpcHandler: JSONRPCHandler,
@@ -186,14 +178,10 @@ async function handleMCPPostInner(
 }
 
 /**
- * Handle an MCP DELETE request for session termination.
- * Reads session ID from the `Mcp-Session-Id` header (with `x-mcp-session-id`
- * fallback). Destroys the session and returns 204.
- *
- * Missing or invalid session ID format returns 400.
- * Non-existent session IDs return 204 (idempotent).
- * @param req - Express request
- * @param res - Express response
+ * Handle an MCP DELETE request for session termination: reads the session ID (`Mcp-Session-Id`,
+ * `x-mcp-session-id` fallback), 400 on missing/invalid format, 204 otherwise (idempotent).
+ * @param req - Express request.
+ * @param res - Express response.
  */
 export function handleMCPDelete(req: Request, res: Response): void {
   const raw =

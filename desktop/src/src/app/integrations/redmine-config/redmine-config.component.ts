@@ -442,9 +442,8 @@ export class RedmineConfigComponent implements OnDestroy {
   }
 
   /**
-   * Extracts the input value from a DOM event.
+   * Extracts the current value from a DOM input event.
    * @param event - the DOM input event
-   * @returns the current input element value
    */
   asInputValue(event: Event): string {
     return (event.target as HTMLInputElement).value;
@@ -524,8 +523,8 @@ export class RedmineConfigComponent implements OnDestroy {
 
   /**
    * Native `<select>` handler for a mapping picker.
-   * @param key - The mapping key being edited.
-   * @param event - The native `change` event from the mapping `<select>`.
+   * @param key - the mapping key being changed
+   * @param event - the native `change` event from the mapping `<select>`
    */
   onMappingChange(key: string, event: Event): void {
     const raw = (event.target as HTMLSelectElement).value;

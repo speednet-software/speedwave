@@ -1,15 +1,11 @@
 //! Stale-process detection helpers shared by every host MCP worker
 //! manager.
 
-#[cfg(unix)]
-use std::process::Command;
-
-/// Check whether a PID belongs to a `node` process. Used as a safety
-/// gate before killing — if the OS recycled the PID into something
-/// else, we won't touch it.
+/// Check whether a PID belongs to a `node` process. Used as a safety gate before killing — if
+/// the OS recycled the PID into something else, we won't touch it.
 #[cfg(unix)]
 pub fn is_node_process(pid: u32) -> bool {
-    let output = Command::new("ps")
+    let output = crate::binary::system_command("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output();
     match output {
@@ -36,16 +32,15 @@ pub fn is_node_process(pid: u32) -> bool {
     }
 }
 
-/// Terminate a process by PID. SIGTERM then SIGKILL on Unix (500 ms
-/// grace), `taskkill /F` on Windows. Errors are ignored — the process
-/// may already be gone.
+/// Terminate a process by PID. SIGTERM then SIGKILL on Unix (500 ms grace), `taskkill /F` on
+/// Windows. Errors are ignored — the process may already be gone.
 #[cfg(unix)]
 pub fn kill_process(pid: u32) {
-    let _ = Command::new("kill")
+    let _ = crate::binary::system_command("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
     std::thread::sleep(std::time::Duration::from_millis(500));
-    let _ = Command::new("kill")
+    let _ = crate::binary::system_command("kill")
         .args(["-KILL", &pid.to_string()])
         .status();
 }
@@ -60,7 +55,6 @@ pub fn kill_process(pid: u32) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

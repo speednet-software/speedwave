@@ -9,9 +9,8 @@ pub fn log_timestamp() -> String {
     format_log_timestamp(&Local::now())
 }
 
-/// Render `dt` in the canonical Speedwave log timestamp format — RFC 3339,
-/// millisecond precision, colon-separated offset (UTC renders as `+00:00`, not
-/// `Z`). The testable core of [`log_timestamp`].
+/// Render `dt` in the canonical Speedwave log timestamp format — RFC 3339, millisecond precision,
+/// colon-separated offset (UTC renders as `+00:00`, not `Z`); testable core of [`log_timestamp`].
 pub fn format_log_timestamp<Tz: TimeZone>(dt: &DateTime<Tz>) -> String
 where
     Tz::Offset: core::fmt::Display,
@@ -19,12 +18,13 @@ where
     dt.to_rfc3339_opts(SecondsFormat::Millis, false)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
     use chrono::{FixedOffset, Timelike};

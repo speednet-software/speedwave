@@ -161,9 +161,9 @@ export type CostSourceKind =
   | 'failed';
 
 /**
- * Cost source that won't change on re-enrichment (mirror of Rust
- * `CostSource::is_terminal`); `'deferred'` and `''` are non-terminal.
- * @param src - Cost provenance string from the sidecar.
+ * Cost source that won't change on re-enrichment (mirror of Rust `CostSource::is_terminal`);
+ * `'deferred'` and `''` are non-terminal.
+ * @param src - cost provenance string from the sidecar
  */
 export function isTerminalCostSource(src: CostSourceKind | ''): boolean {
   return src !== 'deferred' && src !== '';

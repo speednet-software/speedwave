@@ -15,9 +15,9 @@ export interface SplitPathResult {
 }
 
 /**
- * Split a path into parent directory and name
- * @param {string} fullPath - Full path to split
- * @returns {SplitPathResult} Parent directory and name
+ * Split a path into parent directory and name.
+ * @param fullPath - full path to split
+ * @returns parent directory and name
  */
 export function splitPath(fullPath: string): SplitPathResult {
   const parts = fullPath.split('/');
@@ -26,10 +26,10 @@ export function splitPath(fullPath: string): SplitPathResult {
 }
 
 /**
- * Parse error message from Graph API response
- * @param {Response} response - Fetch response object
- * @param {string} defaultMessage - Default message if parsing fails
- * @returns {Promise<string>} Error message
+ * Parse error message from a Graph API response; falls back to defaultMessage if unparsable.
+ * @param response - fetch response object
+ * @param defaultMessage - default message if parsing fails
+ * @returns error message
  */
 export async function parseGraphErrorMessage(
   response: Response,

@@ -42,9 +42,8 @@ pub struct UsageAcc {
     pub ttft_ms: Option<u64>,
 }
 
-/// Latches `acc.ttft_ms` to elapsed ms on the first non-empty output `text_delta`.
-/// Measures from the first visible text token, not `thinking_delta`, so extended-
-/// thinking models report decode throughput over the user-visible answer.
+/// Latches `acc.ttft_ms` to elapsed ms on the first non-empty output `text_delta` (not
+/// `thinking_delta`, so extended-thinking models report decode throughput on the visible answer).
 pub fn note_first_text_delta(frame: &Value, started: std::time::Instant, acc: &mut UsageAcc) {
     if acc.ttft_ms.is_some() {
         return;
@@ -208,9 +207,8 @@ pub fn append_usage(path: &Path, line: &UsageLine) {
 
 fn append_usage_inner(path: &Path, line: &UsageLine) -> std::io::Result<()> {
     use std::io::Write;
-    // One buffer, one write_all: O_APPEND is atomic per write() only, and each
-    // request appends from its own task with no lock — writeln! (json + '\n' as
-    // two writes) could interleave and corrupt a line in the usage SSOT.
+    // One buffer, one write_all: O_APPEND is atomic per write() only; concurrent tasks with
+    // no lock using writeln! (two writes) could interleave and corrupt a line in the usage SSOT.
     let mut buf = serde_json::to_vec(line).map_err(std::io::Error::other)?;
     buf.push(b'\n');
     let mut file = std::fs::OpenOptions::new()
@@ -222,7 +220,10 @@ fn append_usage_inner(path: &Path, line: &UsageLine) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test fixture setup, failure aborts the test"
+    )]
     use super::*;
     use serde_json::json;
 

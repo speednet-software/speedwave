@@ -4,6 +4,8 @@
 
 **Date:** 2026-07-06
 
+> **Amendment 1:** Pure structural (key-order-insensitive) matching let a user-authored hook that happened to be byte-identical to a managed one be removed on the managing source's toggle-off, or be silently treated as already-registered instead of getting its own tracked copy. Each managed group now carries a `_speedwaveHookId` field (`<source-dir>#<event>#<index>`, deterministic per source/event/position) set by the entrypoint; removal and registration-dedupe match on this id instead of full structural equality. This supersedes the "No sentinel is added inside hook objects" statement below: the field is a harmless pass-through key on the group wrapper, not on the `{type, command}` hook object itself, and Claude Code already tolerates unrecognized fields on that wrapper (`matcher`, `timeout`).
+
 ## Context
 
 Claude Code auto-discovers `skills/`, `commands/`, and `agents/` from `~/.claude/`, but hooks work differently: a hook runs only when it is registered under the `hooks` key of a settings file (user, project, local, or managed scope) or shipped by a native Claude Code plugin as `hooks/hooks.json` next to a `.claude-plugin/plugin.json` manifest.[^1][^2] There is no auto-discovery of a `~/.claude/hooks/` directory.
@@ -71,15 +73,15 @@ Surfacing registered hooks per plugin in the Desktop UI (informed consent at ena
 - Negative: a genuinely new execution surface (see Security analysis); one more generated state file (`.speedwave-managed-hooks`).
 - Downgrade: an app downgrade runs an entrypoint that knows nothing about `.speedwave-managed-hooks`, so already-injected entries stay registered and are no longer managed — a subsequently disabled plugin keeps its hook entry while its `/speedwave/plugins/<slug>` mount disappears (the command then fails at event time). Cleanup is manual (`~/.claude/settings.json`) or by re-upgrading.
 - A corrupted tracking manifest degrades, not breaks: still-enabled sources re-register (dedupe prevents duplicates) and are re-tracked; entries of sources disabled while the manifest was corrupt linger until removed manually or re-managed by an enable/disable cycle.
-- Docs updated in this change: [ADR-022], [ADR-051], [ADR-015] carry update notes; `docs/architecture/bundled-resources.md`, `docs/architecture/security.md`, and `docs/guides/integrations.md` describe the real mechanism; the plugin contract (`.claude/rules/plugins.md`) names `hooks/hooks.json` and the placeholder.
+- Docs updated in this change: [ADR-022], [ADR-051], [ADR-015] carry update notes; the plugin contract (`.claude/rules/plugins.md`) names `hooks/hooks.json` and the placeholder.
 
 ## Footnotes
 
-[^1]: Claude Code documentation, "Hooks reference" — hooks are configured in settings files (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`, managed policy settings); hook arrays from multiple scopes merge. <https://code.claude.com/docs/en/hooks>
+[^1]: Claude Code documentation, "Hooks reference" - hooks are configured in settings files (`~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`, managed policy settings); hook arrays from multiple scopes merge. <https://code.claude.com/docs/en/hooks>
 
-[^2]: Claude Code documentation, "Plugins" — native plugins register hooks via `hooks/hooks.json` with a `.claude-plugin/plugin.json` manifest and reference files via `${CLAUDE_PLUGIN_ROOT}`. <https://code.claude.com/docs/en/plugins>
+[^2]: Claude Code documentation, "Plugins" - native plugins register hooks via `hooks/hooks.json` with a `.claude-plugin/plugin.json` manifest and reference files via `${CLAUDE_PLUGIN_ROOT}`. <https://code.claude.com/docs/en/plugins>
 
-[^3]: Node.js documentation, "Type stripping" — Node.js 24 runs TypeScript files with erasable types directly. <https://nodejs.org/docs/latest-v24.x/api/typescript.html>
+[^3]: Node.js documentation, "Type stripping" - Node.js 24 runs TypeScript files with erasable types directly. <https://nodejs.org/docs/latest-v24.x/api/typescript.html>
 
 [ADR-009]: ADR-009-per-project-isolation-preserved.md
 [ADR-015]: ADR-015-plugin-system.md

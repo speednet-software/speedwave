@@ -10,7 +10,7 @@ Speedwave previously shipped on three host platforms: macOS (via Lima), Windows 
 
 - A 937-line `NerdctlRuntime` that installed and supervised user-level containerd + buildkit via `systemd --user`,[^1] parsed `nerdctl info`[^2] for rootless-mode enforcement, and managed an AppArmor profile for rootlesskit.[^3]
 - A platform-specific UID mapping (`CONTAINER_USER = "0:0"`) and the slirp4netns[^4] host-gateway address (`10.0.2.2`), threaded through `compose.template.yml` (see superseded ADR-026).
-- A `.deb` bundle target with `uidmap`[^5] / `dbus-user-session` package dependencies, a bundled `nerdctl-full`[^6] distribution (~80 MB of containerd/runc/CNI/rootlesskit binaries shipped inside the Debian package, per superseded ADR-003), and an AppArmor profile installed to `/etc/apparmor.d/speedwave.rootlesskit`.
+- A `.deb` bundle target with `uidmap`[^5] / `dbus-user-session`[^6] package dependencies, a bundled `nerdctl-full`[^7] distribution (~80 MB of containerd/runc/CNI/rootlesskit binaries shipped inside the Debian package, per superseded ADR-003), and an AppArmor profile installed to `/etc/apparmor.d/speedwave.rootlesskit`.
 - A Linux-specific audio-capture backend (`audio_linux.rs`, 902 lines) for the host-side transcription feature.
 - An `ubuntu-22.04` matrix entry in three GitHub Actions workflows, plus `make _e2e-linux` and `scripts/e2e-vm*.sh` SSH-driven end-to-end provisioning of a fresh Ubuntu host.
 - A non-trivial slice of the desktop frontend (setup wizard step copy, update notification UI, settings panel) that branched on `platform === 'linux'` because Linux has no in-app updater (Tauri's `NSIS`/`squirrel`-equivalent flow is unavailable; users download the new `.deb` manually).
@@ -51,7 +51,7 @@ ADR-003 (bundled nerdctl-full on Linux), ADR-025 (Linux `.deb` packaging), and A
 - **Negative — lost prior art:** the rootless-on-host work documented in ADR-026 demonstrated that running with `cap_drop: ALL` + `no-new-privileges` + `read_only: true` under a user namespace is a workable security posture even without a VM. We are not deleting the ADR — the design remains a reference if Speedwave ever revisits a non-VM Linux path.
 - **Neutral — plugin contract unchanged:** plugin workers are container images, not host binaries. The plugin manifest, signing scheme (ADR-051), and compose injection (`apply_plugins`) are identical on both remaining platforms. Plugin authors do not have to do anything.
 
-[^1]: containerd-rootless setuptool installs containerd and buildkit as systemd `--user` services — see `containerd/nerdctl` rootless mode docs: https://github.com/containerd/nerdctl/blob/main/docs/rootless.md
+[^1]: containerd-rootless setuptool installs containerd and buildkit as systemd `--user` services - see `containerd/nerdctl` rootless mode docs: https://github.com/containerd/nerdctl/blob/main/docs/rootless.md
 
 [^2]: `nerdctl info` command reference: https://github.com/containerd/nerdctl/blob/main/docs/command-reference.md#nerdctl-info
 
@@ -61,4 +61,6 @@ ADR-003 (bundled nerdctl-full on Linux), ADR-025 (Linux `.deb` packaging), and A
 
 [^5]: `uidmap` Debian package ships `newuidmap`/`newgidmap` setuid binaries required for user-namespace remapping: https://packages.debian.org/bookworm/uidmap
 
-[^6]: `nerdctl-full` release artefacts bundle containerd, runc, BuildKit, CNI plugins, and rootlesskit: https://github.com/containerd/nerdctl/releases
+[^6]: `dbus-user-session` Debian package enables the systemd `--user` session model required for rootless containerd/buildkit: https://packages.debian.org/bookworm/dbus-user-session
+
+[^7]: `nerdctl-full` release artefacts bundle containerd, runc, BuildKit, CNI plugins, and rootlesskit: https://github.com/containerd/nerdctl/releases

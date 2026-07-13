@@ -3,6 +3,7 @@
 use speedwave_runtime::compose::{self, SecurityCheck, SecurityRule};
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
+use speedwave_runtime::engine_path;
 use speedwave_runtime::plugin;
 use speedwave_runtime::runtime::{detect_runtime, ensure_exec_healthy};
 use speedwave_runtime::update;
@@ -13,10 +14,10 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod paste_watcher;
+mod terminal_restore;
 
 /// Redact secrets from one CLI output line via the `log_sanitizer` SSOT.
-/// Split out from [`emit`] so the redaction is unit-testable without
-/// capturing stdout.
+/// Split out from [`emit`] so the redaction is unit-testable without stdout capture.
 fn sanitize_output_line(line: &str) -> String {
     speedwave_runtime::log_sanitizer::sanitize(line)
 }
@@ -28,7 +29,11 @@ fn redact_err(e: &impl std::fmt::Display) -> String {
 
 /// Single output sink for `out!`/`err!`; every line passes through the
 /// `log_sanitizer` SSOT before reaching the terminal.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI's single output sink — every other call site routes through out!/err!"
+)]
 fn emit(to_stderr: bool, args: std::fmt::Arguments<'_>) {
     let line = sanitize_output_line(&args.to_string());
     if to_stderr {
@@ -79,8 +84,7 @@ fn parse_project_flag(args: &[String], subcommand: &str) -> Result<String, Strin
 }
 
 /// Parses an optional `--project <value>` / `--project=<value>` flag from the
-/// argv `tail` (slice after the subcommand token). Any other token is a hard
-/// error; returns `Ok(None)` when the tail is empty.
+/// argv `tail` (slice after the subcommand token); `Ok(None)` when empty, any other token errors.
 fn parse_optional_project_tail(
     tail: &[String],
     subcommand: &str,
@@ -322,7 +326,7 @@ fn maybe_print_update_hint() {
 /// Re-exec the new binary with `update` to rebuild container images with the
 /// correct image tags; CWD is inherited from the caller.
 fn run_rebuild(exe: &std::path::Path) -> anyhow::Result<()> {
-    let status = std::process::Command::new(exe)
+    let status = speedwave_runtime::binary::interactive_command(&exe.to_string_lossy())
         .arg("update")
         .env_remove(speedwave_runtime::consts::BUNDLE_RESOURCES_ENV)
         .status()
@@ -406,9 +410,8 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
-/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env,
-/// re-exports the proxy base URL, then execs `claude auth login --claudeai` so
-/// the OAuth flow starts directly (no interactive prompt, no MCP session).
+/// Builds the `login` exec argv: a shell that unsets non-Anthropic provider env, re-exports
+/// the proxy base URL, then execs `claude auth login --claudeai` (no prompt, no MCP session).
 fn build_login_exec_cmd(base_url: &str, unset_keys: &[&str]) -> Vec<String> {
     let script = format!(
         "unset {}; export ANTHROPIC_BASE_URL={base_url}; exec {} auth login --claudeai",
@@ -437,9 +440,8 @@ fn select_anthropic_in(
     selected || migrated
 }
 
-/// After a successful `speedwave login`, makes Anthropic active so a
-/// logout-emptied OR never-configured project is usable again. No-op when
-/// the project has no entry in `user_config` (nothing to attach `llm` to).
+/// After a successful `speedwave login`, makes Anthropic active so a logout-emptied OR
+/// never-configured project is usable again. No-op when `user_config` has no such project.
 fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
@@ -451,9 +453,8 @@ fn select_anthropic_after_login(project: &str) -> anyhow::Result<()> {
     })
 }
 
-/// Printed by `speedwave --help` / `-h` / `help`. Must not require the
-/// runtime or any I/O so users can discover commands before Desktop is
-/// running (or while troubleshooting a broken setup).
+/// Printed by `speedwave --help` / `-h` / `help`. Must not require the runtime or any I/O so
+/// users can discover commands before Desktop is running (or while troubleshooting a broken setup).
 fn print_help() {
     out!(
         "\
@@ -479,7 +480,8 @@ USAGE:
 The active project is the one selected in Speedwave Desktop; `--project <p>`
 overrides it. The working directory does not select the project.
 
-Most commands require Speedwave Desktop to be running. See docs/guides/cli.md.",
+Most commands require Speedwave Desktop to be running.
+Full documentation: https://speedwave.dev/docs",
     );
 }
 
@@ -598,16 +600,17 @@ fn main() -> anyhow::Result<()> {
     if let CliAction::Init(ref custom_name) = action {
         let cwd = std::env::current_dir()?;
         let canonical = std::fs::canonicalize(&cwd)?;
+        let raw_canonical = canonical.to_string_lossy();
+        let canonical_str = engine_path::strip_extended_length_prefix(&raw_canonical).to_string();
         let name = match custom_name {
             Some(n) => n.clone(),
-            None => canonical
+            None => PathBuf::from(&canonical_str)
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .ok_or_else(|| anyhow::anyhow!("Cannot determine directory name"))?,
         };
         validation::validate_project_name(&name)?;
 
-        let canonical_str = canonical.to_string_lossy().to_string();
         match speedwave_runtime::project::add_project(&name, &canonical_str) {
             Ok(()) => {
                 out!("Project '{}' registered at {}", name, canonical_str);
@@ -648,9 +651,8 @@ fn main() -> anyhow::Result<()> {
             Err(e) => {
                 let msg = redact_err(&e);
                 err!("Container update failed: {msg}");
-                // Roll back only when containers are torn down (compose_down+).
-                // Early failures leave old containers running; rollback there
-                // would needlessly recreate from a possibly stale snapshot.
+                // Roll back only when containers are torn down (compose_down+); early failures
+                // leave old containers running, so rollback there could recreate a stale snapshot.
                 if update::is_torn_down(&e) {
                     match update::rollback_containers(&runtime, &project_name) {
                         Ok(()) => err!("Rolled back to the previous container state."),
@@ -863,6 +865,17 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Live-session marker: Desktop's exit cleanup leaves the VM running while
+    // this shared lock is held (kernel-released on any death, incl. SIGKILL).
+    let _cli_session = match speedwave_runtime::session::CliSessionGuard::acquire(consts::data_dir())
+    {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            log::warn!("CLI session lock unavailable: {e}");
+            None
+        }
+    };
+
     // Windows engine invariants (nerdctl pin + drvfs metadata automount);
     // no-op elsewhere. Warn-only, Once-guarded inside.
     speedwave_runtime::provision::ensure_windows_invariants();
@@ -931,16 +944,15 @@ fn main() -> anyhow::Result<()> {
     // Idempotent; secrets are never migrated.
     let cleaned = speedwave_runtime::legacy_token_cleanup::run_legacy_token_cleanup_at_startup();
     if cleaned > 0 {
-        log::info!("legacy_token_cleanup: {cleaned} project(s) sanitised");
+        log::info!("legacy token cleanup sanitised {cleaned} project(s)");
     }
 
     // Self-heal legacy/partial oauth.json shape (ADR-060 addendum); idempotent.
     // Do not re-log the return value (CodeQL taints it).
     let _ = speedwave_runtime::oauth_state_migration::run_oauth_state_migration_at_startup();
 
-    // Host workers (oauth, mcp-os) are Desktop-owned; the CLI must NOT spawn its
-    // own. render_compose reads the Desktop-held lock + bearer-map from disk.
-    // Reconstruct host-bridge registrations from disk (ADR-074).
+    // Host workers (oauth, mcp-os) are Desktop-owned; the CLI must NOT spawn its own —
+    // render_compose reads the Desktop-held lock + bearer-map, reconstructed from disk (ADR-074).
     let host_bridges = compose::host_bridges_from_disk();
 
     let compose_yml = compose::render_compose(
@@ -957,7 +969,8 @@ fn main() -> anyhow::Result<()> {
         Vec::new()
     });
     let expected_paths =
-        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?;
+        compose::SecurityExpectedPaths::compute(&project_name, &project_dir.to_string_lossy())?
+            .with_telemetry_locked(resolved.telemetry.any_locked);
 
     // OS prerequisite check
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
@@ -1075,9 +1088,8 @@ fn main() -> anyhow::Result<()> {
     plugin::ensure_plugin_images(&runtime, &enabled_plugin_ids)
         .map_err(|e| anyhow::anyhow!("plugin image build failed: {}", redact_err(&e)))?;
 
-    // compose_up is idempotent (no --force-recreate). Wrapped in a per-project
-    // transaction so a concurrent Desktop process can't overwrite compose.yml
-    // between save and up (ADR-066).
+    // compose_up is idempotent (no --force-recreate); wrapped in a per-project transaction so a
+    // concurrent Desktop process can't overwrite compose.yml between save and up (ADR-066).
     runtime.transaction(&project_name, |runtime| -> anyhow::Result<()> {
         compose::save_compose(&project_name, &compose_yml)?;
         speedwave_runtime::runtime::compose_validate_with_retry(runtime, &project_name)?;
@@ -1099,12 +1111,19 @@ fn main() -> anyhow::Result<()> {
     if let CliAction::Login(_) = action {
         err!("Starting Anthropic sign-in. Follow the prompt, then close the terminal when done.");
         // Unset any non-Anthropic provider env so OAuth runs against Anthropic.
-        let cmd = build_login_exec_cmd(
-            compose::PROXY_BASE_URL,
-            compose::anthropic_login_unset_keys(),
+        let instance_id = speedwave_runtime::session::new_instance_id();
+        let cmd = stamped_exec_argv(
+            &instance_id,
+            build_login_exec_cmd(
+                compose::PROXY_BASE_URL,
+                compose::anthropic_login_unset_keys(),
+            ),
         );
         let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
-        let status = runtime.container_exec(&container_name, &cmd_ref).status()?;
+        let status_result = runtime.container_exec(&container_name, &cmd_ref).status();
+        terminal_restore::sanitize_host_terminal();
+        reap_instance(&runtime, &container_name, &instance_id);
+        let status = status_result?;
         std::process::exit(
             status
                 .code()
@@ -1113,11 +1132,17 @@ fn main() -> anyhow::Result<()> {
     }
 
     // exec -it -> interactive Claude terminal inside container
-    let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-    exec_cmd.extend(resolved.flags.iter().map(String::as_str));
-    let status = runtime
-        .container_exec(&container_name, &exec_cmd)
-        .status()?;
+    let instance_id = speedwave_runtime::session::new_instance_id();
+    let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
+    tail.extend(resolved.flags.iter().cloned());
+    let exec_argv = stamped_exec_argv(&instance_id, tail);
+    let exec_cmd: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
+    let status_result = runtime.container_exec(&container_name, &exec_cmd).status();
+    // Claude killed abruptly (VM poweroff, OOM) cannot pop the emulator modes it
+    // enabled; run even on a spawn error, before propagating it below.
+    terminal_restore::sanitize_host_terminal();
+    reap_instance(&runtime, &container_name, &instance_id);
+    let status = status_result?;
 
     let is_oom = speedwave_runtime::resources::is_oom_exit(&status);
     if is_oom {
@@ -1128,9 +1153,36 @@ fn main() -> anyhow::Result<()> {
     std::process::exit(code);
 }
 
-/// Picks the project an action operates on. An explicit `--project` override
-/// wins and must name a real project; otherwise falls back to the active then
-/// first configured project. The working directory is never consulted.
+/// Interactive exec argv carrying the instance marker so an orphaned in-container process
+/// can be reaped after the exec transport dies.
+fn stamped_exec_argv(instance_id: &str, tail: Vec<String>) -> Vec<String> {
+    let mut argv = speedwave_runtime::session::instance_env_argv(instance_id);
+    argv.extend(tail);
+    argv
+}
+
+/// Kills the in-container claude stamped with `instance_id` (host-side death
+/// does not propagate through `nerdctl exec`). Best-effort; dead VM is fine.
+fn reap_instance(
+    runtime: &speedwave_runtime::runtime::LockedRuntime,
+    container: &str,
+    instance_id: &str,
+) {
+    let argv = speedwave_runtime::session::kill_by_instance_command(instance_id);
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match runtime.container_exec_piped(container, &argv_refs) {
+        Ok(mut cmd) => {
+            // output() (not status()) so nerdctl noise never reaches the terminal.
+            if let Err(e) = cmd.output() {
+                log::debug!("session reap failed: {e}");
+            }
+        }
+        Err(e) => log::debug!("session reap unavailable: {e}"),
+    }
+}
+
+/// Picks the project an action operates on. An explicit `--project` override wins and must
+/// name a real project; otherwise falls back to active then first configured (CWD never consulted).
 fn resolve_action_project(
     action: &CliAction,
     user_config: &config::SpeedwaveUserConfig,
@@ -1148,9 +1200,8 @@ fn resolve_action_project(
     }
 }
 
-/// Resolves the project when no explicit `--project` was given: the active
-/// project is authoritative, else the first configured project. The working
-/// directory is never consulted.
+/// Resolves the project when no explicit `--project` was given: the active project is
+/// authoritative, else the first configured project. The working directory is never consulted.
 fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow::Result<String> {
     user_config
         .active_project
@@ -1164,7 +1215,11 @@ fn resolve_project_fallback(user_config: &config::SpeedwaveUserConfig) -> anyhow
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
 
@@ -1180,6 +1235,97 @@ mod tests {
         assert!(
             window.contains("sync_claude_resources"),
             "bare-run rebuild must sync claude-resources alongside images"
+        );
+    }
+
+    #[test]
+    fn interactive_exec_sanitizes_host_terminal_before_exit() {
+        // An abruptly killed claude leaves emulator modes enabled (kitty CSI-u,
+        // bracketed paste); the CLI must sanitize after the PTY session ends.
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let sanitize = source[exec..]
+            .find("sanitize_host_terminal()")
+            .expect("interactive exec must sanitize the host terminal after status()");
+        let oom = source[exec..]
+            .find("is_oom_exit(&status)")
+            .expect("OOM check must exist after the interactive exec");
+        assert!(
+            sanitize < oom,
+            "sanitize must run before the OOM message so it renders on a sane terminal"
+        );
+    }
+
+    #[test]
+    fn login_exec_sanitizes_host_terminal_before_exit() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let window = &source[exec..exec + 300];
+        assert!(
+            window.contains("sanitize_host_terminal()"),
+            "login exec must sanitize the host terminal after status()"
+        );
+    }
+
+    #[test]
+    fn interactive_exec_sanitizes_and_reaps_before_propagating_spawn_error() {
+        // .status() must not be followed by `?` directly: a failed spawn (not just
+        // a bad exit code) must still sanitize/reap before the error propagates.
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let status_line_end = source[exec..]
+            .find(';')
+            .map(|i| exec + i)
+            .expect("status() statement must be terminated");
+        assert!(
+            !source[exec..status_line_end].contains('?'),
+            "the interactive exec status must be captured without an early `?` return"
+        );
+        let sanitize = source[status_line_end..]
+            .find("sanitize_host_terminal()")
+            .map(|i| status_line_end + i)
+            .expect("sanitize must run after the captured status");
+        let propagate = source[status_line_end..]
+            .find("status_result?")
+            .map(|i| status_line_end + i)
+            .expect("the captured status_result must be propagated after cleanup");
+        assert!(
+            sanitize < propagate,
+            "sanitize/reap must run before the spawn error is propagated"
+        );
+    }
+
+    #[test]
+    fn login_exec_sanitizes_and_reaps_before_propagating_spawn_error() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let status_line_end = source[exec..]
+            .find(';')
+            .map(|i| exec + i)
+            .expect("status() statement must be terminated");
+        assert!(
+            !source[exec..status_line_end].contains('?'),
+            "the login exec status must be captured without an early `?` return"
+        );
+        let sanitize = source[status_line_end..]
+            .find("sanitize_host_terminal()")
+            .map(|i| status_line_end + i)
+            .expect("sanitize must run after the captured status");
+        let propagate = source[status_line_end..]
+            .find("status_result?")
+            .map(|i| status_line_end + i)
+            .expect("the captured status_result must be propagated after cleanup");
+        assert!(
+            sanitize < propagate,
+            "sanitize/reap must run before the spawn error is propagated"
         );
     }
 
@@ -1219,9 +1365,8 @@ mod tests {
         );
     }
 
-    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded
-    /// tags immediately after — CLI-only users never see Desktop reconcile, so
-    /// without this they leak one tag generation per update.
+    /// Structural (ADR-072 GC): when the CLI builds images it must prune superseded tags
+    /// immediately after — CLI-only users never see Desktop reconcile and leak a tag generation.
     #[test]
     fn cli_prunes_superseded_images_after_build() {
         let src = include_str!("main.rs");
@@ -1649,10 +1794,18 @@ mod tests {
     }
 
     #[test]
-    fn test_exec_cmd_starts_with_claude_binary() {
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend_from_slice(&["--flag"]);
-        assert_eq!(exec_cmd[0], "/usr/local/bin/claude");
+    fn stamped_exec_argv_places_claude_after_instance_marker() {
+        let argv = stamped_exec_argv(
+            "id-1",
+            vec![consts::CLAUDE_BINARY.to_string(), "--flag".to_string()],
+        );
+        assert_eq!(argv[0], "env");
+        assert_eq!(
+            argv[1],
+            format!("{}=id-1", speedwave_runtime::session::SESSION_INSTANCE_ENV)
+        );
+        assert_eq!(argv[2], "/usr/local/bin/claude");
+        assert_eq!(argv[3], "--flag");
     }
 
     #[test]
@@ -1695,9 +1848,8 @@ mod tests {
         assert!(script.contains(compose::PROXY_BASE_URL), "{script}");
     }
 
-    /// Login must select Anthropic active BEFORE render_compose, so a
-    /// logout-emptied project escapes the no-provider guard (avoids the dead-loop
-    /// where the login terminal closes before `claude auth login` runs).
+    /// Login must select Anthropic active BEFORE render_compose, so a logout-emptied project
+    /// escapes the no-provider guard (else the terminal closes before `claude auth login` runs).
     #[test]
     fn login_selects_anthropic_before_render_compose() {
         let source = include_str!("main.rs");
@@ -1812,9 +1964,8 @@ mod tests {
             .is_unconfigured());
     }
 
-    /// Explicit logout (v2 shape, providers present, active cleared) must be
-    /// reactivated — the original no-op-when-absent behavior is preserved
-    /// when there IS an llm config, just no longer the only path.
+    /// Explicit logout (v2 shape, providers present, active cleared) must be reactivated —
+    /// the original no-op-when-absent behavior stays, just no longer the only path.
     #[test]
     fn select_anthropic_in_reactivates_explicit_logout() {
         let llm = config::LlmConfig {
@@ -2029,13 +2180,70 @@ mod tests {
     #[test]
     fn test_exec_cmd_includes_resolved_flags() {
         use speedwave_runtime::defaults;
-        let mut exec_cmd: Vec<&str> = vec![consts::CLAUDE_BINARY];
-        exec_cmd.extend_from_slice(defaults::DEFAULT_FLAGS);
-        assert_eq!(exec_cmd[0], consts::CLAUDE_BINARY);
-        assert!(exec_cmd.contains(&"--dangerously-skip-permissions"));
-        assert!(exec_cmd.contains(&"--mcp-config"));
-        assert!(exec_cmd.contains(&defaults::MCP_CONFIG_PATH));
-        assert!(exec_cmd.contains(&"--strict-mcp-config"));
+        let mut tail = vec![consts::CLAUDE_BINARY.to_string()];
+        tail.extend(defaults::DEFAULT_FLAGS.iter().map(|f| f.to_string()));
+        let argv = stamped_exec_argv("id-2", tail);
+        assert!(argv.contains(&consts::CLAUDE_BINARY.to_string()));
+        assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(argv.contains(&"--mcp-config".to_string()));
+        assert!(argv.contains(&defaults::MCP_CONFIG_PATH.to_string()));
+        assert!(argv.contains(&"--strict-mcp-config".to_string()));
+    }
+
+    #[test]
+    fn interactive_exec_is_stamped_and_reaped() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &exec_cmd)")
+            .expect("interactive exec must exist");
+        let before = &source[exec.saturating_sub(700)..exec];
+        assert!(
+            before.contains("stamped_exec_argv("),
+            "run argv must carry the instance marker"
+        );
+        let after = &source[exec..exec + 500];
+        assert!(
+            after.contains("reap_instance("),
+            "run path must reap the marked process after status()"
+        );
+    }
+
+    #[test]
+    fn login_exec_is_stamped_and_reaped() {
+        let source = include_str!("main.rs");
+        let exec = source
+            .find(".container_exec(&container_name, &cmd_ref)")
+            .expect("login exec must exist");
+        let before = &source[exec.saturating_sub(700)..exec];
+        assert!(
+            before.contains("stamped_exec_argv("),
+            "login argv must carry the instance marker"
+        );
+        let after = &source[exec..exec + 500];
+        assert!(
+            after.contains("reap_instance("),
+            "login path must reap the marked process after status()"
+        );
+    }
+
+    #[test]
+    fn cli_session_guard_spans_compose_and_interactive_execs() {
+        // The shared lock tells Desktop's exit cleanup a live CLI session is
+        // attached to the VM (kernel-released on any death, incl. SIGKILL).
+        let source = include_str!("main.rs");
+        let ready = source
+            .find("runtime.ensure_ready()")
+            .expect("runtime recovery must exist");
+        let guard = source
+            .find("CliSessionGuard::acquire(")
+            .expect("CLI must hold the live-session lock");
+        let txn = source
+            .find("runtime.transaction(")
+            .expect("compose transaction must exist");
+        assert!(
+            ready < guard && guard < txn,
+            "guard must be taken once the VM is confirmed, before compose/image work"
+        );
     }
 
     /// Builds a project entry with the given name; dir is irrelevant now that
@@ -2714,9 +2922,8 @@ mod tests {
         assert!(red.contains("REDACTED"), "not redacted: {red}");
     }
 
-    /// `PluginEnable`/`PluginDisable` must hold `with_config_lock` across their
-    /// load→mutate→save sequence, like `select_anthropic_after_login` does —
-    /// otherwise a concurrent config writer loses the plugin-enabled update.
+    /// `PluginEnable`/`PluginDisable` must hold `with_config_lock` across load→mutate→save,
+    /// like `select_anthropic_after_login` — else a concurrent writer loses the update.
     #[test]
     fn plugin_enable_disable_hold_config_lock_across_save() {
         let source = include_str!("main.rs");

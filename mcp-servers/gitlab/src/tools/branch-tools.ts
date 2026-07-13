@@ -9,6 +9,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
@@ -17,7 +18,7 @@ const listBranchesTool: Tool = {
   name: 'listBranches',
   description: 'List branches in a project',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'branches', 'list', 'git', 'refs'],
   example: 'const branches = await gitlab.listBranches({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -66,7 +67,7 @@ const getBranchTool: Tool = {
   name: 'getBranch',
   description: 'Get details of a specific branch',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'branch', 'get', 'show', 'git'],
   example:
     'const branch = await gitlab.getBranch({ project_id: "speedwave/core", branch: "main" })',
@@ -108,7 +109,7 @@ const createBranchTool: Tool = {
   name: 'createBranch',
   description: 'Create a new branch',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'branch', 'create', 'new', 'git'],
   example:
     'const branch = await gitlab.createBranch({ project_id: "speedwave/core", branch: "feature/new", ref: "main" })',
@@ -149,7 +150,7 @@ const deleteBranchTool: Tool = {
   name: 'deleteBranch',
   description: 'Delete a branch',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'branch', 'delete', 'remove', 'git'],
   example: 'await gitlab.deleteBranch({ project_id: "speedwave/core", branch: "feature/old" })',
   inputSchema: {
@@ -180,7 +181,7 @@ const compareBranchesTool: Tool = {
   name: 'compareBranches',
   description: 'Compare two branches',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'compare', 'diff', 'branches', 'git'],
   example:
     'const diff = await gitlab.compareBranches({ project_id: "speedwave/core", from: "main", to: "develop" })',

@@ -40,7 +40,10 @@ pub fn managed_config_path() -> anyhow::Result<Option<PathBuf>> {
 /// Resolves the system ProgramData directory via `SHGetKnownFolderPath`, never the
 /// user-controllable `%ProgramData%` env var (which could hide MDM policy).
 #[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "Win32 FFI boundary: SHGetKnownFolderPath, SAFETY documented inline"
+)]
 fn program_data_dir() -> anyhow::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Globalization::lstrlenW;
@@ -85,7 +88,10 @@ pub(crate) fn load_managed_config_from(path: &Path) -> anyhow::Result<Option<Man
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
 

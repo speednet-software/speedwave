@@ -12,9 +12,7 @@ import { ALLOWED_COMMANDS } from './tools/index.js';
 
 const execFileAsync = promisify(execFileCb);
 
-//=============================================================================
-// Types
-//=============================================================================
+// ── Types ──────────────────────────────────────────────────────────────
 
 /** OS domain identifier for native CLI routing. */
 export type OsDomain = 'reminders' | 'calendar' | 'mail' | 'notes';
@@ -39,9 +37,7 @@ export interface PlatformPaths {
   notes: string;
 }
 
-//=============================================================================
-// Binary Resolution
-//=============================================================================
+// ── Binary Resolution ──────────────────────────────────────────────────
 
 /** Detect whether we are running in dev mode or production (bundled). */
 function isDevMode(): boolean {
@@ -55,7 +51,7 @@ function resolveProjectRoot(): string {
 
 /**
  * Resolve native CLI binary paths for macOS (Swift binaries).
- * SYNC: binary paths must match desktop/src-tauri/src/integrations_cmd.rs::resolve_native_cli_binary()
+ * SYNC: must match integrations_cmd.rs::resolve_native_cli_binary() in desktop/src-tauri.
  */
 function resolveDarwinPaths(): PlatformPaths {
   if (isDevMode()) {
@@ -115,9 +111,7 @@ export function resolvePaths(): PlatformPaths {
   return resolveNativePaths();
 }
 
-//=============================================================================
-// Execution
-//=============================================================================
+// ── Execution ──────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -140,10 +134,10 @@ export function buildChildEnv(): NodeJS.ProcessEnv {
 
 /**
  * Run a native CLI command and parse JSON output.
- * @param domain - OS domain (reminders, calendar, mail, notes)
- * @param command - Command name (e.g., list_reminders, create_event)
- * @param args - JSON-serializable arguments
- * @param timeoutMs - Execution timeout in milliseconds
+ * @param domain - OS domain (reminders, calendar, mail, notes).
+ * @param command - Command name (e.g., list_reminders, create_event).
+ * @param args - JSON-serializable arguments.
+ * @param timeoutMs - Execution timeout in milliseconds (default {@link DEFAULT_TIMEOUT_MS}).
  */
 export async function runCommand(
   domain: OsDomain,
@@ -153,7 +147,8 @@ export async function runCommand(
 ): Promise<RunResult> {
   const allowed = ALLOWED_COMMANDS[domain];
   if (!allowed || !allowed.has(command)) {
-    throw new Error('Unknown command.');
+    const allowedList = allowed ? [...allowed].join(', ') : '(no commands registered for domain)';
+    throw new Error(`Unknown command '${command}' for domain '${domain}'. Allowed: ${allowedList}`);
   }
 
   const paths = resolvePaths();

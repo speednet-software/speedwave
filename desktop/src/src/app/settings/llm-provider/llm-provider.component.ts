@@ -38,10 +38,7 @@ import {
   ProviderTarget,
 } from '../../models/llm';
 
-/**
- * Edit-state row of a remote (proxy-routed) provider — ADR-073. Key VALUE
- * lives in `keyInput` until Save; config carries the `hasKey` presence flag.
- */
+/** Edit-state row of a remote (proxy-routed) provider (ADR-073). Key VALUE lives in `keyInput` until Save; config carries the `hasKey` presence flag. */
 interface ExtraProviderEdit {
   id: ExtraProviderId;
   kind: 'open_router';
@@ -59,10 +56,7 @@ interface ExtraProviderEdit {
   contextTokens: number | null;
 }
 
-/**
- * The permanent remote row (`openrouter`) — rendered like the anthropic/local
- * cards; an unconfigured row is simply not persisted.
- */
+/** The permanent remote row (`openrouter`) — rendered like the anthropic/local cards; an unconfigured row is simply not persisted. */
 function fixedExtraRows(): ExtraProviderEdit[] {
   const empty = (id: ExtraProviderId, kind: ExtraProviderEdit['kind']): ExtraProviderEdit => ({
     id,
@@ -81,19 +75,15 @@ function fixedExtraRows(): ExtraProviderEdit[] {
 }
 
 /**
- * Tri-state credential value for a touched field: empty/blank → null (delete),
- * otherwise the value. Callers gate on the field's touched flag first.
- * @param value - The raw field value.
- * @returns The trimmed-non-empty value, or null when blank.
+ * Tri-state credential value for a touched field: empty/blank → null (delete), otherwise the value; callers gate on the field's touched flag first.
+ * @param value - the raw field value
+ * @returns the trimmed-non-empty value, or null when blank
  */
 function nullIfEmpty(value: string): string | null {
   return value.trim() === '' ? null : value;
 }
 
-/**
- * Discovery state for the LLM model listing (discriminated union). `in-flight.id`
- * matches the monotonic counter; non-latest responses are discarded as stale.
- */
+/** Discovery state for the LLM model listing (discriminated union). `in-flight.id` matches the monotonic counter; non-latest responses are discarded as stale. */
 type DiscoveryFailureReason = 'offline' | 'unsupported' | 'other' | 'auth' | 'server-error';
 
 type DiscoveryState =
@@ -110,7 +100,7 @@ const AUTH_FAILURE_MESSAGE = 'Authentication failed — check the API key.';
 
 /**
  * Maps a discovery Err string to a reason + status (contract: discovery.rs).
- * @param msg - Backend Err string from `discover_llm_models`.
+ * @param msg - backend Err string from `discover_llm_models`
  */
 function classifyDiscoveryFailure(msg: string): {
   reason: DiscoveryFailureReason;
@@ -645,18 +635,12 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   saving = signal(false);
   saved = signal(false);
 
-  /**
-   * Local-LLM API key (Bearer), form-only — backend stores it per-project and
-   * exposes only `has_api_key`. `apiKeyTouched` gates the unchanged/empty/value tri-state.
-   */
+  /** Local-LLM API key (Bearer), form-only — backend stores it per-project and exposes only `has_api_key`; `apiKeyTouched` gates the unchanged/empty/value tri-state. */
   apiKey = signal('');
   apiKeyTouched = signal(false);
   hasApiKey = signal(false);
 
-  /**
-   * Optional custom HTTP headers (Azure APIM, corporate gateways). Same
-   * touched-flag pattern as apiKey. Format: one `Name: Value` per line.
-   */
+  /** Optional custom HTTP headers (Azure APIM, corporate gateways); same touched-flag pattern as apiKey. Format: one `Name: Value` per line. */
   customHeaders = signal('');
   customHeadersTouched = signal(false);
   hasCustomHeaders = signal(false);
@@ -667,10 +651,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Active project — drives the auth-status load and the OAuth terminal. */
   readonly activeProject = input<string | null>(null);
 
-  /**
-   * Anthropic auth — OAuth default, api-key tab one click away. The key VALUE
-   * goes via `save_api_key` to `secrets/<project>/anthropic_api_key`, never LlmConfig.
-   */
+  /** Anthropic auth — OAuth default, api-key tab one click away. The key VALUE goes via `save_api_key` to `secrets/<project>/anthropic_api_key`, never LlmConfig. */
   authMethod = signal<'oauth' | 'api_key'>('oauth');
   anthropicApiKeyInput = signal('');
   anthropicApiKeySaving = signal(false);
@@ -682,65 +663,38 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Detects an external-terminal OAuth login and runs the embedded autosave path. */
   private readonly oauthWatcher = inject(OauthCompletionWatcher);
 
-  /**
-   * Remote (proxy-routed) providers — ADR-073. Parsed from the v2 `providers`
-   * list on load (anthropic/local stay on cards); Save sends the full set.
-   */
+  /** Remote (proxy-routed) providers (ADR-073). Parsed from the v2 `providers` list on load (anthropic/local stay on cards); Save sends the full set. */
   extraProviders = signal<ExtraProviderEdit[]>(fixedExtraRows());
 
-  /**
-   * Which target is active: `'anthropic'`, `'local'`, or an extra provider
-   * id. The cards and the extra rows share this one radio state.
-   */
+  /** Which target is active: `'anthropic'`, `'local'`, or an extra provider id. The cards and the extra rows share this one radio state. */
   selectedTarget = signal<ProviderTarget>('anthropic');
 
-  /**
-   * `provider_id|model` snapshot on load. Unchanged at Save → proxy-only hot
-   * reload (session survives); any change → full project restart (claude env).
-   */
+  /** `provider_id|model` snapshot on load. Unchanged at Save → proxy-only hot reload (session survives); any change → full project restart (claude env). */
   private loadedActiveKey = '';
 
-  /**
-   * Whole-form fingerprint on load, gating `canSave` (see `computeFormSnapshot`).
-   * A signal so `isDirty`'s `computed()` invalidates on every reassignment.
-   */
+  /** Whole-form fingerprint on load, gating `canSave` (see `computeFormSnapshot`); a signal so `isDirty`'s `computed()` invalidates on every reassignment. */
   private loadedFormSnapshot = signal('');
 
   /** Join state for the initial load race — see `maybeSnapshotInitialLoad`. */
   private initialConfigLoaded = false;
   private initialAuthStatusLoaded = false;
 
-  /**
-   * Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) in persisted config,
-   * else `null`. Drives the migration banner; rewrite to `local` waits for Save.
-   */
+  /** Legacy provider name (`ollama`/`lmstudio`/`llamacpp`) in persisted config, else `null`. Drives the migration banner; rewrite to `local` waits for Save. */
   legacyMigrationProvider = signal<string | null>(null);
 
-  /**
-   * Persisted `context_tokens`, seeded on load. Fallback for
-   * `resolveContextTokensForSave` until discovery yields the picked model's value.
-   */
+  /** Persisted `context_tokens`, seeded on load. Fallback for `resolveContextTokensForSave` until discovery yields the picked model's value. */
   private loadedLocalContextTokens: number | null = null;
 
   /** Current state of the model discovery probe. See `DiscoveryState` docstring. */
   discoveryState = signal<DiscoveryState>({ kind: 'idle' });
 
-  /**
-   * Monotonic counter bumped per discovery trigger; a response whose `id`
-   * differs from it is stale (superseded trigger) and discarded.
-   */
+  /** Monotonic counter bumped per discovery trigger; a response whose `id` differs from it is stale (superseded trigger) and discarded. */
   private discoveryCounter = 0;
 
-  /**
-   * Tracks the provider value from the previous `onProviderChange` call so we
-   * can detect actual changes (ngModelChange can fire without a user edit).
-   */
+  /** Tracks the provider value from the previous `onProviderChange` call so we can detect actual changes (ngModelChange can fire without a user edit). */
   private lastKnownProvider: FlatProviderId = 'anthropic';
 
-  /**
-   * Per-provider session cache of the last Base URL, restored on switch-back
-   * instead of the often-wrong default. Seeded from config on init.
-   */
+  /** Per-provider session cache of the last Base URL, restored on switch-back instead of the often-wrong default. Seeded from config on init. */
   private baseUrlByProvider: Partial<Record<FlatProviderId, string>> = {};
 
   /** Loaded `local` entry — passed through Save while the card is inactive. */
@@ -770,8 +724,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     });
     effect(() => {
       if (this.activeProject()) {
-        // Only the first firing races the initial load; later firings are
-        // refreshes, and re-snapshotting there would mask real dirty state.
+        // Only the first firing races the initial load; later firings are refreshes,
+        // and re-snapshotting there would mask real dirty state.
         const isInitialLoad = !this.initialAuthStatusLoaded;
         void this.loadAuthStatus().then(() => {
           if (isInitialLoad) this.maybeSnapshotInitialLoad('authStatus');
@@ -785,10 +739,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private chatState = inject(ChatStateService);
   private log = inject(LoggerService);
 
-  /**
-   * Cached SSOT Anthropic model catalog (`list_anthropic_models`). Empty until
-   * the first fetch settles; optgroups render nothing while loading.
-   */
+  /** Cached SSOT Anthropic model catalog (`list_anthropic_models`). Empty until the first fetch settles; optgroups render nothing while loading. */
   protected readonly anthropicCatalog = signal<readonly AnthropicModel[]>([]);
 
   /** Models flagged `latest = true` — rendered in the "Latest" optgroup. */
@@ -814,9 +765,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Format a catalog entry into the dropdown label, e.g.
-   * `"Opus 4.7 · 1M ctx (claude-opus-4-7)"` — the id keeps copied aliases honest.
-   * @param m - Catalog entry returned by the backend SSOT.
+   * Format a catalog entry into the dropdown label, e.g. `"Opus 4.7 · 1M ctx (claude-opus-4-7)"` — the id keeps copied aliases honest.
+   * @param m - the catalog entry to format
    */
   protected formatModelLabel(m: AnthropicModel): string {
     return `${m.family} · ${formatContextLabel(m.context_tokens)} ctx (${m.id})`;
@@ -824,16 +774,15 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Whether the given model id is present in the SSOT catalog.
-   * @param id - Model id (API alias) to check against the cached catalog.
+   * @param id - the model id to look up
    */
   protected modelInCatalog(id: string): boolean {
     return this.anthropicCatalog().some((m) => m.id === id);
   }
 
   /**
-   * Format a discovered local model into a dropdown label: `id · 32k ctx` when
-   * a context window is known, otherwise the bare id.
-   * @param m - Discovered model returned by the backend probe.
+   * Format a discovered local model into a dropdown label: `id · 32k ctx` when a context window is known, otherwise the bare id.
+   * @param m - the discovered model to format
    */
   protected formatLocalModelLabel(m: DiscoveredModel): string {
     if (m.context_tokens && m.context_tokens > 0) {
@@ -854,18 +803,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   );
 
   /**
-   * Local-model `<select>` change handler. `context_tokens` are derived on
-   * demand from `discoveryState.models` (one source), not cached here.
-   * @param id - Model id from the dropdown's value attribute.
+   * Local-model `<select>` change handler. `context_tokens` are derived on demand from `discoveryState.models` (one source), not cached here.
+   * @param id - the selected model id
    */
   protected onLocalModelChange(id: string): void {
     this.model.set(id);
   }
 
   /**
-   * Base-URL edit resets stale discovery + model, so Save re-gates on a fresh
-   * discover against the new server.
-   * @param value - New base URL typed by the user.
+   * Base-URL edit resets stale discovery + model, so Save re-gates on a fresh discover against the new server.
+   * @param value - the new base URL input value
    */
   protected onBaseUrlInput(value: string): void {
     this.baseUrl.set(value);
@@ -876,7 +823,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Touched-flag handler — see `apiKeyTouched` doc for the tri-state rationale.
-   * @param value - New value typed by the user.
+   * @param value - the new API key input value
    */
   protected onApiKeyInput(value: string): void {
     this.apiKey.set(value);
@@ -885,17 +832,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Touched-flag handler — see `customHeadersTouched` doc.
-   * @param value - New value typed by the user (multi-line `Name: Value`).
+   * @param value - the new custom-headers input value
    */
   protected onCustomHeadersInput(value: string): void {
     this.customHeaders.set(value);
     this.customHeadersTouched.set(true);
   }
 
-  /**
-   * `context_tokens` to save: anthropic→catalog lookup; local+discovery→picked
-   * model's window; local pre-discovery→loaded config value; else `null`.
-   */
+  /** `context_tokens` to save: anthropic→catalog lookup; local+discovery→picked model's window; local pre-discovery→loaded config value; else `null`. */
   private resolveContextTokensForSave(): number | null {
     const model = this.model();
     if (!model) return null;
@@ -918,9 +862,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Provider-card click handler. Routes through `onProviderChange` so URL
-   * caching, default fetching, and probe gating stay intact.
-   * @param id - Card-class provider id (`anthropic` | `local`).
+   * Provider-card click handler. Routes through `onProviderChange` so URL caching, default fetching, and probe gating stay intact.
+   * @param id - the clicked provider card id
    */
   async selectProvider(id: ProviderCardId): Promise<void> {
     this.selectedTarget.set(id);
@@ -933,9 +876,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   expandedExtraId: ExtraProviderId | null = null;
 
   /**
-   * Whole-bar click: first click activates the row (and expands it);
-   * a click on the already-active row toggles the edit panel.
-   * @param entry - The clicked row.
+   * Whole-bar click: first click activates the row (and expands it); a click on the already-active row toggles the edit panel.
+   * @param entry - the clicked remote provider row
    */
   onExtraHeaderClick(entry: ExtraProviderEdit): void {
     if (this.selectedTarget() !== entry.id) {
@@ -947,7 +889,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Makes the row the active provider (and expands it).
-   * @param entry - The selected row.
+   * @param entry - the remote provider row to activate
    */
   selectExtraProvider(entry: ExtraProviderEdit): void {
     this.snapshotAnthropicModel();
@@ -958,7 +900,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Toggles the row's edit panel without changing the active provider.
-   * @param entry - The toggled row.
+   * @param entry - the remote provider row to toggle
    */
   toggleExtraExpanded(entry: ExtraProviderEdit): void {
     this.expandedExtraId = this.expandedExtraId === entry.id ? null : entry.id;
@@ -966,16 +908,15 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * OpenRouter discovery is gated on a non-empty API key.
-   * @param entry - The remote provider row.
+   * @param entry - the remote provider row to check
    */
   protected canDiscoverExtra(entry: ExtraProviderEdit): boolean {
     return entry.kind === 'open_router' && !!entry.keyInput.trim();
   }
 
   /**
-   * Fetches the OpenRouter catalog (host-side, tool-capable models), sending
-   * the transient key so the catalog probe authenticates.
-   * @param entry - The openrouter row to populate.
+   * Fetches the OpenRouter catalog (host-side, tool-capable models), sending the transient key so the catalog probe authenticates.
+   * @param entry - the remote provider row to discover models for
    */
   async discoverExtraModels(entry: ExtraProviderEdit): Promise<void> {
     if (entry.kind !== 'open_router' || entry.discovering) {
@@ -1014,9 +955,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Inline error for a remote row's failed catalog discovery. The `auth`
-   * sentinel maps to the shared key message; anything else gets a generic hint.
-   * @param entry - The remote provider row.
+   * Inline error for a remote row's failed catalog discovery. The `auth` sentinel maps to the shared key message; anything else gets a generic hint.
+   * @param entry - the remote provider row to render an error for
    */
   protected extraDiscoveryErrorMessage(entry: ExtraProviderEdit): string {
     const failure = entry.discoverError;
@@ -1028,10 +968,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Dropdown selection handler for an openrouter row — records the model
-   * and its catalog context window.
-   * @param entry - The edited row.
-   * @param modelId - Selected catalog model id.
+   * Dropdown selection handler for an openrouter row — records the model and its catalog context window.
+   * @param entry - the remote provider row being edited
+   * @param modelId - the selected model id
    */
   onExtraModelSelect(entry: ExtraProviderEdit, modelId: string): void {
     entry.model = modelId;
@@ -1040,10 +979,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Whether the discovered catalog contains `modelId` — drives the extra
-   * `<option>` preserving a previously saved model that left the catalog.
-   * @param entry - The row whose catalog to check.
-   * @param modelId - Model id to look up.
+   * Whether the discovered catalog contains `modelId` — drives the extra `<option>` preserving a previously saved model that left the catalog.
+   * @param entry - the remote provider row to check
+   * @param modelId - the model id to look up
    */
   catalogHasModel(entry: ExtraProviderEdit, modelId: string): boolean {
     return !!entry.models?.some((m) => m.id === modelId);
@@ -1051,7 +989,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Context window as a short label (`128k`, `1M`) for dropdown options.
-   * @param tokens - Context-token count from the catalog.
+   * @param tokens - the context window size in tokens
    */
   ctxLabel(tokens: number): string {
     return formatContextLabel(tokens);
@@ -1059,8 +997,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Key-field input handler for a remote provider row.
-   * @param entry - The edited row.
-   * @param value - Current input value.
+   * @param entry - the remote provider row being edited
+   * @param value - the new API key input value
    */
   onExtraKeyInput(entry: ExtraProviderEdit, value: string): void {
     entry.keyInput = value;
@@ -1070,10 +1008,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.extraProviders.set([...this.extraProviders()]);
   }
 
-  /**
-   * Placeholder model name per provider. Anthropic derives it from the SSOT
-   * catalog (latest everyday Sonnet); empty while loading to avoid a stale id.
-   */
+  /** Placeholder model name per provider. Anthropic derives it from the SSOT catalog (latest everyday Sonnet); empty while loading to avoid a stale id. */
   readonly modelPlaceholder = computed<string>(() => {
     if (this.provider() === 'anthropic') {
       return this.anthropicModels.latestEverydayModelId() ?? '';
@@ -1110,10 +1045,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.provider() === 'local' ? 'Local LLM server' : 'Provider'
   );
 
-  /**
-   * Provider-dropdown change. Resets baseUrl (per-provider default ports),
-   * re-probes against the new default, and bumps the counter to drop stale probes.
-   */
+  /** Provider-dropdown change. Resets baseUrl (per-provider default ports), re-probes against the new default, and bumps the counter to drop stale probes. */
   async onProviderChange(): Promise<void> {
     const provider = this.provider();
     if (provider === this.lastKnownProvider) {
@@ -1154,17 +1086,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     }
     const defaultBaseUrl = this.defaultBaseUrlsByProvider[provider] ?? '';
     this.defaultBaseUrl.set(defaultBaseUrl);
-    // Restore the cached URL for this provider if we have one; otherwise fall
-    // back to the provider's backend-authoritative default. Anthropic has no baseUrl.
+    // Restore the cached URL for this provider, else fall back to the provider's
+    // backend-authoritative default. Anthropic has no baseUrl.
     const cached = this.baseUrlByProvider[provider];
     this.baseUrl.set(provider === 'anthropic' ? '' : cached || defaultBaseUrl);
     // No auto-probe on switch — discovery is explicit (the discover button only).
   }
 
   /**
-   * Probes the local LLM server for models. Fires only from the explicit
-   * "Discover models" button — never automatically (no blur/load/switch probes).
-   * @param isRefresh When true, bypass the same-URL dedupe to force a re-probe.
+   * Probes the local LLM server for models. Fires only from the explicit "Discover models" button — never automatically (no blur/load/switch probes).
+   * @param isRefresh - true when re-probing the same URL while a probe is already in-flight
    */
   async discoverModels(isRefresh: boolean): Promise<void> {
     const provider = this.provider();
@@ -1201,12 +1132,10 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
       const live = this.discoveryState();
       if (live.kind !== 'in-flight' || live.id !== id) return;
-      // Invariant: do_discover_llm_models maps empty lists to Err("empty"),
-      // so a resolved Ok always carries a non-empty array.
+      // Invariant: do_discover_llm_models maps empty lists to Err("empty"), so a resolved Ok always carries a non-empty array.
       this.discoveryState.set({ kind: 'ready', url: effectiveUrl, models: result.models });
       this.messagesEndpointOk.set(result.messages_endpoint_ok ?? null);
-      // Auto-select only when blank (a3): a restored-but-unlisted model is a
-      // deliberate choice — keep it (the template offers a "not on server" option).
+      // Auto-select only when blank (a3): a restored-but-unlisted model is deliberate — keep it (template offers "not on server").
       if (!this.model() && result.models[0]?.id) {
         this.model.set(result.models[0].id);
       }
@@ -1282,28 +1211,24 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Auto-selects + saves Anthropic on OAuth success, unconditionally: the
-   * prior active provider may still be routing live, so saveConfig must run
-   * even if the card was already showing Anthropic.
-   * @param _success - login hint; the reloaded auth state is authoritative.
+   * Auto-selects + saves Anthropic on OAuth success, unconditionally: the prior active provider may still be routing live, so saveConfig must run even if the card was already showing Anthropic.
+   * @param _success - unused; the handler re-checks auth status instead of trusting the caller's flag
    */
   async onOAuthDone(_success: boolean): Promise<void> {
     await this.loadAuthStatus();
     if (this.oauthAuthenticated()) {
       this.selectedTarget.set('anthropic');
       this.provider.set('anthropic');
-      // Force a full restart: the saved `active` may already read 'anthropic'
-      // while the running container still routes to a stale provider, so the
-      // proxy-reload discriminator would otherwise skip the needed claude restart.
+      // Force a full restart: the saved `active` may already read 'anthropic' while the running
+      // container still routes to a stale provider, so a proxy reload would skip the needed claude restart.
       await this.saveConfig(true);
     }
     this.cdr.markForCheck();
   }
 
   /**
-   * Removes the project's Anthropic credentials and clears the active provider,
-   * leaving the user with no provider, then refreshes the status.
-   * @param project - the project to log out of.
+   * Removes the project's Anthropic credentials and clears the active provider, leaving the user with no provider, then refreshes the status.
+   * @param project - the active project name
    */
   async anthropicLogout(project: string): Promise<void> {
     this.loggingOut.set(true);
@@ -1327,9 +1252,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Builds the full v2 provider set (ADR-073): cards map to `anthropic`/`local`
-   * entries, remote rows append verbatim.
-   * @param anthropicHasApiKey - Whether an Anthropic key is configured (sets the entry kind).
+   * Builds the full v2 provider set (ADR-073): cards map to `anthropic`/`local` entries, remote rows append verbatim.
+   * @param anthropicHasApiKey - whether the Anthropic card has a configured API key
    */
   private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
     // Resolve the active target once — it's stable for this invocation.
@@ -1388,10 +1312,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     return providers;
   }
 
-  /**
-   * Resolves the radio state to a concrete target id. With no matching extra
-   * row, the cards win — `provider` decides (covers programmatic mutation).
-   */
+  /** Resolves the radio state to a concrete target id. With no matching extra row, the cards win — `provider` decides (covers programmatic mutation). */
   private readonly effectiveTarget = computed<ProviderTarget>(() => {
     const selectedTarget = this.selectedTarget();
     if (this.extraProviders().some((p) => p.id === selectedTarget)) {
@@ -1420,9 +1341,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Snapshots once both load legs settle, whichever finishes second.
-   * With no active project, `authStatus` is vacuously satisfied since it never fires.
-   * @param half - Which load leg just completed.
+   * Snapshots once both load legs settle, whichever finishes second. With no active project, `authStatus` is vacuously satisfied since it never fires.
+   * @param half - which load leg just completed
    */
   private maybeSnapshotInitialLoad(half: 'config' | 'authStatus'): void {
     if (half === 'config') {
@@ -1441,10 +1361,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
   );
 
-  /**
-   * Save is allowed only when the active non-anthropic provider has a model
-   * AND the user has actually changed something since load/last save.
-   */
+  /** Save is allowed only when the active non-anthropic provider has a model AND the user has actually changed something since load/last save. */
   protected readonly canSave = computed<boolean>(() => {
     if (!this.isDirty()) return false;
     const target = this.effectiveTarget();
@@ -1456,11 +1373,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * Finds a permanent remote row by exact id, falling back to kind so legacy
-   * generated ids (`openrouter-2`) still land on their fixed row.
-   * @param id - Exact provider id to match first.
-   * @param kind - Optional kind to fall back on when no id matches.
-   * @returns The matching row, or undefined.
+   * Finds a permanent remote row by exact id, falling back to kind so legacy generated ids (`openrouter-2`) still land on their fixed row.
+   * @param id - the persisted provider id to look up
+   * @param kind - fallback provider kind when the exact id isn't found
    */
   private findExtraRow(id: string, kind?: LlmProviderKind): ExtraProviderEdit | undefined {
     const rows = this.extraProviders();
@@ -1468,19 +1383,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * A `provider/model`-shaped id is foreign to Anthropic (ADR-073). Mirror of
-   * the Rust `is_foreign_anthropic_model` SSOT — frontend can't call Rust.
-   * @param model - Candidate model id.
-   * @returns True when the id must not be treated as an Anthropic model.
+   * A `provider/model`-shaped id is foreign to Anthropic (ADR-073). Mirror of the Rust `is_foreign_anthropic_model` SSOT — frontend can't call Rust.
+   * @param model - the model id to check
    */
   private isForeignModel(model: string): boolean {
     return model.includes('/');
   }
 
   /**
-   * Snapshots the anthropic-card model before leaving the card, so a later
-   * Save doesn't fall back to a stale snapshot (F2/a1). Foreign ids never stick.
-   * @param fromTarget - The target being left (defaults to the current one).
+   * Snapshots the anthropic-card model before leaving the card, so a later Save doesn't fall back to a stale snapshot (F2/a1). Foreign ids never stick.
+   * @param fromTarget - the provider target being left; defaults to the current effective target
    */
   private snapshotAnthropicModel(fromTarget: string = this.effectiveTarget()): void {
     const model = this.model();
@@ -1490,11 +1402,10 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Narrows a persisted flat provider to the typed target domain: cards pass
-   * through, remote ids land on their fixed row (id first, then kind for
-   * legacy generated ids), anything unknown falls back to the local card.
-   * @param raw - Persisted flat provider string.
-   * @param kind - Kind of the matching provider entry, when known.
+   * Narrows a persisted flat provider to the typed target domain: cards pass through, remote ids
+   * land on their fixed row (id first, then kind), anything unknown falls back to the local card.
+   * @param raw - the persisted flat provider id
+   * @param kind - fallback provider kind when the exact id isn't a known remote row
    */
   private narrowFlatProvider(raw: string, kind?: LlmProviderKind): ProviderTarget {
     if (raw === 'anthropic' || raw === 'local') return raw;
@@ -1518,12 +1429,11 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Restart-discriminator over claude-env inputs (provider, model, kind,
-   * custom-headers); excludes proxy-path base_url + proxy_enabled (ADR-073 R6).
-   * @param providerId - Active provider id.
-   * @param model - Active model id (or null/undefined).
-   * @param providers - Provider list used to look up the active entry's kind.
-   * @returns A stable key; a change forces a full restart vs. a proxy reload.
+   * Restart-discriminator over claude-env inputs (provider, model, kind, custom-headers); excludes
+   * proxy-path base_url + proxy_enabled (ADR-073 R6). A change in the returned key forces a full restart vs. a proxy reload.
+   * @param providerId - the active provider id
+   * @param model - the active model, if any
+   * @param providers - the full provider set to resolve kind/custom-headers from
    */
   private computeActiveKey(
     providerId: string,
@@ -1538,8 +1448,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /**
    * Persists the LLM provider configuration to the backend.
-   * @param forceRestart - Force a full restart even if `active` is unchanged,
-   *   so a running container can't stay routed to a stale provider.
+   * @param forceRestart - forces a full restart even if `active` is unchanged, so a running container can't stay routed to a stale provider
    */
   async saveConfig(forceRestart = false): Promise<void> {
     // Surface the model-required error at Save time; compose::apply_llm_config

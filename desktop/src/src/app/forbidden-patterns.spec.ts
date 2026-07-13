@@ -57,10 +57,9 @@ const EXCLUDED_DIRS: readonly string[] = [
 ];
 
 /**
- * Recursively walks a directory, returning absolute paths of every file whose
- * extension matches one of the supplied suffixes.
- * @param dir - The absolute directory path to start walking from.
- * @param extensions - File suffixes (e.g. `.ts`, `.html`) to include.
+ * Recursively walks a directory, returning absolute paths of every file matching one of `extensions`.
+ * @param dir - Directory to walk.
+ * @param extensions - File extensions to match (e.g. `.ts`).
  */
 function walk(dir: string, extensions: readonly string[]): string[] {
   const entries = readdirSync(dir);
@@ -131,9 +130,8 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
 ];
 
 /**
- * Scans every source file under SRC_ROOT and returns lines that match the
- * forbidden pattern (subject to per-pattern file and line exemptions).
- * @param pattern - The forbidden-pattern descriptor to enforce.
+ * Scans every source file under SRC_ROOT and returns lines matching `pattern` (subject to its file/line exemptions).
+ * @param pattern - Forbidden pattern to scan for.
  */
 function gatherViolations(pattern: ForbiddenPattern): string[] {
   const files = walk(SRC_ROOT, pattern.extensions);

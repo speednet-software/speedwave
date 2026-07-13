@@ -39,7 +39,7 @@ export interface TocHeading {
 }
 
 /**
- * Extract headings (h1–h6) from text web part HTML, assigning anchor ids when missing.
+ * Extract headings (h1-h6) from text web part HTML, assigning anchor ids when missing.
  * @param innerHtml - text web part HTML
  * @returns headings discovered in source order
  */
@@ -129,7 +129,7 @@ export function slugifyHeading(text: string): string {
 
 /**
  * Render ToC HTML from headings (nested lists inside the parent `<li>`, levels skip gracefully).
- * @param headings - extracted headings (h1–h6, preserving order)
+ * @param headings - extracted headings (h1-h6, preserving order)
  * @param title - optional header rendered above the ToC (`<h2>`)
  * @returns HTML string suitable for a text web part body
  */
@@ -215,7 +215,7 @@ function escapeHtmlAttr(s: string): string {
 export const UI_ONLY_WEBPART_FIELDS = ['customContentDropSupport'] as const;
 
 /**
- * Recursively remove UI-only fields from a canvasLayout so it can be re-PATCHed via `updatePage` (deep clone).
+ * Recursively remove UI-only fields from a canvasLayout so it can be re-PATCHed via `updatePage` (deep clone, any depth).
  * @param layout - canvasLayout from `getPage` or any nested subtree
  * @returns the same structure with UI-only fields removed at every depth
  */
@@ -317,7 +317,7 @@ export function buildImageWebPartData(
 /**
  * Build the createWebPart envelope for standard (non-text) web parts.
  * @param webPartType - GUID of the standard web part type
- * @param data - optional webPartData payload (audiences, properties, serverProcessedContent, title, …)
+ * @param data - optional webPartData payload (audiences, properties, serverProcessedContent, title, ...)
  * @returns request body for POST on a webparts collection
  */
 export function buildStandardWebPartBody(

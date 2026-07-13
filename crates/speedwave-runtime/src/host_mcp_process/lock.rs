@@ -1,12 +1,5 @@
-//! Unified lock-file schema for every host MCP worker manager.
-//!
-//! Each manager previously wrote three separate files
-//! (`{port, pid, auth-token}`); this module supersedes that with a
-//! single `lock.json` blob, mirroring the schema bridges already use.
-//!
-//! mcp-os has users on the pre-PR3 layout, so its `spawn_with_data_dir`
-//! calls [`migrate_legacy_with_target`] before the generic spawn writes
-//! the lock; oauth had no released users and skips the migration entirely.
+//! Unified lock-file schema for every host MCP worker manager: a single `lock.json` blob replacing
+//! the legacy 3-file layout. mcp-os has pre-PR3 users so it migrates; oauth doesn't need to.
 
 use std::path::Path;
 
@@ -36,7 +29,7 @@ impl LockService {
 
 /// Lock-file payload. `transport` is "http" for every worker today
 /// — kept as a field for future-proofing and symmetry with bridges.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct LockFile {
     /// Service tag that owns this lock.
     pub service: String,
@@ -49,6 +42,19 @@ pub struct LockFile {
     pub auth_token: String,
     /// Transport protocol (currently always `http`).
     pub transport: String,
+}
+
+// Manual Debug: `auth_token` is a bearer secret (same pattern as `UpstreamIde`).
+impl std::fmt::Debug for LockFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LockFile")
+            .field("service", &self.service)
+            .field("pid", &self.pid)
+            .field("port", &self.port)
+            .field("auth_token", &"***REDACTED***")
+            .field("transport", &self.transport)
+            .finish()
+    }
 }
 
 impl LockFile {
@@ -64,9 +70,8 @@ impl LockFile {
     }
 }
 
-/// Read a `lock.json` from disk. Returns `None` if the file is missing,
-/// unreadable, malformed, or the recorded `service` does not match the
-/// caller's expectation. Best-effort — never panics.
+/// Read a `lock.json` from disk. Returns `None` if missing, unreadable, malformed, or the recorded
+/// `service` doesn't match the caller's expectation. Best-effort — never panics.
 pub fn read(path: &Path, expected: LockService) -> Option<LockFile> {
     let bytes = std::fs::read(path).ok()?;
     let lock: LockFile = serde_json::from_slice(&bytes).ok()?;
@@ -76,11 +81,8 @@ pub fn read(path: &Path, expected: LockService) -> Option<LockFile> {
     Some(lock)
 }
 
-/// Write `lock` to `path` with owner-only permissions. Atomic on Unix
-/// (`NamedTempFile::persist` rename) and on Windows (icacls on tempfile
-/// then atomic rename via `fs_perms::write_restricted_file`'s
-/// `NamedTempFile::persist` path). A concurrent reader either sees the
-/// pre-existing file or the new one — never a partial JSON write.
+/// Write `lock` to `path` with owner-only permissions, atomically via
+/// `fs_perms::write_restricted_file`. A reader never sees a partial write.
 pub fn write(path: &Path, lock: &LockFile) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -90,10 +92,8 @@ pub fn write(path: &Path, lock: &LockFile) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One-shot, idempotent migration from the 3-file legacy layout to
-/// `<state_dir>/lock.json`. Test-only convenience over
-/// [`migrate_legacy_with_target`]; production callers (currently only
-/// mcp-os) pass an explicit lock filename via `_with_target`.
+/// One-shot, idempotent migration from the 3-file legacy layout to `<state_dir>/lock.json`.
+/// Test-only convenience over [`migrate_legacy_with_target`]; mcp-os passes an explicit filename.
 #[cfg(test)]
 pub fn migrate_legacy(
     state_dir: &Path,
@@ -112,10 +112,8 @@ pub fn migrate_legacy(
     )
 }
 
-/// Like [`migrate_legacy`] but the destination lock filename is
-/// caller-specified. Used by the mcp-os singleton, whose lock lives at
-/// `<data_dir>/mcp-os.lock.json` rather than under a per-project
-/// subdirectory.
+/// Like [`migrate_legacy`] but the destination lock filename is caller-specified. Used by the
+/// mcp-os singleton, whose lock lives at `<data_dir>/mcp-os.lock.json`, not a per-project subdir.
 pub fn migrate_legacy_with_target(
     state_dir: &Path,
     service: LockService,
@@ -124,10 +122,8 @@ pub fn migrate_legacy_with_target(
     pid_file: &str,
     auth_token_file: &str,
 ) -> Option<LockFile> {
-    // Fast-path: skip every disk touch when no legacy port/pid file is
-    // present. The auth-token file is intentionally NOT in this check
-    // because mcp-os reuses that name for the live bind-mount, so it
-    // can be present without indicating an un-migrated state.
+    // Fast-path: skip disk touches when no legacy port/pid file exists; auth-token excluded since
+    // mcp-os reuses that name for the live bind-mount and can exist without meaning "unmigrated."
     let legacy_present = state_dir.join(port_file).exists() || state_dir.join(pid_file).exists();
     if !legacy_present {
         return None;
@@ -176,7 +172,11 @@ fn cleanup_legacy_files(state_dir: &Path, port_file: &str, pid_file: &str) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only module: unwraps/expects assert setup succeeded"
+)]
 mod tests {
     use super::*;
     fn fixture() -> LockFile {
@@ -248,10 +248,8 @@ mod tests {
         assert_eq!(lock.pid, 12345);
         assert_eq!(lock.auth_token, "uuid-token");
 
-        // Legacy port + pid removed. The auth-token file is kept on
-        // disk because mcp-os reuses that filename as the live token
-        // mount; callers that don't share the convention can clean it
-        // up themselves.
+        // Legacy port + pid removed. auth-token stays on disk (mcp-os reuses that filename as the
+        // live token mount); callers without that convention clean it up themselves.
         assert!(!dir.path().join("port").exists());
         assert!(!dir.path().join("pid").exists());
         assert!(dir.path().join("lock.json").exists());
@@ -259,10 +257,8 @@ mod tests {
 
     #[test]
     fn migrate_is_idempotent_on_second_call() {
-        // First call: legacy present → migrate to lock.json, remove
-        // port + pid. Second call: fast-path detects no legacy and
-        // returns None — caller treats that as "nothing to migrate,
-        // existing lock.json stands".
+        // First call migrates and removes port+pid; second call's fast-path finds no legacy and
+        // returns None, meaning "nothing to migrate, existing lock.json stands".
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("port"), "60123").unwrap();
         std::fs::write(dir.path().join("pid"), "12345").unwrap();
@@ -299,8 +295,7 @@ mod tests {
         // The JSON wins — legacy values are ignored.
         assert_eq!(lock.port, 60123);
         assert_eq!(lock.auth_token, "uuid-token");
-        // Leftover port + pid cleaned up; auth-token is preserved on
-        // disk (mcp-os reuses the filename as a live mount).
+        // Leftover port + pid cleaned up; auth-token preserved (mcp-os reuses it as a live mount).
         assert!(!dir.path().join("port").exists());
         assert!(!dir.path().join("pid").exists());
     }
@@ -341,13 +336,8 @@ mod tests {
         assert!(result.is_none(), "port 0 must reject migration");
     }
 
-    // ── Edge cases: byte-exact fixture variants a real pre-PR3 user could have ─
-    //
-    // The legacy code (`write_restricted_file(&port_path, &port.to_string())`)
-    // wrote without a trailing newline. But a user could have ended up with
-    // edited / re-saved files, an editor adding a final newline, or a partial
-    // write from a crashed earlier session. These tests pin the resilience
-    // of `read_legacy_*` against the variants we expect to see in the wild.
+    // ── Edge cases: byte-exact legacy fixture variants ──────────────────
+    // Legacy writer omitted a trailing newline; pins `read_legacy_*` against CRLF/whitespace too.
 
     fn run_migrate(
         dir: &Path,
@@ -451,9 +441,7 @@ mod tests {
 
     #[test]
     fn migrate_rejects_zero_pid() {
-        // PID 0 means "the whole process group" on POSIX — definitely
-        // not a real mcp-os worker. The `> 0` filter in read_legacy_u32
-        // catches it.
+        // PID 0 means "whole process group" on POSIX, never a real worker; `> 0` filter rejects it.
         let dir = tempfile::tempdir().unwrap();
         let res = run_migrate(dir.path(), b"54321", b"0", b"tok");
         assert!(res.is_none(), "pid 0 must reject migration");
@@ -470,23 +458,8 @@ mod tests {
         assert_eq!(lock.auth_token, uuid);
     }
 
-    // ── End-to-end migration: legacy fixture → lock.json → read-back ─────
-    //
-    // These tests simulate the upgrade path the audit critic flagged:
-    // "pre-PR3 build leaves 3 files; upgrade to PR3; verify lock.json
-    // exists, legacy files are gone, and the data a worker would read is
-    // intact." We can't spawn a real Node worker in unit tests, but we can
-    // prove the full lock-file lifecycle the worker depends on:
-    //
-    //   1. Legacy 3-file state in state_dir
-    //   2. `migrate_legacy(...)` produces a LockFile
-    //   3. The same data is `read()`-able from disk as the same LockFile
-    //   4. Legacy files are gone
-    //   5. Mode is 0o600 on Unix (no leak)
-    //   6. A second `migrate_legacy(...)` returns the same lock (idempotent)
-    //
-    // Cross-service to cover both (`McpOs`/`Oauth`) with their distinct
-    // legacy filenames.
+    // ── End-to-end migration: legacy fixture → lock.json → read-back ────
+    // Upgrade path: pre-PR3 3-file state → migrate → lock.json exists, legacy gone, data intact.
 
     /// End-to-end: legacy → migrate → read-back for the McpOs service,
     /// with the singleton's actual legacy filenames (`mcp-os-*`).
@@ -518,8 +491,7 @@ mod tests {
         assert_eq!(from_disk.transport, "http");
         assert_eq!(from_disk.service, "mcp-os");
 
-        // (c) Legacy port + pid are gone. `mcp-os-auth-token` survives
-        // — that filename is the live token mount, not a legacy artifact.
+        // (c) Legacy port + pid gone; mcp-os-auth-token survives (live token mount, not legacy).
         assert!(!dir.path().join("mcp-os-port").exists());
         assert!(!dir.path().join("mcp-os-pid").exists());
 
@@ -559,9 +531,8 @@ mod tests {
         assert!(read(&dir.path().join("lock.json"), LockService::McpOs).is_none());
     }
 
-    /// Idempotency after a real migration: second `migrate_legacy` after the
-    /// upgrade reads the existing lock.json verbatim — the worker keeps the
-    /// same port/pid/auth_token across spawns, so consumers don't churn.
+    /// Idempotency after a real migration: second `migrate_legacy` reads the existing lock.json
+    /// verbatim, so port/pid/auth_token stay stable across spawns and consumers don't churn.
     #[test]
     fn migrate_then_read_then_migrate_again_yields_identical_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -583,12 +554,8 @@ mod tests {
         assert_eq!(after_second, first, "lock.json untouched by second call");
     }
 
-    /// Worker-recovery smoke test: simulates the "old version wrote legacy
-    /// files; new version starts up" scenario end-to-end with stable IDs.
-    /// After migration, the same `pid` (host PID) and `port` (TCP) are present
-    /// — so the next process's liveness probe (`probe_tcp` on `port`, kill
-    /// stale by `pid`) can find the previous worker exactly as before the
-    /// schema change.
+    /// Worker-recovery smoke test: "old version wrote legacy files; new version starts up" with
+    /// stable IDs, so the liveness probe (`probe_tcp` on `port`, kill stale by `pid`) still works.
     #[test]
     fn migration_preserves_pid_and_port_for_liveness_probe() {
         let dir = tempfile::tempdir().unwrap();
@@ -611,9 +578,8 @@ mod tests {
         assert!(!lock.auth_token.is_empty(), "auth-token survives migration");
     }
 
-    /// Cross-service isolation: simulating two different services in the
-    /// same temp dir (impossible in production but guards against a
-    /// regression that ignored the service tag during cleanup).
+    /// Cross-service isolation: two services in the same temp dir (impossible in production)
+    /// guards against a regression that ignored the service tag during cleanup.
     #[test]
     fn migrate_does_not_clobber_other_services_lock_in_same_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -621,11 +587,8 @@ mod tests {
         let mcp_os_lock = LockFile::new(LockService::McpOs, 1, 1111, "mcp-os-tok".into());
         write(&dir.path().join("lock.json"), &mcp_os_lock).unwrap();
 
-        // Now attempt to migrate as if for `Oauth` with the same filenames
-        // (port/pid/auth-token). Because the existing lock.json has
-        // `service: "mcp-os"`, `read(..., Oauth)` returns None and the
-        // migration overwrites it. Document this so a future caller knows
-        // mixing services in one state_dir is not supported.
+        // Migrating as `Oauth` with the same filenames: lock.json has service: "mcp-os", so
+        // `read(..., Oauth)` returns None, migration overwrites it — mixing services unsupported.
         std::fs::write(dir.path().join("port"), "2222").unwrap();
         std::fs::write(dir.path().join("pid"), "2").unwrap();
         std::fs::write(dir.path().join("auth-token"), "oauth-tok").unwrap();
@@ -635,16 +598,13 @@ mod tests {
         assert_eq!(migrated.service, "oauth");
         assert_eq!(migrated.port, 2222);
 
-        // Confirm: McpOs lock is now overwritten — services cannot share a state_dir.
-        // In production, each service has its own state_dir
-        // (`<data_dir>/oauth/<project>/`, `<data_dir>/mcp-os.lock.json`
-        // directly) so collision is impossible.
+        // McpOs lock is overwritten — in production each service has its own state_dir
+        // (oauth/<project>/, mcp-os.lock.json), so collision is impossible.
         assert!(read(&dir.path().join("lock.json"), LockService::McpOs).is_none());
     }
 
-    /// `migrate_legacy` must never return a lock whose `service` tag
-    /// disagrees with the requested service. This guards a class of bugs
-    /// where `read()` returns Some for the wrong service.
+    /// `migrate_legacy` must never return a lock whose `service` tag disagrees with the requested
+    /// service — guards against `read()` returning Some for the wrong service.
     #[test]
     fn migrate_result_service_tag_matches_request() {
         for (service, expected_tag) in [
@@ -661,5 +621,18 @@ mod tests {
                 "service tag must match the migrate_legacy(service=) argument"
             );
         }
+    }
+
+    #[test]
+    fn lock_file_debug_redacts_auth_token() {
+        let lock = LockFile::new(
+            LockService::McpOs,
+            42,
+            8080,
+            "top-secret-bearer".to_string(),
+        );
+        let dbg = format!("{lock:?}");
+        assert!(!dbg.contains("top-secret-bearer"), "leaked: {dbg}");
+        assert!(dbg.contains("***REDACTED***"));
     }
 }

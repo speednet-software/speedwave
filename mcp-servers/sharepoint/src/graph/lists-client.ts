@@ -1,23 +1,6 @@
 /**
- * Graph URL builders for the SharePoint Lists API: lists + items.
- *
- * Companion to {@link ./columns-client.ts} (column schema operations live
- * there to keep this module focused on list / item CRUD).
- *
- * Endpoint set (PR5):
- *   - `GET    /sites/{site-id}/lists`
- *   - `GET    /sites/{site-id}/lists/{list-id}?$expand=columns`                     (getList)
- *   - `POST   /sites/{site-id}/lists`                                                (createList)
- *   - `PATCH  /sites/{site-id}/lists/{list-id}`                                      (updateList)
- *   - `DELETE /sites/{site-id}/lists/{list-id}`                                      (deleteList)
- *   - `GET    /sites/{site-id}/lists/{list-id}/items?$expand=fields[&$select=...]`   (listItems)
- *   - `GET    /sites/{site-id}/lists/{list-id}/items/{item-id}?$expand=fields`       (getItem)
- *   - `POST   /sites/{site-id}/lists/{list-id}/items`                                (createItem)
- *   - `PATCH  /sites/{site-id}/lists/{list-id}/items/{item-id}/fields`               (updateItem)
- *   - `DELETE /sites/{site-id}/lists/{list-id}/items/{item-id}`                      (deleteItem)
- *
- * `siteId` is always read from `GraphRequester.getSiteId()`. No tool in the
- * list-tools layer accepts `site_id` from the model (ADR-060).
+ * Graph URL builders for SharePoint Lists: lists + items (columns: {@link ./columns-client.ts}).
+ * `siteId` is always from `GraphRequester.getSiteId()`; no tool accepts `site_id` (ADR-060).
  */
 import type { GraphRequester } from './site-client.js';
 
@@ -104,12 +87,9 @@ export class ListsClient {
   // -- items -----------------------------------------------------------------
 
   /**
-   * GET /sites/{site-id}/lists/{list-id}/items?$expand=fields[&...query].
-   * Caller supplies `extraQuery` segments (e.g. `$top=50`, `$filter=...`);
-   * they are appended with `&`. The `$expand=fields` parameter is always set
-   * so the caller does not need to remember it.
+   * GET .../items?$expand=fields[&...query]; `$expand=fields` is always set.
    * @param listId - Graph id of the list
-   * @param extraQuery - additional OData query-string segments to append
+   * @param extraQuery - additional OData query-string segments, appended with `&`
    */
   listItems<T = unknown>(listId: string, extraQuery: string[] = []): Promise<T | undefined> {
     const qs = ['$expand=fields', ...extraQuery].join('&');
@@ -126,7 +106,7 @@ export class ListsClient {
   }
 
   /**
-   * POST /sites/{site-id}/lists/{list-id}/items — create a new item.
+   * POST .../items — create a new item; `body` is typically `{ fields: { ... } }`.
    * @param listId - Graph id of the list
    * @param body - Graph item payload (typically `{ fields: { ... } }`)
    */

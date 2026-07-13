@@ -6,7 +6,9 @@
 import {
   errorResult,
   jsonResult,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
+  teachingErrorResult,
   Tool,
   ToolDefinition,
   ToolsCallResult,
@@ -20,7 +22,7 @@ export const queryDocsTool: Tool = {
   description:
     'Retrieve documentation snippets for a Context7 library ID. Use resolveLibraryId first if the ID is unknown.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['context7', 'docs', 'documentation', 'snippets', 'context'],
   example:
     'const { docs } = await context7.queryDocs({ libraryId: "/facebook/react", query: "useState examples" })',
@@ -90,8 +92,21 @@ export function createQueryDocsTool(client: Context7Client): ToolDefinition {
       const libraryId = typeof p?.libraryId === 'string' ? p.libraryId : '';
       const query = typeof p?.query === 'string' ? p.query : '';
       const requested = typeof p?.tokens === 'number' ? p.tokens : DEFAULT_OUTPUT_TOKENS;
-      if (!libraryId) return errorResult('libraryId is required');
-      if (!query) return errorResult('query is required');
+      if (!libraryId) {
+        return teachingErrorResult({
+          paramName: 'libraryId',
+          received: p?.libraryId,
+          correctValueTool: 'resolveLibraryId',
+          nextStep: 'A valid ID looks like "/owner/repo" (e.g. "/facebook/react").',
+        });
+      }
+      if (!query) {
+        return teachingErrorResult({
+          paramName: 'query',
+          received: p?.query,
+          nextStep: "Provide the user's question so Context7 can return relevant snippets.",
+        });
+      }
       const tokens = clampTokens(requested);
 
       try {

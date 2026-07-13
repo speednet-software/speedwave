@@ -1,17 +1,26 @@
-/**
- * Validation Helpers for OS Tool Parameters
- *
- * Shared validation utilities following the Speedwave MCP pattern.
- */
+/** Validation helpers for OS tool parameters, following the Speedwave MCP pattern. */
 
-import { withResultValidation, type ToolResult, type ToolsCallResult } from '@speedwave/mcp-shared';
+import {
+  withResultValidation,
+  teachingToolResult,
+  type ToolResult,
+  type ToolsCallResult,
+} from '@speedwave/mcp-shared';
 
 /** Standardized result returned by OS tool handlers (re-export of the shared type). */
 export type { ToolResult };
 
 /**
- * Wraps a tool handler with parameter validation and error handling
- * (pretty-printed JSON output via the shared Family-A wrapper).
+ * Build a `{field: value}` map of the named fields for a multi-field `received`.
+ * @param params - Tool input parameters.
+ * @param names - Field names to include in the map.
+ */
+function receivedMapFor(params: Record<string, unknown>, names: string[]): Record<string, unknown> {
+  return Object.fromEntries(names.map((name) => [name, params[name]]));
+}
+
+/**
+ * Wraps a tool handler with validation + error handling (JSON via the shared Family-A wrapper).
  * @param handler - Function that executes the tool logic.
  */
 export function withValidation<T>(
@@ -29,40 +38,38 @@ export function requireFields(
   params: Record<string, unknown>,
   fields: string[]
 ): { valid: true } | { valid: false; error: ToolResult } {
+  const fieldsError = (
+    offending: string[],
+    code: string,
+    action: string
+  ): { valid: false; error: ToolResult } => {
+    const names = offending.join(', ');
+    return {
+      valid: false,
+      error: teachingToolResult(
+        {
+          paramName: names,
+          received: offending.length > 1 ? receivedMapFor(params, offending) : params[offending[0]],
+          nextStep: `${action} ${names}.`,
+        },
+        code
+      ),
+    };
+  };
   const missing = fields.filter(
     (f) => params[f] === undefined || params[f] === null || typeof params[f] !== 'string'
   );
   if (missing.length > 0) {
-    return {
-      valid: false,
-      error: {
-        success: false,
-        error: {
-          code: 'MISSING_FIELDS',
-          message: `Missing required fields: ${missing.join(', ')}`,
-        },
-      },
-    };
+    return fieldsError(missing, 'MISSING_FIELDS', 'Provide a non-empty string for');
   }
   const empty = fields.filter((f) => (params[f] as string).trim() === '');
   if (empty.length > 0) {
-    return {
-      valid: false,
-      error: {
-        success: false,
-        error: {
-          code: 'EMPTY_FIELDS',
-          message: `Fields must not be empty: ${empty.join(', ')}`,
-        },
-      },
-    };
+    return fieldsError(empty, 'EMPTY_FIELDS', 'Provide a non-empty value for');
   }
   return { valid: true };
 }
 
-//=============================================================================
-// Input Validation — max length, control chars, types (SEC-012)
-//=============================================================================
+// ── Input Validation — max length, control chars, types (SEC-012) ────────
 
 /** Maximum allowed lengths per field category. */
 export const MAX_LENGTHS = { id: 512, short: 1_000, body: 100_000 } as const;
@@ -99,35 +106,39 @@ export function validateStringFields(
     if (typeof value !== 'string') {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: { code: 'INVALID_TYPE', message: `${name} must be a string` },
-        },
+        error: teachingToolResult(
+          { paramName: name, received: value, nextStep: `Pass ${name} as a string.` },
+          'INVALID_TYPE'
+        ),
       };
     }
     if (value.length > maxLength) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'FIELD_TOO_LONG',
-            message: `${name} exceeds maximum length of ${maxLength}`,
+        error: teachingToolResult(
+          {
+            paramName: name,
+            received: `${value.length} characters`,
+            nextStep: `Shorten ${name} to at most ${maxLength} characters.`,
           },
-        },
+          'FIELD_TOO_LONG'
+        ),
       };
     }
     const re = allowNewlines ? CONTROL_CHARS_BODY : CONTROL_CHARS_STRICT;
     if (re.test(value)) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'INVALID_CHARACTERS',
-            message: `${name} contains invalid control characters`,
+        error: teachingToolResult(
+          {
+            paramName: name,
+            received: value,
+            nextStep: allowNewlines
+              ? `Remove control characters from ${name} (tabs, newlines, and carriage returns are allowed).`
+              : `Remove control characters and newlines from ${name}.`,
           },
-        },
+          'INVALID_CHARACTERS'
+        ),
       };
     }
   }
@@ -149,25 +160,27 @@ export function validateNumberFields(
     if (typeof value !== 'number' || !Number.isFinite(value)) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'INVALID_TYPE',
-            message: `${name} must be a finite number between ${min} and ${max}`,
+        error: teachingToolResult(
+          {
+            paramName: name,
+            received: value,
+            nextStep: `Pass ${name} as a finite number between ${min} and ${max}.`,
           },
-        },
+          'INVALID_TYPE'
+        ),
       };
     }
     if (value < min || value > max) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'OUT_OF_RANGE',
-            message: `${name} must be between ${min} and ${max}`,
+        error: teachingToolResult(
+          {
+            paramName: name,
+            received: value,
+            nextStep: `Pass ${name} as a number between ${min} and ${max}.`,
           },
-        },
+          'OUT_OF_RANGE'
+        ),
       };
     }
   }
@@ -189,10 +202,14 @@ export function validateBooleanFields(
     if (typeof value !== 'boolean') {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: { code: 'INVALID_TYPE', message: `${name} must be a boolean` },
-        },
+        error: teachingToolResult(
+          {
+            paramName: name,
+            received: value,
+            nextStep: `Pass ${name} as a literal boolean (true or false), not a string or number.`,
+          },
+          'INVALID_TYPE'
+        ),
       };
     }
   }
@@ -214,66 +231,74 @@ export function validateStringArrayFields(
     if (!Array.isArray(value)) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: { code: 'INVALID_TYPE', message: `${name} must be an array` },
-        },
+        error: teachingToolResult(
+          { paramName: name, received: value, nextStep: `Pass ${name} as an array of strings.` },
+          'INVALID_TYPE'
+        ),
       };
     }
     if (value.length > maxItems) {
       return {
         valid: false,
-        error: {
-          success: false,
-          error: {
-            code: 'ARRAY_TOO_LONG',
-            message: `${name} exceeds maximum of ${maxItems} items`,
+        error: teachingToolResult(
+          {
+            paramName: name,
+            received: `${value.length} items`,
+            nextStep: `Trim ${name} to at most ${maxItems} items.`,
           },
-        },
+          'ARRAY_TOO_LONG'
+        ),
       };
     }
     for (let i = 0; i < value.length; i++) {
       const item = value[i];
+      const itemName = `${name}[${i}]`;
       if (typeof item !== 'string') {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: { code: 'INVALID_TYPE', message: `${name}[${i}] must be a string` },
-          },
+          error: teachingToolResult(
+            { paramName: itemName, received: item, nextStep: `Pass ${itemName} as a string.` },
+            'INVALID_TYPE'
+          ),
         };
       }
       if (item.trim() === '') {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: { code: 'EMPTY_FIELDS', message: `${name}[${i}] must not be empty` },
-          },
+          error: teachingToolResult(
+            {
+              paramName: itemName,
+              received: item,
+              nextStep: `Provide a non-empty value for ${itemName}, or remove it from ${name}.`,
+            },
+            'EMPTY_FIELDS'
+          ),
         };
       }
       if (item.length > maxItemLength) {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: {
-              code: 'FIELD_TOO_LONG',
-              message: `${name}[${i}] exceeds maximum length of ${maxItemLength}`,
+          error: teachingToolResult(
+            {
+              paramName: itemName,
+              received: `${item.length} characters`,
+              nextStep: `Shorten ${itemName} to at most ${maxItemLength} characters.`,
             },
-          },
+            'FIELD_TOO_LONG'
+          ),
         };
       }
       if (CONTROL_CHARS_STRICT.test(item)) {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: {
-              code: 'INVALID_CHARACTERS',
-              message: `${name}[${i}] contains invalid control characters`,
+          error: teachingToolResult(
+            {
+              paramName: itemName,
+              received: item,
+              nextStep: `Remove control characters and newlines from ${itemName}.`,
             },
-          },
+            'INVALID_CHARACTERS'
+          ),
         };
       }
     }
@@ -292,7 +317,7 @@ export interface ValidationSpec {
 }
 
 /**
- * Combine all validation steps in one call.
+ * Combine all validation steps in one call, per `spec`.
  * @param params - Tool input parameters to validate.
  * @param spec - Which validations to run and with what configuration.
  */
@@ -350,10 +375,14 @@ export function validateDateFields(
       if (typeof value !== 'string' || !isValidISO8601(value)) {
         return {
           valid: false,
-          error: {
-            success: false,
-            error: { code: 'INVALID_DATE', message: `Invalid ${field} date format. Use ISO8601.` },
-          },
+          error: teachingToolResult(
+            {
+              paramName: field,
+              received: value,
+              nextStep: `Pass ${field} as an ISO8601 date string, e.g. "2026-06-15" or "2026-06-15T09:30:00Z".`,
+            },
+            'INVALID_DATE'
+          ),
         };
       }
     }

@@ -1,10 +1,5 @@
-//! Plugin host bridge — generic Desktop wrapper that builds a
-//! `HostBridge` from a plugin manifest's `host_bridge` declaration.
-//!
-//! The plugin declares roles, env-var names, origin policy, frame
-//! cap, and collision policy in its manifest. The wrapper translates
-//! those declarations into `HostBridgeConfig` and exposes the same
-//! events / credentials API for any host-bridged plugin.
+//! Plugin host bridge — generic Desktop wrapper that builds a `HostBridge` from a plugin
+//! manifest's `host_bridge` declaration (roles, env-vars, origin/collision policy, frame cap).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -38,9 +33,8 @@ struct PluginBridgeLockFile {
     auth_token: String,
 }
 
-/// Generic pairing events surfaced to the Desktop UI. Serialized form is the
-/// SSOT for the `plugin_bridge_event` Tauri event; mirror is
-/// `BridgeEventPayload` in `desktop/src/src/app/services/plugin-bridge.service.ts`.
+/// Generic pairing events surfaced to the Desktop UI. Serialized form is the SSOT for the
+/// `plugin_bridge_event` Tauri event; mirror `BridgeEventPayload` in `plugin-bridge.service.ts`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginBridgeEvent {
@@ -54,16 +48,16 @@ pub enum PluginBridgeEvent {
 
 pub type PluginBridgeEventCallback = Arc<dyn Fn(PluginBridgeEvent) + Send + Sync + 'static>;
 
-/// Plugin-UI credentials (loopback URL + shared token).
-#[derive(Clone, Debug)]
+/// Plugin-UI credentials (loopback URL + shared token). No Debug: carries the bearer token.
+#[derive(Clone)]
 pub struct PluginBridgeCredentials {
     pub local_ui_url: String,
     pub token: String,
 }
 
 /// Raw bridge facts the compose layer combines with the env-var
-/// names declared in the plugin manifest.
-#[derive(Clone, Debug)]
+/// names declared in the plugin manifest. No Debug: carries the bearer token.
+#[derive(Clone)]
 pub struct PluginBridgeComposeInfo {
     pub port: u16,
     pub auth_token: String,
@@ -288,7 +282,7 @@ fn translate_pairing_event(evt: PairingEvent) -> Option<PluginBridgeEvent> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test module")]
 mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};

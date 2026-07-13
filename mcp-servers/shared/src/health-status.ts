@@ -1,11 +1,6 @@
 /**
- * Connection status tracking for MCP workers with external dependencies.
- *
- * Replaces the historical pattern where each worker had its own ad-hoc
- * `_connectionStatus` / `getHealthStatus()` shape. All workers that talk to
- * an external HTTP service (Redmine, GitLab, GitHub, Atlassian, SharePoint,
- * Slack) hold one `ConnectionStatusTracker` and expose the shared
- * {@link HealthStatus} contract through `getHealthStatus()`.
+ * Connection status tracking for MCP workers with external dependencies: each holds one
+ * `ConnectionStatusTracker` exposing {@link HealthStatus} via `getHealthStatus()`.
  * @module shared/health-status
  */
 
@@ -20,10 +15,7 @@ export interface HealthStatus {
   connection: ConnectionStatus;
   /** Last connection error message, or null when healthy / unknown. */
   connectionError: string | null;
-  /**
-   * Optional token-save error for SharePoint (ADR-060) — populated only by
-   * workers that own a TokenManager. Other workers omit this field.
-   */
+  /** Optional token-save error for SharePoint (ADR-060); only workers owning a TokenManager set it. */
   tokenSaveError?: string | null;
 }
 
@@ -31,11 +23,8 @@ export interface HealthStatus {
 export const DEFAULT_WARMUP_MS = 10_000;
 
 /**
- * Tracks the connection status of an external dependency.
- *
- * Workers create one instance per client and update it via
- * {@link setOk} / {@link setFailed}. The healthCheck callback for
- * `createMCPServer` reads status through {@link makeStandardHealthCheck}.
+ * Tracks the connection status of an external dependency. Workers create one instance per client and
+ * update it via {@link setOk} / {@link setFailed}; `createMCPServer`'s healthCheck reads it via {@link makeStandardHealthCheck}.
  */
 export class ConnectionStatusTracker {
   private _status: ConnectionStatus = 'unknown';
@@ -44,8 +33,7 @@ export class ConnectionStatusTracker {
 
   /**
    * Build a fresh tracker starting in the `unknown` state.
-   * @param warmupMs - Window after construction in which `unknown` is
-   *   considered healthy (background test still in flight). Default 10 s.
+   * @param warmupMs - Window in which `unknown` is treated as healthy (background test in flight). Default 10 s.
    */
   constructor(warmupMs: number = DEFAULT_WARMUP_MS) {
     this._warmupExpiresAt = Date.now() + warmupMs;
@@ -101,14 +89,8 @@ export class ConnectionStatusTracker {
 }
 
 /**
- * Build a healthCheck callback for `createMCPServer` driven by a tracker.
- *
- * Behaviour:
- * - `ok` → healthy (no throw).
- * - `failed` → throws with `${serviceName} connection failed: ${error}`.
- * - `unknown` during warm-up → healthy (background test still in flight).
- * - `unknown` after warm-up → throws with `${serviceName} not configured`
- *   (preserves the legacy `if (!client) throw 'not configured'` UX).
+ * Build a healthCheck callback for `createMCPServer` driven by a tracker: `ok` → healthy; `failed` → throws
+ * with the error; `unknown` → healthy during warm-up, else throws `${serviceName} not configured` (legacy UX).
  * @param tracker - Shared status tracker owned by the worker client.
  * @param serviceName - Human-readable service name (e.g. `'GitLab'`).
  */
@@ -128,10 +110,8 @@ export function makeStandardHealthCheck(
 }
 
 /**
- * Schedule a background connection test that updates a tracker on completion.
- *
- * The promise from `test` is consumed with `void` so the caller is never
- * blocked. Failures are logged at `warn` level with the service name.
+ * Schedule a background connection test that updates a tracker on completion; the `test` promise is
+ * consumed with `void` so the caller is never blocked. Failures are logged at `warn` level with the service name.
  * @param tracker - Status tracker that receives the test result.
  * @param test - Async probe that throws on failure.
  * @param serviceName - Human-readable service name (e.g. `'Slack'`).

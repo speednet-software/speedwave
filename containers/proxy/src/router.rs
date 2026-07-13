@@ -59,7 +59,7 @@ pub struct Route {
 
 /// Top-level proxy routing config, deserialized from `/config/proxy.json`.
 /// `usage_path` is resolved once at startup from `SPW_USAGE_PATH`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     pub routes: Vec<Route>,
     /// Per-project caller secret only the `claude` container holds; the auth
@@ -74,13 +74,35 @@ pub struct Config {
     pub client: reqwest::Client,
 }
 
-/// Outbound forwarding client: rustls TLS, no redirects (SSRF defence).
+// Manual Debug: `caller_token` is a per-project secret and must never reach logs.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("routes", &self.routes)
+            .field(
+                "caller_token",
+                &self.caller_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("usage_path", &self.usage_path)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Outbound forwarding client: rustls TLS, no redirects (SSRF defence). Retries
+/// once without proxy env vars on build failure, then exits fatally.
 fn build_forward_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("building the proxy forward client must not fail at startup")
+    let build = || {
+        reqwest::Client::builder()
+            .use_rustls_tls()
+            .redirect(reqwest::redirect::Policy::none())
+    };
+    build().build().unwrap_or_else(|e| {
+        log::warn!("forward client build failed ({e}), retrying without proxy env vars");
+        build().no_proxy().build().unwrap_or_else(|e| {
+            log::error!("failed to build proxy forward client: {e}");
+            std::process::exit(1);
+        })
+    })
 }
 
 impl Default for Config {
@@ -136,7 +158,10 @@ pub fn resolve<'a>(cfg: &'a Config, model: &str) -> Option<&'a Route> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test fixture setup, failure aborts the test"
+    )]
     use super::*;
 
     fn fixture_config() -> Config {
@@ -176,6 +201,15 @@ mod tests {
     }
 
     #[test]
+    fn config_debug_redacts_caller_token() {
+        let mut cfg = fixture_config();
+        cfg.caller_token = Some("super-secret-caller-token".to_string());
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("super-secret-caller-token"), "leaked: {dbg}");
+        assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
     fn anthropic_prefix_routes_to_passthrough() {
         let cfg = fixture_config();
         let r = resolve(&cfg, "claude-opus-4-8").unwrap();
@@ -212,6 +246,28 @@ mod tests {
         let cfg: Config = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.routes[0].provider_kind, "openrouter");
         assert_eq!(cfg.routes[0].provider_id, "openrouter");
+    }
+
+    #[test]
+    fn build_forward_client_succeeds_on_primary_path() {
+        // Reaching a Client proves the primary build() attempt succeeded.
+        let _client = build_forward_client();
+    }
+
+    #[test]
+    fn build_forward_client_no_proxy_fallback_chain_builds() {
+        // Same builder chain as the retry branch's no_proxy() fallback.
+        let build = || {
+            reqwest::Client::builder()
+                .use_rustls_tls()
+                .redirect(reqwest::redirect::Policy::none())
+        };
+        let result = build().no_proxy().build();
+        assert!(
+            result.is_ok(),
+            "no_proxy() fallback chain must build a client: {:?}",
+            result.err()
+        );
     }
 
     #[test]

@@ -1,15 +1,7 @@
 #!/usr/bin/env bats
 
-# Static sanity checks on .github/workflows/desktop-release.yml to prevent the
-# macOS signing regression that shipped in PR #458 / v0.7.2-draft: without a
-# keychain-import step before tauri-action, `beforeBundleCommand` runs
-# `codesign --sign "$APPLE_SIGNING_IDENTITY"` against an empty keychain and the
-# entire macOS matrix fails with "item could not be found in the keychain".
-#
-# These tests guard the contract between the workflow and
-# scripts/sign-bundled-binaries.sh: by the time tauri-action starts on macOS,
-# the identity must already be importable and the script's `codesign` call must
-# be able to resolve it.
+# Guards .github/workflows/desktop-release.yml against the macOS signing regression from PR #458/
+# v0.7.2-draft: without keychain-import before tauri-action, codesign hits an empty keychain and fails.
 
 WORKFLOW="$BATS_TEST_DIRNAME/../../.github/workflows/desktop-release.yml"
 VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
@@ -20,77 +12,62 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
 
 @test "workflow imports Apple certificate into keychain before tauri-action" {
     # Grab line numbers of the keychain-import step and the tauri-action step.
-    # `grep -n` prints "LINE:content"; cut to just the line number.
     import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
     tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
 
     [ -n "$import_line" ]
     [ -n "$tauri_line" ]
-    # Import must come before tauri-action, otherwise beforeBundleCommand sees
-    # an empty keychain on the ephemeral GitHub runner.
+    # Import must come before tauri-action, or beforeBundleCommand sees an empty keychain.
     [ "$import_line" -lt "$tauri_line" ]
 }
 
 @test "keychain import uses the prescribed security commands" {
-    # security create-keychain + import + set-key-partition-list is the
-    # pattern Tauri and Apple require for codesign to find a Developer ID
-    # identity on a headless CI runner. All three must be present.
+    # create-keychain + import + set-key-partition-list: the pattern Tauri/Apple require for
+    # codesign to find a Developer ID identity on a headless CI runner. All three must be present.
     grep -q "security create-keychain" "$WORKFLOW"
     grep -q "security import" "$WORKFLOW"
     grep -q "security set-key-partition-list" "$WORKFLOW"
 }
 
 @test "keychain import grants codesign access to the imported key" {
-    # `-T /usr/bin/codesign` is what lets codesign read the private key from
-    # the build keychain without triggering a GUI password prompt. Missing
-    # this flag is a common silent-failure mode.
+    # `-T /usr/bin/codesign` lets codesign read the private key without a GUI password prompt;
+    # missing it is a common silent-failure mode.
     grep -q -- "-T /usr/bin/codesign" "$WORKFLOW"
 }
 
 @test "keychain import prepends build keychain to search list" {
-    # codesign resolves identities via the user's keychain search list; if the
-    # build keychain is created but not added to that list, `find-identity`
-    # returns empty and signing fails. `security list-keychains -s` is the
-    # single command that fixes this.
+    # codesign resolves identities via the keychain search list; if the build keychain isn't added,
+    # `find-identity` returns empty. `security list-keychains -s` is the fix.
     grep -q "security list-keychains" "$WORKFLOW"
 }
 
 @test "keychain import fails fast if identity is not resolvable" {
-    # The step must verify the identity is actually importable, not just
-    # that `security import` exited 0 — a malformed .p12 can import without
-    # producing a usable codesigning identity. `find-identity` after import
-    # is the canonical smoke test.
+    # `security import` exiting 0 isn't enough — a malformed .p12 can import without a usable
+    # codesigning identity. `find-identity` after import is the canonical smoke test.
     grep -q "security find-identity" "$WORKFLOW"
 }
 
 @test "keychain import uses fixed-string grep for identity verification" {
-    # The identity string contains `(TEAM)` — grep without -F treats the
-    # parentheses as regex metacharacters. More importantly, `grep -q ""`
-    # matches every line, so without `-F` and an empty-identity guard the
-    # verification silently passes when APPLE_SIGNING_IDENTITY is unset.
+    # Identity contains `(TEAM)` — grep without -F mis-treats parens as regex; without -F and an
+    # empty-identity guard, `grep -q ""` matches every line and passes silently when unset.
     grep -qF 'grep -qF' "$WORKFLOW"
 }
 
 @test "keychain import guards against empty APPLE_SIGNING_IDENTITY" {
-    # If APPLE_CERTIFICATE is set but APPLE_SIGNING_IDENTITY isn't, the
-    # downstream grep verification would match every line (empty pattern) and
-    # silently report success — then tauri-action would fail cryptically
-    # inside the bundle step. The step must fail fast before find-identity.
+    # If APPLE_CERTIFICATE is set but APPLE_SIGNING_IDENTITY isn't, the downstream grep would
+    # match every line and silently succeed; must fail fast before find-identity.
     grep -qF 'APPLE_SIGNING_IDENTITY is empty' "$WORKFLOW"
 }
 
 @test "keychain import uses while-read loop for safe keychain list expansion" {
-    # `security list-keychains -d user` output must be read into an array
-    # without word splitting. macOS ships bash 3.2 which lacks mapfile, so
-    # a while-read loop is the bash 3.2-compatible equivalent.
+    # `security list-keychains -d user` output must read into an array without word splitting;
+    # macOS ships bash 3.2 which lacks mapfile, so a while-read loop is the compatible equivalent.
     grep -qF 'while IFS= read -r' "$WORKFLOW"
 }
 
 @test "keychain import step gates on matrix.platform == 'macos-latest'" {
-    # Must not run on Linux/Windows matrix jobs — security commands don't
-    # exist there and the step would error out the entire matrix. Search
-    # forward from the step name for the next `if:` line instead of assuming
-    # a fixed offset — tolerates blank lines or comments between them.
+    # Must not run on Linux/Windows jobs — security commands don't exist there. Search forward
+    # from the step name for the next `if:` line rather than assume a fixed offset.
     import_line=$(grep -n "Import Apple signing certificate to keychain" "$WORKFLOW" | head -1 | cut -d: -f1)
     [ -n "$import_line" ]
     guard_line=$(awk -v start="$import_line" 'NR>start && /^        if:/ { print NR; exit }' "$WORKFLOW")
@@ -150,9 +127,8 @@ SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 }
 
 @test "bundle ID in tauri.conf.json matches fallback literal in Utilities.swift" {
-    # Cross-check that the bundle identifier SSOT (tauri.conf.json) and the
-    # Swift fallback literal stay in sync. The runtime uses Bundle.main.bundleIdentifier
-    # which inherits from the parent .app; the literal is only used in standalone runs.
+    # Cross-check the bundle identifier SSOT (tauri.conf.json) against the Swift fallback literal,
+    # only used in standalone runs (runtime normally uses Bundle.main.bundleIdentifier).
     local tauri_conf="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.conf.json"
     local utilities_swift="$BATS_TEST_DIRNAME/../../native/macos/shared/Sources/SharedCLI/Utilities.swift"
     [ -f "$tauri_conf" ]

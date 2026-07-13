@@ -7,9 +7,7 @@ run_script() {
     PR_TITLE="$1" HEAD_REF="${2:-feature/branch}" run bash "$SCRIPT"
 }
 
-# ---------------------------------------------------------------------------
-# Happy path — allowed release-triggering conventional commit types
-# ---------------------------------------------------------------------------
+# ── Happy path — allowed release-triggering conventional commit types ──
 
 @test "feat with scope passes" {
     run_script "feat(runtime): add logging"
@@ -36,9 +34,7 @@ run_script() {
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Exempt branches — pass regardless of title (even with chore)
-# ---------------------------------------------------------------------------
+# ── Exempt branches — pass regardless of title (even with chore) ──
 
 @test "release-please branch is exempt even with chore title" {
     run_script "chore(main): release 1.2.3" "release-please--branches--main"
@@ -57,9 +53,7 @@ run_script() {
     [[ "$output" == *"Backmerge PR"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Error paths — the regression guard for issue #371
-# ---------------------------------------------------------------------------
+# ── Error paths — the regression guard for issue #371 ──
 
 @test "chore with scope is REJECTED (issue #371 regression)" {
     run_script "chore(deps): bump dependencies"
@@ -143,9 +137,7 @@ run_script() {
     [[ "$output" == *"release-please version bump"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Edge cases — malformed titles
-# ---------------------------------------------------------------------------
+# ── Edge cases — malformed titles ──
 
 @test "empty title is REJECTED" {
     run_script ""

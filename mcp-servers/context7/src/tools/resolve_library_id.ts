@@ -6,21 +6,23 @@
 import {
   errorResult,
   jsonResult,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
+  teachingErrorResult,
   textResult,
   Tool,
   ToolDefinition,
   ToolsCallResult,
 } from '@speedwave/mcp-shared';
 import { Context7Client, Context7Error } from '../client.js';
+import { MAX_SEARCH_RESULTS } from '../consts.js';
 
 /** Tool metadata exposed to the hub. */
 export const resolveLibraryIdTool: Tool = {
   name: 'resolveLibraryId',
-  description:
-    'Resolve a general library name into a Context7-compatible library ID. Call before queryDocs unless the ID is already known.',
+  description: `Resolve a general library name into a Context7-compatible library ID. Call before queryDocs unless the ID is already known. Returns at most ${MAX_SEARCH_RESULTS} ranked matches; refine libraryName/query if the expected match is missing.`,
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['context7', 'library', 'docs', 'documentation', 'resolve', 'search'],
   example:
     'const { matches } = await context7.resolveLibraryId({ libraryName: "react", query: "useState hook" })',
@@ -56,6 +58,10 @@ export const resolveLibraryIdTool: Tool = {
             title: { type: 'string' },
             description: { type: 'string' },
             trustScore: { type: 'number' },
+            benchmarkScore: {
+              type: 'number',
+              description: 'Benchmark score (0-100), if reported.',
+            },
             totalSnippets: { type: 'number' },
             versions: { type: 'array', items: { type: 'string' } },
           },
@@ -96,8 +102,20 @@ export function createResolveLibraryIdTool(client: Context7Client): ToolDefiniti
       const p = params as Partial<ResolveLibraryIdParams> | null;
       const libraryName = typeof p?.libraryName === 'string' ? p.libraryName : '';
       const query = typeof p?.query === 'string' ? p.query : '';
-      if (!libraryName) return errorResult('libraryName is required');
-      if (!query) return errorResult('query is required');
+      if (!libraryName) {
+        return teachingErrorResult({
+          paramName: 'libraryName',
+          received: p?.libraryName,
+          nextStep: 'Provide a non-empty library name, e.g. "react" or "spring boot".',
+        });
+      }
+      if (!query) {
+        return teachingErrorResult({
+          paramName: 'query',
+          received: p?.query,
+          nextStep: "Provide the user's question so Context7 can rank matches by relevance.",
+        });
+      }
 
       try {
         const { data, tier } = await client.searchLibraries(libraryName, query);
@@ -113,6 +131,7 @@ export function createResolveLibraryIdTool(client: Context7Client): ToolDefiniti
             title: lib.title,
             description: lib.description,
             trustScore: lib.trustScore,
+            benchmarkScore: lib.benchmarkScore,
             totalSnippets: lib.totalSnippets,
             versions: lib.versions ?? [],
           })),

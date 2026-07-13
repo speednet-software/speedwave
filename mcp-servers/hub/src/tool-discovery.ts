@@ -1,18 +1,11 @@
 /**
- * Tool Discovery - Dynamic tool fetching from workers
- * @module tool-discovery
- *
- * Fetches tool definitions from workers via JSON-RPC `tools/list`.
- * Merges worker tool data with _meta metadata to produce ToolMetadata.
- *
- * Workers are the SSOT for ALL tool metadata:
- * - Contract: name, description, inputSchema, inputExamples, keywords, example, outputSchema, annotations
- * - Policy: deferLoading, timeoutClass, timeoutMs, osCategory (via _meta field)
+ * Tool Discovery: fetches tool definitions from workers via JSON-RPC `tools/list`, merging worker
+ * data with `_meta`. Workers are the SSOT for both contract and policy fields.
  */
 
 import { randomUUID } from 'crypto';
 import type { Tool } from '@speedwave/mcp-shared';
-import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts } from '@speedwave/mcp-shared';
+import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, META_KEYS, metaValue } from '@speedwave/mcp-shared';
 import type { ToolMetadata } from './hub-types.js';
 import { getAuthToken } from './auth-tokens.js';
 import { validateWorkerUrl } from '@speedwave/mcp-shared';
@@ -20,8 +13,7 @@ import { parseResponse, buildWorkerHeaders } from './http-bridge.js';
 import { deriveWorkerEnv } from './worker-env.js';
 
 /**
- * Convert snake_case tool name to camelCase method name.
- * Workers use snake_case, hub uses camelCase.
+ * Convert snake_case tool name to camelCase (workers use snake_case, hub uses camelCase).
  * @param str - snake_case string to convert
  */
 export function toCamelCase(str: string): string {
@@ -29,9 +21,8 @@ export function toCamelCase(str: string): string {
 }
 
 /**
- * Perform MCP initialize handshake with a worker.
- * Sends `initialize` request followed by `notifications/initialized` notification.
- * Returns the Mcp-Session-Id if the worker set one, or undefined.
+ * Perform MCP initialize handshake with a worker: `initialize` request then
+ * `notifications/initialized`. Returns the Mcp-Session-Id if the worker set one.
  * @param workerUrl - Worker base URL
  * @param headers - Request headers (Content-Type, Accept, auth, etc.)
  * @returns Session ID from the worker, or undefined
@@ -90,9 +81,8 @@ export async function initializeWorker(
 export const MAX_PAGINATION_PAGES = 50;
 
 /**
- * Fetch all tools from a worker with cursor-based pagination.
- * Iterates `tools/list` until no `nextCursor` is returned or
- * MAX_PAGINATION_PAGES is reached.
+ * Fetch all tools from a worker with cursor-based pagination, iterating `tools/list` until
+ * `nextCursor` is empty or MAX_PAGINATION_PAGES is reached.
  * @param workerUrl - Worker base URL
  * @param headers - Request headers (Content-Type, Accept, auth, session, etc.)
  * @returns Array of all Tool definitions from the worker
@@ -145,7 +135,7 @@ export async function fetchAllTools(
 }
 
 /**
- * Fetch tool list from a worker service via MCP initialize handshake + paginated tools/list.
+ * Fetch tool list from a worker via MCP initialize + paginated tools/list; empty on failure.
  * @param service - Service name (e.g., 'redmine', 'gitlab')
  * @returns Array of Tool definitions from the worker, or empty array on failure
  */
@@ -182,8 +172,8 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
 }
 
 /**
- * Merge a worker Tool definition with its _meta to produce ToolMetadata.
- * Workers are the SSOT for all fields — both contract and policy (via _meta).
+ * Merge a worker Tool definition with its `_meta` to produce ToolMetadata.
+ * Workers are the SSOT for all fields — both contract and policy (via `_meta`).
  * @param tool - Worker Tool definition (including _meta with policy fields)
  * @param service - Service name (e.g., 'redmine')
  * @param methodName - camelCase method name (e.g., 'createIssue')
@@ -195,8 +185,17 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
     );
   }
   const meta = tool._meta ?? {};
+  const deferLoading = metaValue(meta, META_KEYS.DEFER_LOADING, 'deferLoading');
+  const timeoutClass = metaValue(meta, META_KEYS.TIMEOUT_CLASS, 'timeoutClass');
+  const timeoutMsRaw = metaValue(meta, META_KEYS.TIMEOUT_MS, 'timeoutMs');
+  const osCategoryRaw = metaValue(meta, META_KEYS.OS_CATEGORY, 'osCategory');
+  const userScoped = metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped');
+  const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
+  const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
+
   const validOsCategories = ['reminders', 'calendar', 'mail', 'notes'] as const;
-  const rawOsCategory = typeof meta.osCategory === 'string' ? meta.osCategory : undefined;
+  const rawOsCategory = typeof osCategoryRaw === 'string' ? osCategoryRaw : undefined;
+
   return {
     name: methodName,
     // Worker's original tool name (often snake_case); used verbatim for tools/call
@@ -208,26 +207,23 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
     example: tool.example ?? '',
     inputExamples: tool.inputExamples,
     service,
-    deferLoading: typeof meta.deferLoading === 'boolean' ? meta.deferLoading : true,
+    deferLoading: typeof deferLoading === 'boolean' ? deferLoading : true,
     timeoutClass:
-      meta.timeoutClass === 'long'
-        ? 'long'
-        : meta.timeoutClass === 'standard'
-          ? 'standard'
-          : undefined,
-    timeoutMs:
-      typeof meta.timeoutMs === 'number' && meta.timeoutMs > 0 ? meta.timeoutMs : undefined,
+      timeoutClass === 'long' ? 'long' : timeoutClass === 'standard' ? 'standard' : undefined,
+    timeoutMs: typeof timeoutMsRaw === 'number' && timeoutMsRaw > 0 ? timeoutMsRaw : undefined,
     osCategory:
       rawOsCategory && (validOsCategories as readonly string[]).includes(rawOsCategory)
         ? (rawOsCategory as ToolMetadata['osCategory'])
         : undefined,
     annotations: tool.annotations,
+    userScoped: typeof userScoped === 'boolean' ? userScoped : undefined,
+    currentUserTool: typeof currentUserTool === 'string' ? currentUserTool : undefined,
+    selfParam: typeof selfParam === 'string' ? selfParam : undefined,
   };
 }
 
 /**
- * Validate that merged ToolMetadata has all required fields.
- * Returns an array of validation error messages (empty if valid).
+ * Validate merged ToolMetadata has required fields; returns error messages (empty if valid).
  * @param service - Service name
  * @param methodName - camelCase method name
  * @param metadata - Merged ToolMetadata to validate
@@ -263,8 +259,7 @@ export function validateMergeResult(
 }
 
 /**
- * Discover and merge tools for a service.
- * Fetches tool list from worker, merges with _meta, validates.
+ * Discover and merge tools for a service: fetch from worker, merge with `_meta`, validate.
  * Single unified path for all services (built-in and plugin).
  * @param service - Service name
  * @returns Record of camelCase method names to ToolMetadata
@@ -288,5 +283,68 @@ export async function discoverAndMergeService(
     }
   }
 
+  dropDanglingCurrentUserTool(service, result);
+  dropDanglingSelfParam(service, result);
+  warnMissingIdentityCompanion(service, result);
+
   return result;
+}
+
+/**
+ * Warn and drop `currentUserTool` when neither the camelCase method name nor the
+ * worker's own tool name resolves to a discovered tool; normalizes a resolved pointer to camelCase.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service, mutated in place.
+ */
+function dropDanglingCurrentUserTool(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    const target = metadata.currentUserTool;
+    if (!target) continue;
+
+    const resolved = target in tools ? target : toCamelCase(target);
+    if (!(resolved in tools)) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: currentUserTool '${target}' does not exist — dropping`
+      );
+      delete metadata.currentUserTool;
+    } else {
+      metadata.currentUserTool = resolved;
+    }
+  }
+}
+
+/**
+ * Warn and drop `selfParam` when its leading parameter name is not an input parameter
+ * of the declaring tool; never serve a self-reference hint the schema cannot honor.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service, mutated in place.
+ */
+function dropDanglingSelfParam(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    if (!metadata.selfParam) continue;
+    const leadingParam = metadata.selfParam.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+    const schema = metadata.inputSchema as { properties?: Record<string, unknown> };
+    if (!leadingParam || !(leadingParam in (schema.properties ?? {}))) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: selfParam '${metadata.selfParam}' is not an input parameter; dropping`
+      );
+      delete metadata.selfParam;
+    }
+  }
+}
+
+/**
+ * Warn once per tool at discovery when a userScoped tool declares neither companion;
+ * the tool is kept and search_tools serves it with a misconfiguration hint.
+ * @param service - Service name (for the warning message).
+ * @param tools - Merged tools for the service (read-only here).
+ */
+function warnMissingIdentityCompanion(service: string, tools: Record<string, ToolMetadata>): void {
+  for (const [methodName, metadata] of Object.entries(tools)) {
+    if (metadata.userScoped && !metadata.currentUserTool && !metadata.selfParam) {
+      console.warn(
+        `${ts()} [tool-discovery] ${service}.${methodName}: userScoped but declares neither currentUserTool nor selfParam; search results will carry a misconfiguration hint`
+      );
+    }
+  }
 }

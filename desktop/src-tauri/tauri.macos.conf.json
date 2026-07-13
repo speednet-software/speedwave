@@ -1,7 +1,8 @@
 {
   "bundle": {
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "entitlements": "entitlements/audio-capture.plist"
     },
     "resources": {
       "lima/bin/limactl": "lima/bin/limactl",

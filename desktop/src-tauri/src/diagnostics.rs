@@ -17,11 +17,8 @@ pub(crate) struct DiagnosticsInput {
     pub claude_session_log: Option<std::path::PathBuf>,
 }
 
-/// Builds a diagnostics ZIP at `zip_path` from the provided inputs.
-///
-/// All textual content is passed through `log_sanitizer::sanitize()` before
-/// being written to the archive. System info is appended without sanitization.
-/// Writes one ZIP entry, always sanitized.
+/// Writes one ZIP entry; content always passes through `log_sanitizer::sanitize()` first
+/// (`system-info.txt` is written separately, unsanitized — see its own call site).
 fn write_sanitized_entry(
     zip: &mut zip::ZipWriter<std::fs::File>,
     options: zip::write::SimpleFileOptions,
@@ -160,12 +157,14 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
     .map_err(|e| e.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
 

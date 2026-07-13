@@ -1,8 +1,7 @@
 //! Input validation for project names and other user-supplied identifiers.
 
-/// Validates that a project name is safe for filesystem paths and container names.
-/// Rejects empty names, names starting with non-alphanumeric chars, names exceeding 63 characters,
-/// and path traversal.
+/// Validates that a project name is safe for filesystem paths and container names. Rejects empty
+/// names, names starting with non-alphanumeric chars, names over 63 characters, and path traversal.
 pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
         anyhow::bail!("project name is empty");
@@ -50,12 +49,13 @@ pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests assert error branches via unwrap_err"
+)]
 mod tests {
     use super::*;
 

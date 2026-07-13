@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolsCallResult } from '@speedwave/mcp-shared';
-import { SharePointClient } from '../client.js';
+import { SharePointClient, GraphApiError } from '../client.js';
 import { createListTools, LIST_TOOL_SCHEMAS } from './list-tools.js';
 
 const MOCK_SITE_ID = 'speednet.sharepoint.com,abc,def';
@@ -406,6 +406,58 @@ describe('list-tools handlers — error paths', () => {
     expect((parseContent(result) as { code: string }).code).toBe(code);
   });
 
+  it('listItems appends a single-quote hint on a 400 when filter contains a double quote', async () => {
+    const graph = vi.fn().mockRejectedValueOnce(new GraphApiError('400 Bad Request', 400));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: 'fields/Status eq "Open"' });
+    expect(result.isError).toBe(true);
+    const parsed = parseContent(result) as { code: string; message: string };
+    expect(parsed.code).toBe('LIST_ITEMS_FAILED');
+    expect(parsed.message).toContain('single-quoted string literals');
+    expect(parsed.message).toContain('filter');
+  });
+
+  it('listItems does not append the quote hint when filter has no double quote', async () => {
+    const graph = vi.fn().mockRejectedValueOnce(new GraphApiError('400 Bad Request', 400));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: "fields/Status eq 'Open'" });
+    const parsed = parseContent(result) as { message: string };
+    expect(parsed.message).not.toContain('single-quoted string literals');
+  });
+
+  it('listItems does not append the misleading quote hint when a double quote is nested inside an already-correct single-quoted literal', async () => {
+    const graph = vi.fn().mockRejectedValueOnce(new GraphApiError('400 Bad Request', 400));
+    const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+    const tools = createListTools(client);
+    const result = await tools
+      .find((t) => t.tool.name === 'listItems')!
+      .handler({ listId: 'L1', filter: `fields/Title eq 'Say "Hi"'` });
+    const parsed = parseContent(result) as { message: string };
+    expect(parsed.message).not.toContain('single-quoted string literals');
+  });
+
+  // A double-quoted filter that fails with 401/403/429 (not 400) is not a syntax error.
+  it.each([401, 403, 429] as const)(
+    'listItems does not append the quote hint on a %s error even with a double-quoted filter',
+    async (status) => {
+      const graph = vi.fn().mockRejectedValueOnce(new GraphApiError('Graph failure', status));
+      const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+      const tools = createListTools(client);
+      const result = await tools
+        .find((t) => t.tool.name === 'listItems')!
+        .handler({ listId: 'L1', filter: 'fields/Status eq "Open"' });
+      const parsed = parseContent(result) as { code: string; message: string };
+      expect(parsed.code).toBe('LIST_ITEMS_FAILED');
+      expect(parsed.message).not.toContain('single-quoted string literals');
+    }
+  );
+
   it('updateList errors when description is provided alone', async () => {
     // Covers the description-only branch (displayName omitted).
     const graph = vi.fn().mockResolvedValueOnce(undefined);
@@ -463,6 +515,24 @@ describe('list-tools handlers — error paths', () => {
     expect((parseContent(result) as { code: string }).code).toBe('INVALID_ID');
     expect(graph).not.toHaveBeenCalled();
   });
+
+  // A mis-wired sourceTool would point the model at the wrong follow-up tool.
+  it.each([
+    ['getList', { listId: 'bad/../path' }, 'listLists'],
+    ['getItem', { listId: 'bad/../path', itemId: '1' }, 'listLists'],
+    ['getItem', { listId: 'L1', itemId: 'bad/../path' }, 'listItems'],
+  ] as const)(
+    '%s INVALID_ID message names the sourceTool that supplies a valid id',
+    async (toolName, params, sourceTool) => {
+      const graph = vi.fn();
+      const client = createMockClient(graph as unknown as Parameters<typeof createMockClient>[0]);
+      const tools = createListTools(client);
+      const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+      const parsed = parseContent(result) as { code: string; message: string };
+      expect(parsed.code).toBe('INVALID_ID');
+      expect(parsed.message).toContain(sourceTool);
+    }
+  );
 
   it('listItems passes through optional filter and top', async () => {
     // Covers the filter and top branches in handleListItems.

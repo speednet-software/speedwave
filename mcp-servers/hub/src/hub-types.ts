@@ -1,14 +1,6 @@
-/**
- * Hub-Specific Types
- * @module hub-types
- *
- * Extended types for mcp-hub (code executor, skills). PII types live in
- * \@speedwave/policy-engine. Base MCP types are imported from \@speedwave/mcp-shared
- */
+/** Hub-specific types (executor, skills); PII types live in \@speedwave/policy-engine; base types from \@speedwave/mcp-shared */
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Code Executor Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Code Executor Types ───────────────────────────────────────────────────────────────────────
 
 /**
  * Tool execution error
@@ -52,11 +44,7 @@ export interface IToolResult<T = unknown> {
  * Token provider interface for dependency injection
  */
 export interface ITokenProvider {
-  /**
-   * Get authentication token for a service
-   * @param service - Service name
-   * @returns Authentication token
-   */
+  /** Get authentication token for a service. */
   getToken(service: string): Promise<string>;
 }
 
@@ -91,13 +79,10 @@ export interface IToolContext {
   logger: ILogger;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Discovery Types (Progressive Disclosure)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Discovery Types (Progressive Disclosure) ─────────────────────────────────────────────
 
 /**
- * Tool input example (for Tool Use Examples pattern)
- * Based on: Anthropic "Advanced Tool Use" article
+ * Tool input example (Tool Use Examples pattern).
  * @see https://www.anthropic.com/engineering/advanced-tool-use
  */
 export interface ToolInputExample {
@@ -107,11 +92,7 @@ export interface ToolInputExample {
   input: Record<string, unknown>;
 }
 
-/**
- * Timeout class for operations - used to determine execution timeout
- * - standard: Normal operations (default) - uses EXECUTION_MS
- * - long: Long-running operations (sync, extract, AI generation) - uses LONG_OPERATION_MS
- */
+/** Timeout class: 'standard' (default, EXECUTION_MS) or 'long' (slow ops, LONG_OPERATION_MS). */
 export type TimeoutClass = 'standard' | 'long';
 
 /**
@@ -146,6 +127,12 @@ export interface ToolMetadata {
   osCategory?: 'reminders' | 'calendar' | 'mail' | 'notes';
   /** Behavioral annotations from the worker (readOnlyHint, destructiveHint, etc.) */
   annotations?: import('@speedwave/mcp-shared').ToolAnnotations;
+  /** True when results depend on the authenticated user's identity. */
+  userScoped?: boolean;
+  /** Name of the sibling tool that resolves "me"/"my" without an explicit id param. */
+  currentUserTool?: string;
+  /** Name of the input param that accepts a self-referential value (e.g. "me"). */
+  selfParam?: string;
 }
 
 /**
@@ -168,4 +155,6 @@ export interface ToolSearchResult {
   inputExamples?: ToolInputExample[];
   /** Defer loading status: true = on-demand, false = core tool */
   deferLoading?: boolean;
+  /** Self-reference sentence for userScoped tools; present at every detail level. */
+  identityHint?: string;
 }

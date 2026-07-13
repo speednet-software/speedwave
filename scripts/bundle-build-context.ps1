@@ -1,13 +1,5 @@
-# bundle-build-context.ps1 — PowerShell equivalent of bundle-build-context.sh
-# Copies container build context, mcp-os, and the oauth worker into
-# desktop\src-tauri\ for Tauri resource bundling.
-#
-# Usage: powershell -File scripts/bundle-build-context.ps1
-# Must be run from the repo root.
-#
-# CI reach: this script is for LOCAL Windows developer builds only. GitHub
-# Actions on windows-latest runs bundle-build-context.sh via `shell: bash`
-# (Git Bash), so the .sh path is exercised by CI on every platform.
+# PowerShell equivalent of bundle-build-context.sh; run from repo root. LOCAL Windows dev builds
+# only — CI (windows-latest) runs bundle-build-context.sh via Git Bash instead.
 
 $ErrorActionPreference = 'Stop'
 
@@ -16,17 +8,12 @@ $ErrorActionPreference = 'Stop'
 $dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
-# Serialize concurrent runs on the same DEST (mirrors the .sh mkdir-mutex). The
-# body does Remove-Item + non-atomic copies; a parallel image build can read a
-# half-written tree and bake a 0-byte package.json into a worker image. Directory
-# create is atomic; a lock whose holder PID is gone is reclaimed so a killed run
-# cannot deadlock future bundles.
+# Serialize concurrent runs on DEST (mirrors the .sh mkdir-mutex): non-atomic body can bake a
+# 0-byte package.json into a worker image otherwise; a lock whose holder PID is dead is reclaimed.
 $lockDir = "$dest\.bundle.lock"
 
-# Is the PID in a lock dir a live process? Returns $true only when we can prove
-# the holder is gone (Get-Process reports "not found"); any other error or a
-# missing/blank PID is treated as ALIVE so a transient fault never reclaims a
-# live lock.
+# Is the PID in a lock dir a live process? Returns $true only when Get-Process proves the holder
+# is gone; any other error or a missing/blank PID is treated as ALIVE to never reclaim a live lock.
 function Test-LockHolderDead {
     param([string]$dir)
     $holder = (Get-Content "$dir\pid" -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -136,12 +123,8 @@ foreach ($svc in $services) {
 
 # -- mcp-os + oauth (host-side TypeScript workers) ---------------------------
 
-# Stage-Host-Worker <worker-dir-name> <bundle-dir-name>
-#   Mirrors stage_host_worker() in bundle-build-context.sh — stages
-#   mcp-servers\<worker>\dist plus the @speedwave\mcp-shared dependency tree
-#   into $dest\<bundle>\, the same layout mcp-os has always used. Copy-Item
-#   rather than a junction because Tauri's resource bundler doesn't reliably
-#   preserve junctions/symlinks in NSIS packages.
+# Stage-Host-Worker <worker-dir-name> <bundle-dir-name>: mirrors stage_host_worker() in the
+#   .sh; Copy-Item not a junction (Tauri's bundler doesn't reliably preserve them in NSIS).
 function Stage-Host-Worker {
     param([string]$worker, [string]$bundle)
     New-Item -ItemType Directory -Path "$dest\$bundle\$worker","$dest\$bundle\shared" -Force | Out-Null

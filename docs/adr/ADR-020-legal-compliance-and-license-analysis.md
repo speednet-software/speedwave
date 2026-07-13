@@ -9,10 +9,10 @@ Speedwave never bundles or redistributes Claude Code and never routes Anthropic 
 
 ## Why
 
-- **Claude Code is All Rights Reserved.** Its `LICENSE.md` grants no redistribution right, so bundling the binary is prohibited. Speedwave instead builds the Claude container image with a pinned version using the official native installer, and the user authenticates directly with Anthropic.
-- **No credential routing.** Routing user OAuth (Pro/Max) tokens through a third-party harness is explicitly prohibited by Anthropic's Consumer Terms and has been enforced against other tools. Speedwave only supports the user's own API key / direct auth, so it never handles Anthropic credentials.
-- **Wire protocols are not copyrightable.** Implementing the `stream-json` protocol and MCP servers (incl. the IDE bridge) is the intended use. MCP is Apache 2.0 under the Linux Foundation's AAIF.
-- **Avoid GPL copyleft.** QEMU (Lima's fallback VM backend) is GPL v2, so Speedwave forces `vmType: vz` (Apple Virtualization framework) on macOS to never invoke QEMU — limiting support to macOS 13.5+. containerd defaults to runc (Apache 2.0) inside the bundled nerdctl-full, so no GPL OCI runtime is bundled. If a host's WSL2 distro happens to use crun, that is a separate-process invocation (mere aggregation) and does not trigger copyleft.
+- **Claude Code is All Rights Reserved.** Its `LICENSE.md` grants no redistribution right[^1], so bundling the binary is prohibited. Speedwave instead builds the Claude container image with a pinned version using the official native installer, and the user authenticates directly with Anthropic.
+- **No credential routing.** Routing user OAuth (Pro/Max) tokens through a third-party harness is explicitly prohibited by Anthropic's Consumer Terms[^2] and has been enforced against other tools (unverified). Speedwave only supports the user's own API key / direct auth, so it never handles Anthropic credentials.
+- **Wire protocols are not copyrightable.** Implementing the `stream-json` protocol and MCP servers (incl. the IDE bridge) is the intended use. MCP is Apache 2.0 under the Linux Foundation's AAIF[^3].
+- **Avoid GPL copyleft.** QEMU (Lima's fallback VM backend) is GPL v2[^4], so Speedwave forces `vmType: vz` (Apple Virtualization framework) on macOS to never invoke QEMU — limiting support to macOS 13.5+[^7]. containerd defaults to runc (Apache 2.0)[^5] inside the bundled nerdctl-full, so no GPL OCI runtime is bundled. If a host's WSL2 distro happens to use crun, that is a separate-process invocation (mere aggregation) and does not trigger copyleft[^6].
 - **Apache 2.0 for Speedwave** gives an explicit patent grant, trademark coverage for the "Speedwave" name, and compatibility with the Apache/MIT/BSD/ISC dependency tree.
 
 ## Where it lives in code
@@ -25,10 +25,10 @@ Speedwave never bundles or redistributes Claude Code and never routes Anthropic 
 
 ## Component license summary
 
-- **Apache 2.0** (attribution required, redistribution allowed, no source disclosure): Lima, nerdctl, containerd, runc, Docker/Moby NOTICE components, Tauri (dual MIT/Apache), MCP.
-- **MIT**: WSL2 (open-sourced May 2025; user still needs a valid Windows license), windows-rs, mapi-rs (user needs Outlook for MAPI), and most Rust crates (`tokio`, `axum`, `hyper`, `zbus`); `serde`, `clap`, `anyhow`, `thiserror` are MIT OR Apache-2.0.
-- **GPL v2 — avoided**: QEMU (never used; `vmType: vz` is forced).
-- **GitHub Actions** is permitted for building/shipping Speedwave; only reselling Actions itself is prohibited.
+- **Apache 2.0** (attribution required, redistribution allowed, no source disclosure): Lima, nerdctl, containerd, runc[^5], Docker/Moby NOTICE components (unverified), Tauri (dual MIT/Apache) (unverified), MCP[^3].
+- **MIT**: WSL2 (open-sourced May 2025; user still needs a valid Windows license)[^8], windows-rs, mapi-rs (user needs Outlook for MAPI) (unverified), and most Rust crates (`tokio`, `axum`, `hyper`, `zbus`); `serde`, `clap`, `anyhow`, `thiserror` are MIT OR Apache-2.0 (unverified).
+- **GPL v2 — avoided**: QEMU (never used; `vmType: vz` is forced)[^4].
+- **GitHub Actions** is permitted for building/shipping Speedwave; only reselling Actions itself is prohibited (unverified).
 
 ## Correction (was wrong)
 
@@ -50,15 +50,27 @@ Earlier drafts of this ADR called for using a **MinGW** toolchain for Windows bu
 
 ## References
 
-- [Claude Code LICENSE.md](https://github.com/anthropics/claude-code/blob/main/LICENSE.md)
 - [Claude Code legal & compliance](https://code.claude.com/docs/en/legal-and-compliance)
-- [Anthropic Commercial Terms](https://www.anthropic.com/legal/commercial-terms)
-- [Model Context Protocol](https://www.anthropic.com/news/model-context-protocol)
-- [Lima](https://github.com/lima-vm/lima/blob/master/LICENSE) · [nerdctl](https://github.com/containerd/nerdctl/blob/main/LICENSE) · [containerd](https://github.com/containerd/containerd/blob/main/LICENSE) (all Apache 2.0)
-- [QEMU License — GPL v2](https://wiki.qemu.org/License)
-- [GPL FAQ — mere aggregation](https://www.gnu.org/licenses/gpl-faq.html#MereAggregation)
-- [WSL open-sourced under MIT](https://blogs.windows.com/windowsdeveloper/2025/05/19/the-windows-subsystem-for-linux-is-now-open-source/) · [windows-rs](https://github.com/microsoft/windows-rs/blob/master/license-mit) · [mapi-rs](https://github.com/microsoft/mapi-rs/blob/main/LICENSE)
 - [com.apple.security.virtualization entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.virtualization)
-- [Tauri LICENSE (MIT + Apache 2.0)](https://github.com/tauri-apps/tauri/blob/dev/LICENSE_APACHE-2.0)
+- [Tauri LICENSE (Apache 2.0)](https://github.com/tauri-apps/tauri/blob/dev/LICENSE-APACHE-2.0) (unverified: MIT-dual claim)
+- [windows-rs LICENSE (MIT)](https://github.com/microsoft/windows-rs/blob/master/license-mit) · [mapi-rs LICENSE (MIT)](https://github.com/microsoft/mapi-rs/blob/main/LICENSE)
 - [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
-- [GitHub Terms for Additional Products — Actions](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features)
+- [GitHub Terms for Additional Products — Actions](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features) (unverified against the specific "no reselling" claim)
+
+## Footnotes
+
+[^1]: [Claude Code LICENSE.md](https://github.com/anthropics/claude-code/blob/main/LICENSE.md) - "All Rights Reserved", no redistribution grant.
+
+[^2]: [Anthropic Consumer Terms](https://www.anthropic.com/legal/consumer-terms).
+
+[^3]: [Model Context Protocol announcement](https://www.anthropic.com/news/model-context-protocol); the MCP specification repository is licensed Apache 2.0 under the Linux Foundation.
+
+[^4]: [QEMU License - GPL v2](https://wiki.qemu.org/License).
+
+[^5]: [Lima LICENSE](https://github.com/lima-vm/lima/blob/master/LICENSE) · [nerdctl LICENSE](https://github.com/containerd/nerdctl/blob/main/LICENSE) · [containerd LICENSE](https://github.com/containerd/containerd/blob/main/LICENSE) · [runc LICENSE](https://github.com/opencontainers/runc/blob/main/LICENSE) (all Apache 2.0).
+
+[^6]: [GPL FAQ - mere aggregation](https://www.gnu.org/licenses/gpl-faq.html#MereAggregation).
+
+[^7]: [Lima VZ vmType docs](https://lima-vm.io/docs/config/vmtype/vz/) - VZ requires macOS >= 13.0, and Lima defaults to VZ on macOS >= 13.5.
+
+[^8]: [Open Source WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/opensource) - WSL source released under the MIT License, announced May 19, 2025.

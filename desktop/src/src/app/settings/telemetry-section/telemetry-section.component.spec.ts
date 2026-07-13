@@ -195,6 +195,26 @@ describe('TelemetrySectionComponent', () => {
     expect(call?.[1]).toHaveProperty('update');
   });
 
+  it('save() omits a locked field entirely and still saves an edited unlocked field', async () => {
+    // The master switch is MDM-locked while endpoint stays editable.
+    setup(
+      baseResponse({
+        locks: { ...baseResponse().locks, enabled: true },
+        any_locked: true,
+      })
+    );
+    await create();
+    await component.ngOnInit();
+    component.onEndpointInput('https://new-collector:4318');
+    const spy = vi.spyOn(mockTauri, 'invoke');
+    await component.save();
+    const call = spy.mock.calls.find((c) => c[0] === 'update_telemetry_config');
+    const update = (call?.[1] as { update: Record<string, unknown> }).update;
+    expect('enabled' in update).toBe(false);
+    expect(update['endpoint']).toBe('https://new-collector:4318');
+    expect(component.saveError()).toBe('');
+  });
+
   async function savedHeadersUpdate(): Promise<Record<string, unknown>> {
     const spy = vi.spyOn(mockTauri, 'invoke');
     await component.save();
@@ -388,6 +408,36 @@ describe('TelemetrySectionComponent', () => {
     expect(component.saved()).toBe(false);
     await component.save();
     expect(component.saved()).toBe(true);
+  });
+
+  it('the transient saved flag clears itself after ~2s', async () => {
+    vi.useFakeTimers();
+    try {
+      await create();
+      await component.ngOnInit();
+      await component.save();
+      expect(component.saved()).toBe(true);
+      vi.advanceTimersByTime(2000);
+      expect(component.saved()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ngOnDestroy cancels the pending saved-flag timer (no post-destroy signal write)', async () => {
+    vi.useFakeTimers();
+    try {
+      await create();
+      await component.ngOnInit();
+      await component.save();
+      expect(component.saved()).toBe(true);
+      component.ngOnDestroy();
+      // If the timer were still armed, this would flip `saved` back to false.
+      vi.advanceTimersByTime(2000);
+      expect(component.saved()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('save() shows no false success when the write succeeds but the post-save refresh fails', async () => {

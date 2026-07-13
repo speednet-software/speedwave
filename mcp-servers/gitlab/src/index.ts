@@ -1,8 +1,5 @@
 /**
- * MCP GitLab Worker
- *
- * Isolated GitLab MCP server with per-service token isolation.
- * Exposes 46 tools via `@gitbeaker/rest` across 12 domains.
+ * MCP GitLab Worker: isolated GitLab MCP server with per-service token isolation.
  * @module mcp-gitlab
  */
 

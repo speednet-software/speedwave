@@ -10,7 +10,7 @@ Extend the executor's `FORBIDDEN_PATTERNS` denylist to also reject prototype-cha
 ## Why
 
 - The original denylist blocked `eval`, `require`, `process`, `globalThis`, `global`, fs/net/http access, etc., but expressions like `({}).constructor.constructor('return this')()` reach the `Function` constructor through the prototype chain without ever writing the word `Function`, yielding `globalThis` and from there `process`/`require('http')` — bypassing audit logging and PII tokenization.
-- `.constructor` is the only dot-notation way to climb from an arbitrary object to `Function`, so blocking it (plus its bracket-notation form) closes every known attribute-access escape; `Reflect.construct(Function, [...])` and `Proxy` interception are closed by their own patterns.
+- `.constructor` is the only dot-notation way to climb from an arbitrary object to `Function`: every object instance inherits a `constructor` property from its prototype that references the function which created it[^1]. Blocking it (plus its bracket-notation form) closes every known attribute-access escape; `Reflect.construct(Function, [...])` and `Proxy` interception are closed by their own patterns.
 - Legitimate orchestration code Claude generates (e.g. `redmine.listIssueIds()`, `gitlab.getMrFull()`) never contains `.constructor` or these tokens, so the new patterns do not break normal usage.
 - The denylist is defense-in-depth, not the only barrier: the hub container runs with `cap_drop: ALL`, `no-new-privileges`, a read-only filesystem, zero service tokens, and an isolated network — so even a successful escape lands in an empty, credential-free container.
 
@@ -27,6 +27,14 @@ Extend the executor's `FORBIDDEN_PATTERNS` denylist to also reject prototype-cha
 
 ## Rejected alternatives
 
-- `isolated-vm` (V8 Isolate) — in maintenance mode as of early 2025 with prebuilt-binary ABI mismatch against Node 24; reassess if active development and stable Node 24+ bindings return ([repository](https://github.com/laverdet/isolated-vm)).
-- `quickjs-emscripten` — a single async suspension breaks the executor's `batch()` (`Promise.allSettled`) semantics ([repository](https://github.com/justjake/quickjs-emscripten)).
-- `worker_threads` + `vm` — the Node.js `vm` module is explicitly not a security sandbox ([Node.js docs](https://nodejs.org/api/vm.html#vm-executing-javascript)).
+- `isolated-vm` (V8 Isolate) — in maintenance mode with version-specific ABI compatibility requirements against current Node releases[^2]; reassess if active development and stable Node 24+ bindings return.
+- `quickjs-emscripten` — an asyncified WebAssembly module can only suspend to wait for a single asynchronous call at a time, which breaks the executor's `batch()` (`Promise.allSettled`) semantics[^3].
+- `worker_threads` + `vm` — the Node.js `vm` module is explicitly not a security mechanism and must not be used to run untrusted code[^4].
+
+[^1]: [MDN: Object.prototype.constructor](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/constructor) - every object instance inherits a `constructor` property from its prototype referencing the function that created it.
+
+[^2]: [isolated-vm repository](https://github.com/laverdet/isolated-vm) - README states the project "is currently in maintenance mode" and lists per-major-version Node.js compatibility requirements (e.g. Node 22.x needs isolated-vm 5.x/4.x, Node 24.x needs 6.x/5.x), reflecting ABI compatibility constraints across Node/V8 versions.
+
+[^3]: [quickjs-emscripten repository](https://github.com/justjake/quickjs-emscripten) - documents that "an asyncified WebAssembly module can only suspend to wait for a single asynchronous call at a time."
+
+[^4]: [Node.js vm module docs](https://nodejs.org/api/vm.html#vm-executing-javascript) - "The node:vm module is not a security mechanism. Do not use it to run untrusted code."

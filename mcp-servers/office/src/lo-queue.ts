@@ -11,7 +11,6 @@ class SerialQueue {
    * Enqueue `fn`; it executes after every previously-enqueued task has settled (resolved or rejected).
    * @param fn - The async task to run exclusively.
    * @returns A promise for `fn`'s resolved value (or its rejection).
-   * @template T
    */
   run<T>(fn: () => Promise<T>): Promise<T> {
     const result = this.tail.then(fn, fn);

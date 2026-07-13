@@ -1,9 +1,6 @@
 #!/bin/bash
-# Clipboard wrapper (ADR-052). Six symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe/
-# powershell.exe) point here; routes by flag / -Command content.
-#
-# Write: stdin → ~/.clipboard-bridge (Tauri watcher relays to host) + OSC 52 on /dev/tty.
-# Read:  serve /workspace/.speedwave/pastes/clip.png to xclip -t TARGETS/-t image/png -o.
+# Clipboard wrapper (ADR-052); six symlinks (pbcopy/xclip/xsel/wl-copy/clip.exe/powershell.exe)
+# point here, routed by flag/-Command content. Write: stdin → ~/.clipboard-bridge + OSC 52 on tty.
 
 set -f
 

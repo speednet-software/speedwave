@@ -34,6 +34,7 @@ Plugins live in the **separate sibling repo `speedwave-plugins`**. Everything be
 - **Desktop surface:** Tauri commands in `plugin_cmd.rs` (lifecycle + credentials, incl. `delete_plugin_credential_field`), `plugin_oauth_cmd.rs` (`start_plugin_oauth`/`cancel_plugin_oauth`/`forget_plugin_oauth`), `main.rs` (`plugin_bridge_get_status`/`plugin_bridge_get_credentials`). Frontend models in `models/plugin.ts` (`PluginStatusEntry`, `PluginAuthField*`, `PluginSaveCredentialsEvent`, `MAX_PLUGIN_CREDENTIAL_BYTES`, `PluginBridge*`) must match command return types — the JSON deserializer silently drops mismatched fields; update both sides in one commit and assert the shape in a frontend test.
 - **Container hardening** (`cap_drop: ALL`, `no-new-privileges`, `read_only`, resource limits) applies to plugin containers — plugins must work within it. Plugin resource envelope: defaults/caps in `consts.rs` (`PLUGIN_*` consts).
 - **Line endings:** root `.gitattributes` forces LF — plugin repos must ship LF `*.sh` in Containerfiles.
+- **Tool `_meta` keys are OPTIONAL prefixed MCP-spec keys** (`speedwave.pl/defer-loading`, `speedwave.pl/user-scoped`, `speedwave.pl/current-user-tool`, `speedwave.pl/self-param`, etc, mcp-shared `META_KEYS`): the hub reads prefixed-first with a fallback to the legacy unprefixed key (`deferLoading`, `userScoped`, …), so existing plugins keep working unchanged; the identity keys are opt-in for a plugin that wants its user-scoped tools to surface current-user guidance.
 
 ## Types & lifecycle
 

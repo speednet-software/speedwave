@@ -7,7 +7,7 @@ static BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 pub(crate) fn init_bundle_identifier(identifier: String) {
     if BUNDLE_IDENTIFIER.set(identifier).is_err() {
-        log::debug!("init_bundle_identifier: already initialised; ignoring");
+        log::debug!("bundle identifier already initialised; ignoring new value");
     }
 }
 
@@ -18,7 +18,7 @@ fn bundle_identifier() -> &'static str {
             // Debug build warns; production returns the default silently.
             #[cfg(all(debug_assertions, not(test)))]
             log::warn!(
-                "bundle_identifier(): BUNDLE_IDENTIFIER not initialised yet; falling back to {DEFAULT_BUNDLE_IDENTIFIER}"
+                "bundle identifier not initialised yet; falling back to {DEFAULT_BUNDLE_IDENTIFIER}"
             );
             DEFAULT_BUNDLE_IDENTIFIER
         }
@@ -38,7 +38,7 @@ pub(crate) fn desktop_log_dir() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 

@@ -10,15 +10,8 @@ import { ProjectStateService } from '../../services/project-state.service';
 import { LoggerService } from '../../services/logger.service';
 
 /**
- * Modal shown when a CloudStorage TCC permission failure is detected.
- *
- * Provides:
- * - Manual step-by-step instructions (always visible — no System Settings button fallback needed)
- * - "Open System Settings" button that invokes `open_files_folders_pane` (macOS only)
- * - "Retry" button that re-runs `ensureContainersRunning` via `projectState.retry()`
- *
- * The modal is rendered by `ShellComponent` when
- * `projectState.errorKind === 'cloudstorage_tcc_required'`.
+ * Modal shown when a CloudStorage TCC permission failure is detected: always-visible manual steps,
+ * an "Open System Settings" button (macOS only), and "Retry" via `projectState.retry()`.
  */
 @Component({
   selector: 'app-cloudstorage-modal',

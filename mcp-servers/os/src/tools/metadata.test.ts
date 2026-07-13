@@ -1,11 +1,7 @@
-/**
- * Metadata Validation Tests
- *
- * Validates that every OS worker tool has required metadata fields:
- * annotations, keywords, and example.
- */
+/** Validates that every OS worker tool has required metadata fields: annotations, keywords, and example. */
 
 import { describe, it, expect, vi } from 'vitest';
+import { META_KEYS, metaValue } from '@speedwave/mcp-shared';
 import { createReminderTools } from './reminder-tools.js';
 import { createCalendarTools } from './calendar-tools.js';
 import { createMailTools } from './mail-tools.js';
@@ -68,12 +64,16 @@ describe('OS tool metadata', () => {
       }
     });
 
-    it('has _meta with deferLoading', () => {
+    it('has _meta with a prefixed defer-loading key', () => {
       expect(td.tool._meta, `${td.tool.name} missing _meta`).toBeDefined();
+      const meta = td.tool._meta as Record<string, unknown>;
       expect(
-        typeof (td.tool._meta as Record<string, unknown>).deferLoading,
-        `${td.tool.name} missing deferLoading`
+        typeof metaValue(meta, META_KEYS.DEFER_LOADING, 'deferLoading'),
+        `${td.tool.name} missing defer-loading`
       ).toBe('boolean');
+      expect(META_KEYS.DEFER_LOADING in meta, `${td.tool.name} must use the prefixed key`).toBe(
+        true
+      );
     });
   });
 

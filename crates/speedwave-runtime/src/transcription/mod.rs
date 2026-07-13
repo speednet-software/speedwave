@@ -1,6 +1,5 @@
-//! Host-side meeting transcription — SSOT layer (ADR-056). Capture +
-//! Whisper + model store; gated behind the `audio-transcription` feature
-//! (CLI never enables it). Speaker diarization was removed (ADR-075).
+//! Host-side meeting transcription — SSOT layer (ADR-056). Capture + Whisper + model store;
+//! gated behind `audio-transcription` (CLI never enables it). Diarization removed (ADR-075).
 
 pub mod accel;
 pub mod audio;
@@ -20,7 +19,8 @@ pub use accel::{best_model_for_this_build, compiled_backends, has_gpu_backend, B
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, FileAudioCapture, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
+    CaptureError, CaptureWarning, FileAudioCapture, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL,
+    SAMPLE_RATE_HZ,
 };
 pub use mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};
@@ -48,9 +48,8 @@ pub fn models_dir() -> PathBuf {
     crate::consts::data_dir().join(crate::consts::MODELS_SUBDIR)
 }
 
-/// Resolves the `AudioCapture` backend for this host: macOS = the bundled
-/// `audio-capture-cli` (CoreAudio process taps); Windows = WASAPI loopback via
-/// the `wasapi` crate (mic via cpal); else = `FileAudioCapture` (file input).
+/// Resolves the `AudioCapture` backend for this host: macOS = bundled `audio-capture-cli`
+/// (CoreAudio taps); Windows = WASAPI loopback via `wasapi` (mic via cpal); else = file input.
 pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
     #[cfg(target_os = "macos")]
     {
@@ -67,15 +66,13 @@ pub fn detect_audio_capture() -> Box<dyn AudioCapture> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
     fn dirs_are_under_the_data_dir() {
-        // Structural invariant only — both dirs share one data-dir parent and
-        // end with their subdir. Asserted without naming the production
-        // `data_dir()` singleton, so it holds under any isolated tempdir.
+        // Structural invariant only — both dirs share one data-dir parent, without naming the
+        // production `data_dir()` singleton, so it holds under any isolated tempdir.
         let transcripts = transcripts_dir();
         let models = models_dir();
         assert!(transcripts.ends_with(crate::consts::TRANSCRIPTS_SUBDIR));

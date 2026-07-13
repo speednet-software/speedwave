@@ -14,11 +14,8 @@ import type { HealthReport } from '../models/health';
 export const SYSTEM_REFRESH_INTERVAL_MS = 5000;
 
 /**
- * System view — shows aggregated container health and per-container actions.
- *
- * Polls `get_system_health` on a fixed cadence and surfaces restart controls
- * for individual containers; tracks in-flight restarts in a local set so the
- * UI can disable buttons without round-tripping through the backend.
+ * System view — shows aggregated container health and per-container actions. Polls `get_system_health` on a fixed cadence.
+ * Tracks in-flight restarts in a local set so the UI can disable buttons without round-tripping through the backend.
  */
 @Component({
   selector: 'app-system-view',

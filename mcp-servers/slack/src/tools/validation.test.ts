@@ -1,7 +1,8 @@
 /** Tests for withValidation wrapper. */
 
 import { describe, it, expect, vi } from 'vitest';
-import { withValidation, ToolResult } from './validation.js';
+import { teachingErrorResult } from '@speedwave/mcp-shared';
+import { withValidation, missingParamResult, ToolResult } from './validation.js';
 
 describe('withValidation', () => {
   describe('parameter validation', () => {
@@ -197,5 +198,115 @@ describe('withValidation', () => {
       expect(parsed.code).toBe('HANDLER_ERROR');
       expect(parsed.message).toBe('async failure');
     });
+  });
+});
+
+describe('withValidation required-param enforcement', () => {
+  it('short-circuits to MISSING_PARAM when a required param is absent', async () => {
+    const handler = vi.fn<(p: Record<string, unknown>) => ToolResult>().mockReturnValue({
+      success: true,
+      data: 'ok',
+    });
+    const wrapped = withValidation(handler, { required: ['channel'], toolName: 'sendChannel' });
+
+    const result = await wrapped({ message: 'hi' });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('MISSING_PARAM');
+    expect(parsed.message).toContain('for sendChannel');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits when a required param is an empty string', async () => {
+    const handler = vi.fn<(p: Record<string, unknown>) => ToolResult>().mockReturnValue({
+      success: true,
+      data: 'ok',
+    });
+    const wrapped = withValidation(handler, { required: ['channel'] });
+
+    const result = await wrapped({ channel: '' });
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.code).toBe('MISSING_PARAM');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('calls the handler once all required params are present', async () => {
+    const handler = vi.fn<(p: Record<string, unknown>) => ToolResult>().mockReturnValue({
+      success: true,
+      data: 'ok',
+    });
+    const wrapped = withValidation(handler, { required: ['channel', 'message'] });
+
+    const result = await wrapped({ channel: '#general', message: 'hi' });
+
+    expect(result.isError).toBeUndefined();
+    expect(handler).toHaveBeenCalledWith({ channel: '#general', message: 'hi' });
+  });
+
+  it('treats numeric 0 as present, not missing', async () => {
+    const handler = vi.fn<(p: Record<string, unknown>) => ToolResult>().mockReturnValue({
+      success: true,
+      data: 'ok',
+    });
+    const wrapped = withValidation(handler, { required: ['limit'] });
+
+    const result = await wrapped({ limit: 0 });
+
+    expect(result.isError).toBeUndefined();
+    expect(handler).toHaveBeenCalledWith({ limit: 0 });
+  });
+
+  it('runs the handler unchecked when no options are passed', async () => {
+    const handler = vi.fn<(p: Record<string, unknown>) => ToolResult>().mockReturnValue({
+      success: true,
+      data: 'ok',
+    });
+    const wrapped = withValidation(handler);
+
+    const result = await wrapped({});
+
+    expect(result.isError).toBeUndefined();
+    expect(handler).toHaveBeenCalledWith({});
+  });
+});
+
+describe('missingParamResult', () => {
+  it('wraps the shared teachingErrorResult message into a MISSING_PARAM ToolResult', () => {
+    const teaching = teachingErrorResult({
+      paramName: 'message',
+      received: undefined,
+      nextStep: 'Provide the text to send.',
+    });
+    const expectedMessage = (teaching.content[0].text as string).replace(/^Error: /, '');
+
+    const result = missingParamResult('message', undefined, 'Provide the text to send.');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('MISSING_PARAM');
+    expect(result.error?.message).toBe(expectedMessage);
+    expect(result.error?.message).toContain('Invalid message');
+    expect(result.error?.message).toContain('undefined');
+    expect(result.error?.message).toContain('Provide the text to send.');
+  });
+
+  it('quotes a received string value', () => {
+    const result = missingParamResult('channel', '', 'Provide a channel name.');
+
+    expect(result.error?.message).toContain('received: ""');
+  });
+
+  it('renders a received null value', () => {
+    const result = missingParamResult('users', null, 'Provide an array of user IDs.');
+
+    expect(result.error?.message).toContain('received: null');
+  });
+
+  it('stringifies a non-string, non-null received value', () => {
+    const result = missingParamResult('limit', 0, 'Provide a positive number.');
+
+    expect(result.error?.message).toContain('received: 0');
   });
 });

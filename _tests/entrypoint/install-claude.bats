@@ -1,6 +1,5 @@
 #!/usr/bin/env bats
-# Tests for containers/install-claude.sh
-# Runs on the host (macOS) — no container required.
+# Tests for containers/install-claude.sh, run on the host (macOS) — no container required.
 # Stubs out 'curl' and 'bash' execution to avoid network calls.
 
 INSTALL_SCRIPT="$BATS_TEST_DIRNAME/../../containers/install-claude.sh"
@@ -43,9 +42,7 @@ teardown() {
     rm -rf "$TEST_HOME" "$STUBS_DIR"
 }
 
-# ---------------------------------------------------------------------------
-# Version argument is required — no default
-# ---------------------------------------------------------------------------
+# ── Version argument is required — no default ──────────────────────────────
 
 @test "install-claude.sh fails without version argument" {
     run bash "$INSTALL_SCRIPT"
@@ -53,9 +50,7 @@ teardown() {
     [[ "$output" == *"Usage: install-claude.sh"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Version argument passthrough
-# ---------------------------------------------------------------------------
+# ── Version argument passthrough ────────────────────────────────────────────
 
 @test "install-claude.sh passes version argument to installer" {
     run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
@@ -69,9 +64,7 @@ teardown() {
     [[ "$output" == *"installed 3.0.0"* ]]
 }
 
-# ---------------------------------------------------------------------------
-# Curl failure handling
-# ---------------------------------------------------------------------------
+# ── Curl failure handling ───────────────────────────────────────────────────
 
 @test "install-claude.sh fails when curl fails" {
     cat > "$STUBS_DIR/curl" << 'EOF'
@@ -84,9 +77,7 @@ EOF
     [ "$status" -ne 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Temp file cleanup (uses isolated TMPDIR for reliability)
-# ---------------------------------------------------------------------------
+# ── Temp file cleanup (uses isolated TMPDIR for reliability) ───────────────
 
 @test "install-claude.sh cleans up temp file on success" {
     run bash "$INSTALL_SCRIPT" "$PINNED_VERSION"
@@ -98,25 +89,19 @@ EOF
     [ "$leftover" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Curl uses HTTPS-only with --proto flag
-# ---------------------------------------------------------------------------
+# ── Curl uses HTTPS-only with --proto flag ──────────────────────────────────
 
 @test "install-claude.sh uses --proto =https in curl invocation" {
     grep -q -- "--proto '=https'" "$INSTALL_SCRIPT"
 }
 
-# ---------------------------------------------------------------------------
-# Installer URL is correct
-# ---------------------------------------------------------------------------
+# ── Installer URL is correct ────────────────────────────────────────────────
 
 @test "install-claude.sh downloads from claude.ai" {
     grep -q 'INSTALLER_URL="https://claude.ai/install.sh"' "$INSTALL_SCRIPT"
 }
 
-# ---------------------------------------------------------------------------
-# Containerfile.claude does not contain curl | bash (DRY regression guard)
-# ---------------------------------------------------------------------------
+# ── Containerfile.claude does not contain curl | bash (DRY regression guard) ─
 
 @test "Containerfile.claude does not pipe curl to bash" {
     local containerfile="$BATS_TEST_DIRNAME/../../containers/Containerfile.claude"

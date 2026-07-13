@@ -1,7 +1,5 @@
 /**
- * Worker → oauth-worker client (ADR-060).
- *   WORKER_OAUTH_URL    — base URL of the oauth worker
- *   OAUTH_BEARER_PATH   — bearer path (default `/secrets/oauth-auth-token-<service>`)
+ * Worker → oauth-worker client (ADR-060). `WORKER_OAUTH_URL` = base URL; bearer path defaults to `/secrets/oauth-auth-token-<service>`.
  */
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -36,9 +34,9 @@ export class OAuthRefreshError extends Error {
   readonly code: OAuthRefreshCode;
   readonly httpStatus?: number;
   /**
-   * Construct a typed refresh error.
+   * Construct a refresh error.
    * @param code - machine-readable code (drives caller branching)
-   * @param message - human-readable detail (safe to surface to the user)
+   * @param message - human-readable error message
    * @param httpStatus - optional HTTP status when the failure was an HTTP response
    */
   constructor(code: OAuthRefreshCode, message: string, httpStatus?: number) {
@@ -54,7 +52,7 @@ export const PROACTIVE_REFRESH_SECONDS = 120;
 
 /**
  * Read the `exp` claim (UNIX seconds) from a JWT; `null` for malformed/non-JWT tokens.
- * @param token - JWT access token
+ * @param token - the JWT to parse
  */
 export function readJwtExp(token: string): number | null {
   const parts = token.split('.');
@@ -71,8 +69,8 @@ export function readJwtExp(token: string): number | null {
 
 /**
  * True when the token's `exp` is within `seconds` of now; `false` for unparseable tokens.
- * @param token - JWT access token
- * @param seconds - refresh window
+ * @param token - the JWT access token to check
+ * @param seconds - the expiry window in seconds
  * @param nowMs - injectable clock for tests
  */
 export function accessTokenExpiresWithin(
@@ -111,9 +109,8 @@ interface MCPToolsCallResponse {
 
 /**
  * Refresh the caller's access token by calling the oauth worker. Retries once on 401.
- * @param options - service id and optional overrides
- * @throws {OAuthScopeMismatchError} if the granted scopes are insufficient
- * @throws {OAuthRefreshError} for any other failure
+ * @param options - refresh options (service id, bearer path override, worker URL override, fetch override)
+ * @throws {OAuthScopeMismatchError} if the granted scopes are insufficient; {@link OAuthRefreshError} for any other failure.
  */
 export async function refreshAccessToken(
   options: OAuthRefreshOptions

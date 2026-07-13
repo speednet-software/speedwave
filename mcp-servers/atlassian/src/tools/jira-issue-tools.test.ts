@@ -3,7 +3,13 @@
  * handler success cases (domain client mocked), and error handling.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { META_KEYS } from '@speedwave/mcp-shared';
+import { createJiraIssueTools } from './jira-issue-tools.js';
+import type { AtlassianClient } from '../client.js';
 
 // Mock the domain factory: `createJiraIssuesClient` returns our scripted stub.
 const issuesStub = {
@@ -15,13 +21,12 @@ const issuesStub = {
   transition: vi.fn(),
   assign: vi.fn(),
   getMyself: vi.fn(),
+  addAttachment: vi.fn(),
+  deleteAttachment: vi.fn(),
 };
 vi.mock('../domains/jira-issues.js', () => ({
   createJiraIssuesClient: () => issuesStub,
 }));
-
-import { createJiraIssueTools } from './jira-issue-tools.js';
-import type { AtlassianClient } from '../client.js';
 
 /** A non-null AtlassianClient-shaped value (its methods aren't used — domains are mocked). */
 const FAKE_CLIENT = {} as AtlassianClient;
@@ -44,7 +49,7 @@ beforeEach(() => {
 });
 
 describe('definitions', () => {
-  it('exposes exactly the 8 expected tools with camelCase names and no service prefix', () => {
+  it('exposes exactly the 10 expected tools with camelCase names and no service prefix', () => {
     const names = createJiraIssueTools(FAKE_CLIENT).map((d) => d.tool.name);
     expect(names).toEqual([
       'searchIssues',
@@ -55,6 +60,8 @@ describe('definitions', () => {
       'transitionIssue',
       'assignIssue',
       'getMyself',
+      'addAttachment',
+      'deleteAttachment',
     ]);
     expect(names.every((n) => /^[a-z][A-Za-z]+$/.test(n))).toBe(true);
   });
@@ -73,16 +80,33 @@ describe('definitions', () => {
     const byName = Object.fromEntries(
       createJiraIssueTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
     );
-    expect(byName.searchIssues._meta).toEqual({ deferLoading: false });
-    expect(byName.createIssue._meta).toEqual({ deferLoading: true });
+    expect(byName.searchIssues._meta).toMatchObject({ [META_KEYS.DEFER_LOADING]: false });
+    expect(byName.createIssue._meta).toMatchObject({ [META_KEYS.DEFER_LOADING]: true });
     expect(byName.searchIssues.annotations).toBeDefined();
+  });
+
+  it('every tool declares strict prefixed-key identity metadata: user-scoped tools point at getMyself, others carry neither the prefixed nor the legacy key', () => {
+    const userScopedNames = new Set(['searchIssues', 'createIssue', 'updateIssue', 'assignIssue']);
+    for (const { tool } of createJiraIssueTools(FAKE_CLIENT)) {
+      const meta = tool._meta as Record<string, unknown> | undefined;
+      if (userScopedNames.has(tool.name)) {
+        expect(meta?.[META_KEYS.USER_SCOPED], `${tool.name} should be user-scoped`).toBe(true);
+        expect(meta?.[META_KEYS.CURRENT_USER_TOOL], `${tool.name} current-user-tool`).toBe(
+          'getMyself'
+        );
+      } else {
+        expect(meta?.[META_KEYS.USER_SCOPED], `${tool.name} unexpectedly user-scoped`).toBeFalsy();
+      }
+      expect(meta?.userScoped, `${tool.name} uses legacy userScoped`).toBeUndefined();
+      expect(meta?.currentUserTool, `${tool.name} uses legacy currentUserTool`).toBeUndefined();
+    }
   });
 });
 
 describe('unconfigured client', () => {
   it('still lists all tools, but every handler returns a not-configured error', async () => {
     const defs = createJiraIssueTools(null);
-    expect(defs).toHaveLength(8);
+    expect(defs).toHaveLength(10);
     for (const { handler } of defs) {
       const res = await handler({} as never);
       expect(res.isError).toBe(true);
@@ -194,6 +218,12 @@ describe('updateIssue handler', () => {
     await handlerFor('updateIssue')({ issueIdOrKey: 'PROJ-1', bodyText: 't' });
     expect(issuesStub.update.mock.calls[0][1].body).toBe('t');
   });
+
+  it('forwards assigneeAccountId to reassign the issue', async () => {
+    issuesStub.update.mockResolvedValueOnce({ key: 'PROJ-1' });
+    await handlerFor('updateIssue')({ issueIdOrKey: 'PROJ-1', assigneeAccountId: 'u1' });
+    expect(issuesStub.update.mock.calls[0][1].assigneeAccountId).toBe('u1');
+  });
 });
 
 describe('transitions & assignment handlers', () => {
@@ -231,5 +261,209 @@ describe('getMyself handler', () => {
   it('wraps the account under `user`', async () => {
     issuesStub.getMyself.mockResolvedValueOnce({ account_id: 'me' });
     expect(payload(await handlerFor('getMyself')({}))).toEqual({ user: { account_id: 'me' } });
+  });
+});
+
+describe('addAttachment handler validation', () => {
+  it('errors when issueIdOrKey is missing, with teaching next-step guidance', async () => {
+    const res = await handlerFor('addAttachment')({ filePath: '/workspace/bug.png' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/issueIdOrKey/);
+    expect(res.content[0].text).toMatch(/Provide the Jira issue key/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+  });
+
+  it('errors when filePath is missing, with teaching next-step guidance', async () => {
+    const res = await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/filePath/);
+    expect(res.content[0].text).toMatch(/Provide a path under \/workspace/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+  });
+});
+
+describe('addAttachment handler via filePath', () => {
+  let ws: string;
+  let prevEnv: string | undefined;
+
+  beforeEach(() => {
+    prevEnv = process.env.WORKSPACE_DIR;
+    ws = realpathSync(mkdtempSync(join(tmpdir(), 'atl-ws-')));
+    process.env.WORKSPACE_DIR = ws;
+  });
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env.WORKSPACE_DIR;
+    else process.env.WORKSPACE_DIR = prevEnv;
+    rmSync(ws, { recursive: true, force: true });
+  });
+
+  it('reads a workspace file, derives the filename, and forwards the bytes', async () => {
+    writeFileSync(join(ws, 'bug.png'), Buffer.from('real-png-bytes'));
+    issuesStub.addAttachment.mockResolvedValueOnce({ id: '1', filename: 'bug.png' });
+    const res = await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: join(ws, 'bug.png'),
+    });
+    const [key, p] = issuesStub.addAttachment.mock.calls[0];
+    expect(key).toBe('PROJ-1');
+    expect(p.filename).toBe('bug.png');
+    expect(Buffer.isBuffer(p.data)).toBe(true);
+    expect(p.data.toString()).toBe('real-png-bytes');
+    expect(p.contentType).toBe('application/octet-stream');
+    expect(payload(res)).toEqual({ attachment: { id: '1', filename: 'bug.png' } });
+  });
+
+  it('accepts a relative path resolved against the workspace root', async () => {
+    writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
+    issuesStub.addAttachment.mockResolvedValueOnce({ id: '2' });
+    await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1', filePath: 'shot.png' });
+    expect(issuesStub.addAttachment.mock.calls[0][1].filename).toBe('shot.png');
+  });
+
+  it('lets an explicit filename override the basename', async () => {
+    writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
+    issuesStub.addAttachment.mockResolvedValueOnce({ id: '3' });
+    await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: 'shot.png',
+      filename: 'renamed.png',
+    });
+    expect(issuesStub.addAttachment.mock.calls[0][1].filename).toBe('renamed.png');
+  });
+
+  it('rejects a path that escapes the workspace (no /tokens exfiltration)', async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'atl-out-')));
+    writeFileSync(join(outside, 'secret'), Buffer.from('token'));
+    const res = await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: join(outside, 'secret'),
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/inside the workspace/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('errors when the file does not exist', async () => {
+    const res = await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: 'nope.png',
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/not found/i);
+  });
+
+  it('passes an explicit contentType through', async () => {
+    writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
+    issuesStub.addAttachment.mockResolvedValueOnce({ id: '4' });
+    await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: 'shot.png',
+      contentType: 'image/png',
+    });
+    expect(issuesStub.addAttachment.mock.calls[0][1].contentType).toBe('image/png');
+  });
+
+  it('surfaces a thrown domain error as an error result', async () => {
+    writeFileSync(join(ws, 'shot.png'), Buffer.from('x'));
+    issuesStub.addAttachment.mockRejectedValueOnce(new Error('boom-attach'));
+    const res = await handlerFor('addAttachment')({ issueIdOrKey: 'PROJ-1', filePath: 'shot.png' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/boom-attach/);
+  });
+
+  it('errors when filePath points to a directory', async () => {
+    mkdirSync(join(ws, 'subdir'));
+    const res = await handlerFor('addAttachment')({
+      issueIdOrKey: 'PROJ-1',
+      filePath: join(ws, 'subdir'),
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/Not a regular file/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+  });
+});
+
+describe('addAttachment handler size cap', () => {
+  let ws: string;
+  let prevWorkspace: string | undefined;
+  let prevMax: string | undefined;
+
+  beforeEach(() => {
+    prevWorkspace = process.env.WORKSPACE_DIR;
+    prevMax = process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
+    ws = realpathSync(mkdtempSync(join(tmpdir(), 'atl-ws-cap-')));
+    process.env.WORKSPACE_DIR = ws;
+    process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES = '10';
+    vi.resetModules();
+  });
+  afterEach(() => {
+    if (prevWorkspace === undefined) delete process.env.WORKSPACE_DIR;
+    else process.env.WORKSPACE_DIR = prevWorkspace;
+    if (prevMax === undefined) delete process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
+    else process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES = prevMax;
+    rmSync(ws, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  /** Re-import the module fresh so it re-reads `ATLASSIAN_MAX_ATTACHMENT_BYTES` from env. */
+  async function freshAddAttachmentDef() {
+    const mod = await import('./jira-issue-tools.js');
+    return mod.createJiraIssueTools(FAKE_CLIENT).find((d) => d.tool.name === 'addAttachment')!;
+  }
+
+  it('rejects a file over the configured byte cap before reading it into memory', async () => {
+    writeFileSync(join(ws, 'big.bin'), Buffer.alloc(11, 'x'));
+    const def = await freshAddAttachmentDef();
+    const res = await def.handler({ issueIdOrKey: 'PROJ-1', filePath: 'big.bin' } as never);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/too large to attach/);
+    expect(res.content[0].text).toMatch(/11 bytes > 10 byte limit/);
+    expect(issuesStub.addAttachment).not.toHaveBeenCalled();
+  });
+
+  it('accepts a file at exactly the byte cap', async () => {
+    writeFileSync(join(ws, 'ok.bin'), Buffer.alloc(10, 'x'));
+    issuesStub.addAttachment.mockResolvedValueOnce({ id: '1' });
+    const def = await freshAddAttachmentDef();
+    const res = await def.handler({ issueIdOrKey: 'PROJ-1', filePath: 'ok.bin' } as never);
+    expect(res.isError).toBeUndefined();
+    expect(issuesStub.addAttachment).toHaveBeenCalledTimes(1);
+  });
+
+  it('states the configured byte cap in the tool description', async () => {
+    const def = await freshAddAttachmentDef();
+    expect(def.tool.description).toMatch(/capped at 10 bytes/);
+    expect(def.tool.description).not.toMatch(/streams it/);
+  });
+});
+
+describe('deleteAttachment handler', () => {
+  it('is marked destructive in its annotations', () => {
+    const def = createJiraIssueTools(FAKE_CLIENT).find((d) => d.tool.name === 'deleteAttachment');
+    expect(def?.tool.annotations?.destructiveHint).toBe(true);
+    expect(def?.tool.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it('delegates to the domain and reports deletion', async () => {
+    issuesStub.deleteAttachment.mockResolvedValueOnce(undefined);
+    const res = await handlerFor('deleteAttachment')({ attachmentId: '10475' });
+    expect(issuesStub.deleteAttachment).toHaveBeenCalledWith('10475');
+    expect(payload(res)).toEqual({ deleted: true });
+  });
+
+  it('errors when attachmentId is missing, with teaching next-step guidance', async () => {
+    const res = await handlerFor('deleteAttachment')({});
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/attachmentId/);
+    expect(res.content[0].text).toMatch(/Provide the Jira attachment ID/);
+    expect(issuesStub.deleteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a thrown domain error (e.g. allowlist scope) as an error result', async () => {
+    issuesStub.deleteAttachment.mockRejectedValueOnce(new Error('allowlist configured'));
+    const res = await handlerFor('deleteAttachment')({ attachmentId: '10475' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/allowlist/);
   });
 });

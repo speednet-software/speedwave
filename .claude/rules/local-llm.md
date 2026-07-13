@@ -7,6 +7,7 @@ paths:
   - 'containers/Containerfile.proxy'
   - 'containers/proxy/**'
   - 'desktop/src-tauri/src/llm_cmd.rs'
+  - 'desktop/src-tauri/src/llm_cmd/**'
   - 'desktop/src-tauri/src/containers_cmd.rs'
   - 'desktop/src-tauri/src/http_util.rs'
   - 'desktop/src/src/app/settings/llm-provider/**'
@@ -35,6 +36,7 @@ Every session routes through the per-project Rust forwarder `proxy` (port 4000, 
 - **Anthropic kinds pin `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` only — FABLE is deliberately omitted** (it resolves natively; test `anthropic_default_models_env_omits_fable_alias`), each alias to its latest catalog model, with the `[1m]` suffix only where the model supports a 1M context. `[1m]` is real Claude Code model-id syntax — it must stay quoted in compose YAML (Go/nerdctl chokes on `[`); never strip it.
 - **Provenance:** the routing model comes from the active provider entry (`LlmConfig::effective_active_model`), never a foreign `active.model`. A `provider/model`-shaped id under an Anthropic entry falls back to the account default.
 - A `local` provider with custom headers falls back to the direct path — the proxy would consume headers addressed to the LLM server.
+- **Local-only CLI flags (config.rs resolver, not compose):** an active `Local` kind adds `--exclude-dynamic-system-prompt-sections` (KV-cache prefix reuse) and `--append-system-prompt` with `prompts::local_llm_skills_nudge()` (static copy — never interpolate config values into it without a sanitizer; the v0.10-removed `local_llm_identity` shows the injection risk). Prompt **replacement** (`--system-prompt-file`) stays banned — removed in v0.10.0, do not reintroduce. Test-guarded (`resolve_injects_skills_nudge_*`, `resolve_never_replaces_prompt_*`).
 
 ## URLs, aliases, auth
 

@@ -22,11 +22,8 @@ const MARKER = /\b(TODO|FIXME|HACK|XXX)\b/;
 const EXCLUDED_DIRS: readonly string[] = ['node_modules', 'dist', 'coverage', 'out-tsc'];
 
 /**
- * Walk up from this file to the `mcp-servers/` root. This file lives at
- * `mcp-servers/shared/src/forbidden-markers.test.ts`, so the root is the first
- * ancestor directory named `mcp-servers`. Anchoring on `import.meta.url` keeps
- * the scan stable under coverage rewriting (cf. the desktop guard's troubles
- * with `__dirname`).
+ * Walk up from this file (`mcp-servers/shared/src/forbidden-markers.test.ts`) to the first ancestor
+ * named `mcp-servers`. Anchored on `import.meta.url`, not `__dirname`, to stay stable under coverage rewriting.
  */
 function findMcpServersRoot(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
@@ -43,11 +40,7 @@ function findMcpServersRoot(): string {
 
 const MCP_ROOT = findMcpServersRoot();
 
-/**
- * Collect every non-test `.ts` file under any `src/` directory of MCP_ROOT.
- * @param dir - Absolute directory to walk.
- * @param inSrc - Whether `dir` is already inside a `src/` subtree.
- */
+/** Collect every non-test `.ts` file under any `src/` directory of MCP_ROOT. */
 function walkTsSources(dir: string, inSrc: boolean): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -63,11 +56,8 @@ function walkTsSources(dir: string, inSrc: boolean): string[] {
 }
 
 /**
- * Extract only the comment portions of a TypeScript source so the marker scan
- * never sees code or string-literal contents. Handles `//` line comments,
- * `/* *​/` block comments, and skips over single-, double-, and template-quoted
- * strings (where a `//` or `/*` would not start a comment).
- * @param source - The file contents to strip down to its comments.
+ * Extract only the comment portions of a TypeScript source so the marker scan never sees code or
+ * string-literal contents. Handles `//` and block comments; skips over quoted/template strings.
  */
 function extractComments(source: string): string[] {
   const comments: string[] = [];

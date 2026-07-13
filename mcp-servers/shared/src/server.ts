@@ -1,23 +1,6 @@
 /**
- * MCP Server Factory
- * Creates Express-based MCP servers with minimal boilerplate
- *
- * Usage:
- * ```typescript
- * import { createMCPServer } from '@speedwave/mcp-shared';
- *
- * const server = createMCPServer({
- *   name: 'slack',
- *   version: '0.55.0',
- *   port: 3001,
- *   tools: [
- *     { tool: getChannelsTool, handler: getChannelsHandler },
- *     { tool: readChannelTool, handler: readChannelHandler },
- *   ],
- * });
- *
- * server.start();
- * ```
+ * MCP Server Factory — creates Express-based MCP servers with minimal boilerplate.
+ * @see createMCPServer usage example below.
  */
 
 import express, { Express, Request, Response, NextFunction } from 'express';
@@ -28,9 +11,7 @@ import { validateOrigin } from './security.js';
 import { handleMCPPost, handleMCPDelete } from './transport.js';
 import { ts } from './logger.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Configuration Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Configuration Types ──────────────────────────────────────────────────────
 
 /**
  * Bearer token authentication configuration.
@@ -42,24 +23,15 @@ export interface MCPServerAuth {
   /** Paths excluded from auth (default: ['/health']) */
   publicPaths?: string[];
   /**
-   * Optional additional bearer tokens mapped to a caller identifier (e.g. a
-   * consumer service id). When set, requests with a matching token authenticate
-   * as that caller; the resolved caller id is available on `res.locals.caller`
-   * for downstream tool handlers. The primary `token` always authenticates as
-   * caller `""` (used for the supervisor's own diagnostic calls).
-   *
-   * Used by the `oauth` worker (ADR-060) to derive the calling service id
-   * from the bearer instead of trusting a model-controlled `service` param.
+   * Optional additional bearer tokens mapped to a caller id, exposed to handlers as `res.locals.caller`
+   * (primary `token` authenticates as `""`); used by the `oauth` worker (ADR-060) to derive the caller instead of trusting a model-controlled `service` param.
    */
   callerTokens?: Record<string, string>;
 }
 
 /**
- * Configuration options for creating an MCP server instance.
- * Defines server identity, network settings, and optional handlers.
- *
- * Note: MCP workers run inside an isolated Docker network without host-exposed
- * ports (SEC-011). The cors middleware has been removed.
+ * Configuration options for creating an MCP server instance: identity, network settings, optional handlers.
+ * MCP workers run inside an isolated Docker network without host-exposed ports (SEC-011); cors middleware removed.
  */
 export interface MCPServerOptions {
   /** Server name (shown to clients) */
@@ -77,9 +49,8 @@ export interface MCPServerOptions {
   /** Bearer token auth — when set, all requests except publicPaths require Authorization header */
   auth?: MCPServerAuth;
   /**
-   * Allowed Origin values for CORS-like validation. When set, requests with an
-   * Origin header not in the list are rejected with 403. Requests without an
-   * Origin header (non-browser clients) are always allowed.
+   * Allowed Origin values for CORS-like validation; requests with an Origin header not in the list
+   * are rejected with 403, requests without one (non-browser clients) are always allowed.
    */
   allowedOrigins?: string[];
   /** Rate limiting — sliding window per IP. Disabled when not set. */
@@ -87,9 +58,8 @@ export interface MCPServerOptions {
     maxRequests?: number;
     windowMs?: number;
     /**
-     * Paths to exclude from rate limiting.
-     * When provided, replaces (does not merge with) auth.publicPaths and the default ['/health'].
-     * Include '/health' explicitly if you need it excluded.
+     * Paths to exclude from rate limiting; when provided, REPLACES (does not merge with) auth.publicPaths
+     * and the default ['/health'] — include '/health' explicitly if needed.
      */
     excludedPaths?: string[];
   };
@@ -114,24 +84,12 @@ export interface MCPServer {
   stop: () => Promise<void>;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Server Factory
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Server Factory ───────────────────────────────────────────────────────────
 
 /**
- * Create an MCP server with Streamable HTTP transport
- *
- * Features:
- * - Express-based HTTP server
- * - JSON-RPC 2.0 protocol
- * - Optional SSE streaming
- * - Rate limiting
- * - Session management
- * - Health check endpoint
- *
- * Note: Security provided by Docker network isolation (no exposed ports)
- * @param options Server configuration
- * @returns MCP server instance
+ * Create an MCP server with Streamable HTTP transport (Express, JSON-RPC 2.0, optional SSE, rate limiting,
+ * sessions, health check). Security relies on Docker network isolation — no exposed ports.
+ * @param options - server configuration
  */
 export function createMCPServer(options: MCPServerOptions): MCPServer {
   // Windows supervisor sets MCP_LISTEN_HOST to the WSL adapter IP; see ADR-067.
@@ -151,9 +109,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   let server: ReturnType<Express['listen']> | null = null;
   let rateLimitCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Middleware
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Middleware ──────────────────────────────────────────────────────────────
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -214,9 +170,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     app.use(bearerAuth);
   }
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Rate Limiting Middleware
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Rate Limiting Middleware ────────────────────────────────────────────────
 
   if (options.rateLimit) {
     const maxRequests = options.rateLimit.maxRequests ?? 60;
@@ -240,9 +194,8 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     }, CLEANUP_INTERVAL_MS);
     rateLimitCleanupInterval.unref();
 
-    // Note: in Speedwave's architecture, all mcp-hub traffic to mcp-os arrives
-    // from the same container network IP, so this is effectively a global bucket
-    // rather than per-client rate limiting. This is acceptable for the threat model.
+    // All mcp-hub traffic arrives from the same container network IP, so this is effectively a
+    // global bucket rather than per-client rate limiting — acceptable for the threat model.
     function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
       if (rateLimitExcluded.includes(req.path)) {
         next();
@@ -271,9 +224,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     app.use(rateLimitMiddleware);
   }
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Health Check Endpoint
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Health Check Endpoint ───────────────────────────────────────────────────
 
   app.get('/health', async (_req: Request, res: Response) => {
     if (options.healthCheck) {
@@ -288,9 +239,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     res.json({ status: 'ok' });
   });
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Origin Validation Middleware (when allowedOrigins is configured)
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Origin Validation Middleware (when allowedOrigins is configured) ───────
 
   if (options.allowedOrigins) {
     const origins = options.allowedOrigins;
@@ -307,9 +256,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     app.use(originCheck);
   }
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // MCP Protocol Endpoints (Streamable HTTP)
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── MCP Protocol Endpoints (Streamable HTTP) ────────────────────────────────
 
   app.post('/', async (req: Request, res: Response) => {
     await handleMCPPost(rpcHandler, req, res);
@@ -319,18 +266,14 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     handleMCPDelete(req, res);
   });
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Method Not Allowed Handler (405 for unsupported HTTP methods on /)
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Method Not Allowed Handler (405 for unsupported HTTP methods on /) ─────
 
   app.all('/', (_req: Request, res: Response) => {
     res.setHeader('Allow', 'POST, DELETE');
     res.status(405).json({ error: 'Method Not Allowed' });
   });
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Tool Registration
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Tool Registration ───────────────────────────────────────────────────────
 
   function registerTool(tool: Tool, handler: ToolHandler): void {
     rpcHandler.registerTool(tool, handler);
@@ -341,9 +284,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     registerTool(tool, handler);
   }
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Server Lifecycle
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Server Lifecycle ────────────────────────────────────────────────────────
 
   async function start(): Promise<number> {
     // Run onStart hook if provided
@@ -410,9 +351,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
     });
   }
 
-  //─────────────────────────────────────────────────────────────────────────────
-  // Return Server Instance
-  //─────────────────────────────────────────────────────────────────────────────
+  // ── Return Server Instance ──────────────────────────────────────────────────
 
   return {
     app,
@@ -423,9 +362,7 @@ export function createMCPServer(options: MCPServerOptions): MCPServer {
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Internal Helpers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Internal Helpers ─────────────────────────────────────────────────────────
 
 // Constant-time bearer-token compare via double-HMAC — equalises lengths for timingSafeEqual.
 // Not a password hash: bearer tokens are already high-entropy, so Argon2/bcrypt buys nothing.
@@ -434,14 +371,11 @@ function safeTokenCompare(provided: string, expected: string): boolean {
   return timingSafeEqual(hmac(provided), hmac(expected));
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Helper Functions
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Helper Functions ─────────────────────────────────────────────────────────
 
 /**
- * Create a text response for tool results
- * @param text - Text content to return
- * @returns Tool result with text content
+ * Create a text response for tool results.
+ * @param text - text content to return
  */
 export function textResult(text: string): { content: Array<{ type: 'text'; text: string }> } {
   return {
@@ -450,9 +384,8 @@ export function textResult(text: string): { content: Array<{ type: 'text'; text:
 }
 
 /**
- * Create a JSON response for tool results
- * @param data - Data object to serialize as JSON
- * @returns Tool result with JSON-formatted text
+ * Create a JSON response for tool results.
+ * @param data - data object to serialize as JSON
  */
 export function jsonResult<T>(data: T): { content: Array<{ type: 'text'; text: string }> } {
   return {
@@ -461,9 +394,8 @@ export function jsonResult<T>(data: T): { content: Array<{ type: 'text'; text: s
 }
 
 /**
- * Create an error response for tool results
- * @param message - Error message to return
- * @returns Tool result marked as error
+ * Create an error response for tool results.
+ * @param message - error message to return
  */
 export function errorResult(message: string): {
   content: Array<{ type: 'text'; text: string }>;

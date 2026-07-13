@@ -1,8 +1,5 @@
 /**
- * MCP SharePoint Worker
- *
- * Isolated SharePoint/Graph API MCP server with per-service token isolation.
- * Architecture: Domain-tools pattern with separation of concerns.
+ * MCP SharePoint Worker: isolated SharePoint/Graph API MCP server with per-service token isolation.
  * @module mcp-sharepoint
  */
 
