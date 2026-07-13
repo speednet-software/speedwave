@@ -836,7 +836,11 @@ pub(crate) fn policy_state_digest_in(data_dir: &Path, project: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
     use crate::config::{ManagedPiiPolicyConfig, PiiPolicyUserConfig};
