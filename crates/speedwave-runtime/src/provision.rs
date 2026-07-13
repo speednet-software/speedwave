@@ -106,8 +106,8 @@ const LIMA_VPN_PROVISION_SENTINEL: &str = "99-speedwave-prefer-vznat.yaml";
 #[cfg(any(target_os = "macos", test))]
 const LIMA_TIMESYNC_PROVISION_SENTINEL: &str = "99-speedwave-no-settime.conf";
 
-/// Returns `true` if the Lima config needs regenerating: VPN netplan drop-in missing, or
-/// `memory`/`cpus` drifted from SSOT. Unparseable = no-drift (never touch a hand-mangled file).
+/// Returns `true` if the Lima config needs regenerating: either managed provision drop-in
+/// missing, or `memory`/`cpus` drifted. Unparseable = no-drift (never touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
 pub fn lima_vm_config_needs_update(config_content: &str) -> bool {
     use crate::resources;
