@@ -5,10 +5,11 @@
      before MSI overwrites the binaries. See ADR-048. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
-    <!-- Immediate CA: bake env vars + pwsh command line into the deferred CA. -->
+    <!-- Paths go as -File args, never a -Command literal, so INSTALLDIR cannot inject PowerShell.
+         INSTALLDIR ends in "\", doubled before a closing quote (a lone `\"` escapes it); sweep.ps1 TrimEnds it. -->
     <CustomAction Id="SpeedwaveSweepSetData"
                   Property="SpeedwaveSweepDeferred"
-                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;$env:SPW_INSTDIR='[INSTALLDIR]'.TrimEnd('\'); $env:SPW_DATA_DIR=[%USERPROFILE]+'\.speedwave'; &amp; '[INSTALLDIR]resources\windows\sweep.ps1'&quot;"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]resources\windows\sweep.ps1&quot; -InstDir &quot;[INSTALLDIR]\&quot; -DataDir &quot;[%USERPROFILE]\.speedwave&quot;"
                   Execute="immediate"
                   Return="check" />
 

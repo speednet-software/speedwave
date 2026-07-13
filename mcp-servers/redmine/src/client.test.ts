@@ -5,7 +5,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { withSetupGuidance } from '@speedwave/mcp-shared';
 import axios, { AxiosError } from 'axios';
-import { RedmineClient, initializeRedmineClient, ProjectScopeError } from './client.js';
+import {
+  RedmineClient,
+  initializeRedmineClient,
+  ProjectScopeError,
+  isRetryable,
+} from './client.js';
 import type {
   RedmineConfig,
   RedmineIssue,
@@ -68,11 +73,17 @@ describe('RedmineClient', () => {
       expect(mockedAxios.create).toHaveBeenCalledWith({
         baseURL: 'https://redmine.example.com',
         timeout: 30000,
+        maxRedirects: 0,
         headers: {
           'X-Redmine-API-Key': 'test-api-key-123',
           'Content-Type': 'application/json',
         },
       });
+    });
+
+    it('should disable redirects so the API key is never leaked cross-origin', () => {
+      const createArg = (mockedAxios.create as any).mock.calls[0][0];
+      expect(createArg.maxRedirects).toBe(0);
     });
 
     it('should store config and mappings from projectConfig', () => {
@@ -91,6 +102,35 @@ describe('RedmineClient', () => {
 
     it('should setup retry interceptor', () => {
       expect(mockInterceptors.response.use).toHaveBeenCalled();
+    });
+  });
+
+  describe('isRetryable', () => {
+    const err = (method: string, status?: number): AxiosError =>
+      ({
+        config: { method },
+        response: status === undefined ? undefined : { status },
+      }) as unknown as AxiosError;
+
+    it('retries idempotent GET/HEAD on 5xx, 429, and network errors', () => {
+      expect(isRetryable(err('get', 503))).toBe(true);
+      expect(isRetryable(err('head', 500))).toBe(true);
+      expect(isRetryable(err('get', 429))).toBe(true);
+      expect(isRetryable(err('get', undefined))).toBe(true);
+    });
+
+    it('never retries non-idempotent POST/PUT/DELETE (avoids duplicate mutations)', () => {
+      for (const m of ['post', 'put', 'delete', 'patch']) {
+        expect(isRetryable(err(m, 503))).toBe(false);
+        expect(isRetryable(err(m, 429))).toBe(false);
+        expect(isRetryable(err(m, undefined))).toBe(false);
+      }
+    });
+
+    it('does not retry idempotent reads on non-transient statuses', () => {
+      expect(isRetryable(err('get', 400))).toBe(false);
+      expect(isRetryable(err('get', 404))).toBe(false);
+      expect(isRetryable(err('get', 401))).toBe(false);
     });
   });
 

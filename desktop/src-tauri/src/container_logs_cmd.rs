@@ -6,19 +6,11 @@ use crate::types::check_project;
 /// Read a log file, take the last `tail` lines, and sanitize secrets.
 /// Returns an empty string if the file does not exist.
 fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, String> {
-    // claude-home is container-writable: a symlinked source could pull an
-    // arbitrary host file (e.g. a token) into /logs and the diagnostics ZIP.
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if !meta.file_type().is_file() => {
-            return Err(format!("not a regular file: {}", path.display()));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        _ => {}
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(e) => return Err(format!("Failed to read log file: {e}")),
+    // claude-home is container-writable: a no-follow atomic read stops a
+    // symlink-swap race from pulling an arbitrary host file into /logs + ZIP.
+    let content = match speedwave_runtime::fs_perms::read_regular_file_no_follow(path)? {
+        Some(c) => c,
+        None => return Ok(String::new()),
     };
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(tail);

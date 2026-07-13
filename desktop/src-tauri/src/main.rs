@@ -121,6 +121,17 @@ pub(crate) fn stash_cleanup_handle(
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// True when `url` is the app's own origin. Blocks a model-generated link from
+/// replacing the trusted UI: only the bundled app or the dev server may load.
+fn is_own_origin(url: &url::Url) -> bool {
+    match url.scheme() {
+        // Bundled app origin (tauri://localhost on macOS, http://tauri.localhost on Windows).
+        "tauri" => true,
+        "http" | "https" => matches!(url.host_str(), Some("localhost") | Some("tauri.localhost")),
+        _ => false,
+    }
+}
+
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
 static WATCHDOG_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -783,7 +794,17 @@ fn main() {
         }
     }
 
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(
+        tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
+            .on_navigation(|_webview, url| {
+                let allowed = is_own_origin(url);
+                if !allowed {
+                    log::warn!("blocked navigation to non-app origin: {}", url.scheme());
+                }
+                allowed
+            })
+            .build(),
+    );
 
     // WebDriver server for E2E tests on 127.0.0.1:4445; only compiled under the "e2e" feature.
     #[cfg(feature = "e2e")]
@@ -1391,6 +1412,38 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    // -- is_own_origin (WebView navigation guard) --
+
+    #[test]
+    fn is_own_origin_allows_app_and_dev_origins() {
+        for u in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "http://localhost:4270/",
+            "https://localhost/",
+        ] {
+            assert!(
+                is_own_origin(&url::Url::parse(u).unwrap()),
+                "must allow own origin: {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_own_origin_blocks_foreign_and_dangerous_schemes() {
+        for u in [
+            "https://evil.example.com/phish",
+            "http://169.254.169.254/",
+            "data:text/html,<h1>hi</h1>",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                !is_own_origin(&url::Url::parse(u).unwrap()),
+                "must block non-app navigation: {u}"
+            );
+        }
     }
 
     // -- log_panic_with_fallback --

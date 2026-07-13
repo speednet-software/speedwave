@@ -3335,6 +3335,8 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=512m
     user: "1000:1000"
+    volumes:
+      - /test/project:/workspace:rw
     environment:
       - CLAUDE_VERSION=1.0.3
 networks:
