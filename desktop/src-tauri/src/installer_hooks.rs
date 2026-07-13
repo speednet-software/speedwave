@@ -358,6 +358,29 @@ mod tests {
     }
 
     #[test]
+    fn sweep_wxs_passes_installdir_via_file_arg_not_command_literal() {
+        // H-03: [INSTALLDIR] inside a -Command PS literal lets a crafted install
+        // path inject commands run as SYSTEM. It must be a -File script argument.
+        // Inspect the CustomAction command line only (skip the XML comment prose).
+        let cmd = SWEEP_WXS
+            .lines()
+            .find(|l| l.contains("powershell.exe") && l.contains("Value="))
+            .expect("sweep.wxs must have a powershell CustomAction Value line");
+        assert!(
+            cmd.contains("-File"),
+            "sweep.wxs must invoke sweep.ps1 via -File, not -Command"
+        );
+        assert!(
+            !cmd.contains("-Command"),
+            "sweep.wxs must not use -Command (interpolating [INSTALLDIR] into PS source is injectable)"
+        );
+        assert!(
+            !cmd.contains("$env:SPW_INSTDIR"),
+            "sweep.wxs must not assign [INSTALLDIR] into a PS string literal"
+        );
+    }
+
+    #[test]
     fn firewall_wxs_install_and_uninstall_both_sequenced() {
         assert!(
             FIREWALL_WXS.contains("-Mode install") && FIREWALL_WXS.contains("-Mode uninstall"),
