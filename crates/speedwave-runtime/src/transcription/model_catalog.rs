@@ -194,6 +194,42 @@ pub fn whisper_model(key: &str) -> Option<&'static WhisperModelInfo> {
     WHISPER_MODELS.iter().find(|m| m.key == key)
 }
 
+/// Hugging Face repo the Silero VAD GGML model comes from — whisper.cpp's
+/// official conversion; `WHISPER_HF_REPO` carries no VAD files.
+pub const VAD_HF_REPO: &str = "ggml-org/whisper-vad";
+
+/// The Silero VAD model gating decode windows against hallucinations (ADR-056 Amendment 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VadModelInfo {
+    /// The GGML filename in [`VAD_HF_REPO`].
+    pub file: &'static str,
+    /// Download size in bytes (the SHA256 check is authoritative).
+    pub approx_bytes: u64,
+    /// SHA256 of the file (lowercase hex). Verified on download.
+    pub sha256: &'static str,
+    /// SPDX-ish licence string for the model weights.
+    pub license: &'static str,
+}
+
+impl VadModelInfo {
+    /// Download URL for this model.
+    pub fn url(&self) -> String {
+        format!(
+            "https://huggingface.co/{VAD_HF_REPO}/resolve/main/{}",
+            self.file
+        )
+    }
+}
+
+/// The one VAD model this build uses. v5.1.2 is the version whisper.cpp ships
+/// its VAD support against; bump = edit this const.
+pub const VAD_MODEL: VadModelInfo = VadModelInfo {
+    file: "ggml-silero-v5.1.2.bin",
+    approx_bytes: 885_098,
+    sha256: "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
+    license: "MIT",
+};
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code")]
 mod tests {
@@ -277,6 +313,24 @@ mod tests {
             .iter()
             .any(|m| m.role == ModelRole::GpuLive && m.live_capable));
         assert!(WHISPER_MODELS.iter().any(|m| m.role == ModelRole::Finalize));
+    }
+
+    #[test]
+    fn vad_model_is_well_formed() {
+        assert!(
+            VAD_MODEL.file.starts_with("ggml-") && VAD_MODEL.file.ends_with(".bin"),
+            "bad GGML filename: {}",
+            VAD_MODEL.file
+        );
+        assert!(is_hex64(VAD_MODEL.sha256));
+        // Silero VAD is under 1 MiB — a jump above that means a wrong file was pinned.
+        assert!(VAD_MODEL.approx_bytes > 100_000 && VAD_MODEL.approx_bytes < 10_000_000);
+        assert!(!VAD_MODEL.license.is_empty());
+        let url = VAD_MODEL.url();
+        assert!(url.starts_with("https://huggingface.co/ggml-org/whisper-vad/resolve/main/"));
+        assert!(url.ends_with(VAD_MODEL.file));
+        // The VAD file must not collide with a Whisper catalogue filename.
+        assert!(WHISPER_MODELS.iter().all(|m| m.file != VAD_MODEL.file));
     }
 
     #[test]

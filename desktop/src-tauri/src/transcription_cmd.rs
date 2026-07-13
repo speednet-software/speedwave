@@ -145,10 +145,16 @@ pub async fn start_transcription(
     let transcriber = {
         let path = whisper_path.clone();
         let key = live_key.clone();
-        tokio::task::spawn_blocking(move || WhisperCppTranscriber::load(&path, key))
-            .await
-            .map_err(|e| format!("transcriber load task panicked: {e}"))?
-            .map_err(|e| e.to_string())?
+        let m = models_arc.clone();
+        tokio::task::spawn_blocking(move || {
+            WhisperCppTranscriber::load(&path, key).map(|mut t| {
+                attach_vad(&mut t, &m);
+                t
+            })
+        })
+        .await
+        .map_err(|e| format!("transcriber load task panicked: {e}"))?
+        .map_err(|e| e.to_string())?
     };
 
     // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
@@ -294,7 +300,10 @@ pub async fn stop_transcription(
             }
         };
         let transcriber = match WhisperCppTranscriber::load(&path, key.clone()) {
-            Ok(t) => Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>,
+            Ok(mut t) => {
+                attach_vad(&mut t, &models_arc);
+                Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
+            }
             Err(e) => {
                 let _ = store_arc.set_status(
                     id,
@@ -388,6 +397,23 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .into_iter()
         .find(|m| m.downloaded)
         .map(|m| m.key)
+}
+
+/// Attaches the Silero VAD gate when its model is on disk; otherwise kicks off a background
+/// download so this session's offline pass and later sessions get it. Never fails the caller.
+fn attach_vad(transcriber: &mut WhisperCppTranscriber, models: &ModelStoreHandle) {
+    if models.vad_is_present() {
+        if let Err(e) = transcriber.enable_vad(&models.vad_path()) {
+            log::warn!("failed to load the Silero VAD model: {e}");
+        }
+        return;
+    }
+    let m = models.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = m.ensure_vad_model(&mut |_| {}) {
+            log::warn!(target: "transcription::models", "background VAD model download failed: {e}");
+        }
+    });
 }
 
 /// Picks the model for the live pass: `override_key` (must be downloaded) → `recommended` (if
@@ -638,6 +664,11 @@ pub async fn download_transcription_model(
         // The slot lives inside the blocking task: the registry entry clears
         // exactly when the download work ends, even if this future is dropped.
         let _slot = slot;
+        // The Silero VAD gate rides along with every model download (~1 MB;
+        // ADR-056 Amendment 8). Non-fatal: recording degrades to signal gates.
+        if let Err(e) = models.ensure_vad_model(&mut |_| {}) {
+            log::warn!(target: "transcription::models", "VAD model download failed: {e}");
+        }
         models
             .ensure_model(&model_id, &mut |p| {
                 let _ = app.emit(MODEL_PROGRESS_EVENT, &p);

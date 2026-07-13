@@ -8,7 +8,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::consts;
-use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
+use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo, VAD_MODEL};
 
 /// Max time to establish the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -221,6 +221,54 @@ impl ModelStore {
         }
         restrict_file_perms(dest);
         Ok(())
+    }
+
+    /// Local path the Silero VAD model lives at once downloaded.
+    pub fn vad_path(&self) -> PathBuf {
+        self.whisper_dir().join(VAD_MODEL.file)
+    }
+
+    /// `true` if the verified VAD model file is present (same size window as
+    /// `whisper_is_present`; SHA-verified before the rename put it there).
+    pub fn vad_is_present(&self) -> bool {
+        match std::fs::metadata(self.vad_path()) {
+            Ok(m) => {
+                let floor = VAD_MODEL.approx_bytes / 10 * 9;
+                let ceil = VAD_MODEL.approx_bytes + VAD_MODEL.approx_bytes / 20 + 1024;
+                m.len() >= floor && m.len() <= ceil
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Ensures the Silero VAD model is present locally, downloading + verifying
+    /// it if needed. Returns the local path.
+    pub fn ensure_vad_model(
+        &self,
+        progress: &mut dyn FnMut(DownloadProgress),
+    ) -> Result<PathBuf, ModelStoreError> {
+        let dest = self.vad_path();
+        if self.vad_is_present() {
+            return Ok(dest);
+        }
+        std::fs::create_dir_all(self.whisper_dir())?;
+        restrict_dir_perms(&self.whisper_dir());
+        let cap = VAD_MODEL.approx_bytes + VAD_MODEL.approx_bytes / 20 + 1024;
+        log::info!(
+            target: "transcription::models",
+            "downloading the Silero VAD model (~{} bytes)",
+            VAD_MODEL.approx_bytes
+        );
+        self.download_to(
+            &VAD_MODEL.url(),
+            &dest,
+            "silero-vad",
+            VAD_MODEL.sha256,
+            cap,
+            progress,
+        )?;
+        log::info!(target: "transcription::models", "the Silero VAD model downloaded and verified");
+        Ok(dest)
     }
 
     /// Status of every Whisper model in the catalogue (downloaded? size? path?).
@@ -867,6 +915,28 @@ mod tests {
             !store.whisper_is_present(info),
             "a wildly-oversized file (>105%) is not present"
         );
+    }
+
+    #[test]
+    fn vad_presence_tracks_the_size_window_and_skips_the_download_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        assert!(store.vad_path().starts_with(dir.path()));
+        assert!(!store.vad_is_present(), "empty store has no VAD model");
+
+        std::fs::create_dir_all(store.whisper_dir()).unwrap();
+        let write_sparse = |len: u64| {
+            let f = std::fs::File::create(store.vad_path()).unwrap();
+            f.set_len(len).unwrap();
+        };
+        write_sparse(VAD_MODEL.approx_bytes);
+        assert!(store.vad_is_present(), "exact size is present");
+        // Present → ensure returns the path without touching the network.
+        let p = store.ensure_vad_model(&mut no_progress).unwrap();
+        assert_eq!(p, store.vad_path());
+
+        write_sparse(VAD_MODEL.approx_bytes / 2);
+        assert!(!store.vad_is_present(), "a truncated file is not present");
     }
 
     #[test]
