@@ -189,7 +189,9 @@ export class SessionListComponent implements OnInit, OnDestroy {
       this.cdr.markForCheck();
       return;
     }
-    this.open(s);
+    // resumeRecording already activated the fresh snapshot and attached the live
+    // listener — re-emitting `opened` would re-subscribe and drop events in the gap.
+    this.selectedId.set(s.id);
     await this.refresh();
   }
 

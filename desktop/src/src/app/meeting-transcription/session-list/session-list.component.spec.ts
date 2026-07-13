@@ -75,7 +75,7 @@ describe('SessionListComponent', () => {
     expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
   });
 
-  it('resumes a done session, selects it, and emits opened', async () => {
+  it('resumes a done session and selects it without re-subscribing the view', async () => {
     await component.ngOnInit();
     const spy = vi.fn();
     component.opened.subscribe(spy);
@@ -83,7 +83,8 @@ describe('SessionListComponent', () => {
     await component.resume(s);
     expect(svc.resumeRecording).toHaveBeenCalledWith(s.id);
     expect(component.selectedId()).toBe(s.id);
-    expect(spy).toHaveBeenCalledWith(s);
+    // The service already activated the snapshot + listener — no opened round trip.
+    expect(spy).not.toHaveBeenCalled();
     expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
   });
 

@@ -11,6 +11,7 @@ import {
   input,
   output,
   signal,
+  untracked,
   viewChild,
 } from '@angular/core';
 import { Router } from '@angular/router';
@@ -196,10 +197,16 @@ export class LiveTranscriptComponent {
 
   /** Wires the auto-scroll effects (constructor = injection context). */
   constructor() {
-    // A newly opened session always starts pinned to the newest lines.
+    // A newly opened session starts pinned: live tail while recording, top when
+    // reading a finished transcript (never inherit the previous session's scroll).
     effect(() => {
       this.sessionId();
       this.stickToBottom.set(true);
+      if (untracked(() => this.status()) === 'recording') {
+        this.scrollToBottom();
+      } else {
+        this.scrollToTop();
+      }
     });
     // Follow the live tail while recording, unless the user scrolled up to read.
     effect(() => {
@@ -223,6 +230,19 @@ export class LiveTranscriptComponent {
         write: () => {
           const el = this.body()?.nativeElement;
           if (el) el.scrollTop = el.scrollHeight;
+        },
+      },
+      { injector: this.injector }
+    );
+  }
+
+  /** Resets the transcript body to the top (opening a finished session). */
+  private scrollToTop(): void {
+    afterNextRender(
+      {
+        write: () => {
+          const el = this.body()?.nativeElement;
+          if (el) el.scrollTop = 0;
         },
       },
       { injector: this.injector }

@@ -207,7 +207,7 @@ impl ModelStore {
     }
 
     /// Downloads `url` to `dest`, verifies SHA256 against `expected_sha256`, enforces `cap`,
-    /// restricts perms, removes the file on mismatch. Shared body of `ensure_model` / test seam.
+    /// restricts perms. Shared body of `ensure_model` / test seam.
     fn download_to(
         &self,
         url: &str,
@@ -217,17 +217,7 @@ impl ModelStore {
         cap: u64,
         progress: &mut dyn FnMut(DownloadProgress),
     ) -> Result<(), ModelStoreError> {
-        let got_hash = download_verified(url, dest, model_key, cap, progress)?;
-        if got_hash != expected_sha256 {
-            // download_verified renamed the temp into `dest` on success; on a
-            // hash mismatch that means there is now a bad file at `dest` — remove it.
-            let _ = std::fs::remove_file(dest);
-            return Err(ModelStoreError::HashMismatch {
-                model: model_key.to_string(),
-                expected: expected_sha256.to_string(),
-                got: got_hash,
-            });
-        }
+        download_verified(url, dest, model_key, expected_sha256, cap, progress)?;
         restrict_file_perms(dest);
         Ok(())
     }
@@ -366,12 +356,13 @@ fn host_on_allowlist(url: &reqwest::Url) -> bool {
     }
 }
 
-/// Streams `url` into `dest`, hashing SHA256, enforcing `cap`, reporting progress, and atomically
-/// renaming on success (`.part` temp removed on error). Returns hex SHA256; parent must exist.
+/// Streams `url` into a temp, verifies SHA256 against `expected_sha256`, then atomically
+/// renames into `dest` — an unverified file is never visible at the public path.
 fn download_verified(
     url: &str,
     dest: &Path,
     model_key: &str,
+    expected_sha256: &str,
     cap: u64,
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<String, ModelStoreError> {
@@ -389,7 +380,15 @@ fn download_verified(
         std::process::id()
     ));
     let hash = stream_to_path(url, &tmp, model_key, cap, progress)?;
-    // Atomic rename into place.
+    if hash != expected_sha256 {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ModelStoreError::HashMismatch {
+            model: model_key.to_string(),
+            expected: expected_sha256.to_string(),
+            got: hash,
+        });
+    }
+    // Atomic rename into place — only after the hash verified.
     std::fs::rename(&tmp, dest).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         ModelStoreError::Io(e)
@@ -637,7 +636,15 @@ mod tests {
         let (_srv, url) = serve_bytes(&body);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("final.bin");
-        let hash = download_verified(&url, &dest, "t", 10_000, &mut no_progress).unwrap();
+        let hash = download_verified(
+            &url,
+            &dest,
+            "t",
+            &sha256_hex(&body),
+            10_000,
+            &mut no_progress,
+        )
+        .unwrap();
         assert_eq!(hash, sha256_hex(&body));
         assert!(dest.is_file(), "final file in place");
         assert!(no_part_files(dir.path()), "temp gone after rename");
@@ -656,6 +663,7 @@ mod tests {
         // Two writers on one temp path could install a corrupt file whose
         // stream-hash check passed — unique temps make both installs valid.
         let body = b"model-bytes".repeat(400);
+        let expected = sha256_hex(&body);
         let (_srv, url) = serve_bytes(&body);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("m.bin");
@@ -664,7 +672,10 @@ mod tests {
                 .map(|_| {
                     let url = url.clone();
                     let dest = dest.clone();
-                    s.spawn(move || download_verified(&url, &dest, "t", 100_000, &mut no_progress))
+                    let expected = expected.clone();
+                    s.spawn(move || {
+                        download_verified(&url, &dest, "t", &expected, 100_000, &mut no_progress)
+                    })
                 })
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()

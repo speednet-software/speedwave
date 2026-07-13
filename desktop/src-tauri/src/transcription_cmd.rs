@@ -144,10 +144,7 @@ pub async fn start_transcription(
     // Register the driver entry before creating the session so the delete guard
     // covers the whole start window (delete refuses while an entry is live).
     let stop = StopSignal::new();
-    drivers
-        .lock()
-        .map_err(|e| format!("drivers lock poisoned: {e}"))?
-        .insert(session_id, stop.clone());
+    register_driver(drivers.inner(), session_id, &stop)?;
     let unregister = |drivers: &DriversHandle| {
         if let Ok(mut g) = drivers.lock() {
             if g.get(&session_id).is_some_and(|s| s.same_as(&stop)) {
@@ -203,6 +200,24 @@ pub async fn start_transcription(
         event_name: transcript_event_name(session_id),
         snapshot,
     })
+}
+
+/// Claims the driver-registry slot for `id`. Rejecting an occupied slot is the
+/// single-recording invariant per session — a blind insert would let a losing
+/// concurrent start/resume clobber the winner's live entry.
+fn register_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) -> Result<(), String> {
+    let mut g = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?;
+    match g.entry(id) {
+        std::collections::hash_map::Entry::Occupied(_) => {
+            Err("this session is already recording".to_string())
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(stop.clone());
+            Ok(())
+        }
+    }
 }
 
 /// Runs a built driver on a blocking task; cleans up the stop-signal registry
@@ -268,10 +283,7 @@ pub async fn resume_transcription(
     // Register the driver entry before mutating the session so the delete guard
     // covers the whole resume window (delete refuses while an entry is live).
     let stop = StopSignal::new();
-    drivers
-        .lock()
-        .map_err(|e| format!("drivers lock poisoned: {e}"))?
-        .insert(id, stop.clone());
+    register_driver(drivers.inner(), id, &stop)?;
     let unregister = |drivers: &DriversHandle| {
         if let Ok(mut g) = drivers.lock() {
             if g.get(&id).is_some_and(|s| s.same_as(&stop)) {
@@ -643,15 +655,17 @@ pub async fn delete_transcript(
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
     // A live driver writes into the session dir — deleting under it would orphan
-    // an unstoppable capture (its stop signal dies with the session entry).
-    let live = drivers
+    // an unstoppable capture. The registry lock is held across the delete so a
+    // concurrent start/resume cannot register into the check→delete gap.
+    let guard = drivers
         .lock()
-        .map_err(|e| format!("drivers lock poisoned: {e}"))?
-        .contains_key(&id);
-    if live {
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?;
+    if guard.contains_key(&id) {
         return Err("stop the recording before deleting it".to_string());
     }
-    store.delete(id).map_err(|e| e.to_string())
+    let result = store.delete(id).map_err(|e| e.to_string());
+    drop(guard);
+    result
 }
 
 #[tauri::command]
@@ -824,6 +838,22 @@ mod tests {
             PathBuf::from("/tmp/a.wav"),
         );
         store.create(s).unwrap()
+    }
+
+    #[test]
+    fn register_driver_rejects_an_occupied_slot_and_keeps_the_winner() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let id = Uuid::new_v4();
+        let winner = StopSignal::new();
+        register_driver(&drivers, id, &winner).unwrap();
+        // A concurrent second attempt for the same session is rejected...
+        let err = register_driver(&drivers, id, &StopSignal::new()).unwrap_err();
+        assert!(err.contains("already recording"), "got: {err}");
+        // ...and never clobbers the winner's live entry.
+        assert!(drivers.lock().unwrap().get(&id).unwrap().same_as(&winner));
+        // A different session registers independently.
+        register_driver(&drivers, Uuid::new_v4(), &StopSignal::new()).unwrap();
+        assert_eq!(drivers.lock().unwrap().len(), 2);
     }
 
     #[test]

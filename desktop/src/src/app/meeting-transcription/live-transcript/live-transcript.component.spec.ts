@@ -261,6 +261,18 @@ describe('LiveTranscriptComponent', () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it('resets to the top when opening a finished session', () => {
+      fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
+      fixture.detectChanges();
+      const topSpy = vi.spyOn(component as unknown as { scrollToTop(): void }, 'scrollToTop');
+      fixture.componentRef.setInput(
+        'session',
+        session({ id: 'sess-9', status: { state: 'done' }, live_segments: [seg(0, 'x')] })
+      );
+      fixture.detectChanges();
+      expect(topSpy).toHaveBeenCalled();
+    });
+
     it('re-arms the bottom pin when switching to a different session', () => {
       fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
       fixture.detectChanges();
