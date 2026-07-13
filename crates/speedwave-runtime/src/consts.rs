@@ -76,6 +76,8 @@ pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
 
 /// Log filename for the Claude session output.
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
+/// Entrypoint's startup diagnostics log, written by the container into claude-home.
+pub const ENTRYPOINT_LOG_FILE: &str = ".speedwave-entrypoint.log";
 /// Path to the Claude Code binary inside the container.
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -968,6 +970,11 @@ pub fn claude_session_log_path_under(
 /// Build the per-project Claude session log path.
 pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
     claude_session_log_path_under(data_dir(), project)
+}
+
+/// Host-side path of the container entrypoint's startup log (claude-home is mounted `:rw`).
+pub fn entrypoint_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
+    crate::claude_home::claude_home_dir(data_dir, project).join(ENTRYPOINT_LOG_FILE)
 }
 
 /// SSOT for the mcp-os drain log path — never re-join `data_dir()` by hand.
@@ -2749,5 +2756,15 @@ mod tests {
     fn strip_compose_container_prefix_leaves_unrelated_name_unchanged() {
         let out = strip_compose_container_prefix("other_unrelated_thing", "acme");
         assert_eq!(out, "other_unrelated_thing");
+    }
+
+    #[test]
+    fn entrypoint_log_path_lives_in_claude_home() {
+        let data_dir = std::path::Path::new("/tmp/sw-data");
+        let p = entrypoint_log_path_under(data_dir, "proj");
+        assert_eq!(
+            p,
+            crate::claude_home::claude_home_dir(data_dir, "proj").join(ENTRYPOINT_LOG_FILE)
+        );
     }
 }
