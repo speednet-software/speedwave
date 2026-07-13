@@ -234,7 +234,9 @@ fi
 
 # Install bundled official Anthropic plugins (defaults::BUNDLED_PLUGINS); only installs plugins
 # not already present, so `/plugin disable` survives a restart. Non-fatal and bounded.
-_bundled_marker="${HOME}/.claude/.speedwave-bundled-plugins-installed"
+# v2: pre-v2 markers were poisoned by the empty-list bug below — ignore and remove them.
+_bundled_marker="${HOME}/.claude/.speedwave-bundled-plugins-installed.v2"
+rm -f "${HOME}/.claude/.speedwave-bundled-plugins-installed"
 if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     _mp="${SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE:-claude-plugins-official}"
     if ! echo "${_mp}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
@@ -259,18 +261,22 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
+        # The CLI can print NOTHING with exit 0 on a cold start; blank means unknown,
+        # never "everything installed" (jammy's jq -e exits 0 on empty input).
         _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
+        [ -n "${_installed//[$' \t\n\r']/}" ] || _installed='[]'
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
             if ! echo "${_plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
                 echo "WARNING: skipping invalid bundled-plugin name: ${_plugin}" >&2
                 continue
             fi
             # Match a composite id ("name@marketplace") OR separate name+marketplace
-            # fields; jq -e fails on false/empty/parse error, so a bad list re-installs.
-            if printf '%s' "${_installed}" | jq -e \
+            # fields; only a literal `true` skips — jq exit codes are version-dependent.
+            _match="$(printf '%s' "${_installed}" | jq \
                 --arg id "${_plugin}@${_mp}" --arg name "${_plugin}" --arg mp "${_mp}" \
                 'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp))' \
-                >/dev/null 2>&1; then
+                2>/dev/null)" || _match=""
+            if [ "${_match}" = "true" ]; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
                 continue
             fi
@@ -286,7 +292,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             rm -f "${_new_marker}"
         fi
     fi
-    unset _mp _plugin _installed _err _all_recorded _new_marker
+    unset _mp _plugin _installed _err _all_recorded _new_marker _match
 fi
 unset _bundled_marker
 

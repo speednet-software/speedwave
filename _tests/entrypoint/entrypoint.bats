@@ -1458,6 +1458,68 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
+# Stub: `plugin list --json` prints NOTHING with exit 0 — the real CLI does this
+# on a cold container start; `plugin install` records the target.
+_stub_claude_empty_plugin_list() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
+    exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+}
+
+@test "an empty plugin list output means nothing installed, never everything" {
+    _stub_claude_empty_plugin_list
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+}
+
+@test "a whitespace-only plugin list output means nothing installed" {
+    _stub_claude_empty_plugin_list
+    sed -i.bak 's|then exit 0; fi|then printf "\\n  \\n"; exit 0; fi|' "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+}
+
+@test "a malformed plugin list output means nothing installed" {
+    _stub_claude_empty_plugin_list
+    sed -i.bak 's|then exit 0; fi|then echo "not json"; exit 0; fi|' "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+}
+
+@test "a pre-fix marker poisoned by the empty-list bug does not skip installs" {
+    _stub_claude_empty_plugin_list
+    mkdir -p "$TEST_HOME/.claude"
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+    [ ! -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed" ]
+}
+
 @test "a failing plugin install is non-fatal and surfaces the error reason" {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
