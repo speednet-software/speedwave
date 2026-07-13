@@ -45,13 +45,6 @@ impl fmt::Display for SivError {
 impl std::error::Error for SivError {}
 
 /// Deterministic authenticated encryption: same (key, category, value) => same ciphertext.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by policy scan/tokenize built in a later phase"
-    )
-)]
 pub(crate) fn seal(key: &EngineKey, category: &str, value: &[u8]) -> Result<Vec<u8>, SivError> {
     let mut cipher = Aes128Siv::new(&key.0.into());
     cipher
@@ -60,13 +53,6 @@ pub(crate) fn seal(key: &EngineKey, category: &str, value: &[u8]) -> Result<Vec<
 }
 
 /// Verifies the SIV tag; any corruption or category mismatch is an error, never a panic.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by policy scan/tokenize built in a later phase"
-    )
-)]
 pub(crate) fn open(
     key: &EngineKey,
     category: &str,
@@ -79,25 +65,11 @@ pub(crate) fn open(
 }
 
 /// Encodes a ciphertext as a base64url payload without padding (URL_SAFE_NO_PAD).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by policy scan/tokenize built in a later phase"
-    )
-)]
 pub(crate) fn encode_payload(ciphertext: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(ciphertext)
 }
 
 /// Decodes a base64url-without-padding payload back into ciphertext bytes.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by policy scan/tokenize built in a later phase"
-    )
-)]
 pub(crate) fn decode_payload(s: &str) -> Result<Vec<u8>, SivError> {
     URL_SAFE_NO_PAD.decode(s).map_err(|_| SivError::Encoding)
 }

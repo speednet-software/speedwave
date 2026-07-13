@@ -52,13 +52,11 @@ impl CompiledPolicy {
 }
 
 /// A policy.json v2 document failed to parse or violates the contract's semantics.
-/// Messages never carry scanned data or pattern literals, only field/id names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyError {
-    /// The document is not well-formed JSON, or does not match the v2 shape
-    /// (including an unknown field at any level).
+    /// Malformed JSON or a v2 shape mismatch; the message carries only line/column, never content.
     Parse(String),
-    /// The document parsed but violates a policy v2 semantic rule.
+    /// A v2 semantic rule was violated; the message carries only field/category/pattern ids.
     Semantic(String),
 }
 
@@ -490,7 +488,20 @@ mod tests {
     #[test]
     fn invalid_custom_pattern_regex_is_rejected() {
         let json = FULL_EXAMPLE.replacen("\\\\bEMP-\\\\d{4,8}\\\\b", "(a+", 1);
-        assert!(compile_policy_v2(&json).is_err());
+        match compile_policy_v2(&json) {
+            Err(PolicyError::Semantic(msg)) => {
+                assert!(
+                    msg.contains("EMPLOYEE_ID"),
+                    "message should name the pattern id"
+                );
+                assert!(
+                    !msg.contains("(a+"),
+                    "message must not leak the raw pattern"
+                );
+            }
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(e) => panic!("expected a semantic error, got {e:?}"),
+        }
     }
 
     #[test]

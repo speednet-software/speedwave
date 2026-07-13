@@ -3,6 +3,7 @@
 
 pub mod patterns;
 pub mod policy;
+pub mod scan;
 pub mod siv;
 mod validators;
 
@@ -11,4 +12,8 @@ pub use patterns::{
     BUILTIN_CATEGORIES, SENSITIVE_FIELD,
 };
 pub use policy::{compile_policy_v2, CategoryFlags, CompiledPolicy, CompiledRule, PolicyError};
+pub use scan::{
+    detokenize_json, detokenize_text, scan_json, scan_text, Detection, DetectionAction,
+    DetokenizeError, ScanError, ScanOutcome, TOKEN_SPAN_RE,
+};
 pub use siv::EngineKey;
