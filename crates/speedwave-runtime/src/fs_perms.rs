@@ -391,8 +391,12 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // O_NOFOLLOW: open fails (ELOOP) if the final component is a symlink.
-        opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+        // O_NOFOLLOW: open fails (ELOOP) on a final-component symlink.
+        // O_NONBLOCK: a FIFO/device opened read-only must not block waiting for
+        // a writer — the is_file() check below rejects it either way.
+        opts.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
     }
     let mut file = match opts.open(path) {
         Ok(f) => f,
