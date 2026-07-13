@@ -979,6 +979,7 @@ mod tests {
         // Part 1: 4 s mono; part 2: 2 s mono; a missing part in between is skipped.
         let (_g1, part1) = make_fixture_wav(4.0);
         let (_g2, part2) = make_fixture_wav(2.0);
+        let mut sub = store.subscribe(id).unwrap();
         run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
@@ -990,6 +991,19 @@ mod tests {
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
         .unwrap();
+
+        // The skipped part surfaces as a RecordingPartMissing warning, not silence.
+        let mut saw_missing_warning = false;
+        while let Ok(ev) = sub.events.try_recv() {
+            if let crate::transcription::transcript_store::TranscriptEvent::CaptureWarning {
+                warning: crate::transcription::audio::CaptureWarning::RecordingPartMissing,
+                ..
+            } = ev
+            {
+                saw_missing_warning = true;
+            }
+        }
+        assert!(saw_missing_warning, "a skipped part must raise a warning");
 
         let snap = store.get(id).unwrap();
         assert!(matches!(snap.status, TranscriptStatus::Done));
