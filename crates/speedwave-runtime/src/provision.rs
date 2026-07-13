@@ -71,6 +71,19 @@ provision:
       YAML
       chmod 600 /etc/netplan/99-speedwave-prefer-vznat.yaml
       netplan apply
+  - mode: boot
+    script: |
+      #!/bin/sh
+      # Lima's guestagent SyncTime steps the guest clock (also backward) by host-clock
+      # offset plus RPC latency every 10s; deny CAP_SYS_TIME so timesyncd owns the clock.
+      set -eu
+      mkdir -p /etc/systemd/system/lima-guestagent.service.d
+      cat > /etc/systemd/system/lima-guestagent.service.d/99-speedwave-no-settime.conf <<'UNIT'
+      [Service]
+      CapabilityBoundingSet=~CAP_SYS_TIME
+      UNIT
+      systemctl daemon-reload
+      systemctl try-restart lima-guestagent.service || true
 "#,
         desired_lima_vm_cpus(),
         desired_lima_vm_memory()
@@ -89,6 +102,10 @@ fn limactl_command() -> std::process::Command {
 #[cfg(any(target_os = "macos", test))]
 const LIMA_VPN_PROVISION_SENTINEL: &str = "99-speedwave-prefer-vznat.yaml";
 
+/// Clock provision: Lima's SyncTime steps the guest clock every 10s (see `lima_config`).
+#[cfg(any(target_os = "macos", test))]
+const LIMA_TIMESYNC_PROVISION_SENTINEL: &str = "99-speedwave-no-settime.conf";
+
 /// Returns `true` if the Lima config needs regenerating: VPN netplan drop-in missing, or
 /// `memory`/`cpus` drifted from SSOT. Unparseable = no-drift (never touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
@@ -105,9 +122,11 @@ pub fn lima_vm_config_needs_update_with(
     desired_gib: u32,
     desired_cpus: u32,
 ) -> bool {
-    // Trigger migration when the VPN-aware netplan drop-in is absent — pre-update installs need
-    // the new netplan-based fix injected on next boot. See `lima_config()`, lima-vm/lima#2984.
-    if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL) {
+    // Trigger migration when either managed provision drop-in is absent — pre-update installs
+    // need the netplan (lima-vm/lima#2984) and clock-step fixes injected on next boot.
+    if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL)
+        || !config_content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
+    {
         return true;
     }
     // Whether a `prefix` line exists at all (regardless of parseability).
@@ -233,7 +252,9 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     let desired_gib =
         crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
     let desired_cpus = desired_lima_vm_cpus();
-    let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL) {
+    let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL)
+        && content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
+    {
         match update_lima_managed_fields(&content, desired_gib, desired_cpus) {
             Some(u) => (u, true),
             None => {
@@ -247,7 +268,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     } else {
         log::warn!(
-            "lima.yaml at {} pre-dates the VPN netplan provision — regenerating \
+            "lima.yaml at {} pre-dates a managed provision drop-in — regenerating \
              from the SSOT template; any manual edits are discarded",
             source_template.display()
         );
@@ -1675,11 +1696,11 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Appends the VPN provision sentinel so memory/CPU tests don't also
+    /// Appends both managed provision sentinels so memory/CPU tests don't also
     /// trigger the provision-absent migration branch.
     fn with_provision_sentinel(base: &str) -> String {
         format!(
-            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n"
+            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n  - mode: boot\n    script: |\n      cat > /etc/systemd/system/lima-guestagent.service.d/99-speedwave-no-settime.conf <<'UNIT'\n"
         )
     }
 
@@ -1824,6 +1845,28 @@ mod tests {
         assert!(lima_config().contains(LIMA_VPN_PROVISION_SENTINEL));
     }
 
+    /// SSOT guard: the clock-step drop-in filename in the template must match the sentinel.
+    #[test]
+    fn lima_config_contains_timesync_provision_sentinel() {
+        assert!(lima_config().contains(LIMA_TIMESYNC_PROVISION_SENTINEL));
+    }
+
+    #[test]
+    fn lima_vm_config_missing_timesync_sentinel_triggers_update() {
+        // A pre-clock-fix config carries only the netplan provision — must regenerate.
+        let config = format!(
+            "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\nprovision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/{LIMA_VPN_PROVISION_SENTINEL} <<'YAML'\n"
+        );
+        assert!(lima_vm_config_needs_update_with(&config, 8, 4));
+    }
+
+    #[test]
+    fn lima_vm_config_both_sentinels_and_matching_values_no_update() {
+        let config =
+            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
+        assert!(!lima_vm_config_needs_update_with(&config, 8, 4));
+    }
+
     /// Drift interaction: an 8 GiB host that ran v0.13.3 (`memory: "4GiB"`)
     /// must NOT be migrated up to a VM sized at 100% of host RAM.
     #[test]
@@ -1939,6 +1982,10 @@ mod tests {
         assert!(
             body.contains("LIMA_VPN_PROVISION_SENTINEL"),
             "full regeneration must be gated on the missing provision sentinel"
+        );
+        assert!(
+            body.contains("LIMA_TIMESYNC_PROVISION_SENTINEL"),
+            "full regeneration must also be gated on the clock-step provision sentinel"
         );
     }
 
