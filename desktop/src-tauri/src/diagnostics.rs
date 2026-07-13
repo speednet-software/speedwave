@@ -89,15 +89,12 @@ pub(crate) fn build_diagnostics_zip(
     ];
     for (maybe_path, key) in single_files {
         if let Some(path) = maybe_path {
-            // claude-home is container-writable: a symlinked source could pull an
-            // arbitrary host file into the diagnostics ZIP.
-            let is_regular_file = std::fs::symlink_metadata(path)
-                .map(|m| m.file_type().is_file())
-                .unwrap_or(false);
-            if is_regular_file {
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    write_sanitized_entry(&mut zip, options, zip_entry(key), &content)?;
-                }
+            // claude-home is container-writable: a no-follow atomic read stops a
+            // symlink-swap race from pulling an arbitrary host file into the ZIP.
+            if let Ok(Some(content)) =
+                speedwave_runtime::fs_perms::read_regular_file_no_follow(path)
+            {
+                write_sanitized_entry(&mut zip, options, zip_entry(key), &content)?;
             }
         }
     }

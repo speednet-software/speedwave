@@ -381,6 +381,37 @@ pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Durat
     removed
 }
 
+/// Reads a file without following a final-component symlink (O_NOFOLLOW), then
+/// confirms regular-file via the open handle (atomic against a swap-race).
+pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW: open fails (ELOOP) if the final component is a symlink.
+        opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+    let mut file = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot open {}: {e}", path.display())),
+    };
+    // Confirm regular file via the OPEN HANDLE (no path re-resolution).
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!("not a regular file: {}", path.display()));
+    }
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(Some(buf))
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -389,6 +420,64 @@ pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Durat
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_no_follow_reads_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.txt");
+        std::fs::write(&path, "line1\nline2\n").unwrap();
+        assert_eq!(
+            read_regular_file_no_follow(&path).unwrap(),
+            Some("line1\nline2\n".to_string())
+        );
+    }
+
+    #[test]
+    fn read_no_follow_returns_none_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_regular_file_no_follow(&dir.path().join("nope")).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_no_follow_rejects_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "sk-ant-SECRET\n").unwrap();
+        let link = dir.path().join("log.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert!(
+            read_regular_file_no_follow(&link).is_err(),
+            "a symlinked source must not be followed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_no_follow_rejects_a_fifo() {
+        use std::os::unix::fs::FileTypeExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("log.txt");
+        // Skip if mkfifo is unavailable; assert the type check when present.
+        if std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            assert!(std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo());
+            // O_NOFOLLOW opens the fifo (not a symlink); the handle-based
+            // is_file() check must still reject it.
+            let r = read_regular_file_no_follow(&fifo);
+            assert!(r.is_err(), "a non-regular file must be rejected: {r:?}");
+        }
+    }
 
     #[test]
     fn writes_content_to_new_file() {
