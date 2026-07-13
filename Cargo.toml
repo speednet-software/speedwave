@@ -2,6 +2,7 @@
 members = [
     "crates/speedwave-runtime",
     "crates/speedwave-cli",
+    "crates/pii-engine",
 ]
 resolver = "2"
 

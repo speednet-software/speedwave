@@ -1,0 +1,17 @@
+[package]
+name = "speedwave-pii-engine"
+version = "0.1.0"
+edition = "2021"
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
+base64 = "0.22"
+zeroize = "1"
+
+[lints]
+workspace = true
