@@ -2703,7 +2703,16 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    // Pre-validate: reject dangerous entries before writing anything to disk.
+    if archive.len() > crate::consts::PLUGIN_ZIP_MAX_ENTRIES {
+        anyhow::bail!(
+            "Plugin archive has too many entries ({} > {})",
+            archive.len(),
+            crate::consts::PLUGIN_ZIP_MAX_ENTRIES
+        );
+    }
+
+    // Pre-validate: reject dangerous entries and ZIP bombs before writing to disk.
+    let mut total_uncompressed: u64 = 0;
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
         let name = entry.name().to_owned();
@@ -2717,6 +2726,23 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
         }
         if entry.is_symlink() {
             anyhow::bail!("Rejected symlink entry '{}' in plugin archive", name);
+        }
+        let uncompressed = entry.size();
+        let compressed = entry.compressed_size();
+        if compressed > 0
+            && uncompressed / compressed > crate::consts::PLUGIN_ZIP_MAX_COMPRESSION_RATIO
+        {
+            anyhow::bail!(
+                "Rejected ZIP entry '{}' with excessive compression ratio",
+                name
+            );
+        }
+        total_uncompressed = total_uncompressed.saturating_add(uncompressed);
+        if total_uncompressed > crate::consts::PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED {
+            anyhow::bail!(
+                "Plugin archive exceeds the uncompressed size limit ({} bytes)",
+                crate::consts::PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED
+            );
         }
     }
 
@@ -6501,6 +6527,40 @@ mod tests {
         assert!(extract_dir.join("plugin.json").exists());
         assert!(extract_dir.join("Containerfile").exists());
         assert!(validate_extracted_paths(&extract_dir).is_ok());
+    }
+
+    #[test]
+    fn test_extract_zip_rejects_compression_ratio_bomb() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("bomb.zip");
+        let extract_dir = tmp.path().join("extracted");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("bomb", options).unwrap();
+        // 8 MiB of zeros deflates to a few KiB — ratio well past the cap.
+        writer.write_all(&vec![0u8; 8 * 1024 * 1024]).unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+
+        let err = extract_zip(&zip_path, &extract_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("compression ratio"),
+            "a high-ratio entry must be rejected: {err}"
+        );
+        assert!(
+            !extract_dir.join("bomb").exists(),
+            "bomb must not be written before the ratio check rejects it"
+        );
     }
 
     #[test]

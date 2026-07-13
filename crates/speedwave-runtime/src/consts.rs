@@ -1091,6 +1091,14 @@ pub const PLUGIN_CHANGELOG_MAX_BYTES: usize = 64 * 1024;
 /// engine-agnostic guard (the JS `<input pattern>` engine can backtrack).
 pub const PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN: usize = 512;
 
+/// ZIP-bomb guards for plugin archive extraction (checked before writing to
+/// disk). Generous vs any real plugin tree; small enough to stop a bomb.
+pub const PLUGIN_ZIP_MAX_ENTRIES: usize = 100_000;
+/// Total uncompressed size cap across all entries (2 GiB).
+pub const PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED: u64 = 2 * 1024 * 1024 * 1024;
+/// Per-entry compression-ratio cap (uncompressed / compressed).
+pub const PLUGIN_ZIP_MAX_COMPRESSION_RATIO: u64 = 200;
+
 /// Max length of `host_bridge.url_env` / `token_env` names. 128 leaves headroom
 /// over typical POSIX names without a manifest shipping a huge env name.
 pub const PLUGIN_BRIDGE_ENV_NAME_MAX_LEN: usize = 128;
