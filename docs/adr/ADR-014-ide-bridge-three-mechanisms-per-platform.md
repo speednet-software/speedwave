@@ -1,9 +1,9 @@
 # ADR-014: IDE Bridge — One TCP Mechanism, Per-Platform Gateway
 
-> **Status:** Accepted (Windows bind revised by [ADR-079](ADR-079-wsl2-mirrored-container-host-relay.md))
+> **Status:** Accepted (Windows bind revised by [ADR-080](ADR-080-wsl2-mirrored-container-host-relay.md))
 > **Context:** Claude runs inside a VM/container (Lima on macOS, WSL2 on Windows) and must reach an IDE Bridge listening on the host.
 >
-> **Update (ADR-079):** the "binds the WSL adapter IP on Windows" statements below hold only under **NAT** networking. Under **mirrored** networking (the default) the bridge binds `127.0.0.1` and Claude reaches it through a guest-side `socat` relay; the bridge additionally names its lock file with the relay port and relocates it if the mode flips mid-session.
+> **Update (ADR-080):** the "binds the WSL adapter IP on Windows" statements below hold only under **NAT** networking. Under **mirrored** networking (the default) the bridge binds `127.0.0.1` and Claude reaches it through a guest-side `socat` relay; the bridge additionally names its lock file with the relay port and relocates it if the mode flips mid-session.
 
 ## Decision
 

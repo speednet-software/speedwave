@@ -398,7 +398,7 @@ pub(crate) fn read_lock_port(
 }
 
 /// Container-facing URL of a host-side worker: under WSL2 mirrored mode the container
-/// dials the guest relay port via `container_facing_port`, not the loopback bind (ADR-079).
+/// dials the guest relay port via `container_facing_port`, not the loopback bind (ADR-080).
 pub(crate) fn worker_gateway_url(port: u16) -> String {
     let port = super::container_facing_port(port);
     format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)

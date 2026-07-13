@@ -186,9 +186,8 @@ setup-dev:
 	@echo "  make dev     # start desktop in dev mode"
 
 # ── Windows one-shot toolchain install (requires admin; self-elevates) ───────
-# Automates docs/contributing/development-setup.md "Windows dev setup"; the package
-# list lives in scripts/setup-dev-windows.ps1 (SSOT — the doc mirrors it manually).
-# Run once from Git Bash, then open a NEW Git Bash and run `make setup-dev` + `make dev`.
+# Package list SSOT: scripts/setup-dev-windows.ps1. Run once from Git Bash, then open
+# a NEW Git Bash and run `make setup-dev` + `make dev`.
 setup-dev-windows:
 	@case "$$(uname -s 2>/dev/null)" in \
 	  MINGW*|MSYS*|CYGWIN*) ;; \

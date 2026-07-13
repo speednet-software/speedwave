@@ -285,10 +285,8 @@ fn mcp_os_health_outcome(
     }
 }
 
-/// Relay swap after a host worker respawns on a possibly-new port: drop the old relay
-/// only when the port actually changed — an ephemeral-port reuse keeps the existing relay
-/// valid (it still forwards to the same loopback port), and an unconditional async remove
-/// would race the fresh ensure and kill the new relay for ~30 s. ADR-079.
+/// Relay swap after a respawn: the old relay is dropped only when the port changed — on
+/// ephemeral-port reuse it stays valid, and a blind remove would race the fresh ensure (ADR-080).
 fn swap_relay_for_respawn(old_port: u16, new_port: u16) {
     if old_port != new_port {
         crate::mirror_relay::remove_relay_for_port_async(old_port);
@@ -322,7 +320,7 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
 
             let action = match mcp_os.lock() {
                 Err(e) => {
-                    log::error!("mcp-os watchdog: mutex poisoned: {e}");
+                    log::error!("mcp-os watchdog mutex poisoned: {e}");
                     Tick::Stop
                 }
                 Ok(mut guard) => match *guard {
@@ -339,13 +337,13 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
                             HealthOutcome::Cooldown => Tick::Cooldown,
                             HealthOutcome::ShouldRespawn => {
                                 log::warn!(
-                                    "mcp-os watchdog: process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                                    "mcp-os process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
                                 );
                                 let old = proc.port();
                                 match proc.respawn() {
                                     Ok(new) => Tick::Respawned { old, new },
                                     Err(e) => {
-                                        log::error!("mcp-os watchdog: respawn failed: {e}");
+                                        log::error!("mcp-os respawn failed: {e}");
                                         Tick::Nothing
                                     }
                                 }
@@ -360,18 +358,18 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
                 Tick::Nothing => {}
                 Tick::EnsureRelay(port) => {
                     // Relay lives in the WSL distro; re-ensure so a distro restart
-                    // (which this host process outlives) self-heals it (ADR-079).
+                    // (which this host process outlives) self-heals it (ADR-080).
                     crate::mirror_relay::ensure_relay_for_port(port);
                 }
                 Tick::Respawned { old, new } => {
-                    log::info!("mcp-os watchdog: respawned (port {new})");
+                    log::info!("mcp-os respawned (port {new})");
                     swap_relay_for_respawn(old, new);
                     reconcile::reconcile_compose_port(&app_handle);
                 }
                 Tick::Cooldown => {
                     // Counter already reset by mcp_os_health_outcome.
                     log::error!(
-                        "mcp-os watchdog: unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                        "mcp-os unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
                     );
                     std::thread::sleep(COOLDOWN);
                 }
@@ -424,7 +422,7 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
         match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
             Ok(proc) => {
                 log::info!("mcp-os started (port {})", proc.port());
-                // Reach this host worker from containers under WSL2 mirrored mode (ADR-079; no-op otherwise).
+                // Reach this host worker from containers under WSL2 mirrored mode (ADR-080; no-op otherwise).
                 crate::mirror_relay::ensure_relay_for_port(proc.port());
                 *guard = Some(proc);
                 drop(guard); // release before spawning watchdog thread
@@ -495,7 +493,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     oauth_consumers.sort();
 
     // Relay port of a worker we stopped to respawn; its teardown is deferred until the new
-    // port is known so an ephemeral-port reuse keeps the relay instead of racing it (S3/ADR-079).
+    // port is known so an ephemeral-port reuse keeps the relay instead of racing it (ADR-080).
     let mut old_relay_port: Option<u16> = None;
 
     // A running worker's consumer set is fixed at spawn; reconcile against the desired set.
@@ -505,7 +503,7 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         match oauth_reconcile_action(&current, &oauth_consumers) {
             OauthReconcile::NoChange => {
                 // Re-ensure the live worker's relay: a WSL distro restart wipes it while
-                // the worker (host process) survives (ADR-079; async no-op off Windows).
+                // the worker (host process) survives (ADR-080; async no-op off Windows).
                 crate::mirror_relay::ensure_relay_for_port(running.port());
                 return false;
             }
@@ -568,9 +566,8 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         Ok(proc) => {
             let port = proc.port();
             log::info!("oauth worker for '{project}' started (port {port})");
-            // Container workers dial WORKER_OAUTH_URL; under WSL2 mirrored mode that reaches
-            // the guest relay. Swap (not blind re-add) so an ephemeral-port reuse across the
-            // respawn doesn't tear down the fresh relay (ADR-079).
+            // WORKER_OAUTH_URL reaches the guest relay under mirrored mode; swap (not blind
+            // re-add) so an ephemeral-port reuse can't tear down the fresh relay (ADR-080).
             match old_relay_port {
                 Some(old) => swap_relay_for_respawn(old, port),
                 None => crate::mirror_relay::ensure_relay_for_port(port),
@@ -598,7 +595,7 @@ struct RespawnedWorker {
 }
 
 /// One watchdog pass over the worker map: respawns + the surviving live ports
-/// (which need their guest relay re-ensured — ADR-079).
+/// (which need their guest relay re-ensured — ADR-080).
 struct SweepOutcome {
     respawned: Vec<RespawnedWorker>,
     alive_ports: Vec<u16>,
@@ -626,11 +623,11 @@ where
             outcome.alive_ports.push(proc.port());
             continue;
         }
-        log::warn!("{log_prefix}: worker for '{name}' unhealthy — respawning");
+        log::warn!("{log_prefix} worker for '{name}' unhealthy — respawning");
         let old_port = proc.port();
         match proc.respawn() {
             Ok(new_port) => {
-                log::info!("{log_prefix}: respawned '{name}' (port {new_port})");
+                log::info!("{log_prefix} respawned '{name}' (port {new_port})");
                 outcome.respawned.push(RespawnedWorker {
                     name,
                     old_port,
@@ -638,7 +635,7 @@ where
                 });
             }
             Err(e) => {
-                log::error!("{log_prefix}: respawn for '{name}' failed: {e}");
+                log::error!("{log_prefix} respawn for '{name}' failed: {e}");
             }
         }
     }
@@ -693,7 +690,7 @@ fn start_per_project_watchdog<P>(
                 };
                 sweep_per_project_workers(&mut map, log_prefix)
             };
-            // Live workers: re-ensure the guest relay a distro restart wiped (ADR-079).
+            // Live workers: re-ensure the guest relay a distro restart wiped (ADR-080).
             for port in outcome.alive_ports {
                 crate::mirror_relay::ensure_relay_for_port(port);
             }
@@ -1037,7 +1034,7 @@ fn main() {
                             let new_port = proc.port();
                             log::info!("mcp-os process started (port {new_port})");
                             // Containers reach this host worker via the guest relay under
-                            // WSL2 mirrored mode (ADR-079; async no-op otherwise).
+                            // WSL2 mirrored mode (ADR-080; async no-op otherwise).
                             crate::mirror_relay::ensure_relay_for_port(new_port);
                             if let Ok(mut guard) = mcp_os.lock() {
                                 *guard = Some(proc);
@@ -1718,7 +1715,7 @@ mod tests {
             outcome.respawned.is_empty(),
             "alive worker must not be respawned"
         );
-        // Live ports feed the relay re-ensure (a distro restart wipes relays; ADR-079).
+        // Live ports feed the relay re-ensure (a distro restart wipes relays; ADR-080).
         assert_eq!(outcome.alive_ports, vec![4321]);
         assert_eq!(map["p"].respawn_calls.get(), 0);
     }
@@ -1769,7 +1766,7 @@ mod tests {
     }
 
     /// Wiring guard: the per-project (oauth) watchdog must re-ensure live workers'
-    /// relays and swap relays on respawn — a WSL distro restart wipes them (ADR-079).
+    /// relays and swap relays on respawn — a WSL distro restart wipes them (ADR-080).
     #[test]
     fn per_project_watchdog_reensures_mirror_relay() {
         let source = include_str!("main.rs");
@@ -1790,7 +1787,7 @@ mod tests {
     }
 
     /// Wiring guard: the mcp-os watchdog must re-ensure the relay on its health check
-    /// so a WSL distro restart (which the host process outlives) self-heals (ADR-079).
+    /// so a WSL distro restart (which the host process outlives) self-heals (ADR-080).
     #[test]
     fn mcp_os_watchdog_reensures_mirror_relay() {
         let source = include_str!("main.rs");
@@ -1814,7 +1811,7 @@ mod tests {
     #[test]
     fn swap_relay_for_respawn_only_drops_old_when_port_changed() {
         // Guard against an ephemeral-port reuse tearing down the fresh relay: the old
-        // relay is dropped ONLY when the port actually changed (ADR-079 / S3).
+        // relay is dropped ONLY when the port actually changed (ADR-080).
         let source = include_str!("main.rs");
         let start = source
             .find("fn swap_relay_for_respawn")

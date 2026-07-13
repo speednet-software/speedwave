@@ -783,7 +783,7 @@ fn scan_cni_ids(haystack: &str, prefix: &str) -> Vec<String> {
 }
 
 /// Best-effort cleanup for a stale-CNI failure: base64 `sh -c` payload (root, in the VM)
-/// targeting ONLY the `CNI-*` chains / `br-*` bridges named in `err`. Docs: troubleshooting.
+/// targeting ONLY the `CNI-*` chains / `br-*` bridges named in `err`.
 pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
     use base64::Engine;
     let msg = err.to_string();
@@ -791,9 +791,8 @@ pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
         "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n",
     );
     for ch in scan_cni_ids(&msg, "CNI-") {
-        // Guarded `eval`: only shell parsing survives the `\"` in %q comments (xargs dies
-        // on "unmatched double quote"); the case-guard skips any rule line carrying a shell
-        // metacharacter ($, backtick, ;, |, &, redirects) — a root command-substitution sink.
+        // Guarded `eval`: only shell parsing survives the `\"` in %q comments (xargs dies on
+        // "unmatched double quote"); the case-guard drops any rule line with a metacharacter.
         script.push_str(&format!(
             "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do case \"$r\" in *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*) continue;; esac; eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
              iptables -t nat -F {ch} 2>/dev/null || true\n\
@@ -2640,10 +2639,8 @@ services:
 
     #[test]
     fn scan_cni_ids_excludes_shared_hostport_infrastructure_chains() {
-        // Deliberate: the hex-suffix filter targets ONLY per-container `CNI-<hex>` chains.
-        // The shared `CNI-HOSTPORT-*`/`CNI-DN-*` portmap chains are reused across every
-        // container — flushing them would break port-forwarding for healthy containers, so
-        // they must NOT match. This pins the exclusion as intended behavior, not an oversight.
+        // The hex-suffix filter targets ONLY per-container `CNI-<hex>` chains: the shared
+        // `CNI-HOSTPORT-*`/`CNI-DN-*` chains are live for healthy containers and must survive.
         let s =
             "CNI-HOSTPORT-DNAT CNI-HOSTPORT-SETMARK CNI-HOSTPORT-MASQ CNI-DN-abcdef CNI-68fe31e0";
         assert_eq!(

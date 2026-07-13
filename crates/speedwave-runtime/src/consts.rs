@@ -91,7 +91,7 @@ pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
 
-/// Guest-local gateway IP for the WSL2 mirrored-mode host relay (ADR-079): a `socat`
+/// Guest-local gateway IP for the WSL2 mirrored-mode host relay (ADR-080): a `socat`
 /// unit on the distro's `lo` forwards its relay port here to the bridge's loopback bind port.
 pub const MIRROR_RELAY_GATEWAY_IP: &str = "10.200.0.1";
 

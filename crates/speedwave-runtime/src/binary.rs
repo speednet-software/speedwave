@@ -259,9 +259,8 @@ pub fn run_with_timeout(
     }
 }
 
-/// Spawns `wsl.exe` with `args` (optionally feeding `stdin` — the `bash -s` pattern that
-/// survives wsl.exe's default-shell reparse of the post-`--` line) and waits bounded
-/// via [`wait_with_output_timeout`]. Decode output with `runtime::decode_wsl_output`.
+/// Spawns `wsl.exe` with `args`, optionally feeding `stdin` (the reparse-safe `bash -s`
+/// pattern), bounded by `timeout`. Decode output with `runtime::decode_wsl_output`.
 pub fn run_wsl_bounded(
     args: &[&str],
     stdin: Option<&str>,
@@ -284,9 +283,8 @@ pub fn run_wsl_bounded(
     wait_with_output_timeout(child, timeout)
 }
 
-/// Waits for an already-spawned `child` (piped stdout/stderr) at most `timeout`, draining
-/// pipes on threads; kills the child and errors on expiry. Use this (not
-/// `run_with_timeout_capture`) when the caller must feed the child's stdin before waiting.
+/// Waits for a spawned `child` (piped stdout/stderr) at most `timeout`, draining pipes on
+/// threads; kills + errors on expiry. For callers that must feed stdin before waiting.
 pub fn wait_with_output_timeout(
     mut child: std::process::Child,
     timeout: std::time::Duration,
@@ -315,7 +313,7 @@ pub fn wait_with_output_timeout(
             Some(status) => break status,
             None if start.elapsed() >= timeout => {
                 if let Err(e) = child.kill() {
-                    log::warn!("wait_with_output_timeout: kill failed: {e}");
+                    log::warn!("failed to kill timed-out child process: {e}");
                 }
                 let _ = child.wait();
                 anyhow::bail!("child process timed out after {}s", timeout.as_secs());

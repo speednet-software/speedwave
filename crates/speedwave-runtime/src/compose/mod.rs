@@ -5783,7 +5783,7 @@ services:
             "mcp_os_gateway_url must not use 0.0.0.0 — containers can't route to it"
         );
 
-        // Mirrored: the URL must carry the relay port, not the bind port (ADR-079).
+        // Mirrored: the URL must carry the relay port, not the bind port (ADR-080).
         let _mirrored = super::pin_mirrored_addressing();
         assert_eq!(
             mcp_os_gateway_url(port),

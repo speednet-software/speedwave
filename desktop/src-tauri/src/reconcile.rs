@@ -1059,7 +1059,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
             Ok(mut guard) => {
                 if let Some(proc) = guard.take() {
                     let port = stop_worker("mcp-os", proc);
-                    // Symmetric with HostBridge::stop — drop the guest relay (ADR-079).
+                    // Symmetric with HostBridge::stop — drop the guest relay (ADR-080).
                     crate::mirror_relay::remove_relay_for_port(port);
                 }
             }
@@ -1069,7 +1069,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
             Ok(mut map) => {
                 for (project, proc) in map.drain() {
                     let port = stop_worker(&format!("oauth[{project}]"), proc);
-                    // Symmetric with the relay ensured at oauth spawn (ADR-079).
+                    // Symmetric with the relay ensured at oauth spawn (ADR-080).
                     crate::mirror_relay::remove_relay_for_port(port);
                 }
             }

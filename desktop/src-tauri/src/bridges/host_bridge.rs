@@ -112,7 +112,7 @@ pub struct HostBridgeConfig {
     pub watchdog_interval: Duration,
     pub stale_probe_timeout: Duration,
     /// Name the lock file with the container-facing (relay) port instead of the raw bind
-    /// port — only for locks READ BY THE CONTAINER (the IDE bridge). ADR-079.
+    /// port — only for locks READ BY THE CONTAINER (the IDE bridge). ADR-080.
     pub container_facing_lock: bool,
 }
 
@@ -382,7 +382,7 @@ pub struct HostBridge {
     config: HostBridgeConfig,
     auth_state: Arc<Mutex<AuthState>>,
     // Shared with the watchdog, which relocates a container-facing lock when the
-    // addressing mode flips mid-session (e.g. late mirrored detection) — ADR-079.
+    // addressing mode flips mid-session (e.g. late mirrored detection) — ADR-080.
     lock_file_path: Arc<Mutex<PathBuf>>,
     tcp_port: u16,
     tcp_listener: Option<std::net::TcpListener>,
@@ -419,7 +419,7 @@ impl HostBridge {
         let data_dir = consts::data_dir();
         let lock_dir = data_dir.join(format!("{}-bridge", &config.name));
         // The lock filename carries the port its READER dials: container-read locks get
-        // the container-facing (relay) port under mirrored mode; host-read keep raw. ADR-079.
+        // the container-facing (relay) port under mirrored mode; host-read keep raw. ADR-080.
         let lock_file_path = lock_dir.join(lock_file_name(port, config.container_facing_lock));
 
         Ok(Self {
@@ -499,7 +499,7 @@ impl HostBridge {
             self.config.container_facing_lock,
         );
         // Reach this loopback listener from containers under WSL2 mirrored mode via a
-        // guest-side relay (ADR-079; no-op off Windows/mirrored). Paired with stop().
+        // guest-side relay (ADR-080; no-op off Windows/mirrored). Paired with stop().
         crate::mirror_relay::ensure_relay_for_port(self.tcp_port);
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -579,7 +579,7 @@ impl HostBridge {
                 };
                 rt.block_on(async move {
                     // A WSL distro restart wipes the relay while this process survives —
-                    // re-ensure every ~6 ticks (async fire-and-forget, idempotent). ADR-079.
+                    // re-ensure every ~6 ticks (async fire-and-forget, idempotent). ADR-080.
                     let relay_reensure_every = watchdog_interval * 6;
                     let mut last_relay_ensure = std::time::Instant::now();
                     loop {
@@ -637,7 +637,7 @@ impl HostBridge {
         if let Some(h) = self.watchdog_thread.take() {
             let _ = h.join();
         }
-        // Symmetric with the relay ensured at bind (ADR-079); no-op off Windows.
+        // Symmetric with the relay ensured at bind (ADR-080); no-op off Windows.
         crate::mirror_relay::remove_relay_for_port(self.tcp_port);
         match std::fs::remove_file(self.lock_file_path()) {
             Ok(()) => {}
@@ -670,7 +670,7 @@ fn lock_file_stem_name(name_port: u16) -> String {
 }
 
 /// Lock filename for a listener on `port`: container-facing locks carry the
-/// container-facing (relay) port, host-facing locks the raw bind port. ADR-079.
+/// container-facing (relay) port, host-facing locks the raw bind port. ADR-080.
 fn lock_file_name(port: u16, container_facing: bool) -> String {
     let name_port = if container_facing {
         speedwave_runtime::compose::container_facing_port(port)
@@ -681,16 +681,15 @@ fn lock_file_name(port: u16, container_facing: bool) -> String {
 }
 
 /// Moves a container-facing lock when the addressing mode changed since it was written —
-/// Claude Code dials the FILENAME port; a stale name strands the IDE bridge. ADR-079.
+/// Claude Code dials the FILENAME port; a stale name strands the IDE bridge. ADR-080.
 fn relocate_lock_on_addressing_change(
     lock_path: &Arc<Mutex<PathBuf>>,
     port: u16,
     body_cb: &LockBodyBuilder,
     token: &str,
 ) {
-    // Resolve the addressing ONCE: a transient detection Err must not flap a live
-    // relay-port lock back to the raw port (the WSL-restart case this exists for), and
-    // re-resolving (via container_facing_port) could see the cache flip mid-call.
+    // Resolve the addressing ONCE: a transient detection Err must not flap a live relay-port
+    // lock back to raw, and a re-resolve could see the cache flip mid-call (untranslating it).
     let Ok(addressing) = speedwave_runtime::compose::host_addressing() else {
         return;
     };
@@ -709,20 +708,19 @@ fn relocate_lock_on_addressing_change(
     if let Err(e) = write_lock_body(&expected, body_cb, port, token) {
         log::warn!(
             target: "host_bridge",
-            "watchdog: failed to relocate lock to {expected:?}: {e}"
+            "watchdog failed to relocate lock to {expected:?}: {e}"
         );
         return;
     }
-    // New lock is in place; retire the stale one. If removal fails, leave the tracked
-    // path on the old name so the next tick retries — updating it would make the
-    // `expected == current` guard above early-return and strand a second live lock.
+    // New lock in place; retire the stale one. On removal failure keep the old tracked
+    // path so the next tick retries — advancing it would strand a second live lock.
     match std::fs::remove_file(&current) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             log::warn!(
                 target: "host_bridge",
-                "watchdog: relocated lock to {expected:?} but could not remove stale {current:?}: {e}; will retry"
+                "watchdog relocated lock to {expected:?} but could not remove stale {current:?}: {e}; will retry"
             );
             return;
         }
@@ -732,7 +730,7 @@ fn relocate_lock_on_addressing_change(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = expected.clone();
     log::info!(
         target: "host_bridge",
-        "watchdog: lock moved {current:?} -> {expected:?} after addressing change"
+        "watchdog moved lock {current:?} -> {expected:?} after addressing change"
     );
 }
 
@@ -1463,9 +1461,8 @@ fn cleanup_stale_lock_files(dir: &Path, probe_timeout: Duration, container_facin
                 continue;
             }
         };
-        // The filename carries the READER-facing port. For container-facing bridges under
-        // mirrored mode that is the relay port, which has NO host listener — probe the raw
-        // bind port it maps back to, or we would delete every live lock (ADR-079).
+        // The filename carries the READER-facing port — under mirrored that relay port has
+        // no host listener; probe the bind port it maps to or every live lock gets culled.
         let probe_port = if container_facing {
             speedwave_runtime::compose::host_bind_port_for_container_facing(name_port)
         } else {
@@ -1907,9 +1904,8 @@ mod tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn stale_lock_cleanup_reverse_translates_container_facing_port() {
-        // Under mirrored mode a container-facing lock filename carries the RELAY port,
-        // which has no host listener. Cleanup must reverse-translate to the raw bind port
-        // it maps back to, or it deletes every live container-facing lock (ADR-079).
+        // Under mirrored mode the container-facing lock name carries the RELAY port (no host
+        // listener); cleanup must reverse-translate to the bind port or it culls live locks.
         let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
         let dir = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3185,7 +3181,7 @@ mod tests {
     }
 
     /// Wiring guard: the watchdog must re-ensure the mirror relay so a WSL distro
-    /// restart (which this bridge process outlives) self-heals it (ADR-079).
+    /// restart (which this bridge process outlives) self-heals it (ADR-080).
     #[test]
     fn watchdog_reensures_mirror_relay() {
         let source = include_str!("host_bridge.rs");
@@ -3277,7 +3273,7 @@ mod tests {
         assert!(old_path.exists(), "raw-port lock written at start");
 
         // Detection later resolves mirrored: the watchdog must move the lock to the
-        // relay-port filename, or Claude Code dials a dead port all session (ADR-079).
+        // relay-port filename, or Claude Code dials a dead port all session (ADR-080).
         let _mirrored = speedwave_runtime::compose::pin_mirrored_addressing();
         let relay = speedwave_runtime::compose::mirror_relay_port(bridge.port())
             .expect("mirrored pin must yield a relay port");

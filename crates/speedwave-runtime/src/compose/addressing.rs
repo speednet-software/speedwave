@@ -2,21 +2,18 @@
 //! pluggable computer (Lima static on macOS, WSL-detected on Windows). See ADR-067.
 
 /// How containers reach host listeners: dialing `gateway_ip` with the raw bind port
-/// (`Direct`), or via the ADR-079 guest relay with `relay_port_for`-translated ports.
+/// (`Direct`), or via the ADR-080 guest relay with `relay_port_for`-translated ports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressingMode {
     /// Containers dial `gateway_ip:<bind port>` unchanged (macOS Lima, Windows NAT).
     Direct,
-    /// WSL2 mirrored: containers dial the guest relay at `relay_port_for(bind)` (ADR-079).
+    /// WSL2 mirrored: containers dial the guest relay at `relay_port_for(bind)` (ADR-080).
     MirroredRelay,
 }
 
 /// Container-side `gateway_ip` + host-side `bind_address`. On Windows NAT both equal the
-/// WSL adapter IP; mirrored mode splits them (bind `127.0.0.1`, gateway = relay IP) — ADR-079.
-///
-/// Fields are private so the two constructors are the ONLY way to build one: they uphold the
-/// cross-field invariant (`MirroredRelay` ⇒ relay gateway + loopback bind) a raw literal could
-/// violate. Read the halves through `host_gateway_ip()`/`host_bind_address()`/`container_facing_port_for`.
+/// WSL adapter IP; mirrored mode splits them (bind `127.0.0.1`, gateway = relay IP) — ADR-080.
+/// Fields are private: the two constructors uphold the mode↔addresses invariant; read via accessors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostAddressing {
     /// IP a container's `host.docker.internal` resolves to.
@@ -38,7 +35,7 @@ impl HostAddressing {
         }
     }
 
-    /// WSL2 mirrored-relay addressing (ADR-079): loopback bind, guest relay gateway.
+    /// WSL2 mirrored-relay addressing (ADR-080): loopback bind, guest relay gateway.
     pub fn mirrored_relay() -> Self {
         Self {
             gateway_ip: crate::consts::MIRROR_RELAY_GATEWAY_IP.to_string(),
@@ -95,7 +92,7 @@ static RELAY_DETECT_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Container-facing relay port for a host listener on `bind_port`: `Some` only under
-/// WSL2 mirrored mode (ADR-079); the mapping is the fixed bijection `relay_port_for`.
+/// WSL2 mirrored mode (ADR-080); the mapping is the fixed bijection `relay_port_for`.
 pub fn mirror_relay_port(bind_port: u16) -> Option<u16> {
     match host_addressing() {
         Ok(addr) => {
@@ -106,7 +103,7 @@ pub fn mirror_relay_port(bind_port: u16) -> Option<u16> {
             // Warn once per failure streak, not per 30 s watchdog poll; errors stay
             // uncached upstream so the relay heals as soon as detection recovers.
             if !RELAY_DETECT_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                log::warn!("mirror_relay_port: host addressing unavailable, relay disabled: {e}");
+                log::warn!("host addressing unavailable, mirror relay disabled: {e}");
             }
             None
         }
@@ -138,9 +135,8 @@ pub fn container_facing_port(bind_port: u16) -> u16 {
     mirror_relay_port(bind_port).unwrap_or(bind_port)
 }
 
-/// Container-facing port for `bind_port` under an already-resolved `addressing` snapshot —
-/// no cache read, so a caller holding one addressing value avoids a re-resolve race (the
-/// cache can flip to `Err` mid-call and silently untranslate a live relay port).
+/// Container-facing port under an already-resolved `addressing` snapshot — no cache read,
+/// so one held value can't race a mid-call cache flip that would untranslate a live port.
 pub fn container_facing_port_for(bind_port: u16, addressing: &HostAddressing) -> u16 {
     match addressing.mode {
         AddressingMode::MirroredRelay => relay_port_for(bind_port),
@@ -148,8 +144,7 @@ pub fn container_facing_port_for(bind_port: u16, addressing: &HostAddressing) ->
     }
 }
 
-/// Inverse of [`container_facing_port`]: the host bind port a `container_facing` port maps
-/// back to under the current addressing. Off mirrored mode (or on detection failure) the
+/// Inverse of [`container_facing_port`]. Off mirrored mode (or on detection failure) the
 /// container-facing port equals the bind port, so the identity is correct.
 pub fn host_bind_port_for_container_facing(container_facing: u16) -> u16 {
     match host_addressing() {
@@ -176,7 +171,7 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
     // Install the default computer for this platform.
     let default: std::sync::Arc<dyn HostAddressingComputer> = {
         // Deterministic under tests/test-support: the real detector makes addressing
-        // host-dependent and spawns wsl.exe from dependent crates' tests (ADR-079).
+        // host-dependent and spawns wsl.exe from dependent crates' tests (ADR-080).
         #[cfg(any(test, feature = "test-support"))]
         {
             std::sync::Arc::new(FixedComputer(HostAddressing::direct(
@@ -252,7 +247,7 @@ pub fn pin_direct_addressing(gateway_ip: &str) -> AddressingGuard {
     AddressingGuard(())
 }
 
-/// Pins WSL2 mirrored-relay addressing (ADR-079) — container-facing ports translate.
+/// Pins WSL2 mirrored-relay addressing (ADR-080) — container-facing ports translate.
 #[cfg(any(test, feature = "test-support"))]
 pub fn pin_mirrored_addressing() -> AddressingGuard {
     set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(
@@ -295,7 +290,7 @@ mod host_addressing_impls {
     }
 
     /// Splits the WSL gateway into the addressing pair: host-bindable → NAT (Direct,
-    /// both halves = gateway); non-bindable → mirrored relay mode. ADR-079.
+    /// both halves = gateway); non-bindable → mirrored relay mode. ADR-080.
     #[cfg(any(
         all(target_os = "windows", not(any(test, feature = "test-support"))),
         test
@@ -323,9 +318,7 @@ mod host_addressing_impls {
         match ip.parse::<std::net::Ipv4Addr>() {
             Ok(addr) => std::net::TcpListener::bind((addr, 0)).is_ok(),
             Err(e) => {
-                log::warn!(
-                    "host_can_bind: WSL gateway {ip:?} unparseable ({e}); assuming mirrored"
-                );
+                log::warn!("WSL gateway {ip:?} unparseable ({e}); assuming mirrored mode");
                 false
             }
         }
@@ -589,7 +582,7 @@ mod resolver_tests {
     #[serial_test::serial(host_addressing)]
     fn direct_gateway_equal_to_relay_ip_does_not_translate() {
         // A user-pinned WSL NAT subnet can legitimately yield a bindable 10.200.0.1
-        // gateway; Direct mode must never XOR-translate ports (mode beats IP). ADR-079.
+        // gateway; Direct mode must never XOR-translate ports (mode beats IP). ADR-080.
         let _guard = pin_direct_addressing(crate::consts::MIRROR_RELAY_GATEWAY_IP);
         assert_eq!(mirror_relay_port(60123), None);
         assert_eq!(container_facing_port(60123), 60123);

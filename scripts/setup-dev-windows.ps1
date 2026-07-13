@@ -1,6 +1,5 @@
 ﻿# setup-dev-windows.ps1 -- installs the Windows dev toolchain via Chocolatey (admin;
 # self-elevates) and writes the MSVC/Git Bash config `make dev` needs. Idempotent.
-# See docs/contributing/development-setup.md "Windows dev setup".
 
 $ErrorActionPreference = 'Stop'
 
@@ -37,7 +36,7 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 }
 
 # Non-obvious picks: `make` must be GNU Make 4.4 (GnuWin32 3.81 breaks $(VAR)); cmake
-# + llvm build whisper.cpp/bindgen (audio-transcription). Rationale: development-setup.md.
+# + llvm build whisper.cpp/bindgen (audio-transcription).
 Write-Host "== choco install toolchain (this is large: VS Build Tools) =="
 choco install -y git make rustup.install nodejs-lts cmake llvm `
     visualstudio2022buildtools visualstudio2022-workload-vctools bats-core

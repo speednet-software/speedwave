@@ -1,4 +1,4 @@
-# ADR-079: Container↔host relay for WSL2 mirrored networking
+# ADR-080: Container↔host relay for WSL2 mirrored networking
 
 > **Status:** Accepted — verified end-to-end on live Windows/WSL2 mirrored (2026-07-09).
 >
@@ -52,6 +52,7 @@ End-to-end validated on a live mirrored distro: a container on the project netwo
 
 - Relay ports pair up (the map is nearly an involution): if two host listeners bind a paired combination (`p` and `p ^ 0x4000`, or two members of the `16384→49152→32768` 3-cycle), one bridge's relay listen port equals the other's live bind port → `socat` bind failure, surfaced by the ensure path as a `relay unit started but socat is not active` warning. Low probability (listeners take independent ephemeral ports) and not observed in practice.
 - Host-side **local LLM listeners are not relayed**: `compose/llm.rs::canonicalize_local_base_url`/`default_base_url` emit `host.docker.internal:<raw port>` for user-run Ollama/LM Studio/llama.cpp, and no Speedwave process supervises those ports — under mirrored mode the proxy cannot reach them. Binding the server to `0.0.0.0` does NOT help (per the measured table, no host address is container-reachable under mirroring). Workarounds: switch WSL to NAT networking (sacrifices the VPN case), run the LLM server inside the distro, or hand-run a `socat` unit on a spare port (`systemd-run --unit=my-llm-relay socat TCP-LISTEN:<spare>,bind=10.200.0.1,fork TCP:127.0.0.1:<llm port>` as root in the distro, with `base_url` pointing at `<spare>`; the shared port space forbids reusing the LLM's own port, and a WSL restart wipes the unit). A supervised relay for configured provider ports is future work.
+- **Only Speedwave-supervised listeners are relayed.** Any other host port a container dials through `host.docker.internal` — a user's dev server reached by Playwright ([ADR-062](ADR-062-playwright-host-gateway-access.md)), a hand-run host MCP endpoint — is unreachable under mirrored mode, because the relay is created per supervised bind, not per alias lookup. The local-LLM bullet above is the common instance; the same `socat` workaround applies to any such port.
 - An in-flight async ensure can race a concurrent stop and recreate a unit just torn down; the next start's orphan sweep (or the 30 s re-ensure cycle) clears the residue. The startup sweep runs only under mirrored mode — a mirrored→NAT flip needs a `wsl --shutdown` to take effect, which already kills every transient relay unit, so no NAT-side sweep is required.
 
 ## Security

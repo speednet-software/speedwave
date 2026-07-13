@@ -375,7 +375,7 @@ impl IdeBridge {
             .origin_policy(OriginPolicy::RejectIfPresent)
             .subprotocol(SubprotocolPolicy { accepted: &["mcp"] })
             // Claude Code (in the container) dials the port from the lock FILENAME; under
-            // WSL2 mirrored mode that must be the relay port, not the raw bind port (ADR-079).
+            // WSL2 mirrored mode that must be the relay port, not the raw bind port (ADR-080).
             .container_facing_lock(true)
             .lock_body(|ctx: LockBodyContext<'_>| {
                 let lock = IdeLockFile {

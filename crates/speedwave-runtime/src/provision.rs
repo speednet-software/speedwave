@@ -497,7 +497,7 @@ fn relay_packages_script() -> String {
     )
 }
 
-/// Ensures `iptables` (CNI-critical — error when missing) and `socat` (ADR-079 relay —
+/// Ensures `iptables` (CNI-critical — error when missing) and `socat` (ADR-080 relay —
 /// warn-only) in the distro. Idempotent; runs as root via `bash -s` on stdin; bounded.
 #[cfg(target_os = "windows")]
 fn ensure_relay_packages() -> anyhow::Result<()> {
@@ -535,7 +535,7 @@ fn ensure_relay_packages() -> anyhow::Result<()> {
     }
     if String::from_utf8_lossy(&output.stdout).contains(SPW_SOCAT_MISSING_MARKER) {
         log::warn!(
-            "socat unavailable in the distro — WSL2 mirrored-mode host relay (ADR-079) \
+            "socat unavailable in the distro — WSL2 mirrored-mode host relay (ADR-080) \
              is disabled until it installs"
         );
     }
@@ -1543,10 +1543,8 @@ pub fn ensure_windows_invariants() {
         if let Err(e) = ensure_wslconfig_vpn_compat() {
             log::warn!("could not verify .wslconfig VPN compat: {e}");
         }
-        // Upgrades skip the setup wizard (check_runtime returns Ready, so init_vm_windows
-        // never runs); this per-start path is the only place the upgrade population installs
-        // iptables (CNI) + socat (ADR-079 relay). Warn-only here — a failed compose up
-        // surfaces the iptables error on its own.
+        // Upgrades skip the wizard (init_vm_windows never runs) — this per-start path is their
+        // only iptables/socat installer. Warn-only: a failed compose up surfaces iptables itself.
         if let Err(e) = ensure_relay_packages() {
             log::warn!("could not ensure relay packages (iptables/socat): {e}");
         }
@@ -2068,7 +2066,7 @@ mod tests {
     #[test]
     fn relay_packages_script_is_fatal_on_iptables_soft_on_socat() {
         // Contract: a failed iptables install must FAIL provisioning (CNI-critical);
-        // a missing socat only degrades the ADR-079 relay via the marker.
+        // a missing socat only degrades the ADR-080 relay via the marker.
         let script = relay_packages_script();
         assert!(script.contains("apt-get install -y -qq iptables socat"));
         assert!(
@@ -2092,10 +2090,8 @@ mod tests {
 
     #[test]
     fn ensure_windows_invariants_installs_relay_packages_for_upgrades() {
-        // Wiring guard: upgrades skip the setup wizard (check_runtime Ready →
-        // init_vm_windows never runs), so the per-start invariants path is the ONLY
-        // installer of iptables/socat for the upgrade population — dropping this call
-        // strands mirrored-mode relay dead on every upgraded install (ADR-079).
+        // Wiring guard: upgrades never run init_vm_windows, so this per-start path is their
+        // only iptables/socat installer — dropping the call strands the relay (ADR-080).
         let src = include_str!("provision.rs");
         let start = src
             .find("pub fn ensure_windows_invariants() {\n")

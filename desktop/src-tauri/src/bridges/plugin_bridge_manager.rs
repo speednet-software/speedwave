@@ -30,9 +30,8 @@ pub fn stop_for(slug: &str) {
         log::warn!("plugin bridge[{slug}] stop: global registry not initialized");
         return;
     };
-    // Remove under the lock, then release it BEFORE stop(): stop() performs synchronous
-    // relay teardown (tens of seconds behind a wedged wsl.exe, ADR-079), and holding the
-    // map lock through it would stall every other plugin-bridge Tauri command.
+    // Remove under the lock, release BEFORE stop(): its synchronous relay teardown can take
+    // tens of seconds behind a wedged wsl.exe (ADR-080) and would stall every bridge command.
     let bridge = match map.lock() {
         Ok(mut guard) => guard.remove(slug),
         Err(e) => {

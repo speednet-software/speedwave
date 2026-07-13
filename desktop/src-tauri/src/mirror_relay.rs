@@ -1,5 +1,5 @@
 //! Guest-side relay for WSL2 mirrored networking: a host bridge binds loopback and a
-//! `socat` unit forwards its `mirror_relay_port` to it. No-op off Windows/mirrored. ADR-079.
+//! `socat` unit forwards its `mirror_relay_port` to it. No-op off Windows/mirrored. ADR-080.
 
 /// Ensures a guest-side relay for a host listener bound on `bind_port`, asynchronously
 /// (fire-and-forget thread — safe from the UI thread). Best-effort: failures are logged.
@@ -33,10 +33,8 @@ pub fn ensure_relay_for_port(bind_port: u16) {
     let _ = bind_port;
 }
 
-/// Tears down the relay for a listener bound on `bind_port` (bounded, synchronous).
-/// Runs on Windows regardless of the detected addressing mode (a mode flip or detection
-/// failure must never orphan a unit) — but skips when the distro is not running, since
-/// transient units die with it and probing must not boot a stopped distro.
+/// Tears down the relay for `bind_port` (bounded, sync) regardless of detected mode (a
+/// flip must never orphan a unit), skipping a stopped distro — transient units died with it.
 pub fn remove_relay_for_port(bind_port: u16) {
     #[cfg(all(target_os = "windows", not(test)))]
     {
@@ -100,12 +98,12 @@ fn ensure_relay_blocking(bind_port: u16) {
     };
     sweep_orphan_relay_units_once();
     // socat upstream = the bridge's bind address (127.0.0.1 under mirrored), from the
-    // addressing SSOT rather than hardcoded, so the two can never diverge (ADR-079).
+    // addressing SSOT rather than hardcoded, so the two can never diverge (ADR-080).
     let upstream = match speedwave_runtime::compose::host_bind_address() {
         Ok(addr) => addr,
         Err(e) => {
             // mirror_relay_port just resolved, so this is a poison/race edge — surface it.
-            log::warn!("relay ensure for bind {bind_port}: host_bind_address unavailable ({e}); assuming 127.0.0.1");
+            log::warn!("host_bind_address unavailable while ensuring relay for bind {bind_port} ({e}); assuming 127.0.0.1");
             "127.0.0.1".to_string()
         }
     };
@@ -149,7 +147,7 @@ fn ensure_relay_blocking(bind_port: u16) {
 }
 
 /// One-time stop of every `spw-mirror-relay-*` unit before the first create: a Desktop
-/// crash leaves `Restart=on-failure` units forwarding to freed loopback ports (ADR-079).
+/// crash leaves `Restart=on-failure` units forwarding to freed loopback ports (ADR-080).
 #[cfg(all(target_os = "windows", not(test)))]
 fn sweep_orphan_relay_units_once() {
     static SWEEP: std::sync::Once = std::sync::Once::new();
@@ -162,10 +160,8 @@ fn sweep_orphan_relay_units_once() {
     });
 }
 
-/// True when the Speedwave distro is currently running. `--list --running` reports
-/// without booting anything (a `-d <distro>` exec would start a stopped distro).
-/// Negative results are cached briefly: exit paths tear down one relay per port, and a
-/// wedged/stopped WSL must cost one probe stall, not one per port.
+/// True when the Speedwave distro runs; `--list --running` reports without booting one.
+/// Negatives are cached ~10 s so a stopped/wedged WSL costs one probe, not one per port.
 #[cfg(all(target_os = "windows", not(test)))]
 fn distro_is_running() -> bool {
     const NEGATIVE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -207,7 +203,7 @@ fn running_list_names_distro(decoded: &str, distro: &str) -> bool {
 }
 
 /// Runs `script` as root in the distro via stdin `bash -s` — bare `bash -lc <script>`
-/// splicing breaks on wsl.exe's default-shell reparse of the post-`--` line (ADR-079).
+/// splicing breaks on wsl.exe's default-shell reparse of the post-`--` line (ADR-080).
 #[cfg(all(target_os = "windows", not(test)))]
 fn run_in_distro_root(script: &str) -> anyhow::Result<String> {
     let out = speedwave_runtime::binary::run_wsl_bounded(
@@ -296,8 +292,7 @@ struct RelayRoute {
 }
 
 /// Adds the relay address to `lo` and starts `socat` as a transient systemd unit; prints
-/// [`RELAY_CREATED_MARKER`] once verified active, [`RELAY_FAILED_MARKER`] when socat
-/// cannot hold the port.
+/// [`RELAY_CREATED_MARKER`] once verified active, [`RELAY_FAILED_MARKER`] otherwise.
 #[cfg(any(all(target_os = "windows", not(test)), test))]
 fn relay_setup_script(route: RelayRoute, gateway_ip: &str, upstream: &str) -> String {
     let unit = relay_unit_name(route.bind_port);
