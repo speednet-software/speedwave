@@ -58,7 +58,7 @@ guard-not-prod-data-dir:
 	    exit 1;; \
 	esac
 
-.PHONY: all build test check clean dev install-deps setup-dev install-hooks guard-not-prod-data-dir \
+.PHONY: all build test check clean dev install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
@@ -184,6 +184,17 @@ setup-dev:
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
+
+# ── Windows one-shot toolchain install (requires admin; self-elevates) ───────
+# Package list SSOT: scripts/setup-dev-windows.ps1. Run once from Git Bash, then open
+# a NEW Git Bash and run `make setup-dev` + `make dev`.
+setup-dev-windows:
+	@case "$$(uname -s 2>/dev/null)" in \
+	  MINGW*|MSYS*|CYGWIN*) ;; \
+	  *) echo "❌ setup-dev-windows is Windows-only (run from Git Bash)."; exit 1;; \
+	esac
+	@ps="$${SYSTEMROOT:-C:\\Windows}"; ps="$${ps//\\//}/System32/WindowsPowerShell/v1.0/powershell.exe"; \
+	 "$$ps" -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-windows.ps1
 
 # ── Aggregate targets ────────────────────────────────────────────────────────
 
