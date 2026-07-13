@@ -596,6 +596,14 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
+    // Fail-closed on an invalid (or MDM-broken) PII policy — same detection
+    // point and error handling as telemetry above.
+    if let Err(e) = speedwave_runtime::pii_policy::check_pii_policy_at_boot() {
+        err!("Organization policy error: {}", redact_err(&e));
+        err!("Contact your administrator to correct the managed configuration.");
+        std::process::exit(2);
+    }
+
     // Handle `speedwave init [name]` — register CWD as a project (no running VM required)
     if let CliAction::Init(ref custom_name) = action {
         let cwd = std::env::current_dir()?;

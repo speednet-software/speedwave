@@ -23,7 +23,8 @@ export interface CustomPiiPattern {
   displayName: string;
   pattern: string;
   caseInsensitive: boolean;
-  forced: boolean;
+  tokenize: boolean;
+  log: boolean;
 }
 
 /**

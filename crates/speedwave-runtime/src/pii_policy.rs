@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Builtin template id used when no template is requested.
-pub const DEFAULT_TEMPLATE_ID: &str = "strict";
-
 /// Maximum number of custom patterns a user may store (save-time gate).
 pub const PII_MAX_CUSTOM_PATTERNS: usize = 32;
 /// Maximum number of sensitive-key additions a user may store (save-time gate).
@@ -25,9 +22,6 @@ const SENSITIVE_KEY_MAX_LEN: usize = 64;
 /// form), mirroring `pattern-lint.ts`'s `MAX_QUANTIFIER_COUNT`. Atom and char-class
 /// quantifiers are exempt (linear-time, not a ReDoS risk), as in the TS lint.
 const PII_PATTERN_MAX_QUANTIFIER: u32 = 128;
-
-const DEFAULT_MAX_TOKENS: u32 = 1000;
-const DEFAULT_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// A built-in PII category. Serde strings are the exact TS `PIIType` wire
 /// values — pinned by `pii_category_serde_matches_policy_engine_ts`.
@@ -166,8 +160,8 @@ impl Default for PiiCategoryFlags {
     }
 }
 
-/// A user-defined detection pattern, additive to the built-in categories.
-/// Shared by `PolicyTemplate` and the user config (mirrors TS `CustomPatternRule`).
+/// A user-defined detection pattern, additive to the built-in categories, with its
+/// own `{tokenize, log}` pair (forcing lives at the POLICY level, ADR-079 dropped it here).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CustomPiiPattern {
@@ -179,9 +173,10 @@ pub struct CustomPiiPattern {
     pub pattern: String,
     /// Whether the pattern is matched case-insensitively.
     pub case_insensitive: bool,
-    /// MDM-forced pattern the user cannot remove; re-forced by the engine.
-    #[serde(default)]
-    pub forced: bool,
+    /// Whether hits in this pattern are tokenized (sealed) before leaving the engine.
+    pub tokenize: bool,
+    /// Whether hits in this pattern are logged (observation mode).
+    pub log: bool,
 }
 
 /// Sensitive key-name add/remove deltas as shipped by a template or user config.
@@ -244,27 +239,8 @@ impl From<&CustomPiiPattern> for ResolvedCustomPiiPattern {
             display_name: p.display_name.clone(),
             pattern: p.pattern.clone(),
             case_insensitive: p.case_insensitive,
-            tokenize: true,
-            log: false,
-        }
-    }
-}
-
-/// Optional token-lifecycle overrides; omitted fields keep today's defaults.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PiiPolicyLimits {
-    /// Maximum number of tokens a single `PIIContext` may hold.
-    pub max_tokens: u32,
-    /// Token time-to-live in milliseconds.
-    pub ttl_ms: u64,
-}
-
-impl Default for PiiPolicyLimits {
-    fn default() -> Self {
-        Self {
-            max_tokens: DEFAULT_MAX_TOKENS,
-            ttl_ms: DEFAULT_TTL_MS,
+            tokenize: p.tokenize,
+            log: p.log,
         }
     }
 }
@@ -351,14 +327,13 @@ impl From<PiiCategoryPolicies> for PiiCategoryFlags {
     }
 }
 
-/// Provenance of a resolved policy.json v2 (mirrors the contract's `source`
-/// object). `forced` is always empty in this task; F2.2 fills the MDM union.
+/// Provenance of a resolved policy.json v2 (mirrors the contract's `source` object).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedPiiPolicySource {
-    /// The policy id(s) this resolution was built from (a template id, or `"custom"`).
+    /// The effective policy id set (user selection ∪ MDM-forced ids).
     pub policies: Vec<String>,
-    /// Policy ids forced by MDM; always empty until F2.2.
+    /// The subset of `policies` forced on by MDM.
     pub forced: Vec<String>,
 }
 
@@ -406,7 +381,24 @@ pub struct ResolvedPiiPolicy {
 
 impl Default for ResolvedPiiPolicy {
     fn default() -> Self {
-        resolve_pii_policy(None, None)
+        safe_default_policy()
+    }
+}
+
+/// Fail-closed fallback (every category tokenized, no patterns): both `Default`
+/// and the empty-effective-set resolution, kept panic-free so it can back `Default`.
+fn safe_default_policy() -> ResolvedPiiPolicy {
+    let sensitive_keys: std::collections::BTreeSet<String> =
+        speedwave_pii_engine::default_sensitive_keys()
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+    ResolvedPiiPolicy {
+        version: 2,
+        source: ResolvedPiiPolicySource::default(),
+        categories: PiiCategoryFlags::ALL_ON.into(),
+        custom_patterns: Vec::new(),
+        sensitive_keys: sensitive_keys.into_iter().collect(),
     }
 }
 
@@ -494,44 +486,101 @@ pub fn validate_sensitive_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Save-time gate for a full user PII policy selection: list-size caps plus
-/// per-item validation. Call before persisting a [`crate::config::PiiPolicyUserConfig`].
-pub fn validate_user_policy_config(cfg: &crate::config::PiiPolicyUserConfig) -> Result<(), String> {
-    if let Some(patterns) = &cfg.custom_patterns {
-        if patterns.len() > PII_MAX_CUSTOM_PATTERNS {
-            return Err(format!(
-                "at most {PII_MAX_CUSTOM_PATTERNS} custom patterns are allowed"
-            ));
-        }
-        let mut seen = std::collections::HashSet::new();
-        for p in patterns {
-            if p.display_name.trim().is_empty() {
-                return Err(format!(
-                    "pattern \"{}\" display name must not be empty",
-                    p.id
-                ));
-            }
-            if p.display_name.len() > PII_PATTERN_NAME_MAX_LEN {
-                return Err(format!(
-                    "pattern \"{}\" display name exceeds {PII_PATTERN_NAME_MAX_LEN} bytes",
-                    p.id
-                ));
-            }
-            validate_custom_pattern_id(&p.id)?;
-            if !seen.insert(p.id.clone()) {
-                return Err(format!("duplicate custom pattern id \"{}\"", p.id));
-            }
-            validate_value_pattern(&p.pattern)?;
-        }
+/// Validates a policy id: shape plus no collision with a built-in template id.
+/// Shared by save-time validation and resolve-time defense-in-depth.
+fn validate_policy_id_against_templates(
+    id: &str,
+    templates: &[PolicyTemplate],
+) -> Result<(), String> {
+    if !id_regex(&TEMPLATE_ID_RE)?.is_match(id) {
+        return Err(format!(
+            "policy id \"{id}\" must match ^[a-z][a-z0-9-]{{1,63}}$"
+        ));
     }
-    if let Some(delta) = &cfg.sensitive_keys {
-        if delta.add.len() > PII_MAX_SENSITIVE_KEYS {
+    if templates.iter().any(|t| t.id == id) {
+        return Err(format!(
+            "policy id \"{id}\" collides with a built-in template id"
+        ));
+    }
+    Ok(())
+}
+
+/// Save-time gate for one policy definition's own contents: per-pattern and
+/// per-key validation plus the list-size caps.
+fn validate_policy_definition_contents(
+    def: &crate::config::PiiPolicyDefinition,
+) -> Result<(), String> {
+    if def.name.trim().is_empty() {
+        return Err(format!("policy \"{}\": name must not be empty", def.id));
+    }
+    if def.custom_patterns.len() > PII_MAX_CUSTOM_PATTERNS {
+        return Err(format!(
+            "policy \"{}\": at most {PII_MAX_CUSTOM_PATTERNS} custom patterns are allowed",
+            def.id
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for p in &def.custom_patterns {
+        if p.display_name.trim().is_empty() {
             return Err(format!(
-                "at most {PII_MAX_SENSITIVE_KEYS} sensitive keys are allowed"
+                "policy \"{}\" pattern \"{}\": display name must not be empty",
+                def.id, p.id
             ));
         }
-        for key in delta.add.iter().chain(delta.remove.iter()) {
-            validate_sensitive_key(key)?;
+        if p.display_name.len() > PII_PATTERN_NAME_MAX_LEN {
+            return Err(format!(
+                "policy \"{}\" pattern \"{}\": display name exceeds {PII_PATTERN_NAME_MAX_LEN} bytes",
+                def.id, p.id
+            ));
+        }
+        validate_custom_pattern_id(&p.id)?;
+        if !seen.insert(p.id.clone()) {
+            return Err(format!(
+                "policy \"{}\": duplicate custom pattern id \"{}\"",
+                def.id, p.id
+            ));
+        }
+        validate_value_pattern(&p.pattern)?;
+    }
+    if def.sensitive_keys.add.len() > PII_MAX_SENSITIVE_KEYS {
+        return Err(format!(
+            "policy \"{}\": at most {PII_MAX_SENSITIVE_KEYS} sensitive keys are allowed",
+            def.id
+        ));
+    }
+    for key in def
+        .sensitive_keys
+        .add
+        .iter()
+        .chain(def.sensitive_keys.remove.iter())
+    {
+        validate_sensitive_key(key)?;
+    }
+    Ok(())
+}
+
+/// Save-time gate for a full user PII policy selection: per-definition
+/// validation, id collisions/duplicates, and unknown ids in `policies`.
+pub fn validate_user_policy_config(cfg: &crate::config::PiiPolicyUserConfig) -> Result<(), String> {
+    let templates = builtin_templates().map_err(|e| e.to_string())?;
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for def in &cfg.custom_policies {
+        validate_policy_id_against_templates(&def.id, templates)?;
+        if !seen_ids.insert(def.id.clone()) {
+            return Err(format!("duplicate custom policy id \"{}\"", def.id));
+        }
+        validate_policy_definition_contents(def)?;
+    }
+
+    let known_ids: std::collections::HashSet<&str> = templates
+        .iter()
+        .map(|t| t.id.as_str())
+        .chain(cfg.custom_policies.iter().map(|d| d.id.as_str()))
+        .collect();
+    for id in &cfg.policies {
+        if !known_ids.contains(id.as_str()) {
+            return Err(format!("policy list references unknown id \"{id}\""));
         }
     }
     Ok(())
@@ -813,105 +862,209 @@ pub fn builtin_templates() -> anyhow::Result<&'static [PolicyTemplate]> {
     }
 }
 
-/// Merges the user's PII policy into a policy.json v2 document. `managed` is
-/// accepted but not yet consulted — MDM union lands in F2.2.
-/// Infallible: degrades toward MORE filtering only (all-on / dropped).
+/// A resolved policy-set member, borrowed from either a builtin template or a
+/// user policy definition — symmetric inputs to the union.
+struct PolicyMember<'a> {
+    id: &'a str,
+    categories: PiiCategoryPolicies,
+    custom_patterns: &'a [CustomPiiPattern],
+    sensitive_keys: &'a PiiSensitiveKeyDelta,
+}
+
+/// Field-by-field OR of two category flag-pair sets (union semantics: a
+/// category is on/logged if ANY policy in the effective set turns it on).
+fn or_category_policies(a: PiiCategoryPolicies, b: PiiCategoryPolicies) -> PiiCategoryPolicies {
+    fn or(x: PiiCategoryPolicy, y: PiiCategoryPolicy) -> PiiCategoryPolicy {
+        PiiCategoryPolicy {
+            tokenize: x.tokenize || y.tokenize,
+            log: x.log || y.log,
+        }
+    }
+    PiiCategoryPolicies {
+        email: or(a.email, b.email),
+        phone_pl: or(a.phone_pl, b.phone_pl),
+        pesel: or(a.pesel, b.pesel),
+        nip: or(a.nip, b.nip),
+        iban: or(a.iban, b.iban),
+        card: or(a.card, b.card),
+        api_key: or(a.api_key, b.api_key),
+        sensitive_field: or(a.sensitive_field, b.sensitive_field),
+    }
+}
+
+/// Resolves `user.policies ∪ managed.forced_policies` into a policy.json v2 document.
+/// Fail-closed: any ambiguity or unresolvable id is an `Err`, never a silent degrade.
 pub fn resolve_pii_policy(
     user: Option<&crate::config::PiiPolicyUserConfig>,
-    _managed: Option<&crate::config::ManagedPiiPolicyConfig>,
-) -> ResolvedPiiPolicy {
-    let requested_template_id = user
-        .and_then(|u| u.template_id.clone())
-        .unwrap_or_else(|| DEFAULT_TEMPLATE_ID.to_string());
+    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
+) -> Result<ResolvedPiiPolicy, String> {
+    let templates = builtin_templates().map_err(|e| e.to_string())?;
+    let custom_policies: &[crate::config::PiiPolicyDefinition] =
+        user.map(|u| u.custom_policies.as_slice()).unwrap_or(&[]);
 
-    let template = match builtin_templates() {
-        Ok(templates) => {
-            let found = templates.iter().find(|t| t.id == requested_template_id);
-            if found.is_none() {
-                log::warn!(
-                    "PII policy: unknown template id \"{requested_template_id}\"; \
-                     falling back to all categories on"
-                );
+    // Effective set: user policies in order, then MDM-forced ids not already
+    // present (dedup on first occurrence) — MDM ids are additive, not overriding.
+    let mut effective: Vec<String> = Vec::new();
+    for id in user.map(|u| u.policies.as_slice()).unwrap_or(&[]) {
+        if !effective.contains(id) {
+            effective.push(id.clone());
+        }
+    }
+    let mut forced: Vec<String> = Vec::new();
+    for id in managed.map(|m| m.forced_policies.as_slice()).unwrap_or(&[]) {
+        if !effective.contains(id) {
+            effective.push(id.clone());
+        }
+        if !forced.contains(id) {
+            forced.push(id.clone());
+        }
+    }
+
+    if effective.is_empty() {
+        return Ok(safe_default_policy());
+    }
+
+    // custom_policies internal integrity: no id collides with a builtin, no duplicates.
+    let mut seen_custom_ids = std::collections::HashSet::new();
+    for def in custom_policies {
+        if templates.iter().any(|t| t.id == def.id) {
+            return Err(format!(
+                "custom policy id \"{}\" collides with a built-in template id",
+                def.id
+            ));
+        }
+        if !seen_custom_ids.insert(def.id.as_str()) {
+            return Err(format!("duplicate custom policy id \"{}\"", def.id));
+        }
+    }
+
+    let mut members: Vec<PolicyMember> = Vec::with_capacity(effective.len());
+    for id in &effective {
+        if let Some(t) = templates.iter().find(|t| &t.id == id) {
+            members.push(PolicyMember {
+                id: &t.id,
+                categories: t.categories,
+                custom_patterns: &t.custom_patterns,
+                sensitive_keys: &t.sensitive_keys,
+            });
+        } else if let Some(d) = custom_policies.iter().find(|d| &d.id == id) {
+            members.push(PolicyMember {
+                id: &d.id,
+                categories: d.categories,
+                custom_patterns: &d.custom_patterns,
+                sensitive_keys: &d.sensitive_keys,
+            });
+        } else {
+            return Err(format!("unknown PII policy id \"{id}\""));
+        }
+    }
+
+    // Categories: OR each flag pair across every member of the set.
+    let mut categories = members[0].categories;
+    for m in &members[1..] {
+        categories = or_category_policies(categories, m.categories);
+    }
+
+    // Custom patterns: union by id, first-seen order (linear scan, counts are
+    // small); a shared id must match (pattern, caseInsensitive) or it's Err.
+    let mut custom_patterns: Vec<ResolvedCustomPiiPattern> = Vec::new();
+    for m in &members {
+        for p in m.custom_patterns {
+            validate_value_pattern(&p.pattern)
+                .map_err(|e| format!("policy \"{}\" custom pattern \"{}\": {e}", m.id, p.id))?;
+            match custom_patterns
+                .iter_mut()
+                .find(|existing| existing.id == p.id)
+            {
+                None => custom_patterns.push(ResolvedCustomPiiPattern::from(p)),
+                Some(existing) => {
+                    if existing.pattern != p.pattern
+                        || existing.case_insensitive != p.case_insensitive
+                    {
+                        return Err(format!(
+                            "custom pattern id \"{}\" is defined with a different pattern or \
+                             caseInsensitive flag across policies in the effective set",
+                            p.id
+                        ));
+                    }
+                    existing.tokenize = existing.tokenize || p.tokenize;
+                    existing.log = existing.log || p.log;
+                }
             }
-            found
         }
-        Err(e) => {
-            log::warn!("PII policy templates unavailable ({e}); falling back to all categories on");
-            None
-        }
-    };
-
-    let is_custom = user.is_some_and(|u| {
-        u.categories.is_some() || u.custom_patterns.is_some() || u.sensitive_keys.is_some()
-    });
-
-    let categories: PiiCategoryPolicies = user
-        .and_then(|u| u.categories)
-        .map(PiiCategoryPolicies::from)
-        .or_else(|| template.map(|t| t.categories))
-        .unwrap_or_else(|| PiiCategoryFlags::default().into());
-
-    let mut custom_patterns: Vec<CustomPiiPattern> = template
-        .map(|t| t.custom_patterns.clone())
-        .unwrap_or_default();
-    if let Some(extra) = user.and_then(|u| u.custom_patterns.clone()) {
-        custom_patterns.extend(extra);
     }
-    custom_patterns.retain(|p| match validate_value_pattern(&p.pattern) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!(
-                "PII policy: dropping unusable stored custom pattern \"{}\": {e}",
-                p.id
-            );
-            false
-        }
-    });
-    let custom_patterns: Vec<ResolvedCustomPiiPattern> = custom_patterns
-        .iter()
-        .map(ResolvedCustomPiiPattern::from)
-        .collect();
 
-    let template_keys = template
-        .map(|t| t.sensitive_keys.clone())
-        .unwrap_or_default();
-    let mut add = template_keys.add;
-    let mut remove = template_keys.remove;
-    if let Some(delta) = user.and_then(|u| u.sensitive_keys.as_ref()) {
-        add.extend(delta.add.iter().cloned());
-        remove.extend(delta.remove.iter().cloned());
+    // Sensitive keys: add is a union; remove applies only where EVERY member
+    // removes the key (intersection), so the union never narrows protection.
+    let mut add: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut remove_intersection: Option<std::collections::BTreeSet<String>> = None;
+    for m in &members {
+        for key in &m.sensitive_keys.add {
+            add.insert(key.to_lowercase());
+        }
+        let this_remove: std::collections::BTreeSet<String> = m
+            .sensitive_keys
+            .remove
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+        remove_intersection = Some(match remove_intersection {
+            None => this_remove,
+            Some(prev) => prev.intersection(&this_remove).cloned().collect(),
+        });
     }
+    let remove_effective = remove_intersection.unwrap_or_default();
     let mut sensitive_keys: std::collections::BTreeSet<String> =
         speedwave_pii_engine::default_sensitive_keys()
             .iter()
             .map(|k| k.to_lowercase())
             .collect();
-    for key in &add {
-        sensitive_keys.insert(key.to_lowercase());
+    sensitive_keys.extend(add);
+    for key in &remove_effective {
+        sensitive_keys.remove(key);
     }
-    for key in &remove {
-        sensitive_keys.remove(&key.to_lowercase());
-    }
-    let sensitive_keys: Vec<String> = sensitive_keys.into_iter().collect();
 
-    let policies = if is_custom {
-        vec!["custom".to_string()]
-    } else {
-        vec![template
-            .map(|t| t.id.clone())
-            .unwrap_or_else(|| requested_template_id.clone())]
-    };
-
-    ResolvedPiiPolicy {
+    Ok(ResolvedPiiPolicy {
         version: 2,
         source: ResolvedPiiPolicySource {
-            policies,
-            forced: Vec::new(),
+            policies: effective,
+            forced,
         },
         categories,
         custom_patterns,
-        sensitive_keys,
+        sensitive_keys: sensitive_keys.into_iter().collect(),
+    })
+}
+
+/// True when MDM is implicated in a `resolve_pii_policy` failure: present AND
+/// the same user config resolves cleanly without it (mirrors telemetry's helper).
+fn pii_policy_error_implicates_mdm(
+    user: Option<&crate::config::PiiPolicyUserConfig>,
+    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
+) -> bool {
+    managed.is_some() && resolve_pii_policy(user, None).is_ok()
+}
+
+/// Global boot gate for the active project's PII policy (mirrors
+/// `check_telemetry_policy_at_boot`): any config error hard-stops at startup.
+pub fn check_pii_policy_at_boot() -> Result<(), String> {
+    let user_config = crate::config::load_user_config().unwrap_or_default();
+    let policy = user_config
+        .active_project_entry()
+        .and_then(|p| p.policy.as_ref());
+    let managed = crate::managed_config::load_managed_config()
+        .map_err(|e| e.to_string())?
+        .and_then(|m| m.pii_policy);
+
+    if let Err(e) = resolve_pii_policy(policy, managed.as_ref()) {
+        if pii_policy_error_implicates_mdm(policy, managed.as_ref()) {
+            return Err(e);
+        }
+        return Err(format!(
+            "invalid local PII policy configuration (no organization policy involved): {e}"
+        ));
     }
+    Ok(())
 }
 
 /// `<data_dir>/policies/<project>/`. Caller validates `project` as a safe component.
@@ -998,7 +1151,7 @@ mod tests {
         let strict = templates.iter().find(|t| t.id == "strict").unwrap();
         let all_on: PiiCategoryPolicies = PiiCategoryFlags::ALL_ON.into();
         assert_eq!(strict.categories, all_on);
-        assert_eq!(resolve_pii_policy(None, None).categories, all_on);
+        assert_eq!(resolve_pii_policy(None, None).unwrap().categories, all_on);
         assert_eq!(ResolvedPiiPolicy::default().categories, all_on);
     }
 
@@ -1093,14 +1246,41 @@ sensitiveKeys: { add: [], remove: [] }
 
     // ---- resolve_pii_policy semantics ------------------------------------
 
+    fn custom_pattern(id: &str, pattern: &str, tokenize: bool, log: bool) -> CustomPiiPattern {
+        CustomPiiPattern {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            pattern: pattern.to_string(),
+            case_insensitive: false,
+            tokenize,
+            log,
+        }
+    }
+
+    fn custom_policy(
+        id: &str,
+        categories: PiiCategoryPolicies,
+        custom_patterns: Vec<CustomPiiPattern>,
+        sensitive_keys: PiiSensitiveKeyDelta,
+    ) -> crate::config::PiiPolicyDefinition {
+        crate::config::PiiPolicyDefinition {
+            id: id.to_string(),
+            name: id.to_string(),
+            categories,
+            custom_patterns,
+            sensitive_keys,
+        }
+    }
+
     #[test]
-    fn resolve_with_no_user_and_no_managed_defaults_to_strict_all_on() {
-        let resolved = resolve_pii_policy(None, None);
+    fn resolve_with_no_user_and_no_managed_is_safe_default() {
+        // Point 3: empty effective set => safe default (all-on, no patterns).
+        let resolved = resolve_pii_policy(None, None).unwrap();
         assert_eq!(resolved.categories, PiiCategoryFlags::ALL_ON.into());
         assert_eq!(
             resolved.source,
             ResolvedPiiPolicySource {
-                policies: vec!["strict".to_string()],
+                policies: Vec::new(),
                 forced: Vec::new(),
             }
         );
@@ -1110,10 +1290,10 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn resolve_with_known_template_id_uses_its_categories() {
         let user = PiiPolicyUserConfig {
-            template_id: Some("gdpr-art32".to_string()),
+            policies: vec!["gdpr-art32".to_string()],
             ..Default::default()
         };
-        let resolved = resolve_pii_policy(Some(&user), None);
+        let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert!(!resolved.categories.api_key.tokenize);
         assert_eq!(
             resolved.source,
@@ -1125,162 +1305,219 @@ sensitiveKeys: { add: [], remove: [] }
     }
 
     #[test]
-    fn resolve_with_unknown_template_id_degrades_to_all_on() {
+    fn resolve_with_unknown_user_policy_id_errs_naming_it() {
+        // Point 2: unknown id (user or MDM) is an Err naming the id.
         let user = PiiPolicyUserConfig {
-            template_id: Some("totally-bogus-template".to_string()),
+            policies: vec!["totally-bogus-template".to_string()],
             ..Default::default()
         };
-        let resolved = resolve_pii_policy(Some(&user), None);
-        assert_eq!(resolved.categories, PiiCategoryFlags::ALL_ON.into());
+        let err = resolve_pii_policy(Some(&user), None).unwrap_err();
+        assert!(err.contains("totally-bogus-template"));
+    }
+
+    #[test]
+    fn resolve_with_unknown_managed_forced_id_errs_naming_it() {
+        let managed = ManagedPiiPolicyConfig {
+            forced_policies: vec!["not-a-real-policy".to_string()],
+        };
+        let err = resolve_pii_policy(None, Some(&managed)).unwrap_err();
+        assert!(err.contains("not-a-real-policy"));
+    }
+
+    #[test]
+    fn resolve_custom_policy_colliding_with_builtin_id_errs() {
+        let user = PiiPolicyUserConfig {
+            policies: vec!["strict".to_string()],
+            custom_policies: vec![custom_policy(
+                "strict",
+                PiiCategoryFlags::ALL_ON.into(),
+                Vec::new(),
+                PiiSensitiveKeyDelta::default(),
+            )],
+        };
+        assert!(resolve_pii_policy(Some(&user), None).is_err());
+    }
+
+    #[test]
+    fn resolve_duplicate_custom_policy_ids_errs() {
+        let def = custom_policy(
+            "acme",
+            PiiCategoryFlags::ALL_ON.into(),
+            Vec::new(),
+            PiiSensitiveKeyDelta::default(),
+        );
+        let user = PiiPolicyUserConfig {
+            policies: vec!["acme".to_string()],
+            custom_policies: vec![def.clone(), def],
+        };
+        assert!(resolve_pii_policy(Some(&user), None).is_err());
+    }
+
+    #[test]
+    fn resolve_effective_set_is_user_policies_then_unseen_forced_ids() {
+        // Point 1: user order first, then unseen forced ids; `source.forced`
+        // names every MDM-forced id even if the user also picked it themselves.
+        let user = PiiPolicyUserConfig {
+            policies: vec!["gdpr-art32".to_string()],
+            ..Default::default()
+        };
+        let managed = ManagedPiiPolicyConfig {
+            forced_policies: vec!["gdpr-art32".to_string(), "eu-ai-act-art5".to_string()],
+        };
+        let resolved = resolve_pii_policy(Some(&user), Some(&managed)).unwrap();
         assert_eq!(
             resolved.source,
             ResolvedPiiPolicySource {
-                policies: vec!["totally-bogus-template".to_string()],
-                forced: Vec::new(),
+                policies: vec!["gdpr-art32".to_string(), "eu-ai-act-art5".to_string()],
+                forced: vec!["gdpr-art32".to_string(), "eu-ai-act-art5".to_string()],
             }
         );
     }
 
     #[test]
-    fn resolve_with_category_override_switches_to_custom_mode() {
-        let mut categories = PiiCategoryFlags::ALL_ON;
-        categories.set(PiiCategory::Email, false);
+    fn resolve_categories_are_ored_per_flag_across_the_effective_set() {
+        // Point 4: gdpr-art32 has nip ON (eu-ai-act-art5 off) — OR keeps it on.
+        // Both have api_key off, so it stays off (not "any policy defaults on").
         let user = PiiPolicyUserConfig {
-            categories: Some(categories),
+            policies: vec!["gdpr-art32".to_string(), "eu-ai-act-art5".to_string()],
             ..Default::default()
         };
-        let resolved = resolve_pii_policy(Some(&user), None);
-        assert_eq!(resolved.categories, categories.into());
-        assert_eq!(
-            resolved.source,
-            ResolvedPiiPolicySource {
-                policies: vec!["custom".to_string()],
-                forced: Vec::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_with_template_and_extra_custom_pattern_records_provenance() {
-        let user = PiiPolicyUserConfig {
-            template_id: Some("gdpr-art32".to_string()),
-            custom_patterns: Some(vec![CustomPiiPattern {
-                id: "EMPLOYEE_ID".to_string(),
-                display_name: "Employee ID".to_string(),
-                pattern: r"\bEMP-\d{4,8}\b".to_string(),
-                case_insensitive: false,
-                forced: false,
-            }]),
-            ..Default::default()
-        };
-        let resolved = resolve_pii_policy(Some(&user), None);
-        assert_eq!(
-            resolved.source,
-            ResolvedPiiPolicySource {
-                policies: vec!["custom".to_string()],
-                forced: Vec::new(),
-            }
-        );
-        assert_eq!(resolved.custom_patterns.len(), 1);
-        assert!(resolved.custom_patterns[0].tokenize);
-        assert!(!resolved.custom_patterns[0].log);
+        let resolved = resolve_pii_policy(Some(&user), None).unwrap();
+        assert!(resolved.categories.nip.tokenize, "on in gdpr-art32");
         assert!(
             !resolved.categories.api_key.tokenize,
-            "gdpr-art32 baseline preserved"
+            "off in both — OR must not invent a true"
         );
+        assert!(resolved.categories.email.tokenize, "on in both");
     }
 
     #[test]
-    fn resolve_drops_invalid_stored_custom_pattern_and_keeps_the_rest() {
+    fn resolve_custom_patterns_with_same_id_and_pattern_merge_flags_with_or() {
+        // Point 5: identical (pattern, caseInsensitive) across policies -> one
+        // merged entry with OR'd tokenize/log.
         let user = PiiPolicyUserConfig {
-            custom_patterns: Some(vec![
-                CustomPiiPattern {
-                    id: "GOOD".to_string(),
-                    display_name: "Good".to_string(),
-                    pattern: r"\d{3}".to_string(),
-                    case_insensitive: false,
-                    forced: false,
-                },
-                CustomPiiPattern {
-                    id: "BAD".to_string(),
-                    display_name: "Bad".to_string(),
-                    pattern: "(a+)+".to_string(),
-                    case_insensitive: false,
-                    forced: false,
-                },
-            ]),
-            ..Default::default()
+            policies: vec!["a".to_string(), "b".to_string()],
+            custom_policies: vec![
+                custom_policy(
+                    "a",
+                    PiiCategoryFlags::ALL_ON.into(),
+                    vec![custom_pattern("EMPLOYEE_ID", r"\d{3}", true, false)],
+                    PiiSensitiveKeyDelta::default(),
+                ),
+                custom_policy(
+                    "b",
+                    PiiCategoryFlags::ALL_ON.into(),
+                    vec![custom_pattern("EMPLOYEE_ID", r"\d{3}", false, true)],
+                    PiiSensitiveKeyDelta::default(),
+                ),
+            ],
         };
-        let resolved = resolve_pii_policy(Some(&user), None);
+        let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert_eq!(resolved.custom_patterns.len(), 1);
-        assert_eq!(resolved.custom_patterns[0].id, "GOOD");
+        assert!(resolved.custom_patterns[0].tokenize);
+        assert!(resolved.custom_patterns[0].log);
     }
 
     #[test]
-    fn resolve_sensitive_keys_is_the_final_union_lowercased_sorted_deduped() {
+    fn resolve_custom_patterns_with_same_id_but_different_pattern_errs() {
         let user = PiiPolicyUserConfig {
-            sensitive_keys: Some(PiiSensitiveKeyDelta {
-                add: vec!["Salary".to_string(), "TOKEN".to_string()],
-                remove: vec!["cookie".to_string()],
-            }),
-            ..Default::default()
+            policies: vec!["a".to_string(), "b".to_string()],
+            custom_policies: vec![
+                custom_policy(
+                    "a",
+                    PiiCategoryFlags::ALL_ON.into(),
+                    vec![custom_pattern("EMPLOYEE_ID", r"\d{3}", true, false)],
+                    PiiSensitiveKeyDelta::default(),
+                ),
+                custom_policy(
+                    "b",
+                    PiiCategoryFlags::ALL_ON.into(),
+                    vec![custom_pattern("EMPLOYEE_ID", r"\d{4}", true, false)],
+                    PiiSensitiveKeyDelta::default(),
+                ),
+            ],
         };
-        let resolved = resolve_pii_policy(Some(&user), None);
+        let err = resolve_pii_policy(Some(&user), None).unwrap_err();
+        assert!(err.contains("EMPLOYEE_ID"));
+    }
+
+    #[test]
+    fn resolve_errs_on_an_unusable_stored_custom_pattern() {
+        // Fail-closed: a stored pattern that no longer validates is an Err, not
+        // a silent drop (unlike the pre-F2.2 infallible resolve).
+        let user = PiiPolicyUserConfig {
+            policies: vec!["a".to_string()],
+            custom_policies: vec![custom_policy(
+                "a",
+                PiiCategoryFlags::ALL_ON.into(),
+                vec![custom_pattern("BAD", "(a+)+", true, false)],
+                PiiSensitiveKeyDelta::default(),
+            )],
+        };
+        assert!(resolve_pii_policy(Some(&user), None).is_err());
+    }
+
+    #[test]
+    fn resolve_sensitive_keys_add_is_a_union_remove_only_when_every_policy_agrees() {
+        // Point 6: "cookie" removed by only one of two policies must survive;
+        // "token" removed by both must be gone.
+        let user = PiiPolicyUserConfig {
+            policies: vec!["a".to_string(), "b".to_string()],
+            custom_policies: vec![
+                custom_policy(
+                    "a",
+                    PiiCategoryFlags::ALL_ON.into(),
+                    Vec::new(),
+                    PiiSensitiveKeyDelta {
+                        add: vec!["Salary".to_string()],
+                        remove: vec!["cookie".to_string(), "token".to_string()],
+                    },
+                ),
+                custom_policy(
+                    "b",
+                    PiiCategoryFlags::ALL_ON.into(),
+                    Vec::new(),
+                    PiiSensitiveKeyDelta {
+                        add: Vec::new(),
+                        remove: vec!["token".to_string()],
+                    },
+                ),
+            ],
+        };
+        let resolved = resolve_pii_policy(Some(&user), None).unwrap();
         assert!(resolved.sensitive_keys.contains(&"salary".to_string()));
-        assert!(resolved.sensitive_keys.contains(&"password".to_string()));
-        assert!(!resolved.sensitive_keys.contains(&"cookie".to_string()));
-        // "token" is both a default key and re-added uppercase — must appear exactly once.
-        assert_eq!(
-            resolved
-                .sensitive_keys
-                .iter()
-                .filter(|k| *k == "token")
-                .count(),
-            1
+        assert!(
+            resolved.sensitive_keys.contains(&"cookie".to_string()),
+            "only one policy removes cookie — union must not narrow protection"
         );
-        let mut sorted = resolved.sensitive_keys.clone();
-        sorted.sort();
-        assert_eq!(resolved.sensitive_keys, sorted, "must be sorted");
-    }
-
-    #[test]
-    fn resolve_accepts_managed_config_without_surfacing_it_in_v2_output() {
-        // forced_categories has no render slot yet (F2.2); passing Some(managed) must not
-        // change the output relative to None — it is accepted but not yet consulted.
-        let managed = ManagedPiiPolicyConfig {
-            forced_categories: Some(vec![PiiCategory::ApiKey]),
-        };
-        let user = PiiPolicyUserConfig {
-            template_id: Some("gdpr-art32".to_string()),
-            ..Default::default()
-        };
-        let with_managed = resolve_pii_policy(Some(&user), Some(&managed));
-        let without_managed = resolve_pii_policy(Some(&user), None);
-        assert_eq!(with_managed, without_managed);
+        assert!(
+            !resolved.sensitive_keys.contains(&"token".to_string()),
+            "both policies remove token — intersection removes it"
+        );
     }
 
     // ---- serde round-trips -------------------------------------------------
 
     #[test]
     fn resolved_pii_policy_json_round_trips_and_uses_camel_case() {
-        let resolved = resolve_pii_policy(
-            Some(&PiiPolicyUserConfig {
-                template_id: Some("gdpr-art32".to_string()),
-                custom_patterns: Some(vec![CustomPiiPattern {
-                    id: "EMPLOYEE_ID".to_string(),
-                    display_name: "Employee ID".to_string(),
-                    pattern: r"\bEMP-\d{4,8}\b".to_string(),
-                    case_insensitive: false,
-                    forced: false,
-                }]),
-                sensitive_keys: Some(PiiSensitiveKeyDelta {
+        let user = PiiPolicyUserConfig {
+            policies: vec!["gdpr-art32".to_string(), "custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                vec![custom_pattern(
+                    "EMPLOYEE_ID",
+                    r"\bEMP-\d{4,8}\b",
+                    true,
+                    false,
+                )],
+                PiiSensitiveKeyDelta {
                     add: vec!["salary".to_string()],
-                    remove: vec![],
-                }),
-                ..Default::default()
-            }),
-            None,
-        );
+                    remove: Vec::new(),
+                },
+            )],
+        };
+        let resolved = resolve_pii_policy(Some(&user), None).unwrap();
 
         let value = serde_json::to_value(&resolved).unwrap();
         assert_eq!(value["version"], 2);
@@ -1290,7 +1527,7 @@ sensitiveKeys: { add: [], remove: [] }
         assert!(value.get("forcedCategories").is_none());
         assert_eq!(value["categories"]["EMAIL"]["tokenize"], true);
         assert_eq!(value["categories"]["EMAIL"]["log"], false);
-        assert_eq!(value["customPatterns"][0]["displayName"], "Employee ID");
+        assert_eq!(value["customPatterns"][0]["displayName"], "EMPLOYEE_ID");
         assert_eq!(value["customPatterns"][0]["caseInsensitive"], false);
         assert_eq!(value["customPatterns"][0]["tokenize"], true);
         assert_eq!(value["customPatterns"][0]["log"], false);
@@ -1299,14 +1536,14 @@ sensitiveKeys: { add: [], remove: [] }
             .unwrap()
             .contains(&serde_json::Value::String("salary".to_string())));
         // Literal wire values, so a symmetric casing bug can't hide behind the round-trip.
-        assert_eq!(value["source"]["policies"], serde_json::json!(["custom"]));
+        assert_eq!(
+            value["source"]["policies"],
+            serde_json::json!(["gdpr-art32", "custom"])
+        );
         assert_eq!(value["source"]["forced"], serde_json::json!([]));
 
-        let default_value = serde_json::to_value(resolve_pii_policy(None, None)).unwrap();
-        assert_eq!(
-            default_value["source"]["policies"],
-            serde_json::json!(["strict"])
-        );
+        let default_value = serde_json::to_value(resolve_pii_policy(None, None).unwrap()).unwrap();
+        assert_eq!(default_value["source"]["policies"], serde_json::json!([]));
 
         let round_tripped: ResolvedPiiPolicy = serde_json::from_value(value).unwrap();
         assert_eq!(round_tripped, resolved);
@@ -1476,17 +1713,16 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn validate_user_policy_config_rejects_too_many_custom_patterns() {
         let patterns: Vec<CustomPiiPattern> = (0..PII_MAX_CUSTOM_PATTERNS + 1)
-            .map(|i| CustomPiiPattern {
-                id: format!("PAT_{i}"),
-                display_name: format!("Pat {i}"),
-                pattern: r"\d{3}".to_string(),
-                case_insensitive: false,
-                forced: false,
-            })
+            .map(|i| custom_pattern(&format!("PAT_{i}"), r"\d{3}", true, false))
             .collect();
         let cfg = PiiPolicyUserConfig {
-            custom_patterns: Some(patterns),
-            ..Default::default()
+            policies: vec!["custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                patterns,
+                PiiSensitiveKeyDelta::default(),
+            )],
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -1494,38 +1730,32 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn validate_user_policy_config_rejects_duplicate_pattern_ids() {
         let cfg = PiiPolicyUserConfig {
-            custom_patterns: Some(vec![
-                CustomPiiPattern {
-                    id: "DUP".to_string(),
-                    display_name: "Dup 1".to_string(),
-                    pattern: r"\d{3}".to_string(),
-                    case_insensitive: false,
-                    forced: false,
-                },
-                CustomPiiPattern {
-                    id: "DUP".to_string(),
-                    display_name: "Dup 2".to_string(),
-                    pattern: r"\d{4}".to_string(),
-                    case_insensitive: false,
-                    forced: false,
-                },
-            ]),
-            ..Default::default()
+            policies: vec!["custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                vec![
+                    custom_pattern("DUP", r"\d{3}", true, false),
+                    custom_pattern("DUP", r"\d{4}", true, false),
+                ],
+                PiiSensitiveKeyDelta::default(),
+            )],
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
 
     #[test]
     fn validate_user_policy_config_rejects_over_length_display_name() {
+        let mut pattern = custom_pattern("EMPLOYEE_ID", r"\d{3}", true, false);
+        pattern.display_name = "a".repeat(PII_PATTERN_NAME_MAX_LEN + 1);
         let cfg = PiiPolicyUserConfig {
-            custom_patterns: Some(vec![CustomPiiPattern {
-                id: "EMPLOYEE_ID".to_string(),
-                display_name: "a".repeat(PII_PATTERN_NAME_MAX_LEN + 1),
-                pattern: r"\d{3}".to_string(),
-                case_insensitive: false,
-                forced: false,
-            }]),
-            ..Default::default()
+            policies: vec!["custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                vec![pattern],
+                PiiSensitiveKeyDelta::default(),
+            )],
         };
         let err = validate_user_policy_config(&cfg).unwrap_err();
         assert!(err.contains("display name exceeds"));
@@ -1533,15 +1763,16 @@ sensitiveKeys: { add: [], remove: [] }
 
     #[test]
     fn validate_user_policy_config_accepts_max_length_display_name() {
+        let mut pattern = custom_pattern("EMPLOYEE_ID", r"\d{3}", true, false);
+        pattern.display_name = "a".repeat(PII_PATTERN_NAME_MAX_LEN);
         let cfg = PiiPolicyUserConfig {
-            custom_patterns: Some(vec![CustomPiiPattern {
-                id: "EMPLOYEE_ID".to_string(),
-                display_name: "a".repeat(PII_PATTERN_NAME_MAX_LEN),
-                pattern: r"\d{3}".to_string(),
-                case_insensitive: false,
-                forced: false,
-            }]),
-            ..Default::default()
+            policies: vec!["custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                vec![pattern],
+                PiiSensitiveKeyDelta::default(),
+            )],
         };
         assert!(validate_user_policy_config(&cfg).is_ok());
     }
@@ -1549,13 +1780,18 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn validate_user_policy_config_rejects_too_many_sensitive_keys() {
         let cfg = PiiPolicyUserConfig {
-            sensitive_keys: Some(PiiSensitiveKeyDelta {
-                add: (0..PII_MAX_SENSITIVE_KEYS + 1)
-                    .map(|i| format!("k{i}"))
-                    .collect(),
-                remove: vec![],
-            }),
-            ..Default::default()
+            policies: vec!["custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                Vec::new(),
+                PiiSensitiveKeyDelta {
+                    add: (0..PII_MAX_SENSITIVE_KEYS + 1)
+                        .map(|i| format!("k{i}"))
+                        .collect(),
+                    remove: vec![],
+                },
+            )],
         };
         assert!(validate_user_policy_config(&cfg).is_err());
     }
@@ -1563,21 +1799,62 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn validate_user_policy_config_accepts_well_formed_config() {
         let cfg = PiiPolicyUserConfig {
-            template_id: Some("strict".to_string()),
-            custom_patterns: Some(vec![CustomPiiPattern {
-                id: "EMPLOYEE_ID".to_string(),
-                display_name: "Employee ID".to_string(),
-                pattern: r"\bEMP-\d{4,8}\b".to_string(),
-                case_insensitive: false,
-                forced: false,
-            }]),
-            sensitive_keys: Some(PiiSensitiveKeyDelta {
-                add: vec!["salary".to_string()],
-                remove: vec![],
-            }),
-            ..Default::default()
+            policies: vec!["strict".to_string(), "custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                PiiCategoryFlags::ALL_ON.into(),
+                vec![custom_pattern(
+                    "EMPLOYEE_ID",
+                    r"\bEMP-\d{4,8}\b",
+                    true,
+                    false,
+                )],
+                PiiSensitiveKeyDelta {
+                    add: vec!["salary".to_string()],
+                    remove: vec![],
+                },
+            )],
         };
         assert!(validate_user_policy_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_user_policy_config_rejects_policy_referencing_unknown_id() {
+        let cfg = PiiPolicyUserConfig {
+            policies: vec!["totally-bogus".to_string()],
+            custom_policies: Vec::new(),
+        };
+        let err = validate_user_policy_config(&cfg).unwrap_err();
+        assert!(err.contains("totally-bogus"));
+    }
+
+    #[test]
+    fn validate_user_policy_config_rejects_custom_policy_id_colliding_with_builtin() {
+        let cfg = PiiPolicyUserConfig {
+            policies: vec!["strict".to_string()],
+            custom_policies: vec![custom_policy(
+                "strict",
+                PiiCategoryFlags::ALL_ON.into(),
+                Vec::new(),
+                PiiSensitiveKeyDelta::default(),
+            )],
+        };
+        assert!(validate_user_policy_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_user_policy_config_rejects_duplicate_custom_policy_ids() {
+        let def = custom_policy(
+            "acme",
+            PiiCategoryFlags::ALL_ON.into(),
+            Vec::new(),
+            PiiSensitiveKeyDelta::default(),
+        );
+        let cfg = PiiPolicyUserConfig {
+            policies: vec!["acme".to_string()],
+            custom_policies: vec![def.clone(), def],
+        };
+        assert!(validate_user_policy_config(&cfg).is_err());
     }
 
     // ---- cross-read SSOT: Rust serde strings vs TS PIIType enum ------------
@@ -1627,31 +1904,35 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn write_policy_config_matches_pinned_contract_shape() {
         let tmp = tempfile::tempdir().unwrap();
-        let policy = resolve_pii_policy(
-            Some(&PiiPolicyUserConfig {
-                template_id: Some("gdpr-art32".to_string()),
-                custom_patterns: Some(vec![CustomPiiPattern {
-                    id: "EMPLOYEE_ID".to_string(),
-                    display_name: "Employee ID".to_string(),
-                    pattern: r"\bEMP-\d{4,8}\b".to_string(),
-                    case_insensitive: false,
-                    forced: false,
-                }]),
-                sensitive_keys: Some(PiiSensitiveKeyDelta {
+        // Matches gdpr-art32's own api_key=false so the union preserves the
+        // exclusion (a plain ALL_ON "custom" policy would OR it back on).
+        let mut api_key_off = PiiCategoryFlags::ALL_ON;
+        api_key_off.set(PiiCategory::ApiKey, false);
+        let mut pattern = custom_pattern("EMPLOYEE_ID", r"\bEMP-\d{4,8}\b", true, false);
+        pattern.display_name = "Employee ID".to_string();
+        let user = PiiPolicyUserConfig {
+            policies: vec!["gdpr-art32".to_string(), "custom".to_string()],
+            custom_policies: vec![custom_policy(
+                "custom",
+                api_key_off.into(),
+                vec![pattern],
+                PiiSensitiveKeyDelta {
                     add: vec!["salary".to_string()],
                     remove: vec![],
-                }),
-                ..Default::default()
-            }),
-            None,
-        );
+                },
+            )],
+        };
+        let policy = resolve_pii_policy(Some(&user), None).unwrap();
         write_policy_config_in(tmp.path(), "proj", &policy).unwrap();
 
         let path = policy_config_path_in(tmp.path(), "proj");
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["version"], 2);
-        assert_eq!(v["source"]["policies"], serde_json::json!(["custom"]));
+        assert_eq!(
+            v["source"]["policies"],
+            serde_json::json!(["gdpr-art32", "custom"])
+        );
         assert_eq!(v["source"]["forced"], serde_json::json!([]));
         assert_eq!(v["categories"]["EMAIL"]["tokenize"], true);
         assert!(!v["categories"]["API_KEY"]["tokenize"].as_bool().unwrap());

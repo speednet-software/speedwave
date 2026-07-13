@@ -882,6 +882,17 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
+            // Fail-closed on an invalid (or MDM-broken) PII policy — same
+            // detection point and dialog as telemetry above.
+            if let Err(e) = speedwave_runtime::pii_policy::check_pii_policy_at_boot() {
+                let body = format!(
+                    "Speedwave could not apply the organization PII policy.\n\n{e}\n\n\
+                     Contact your administrator to correct the managed configuration."
+                );
+                log::error!("PII policy check failed: {}", e);
+                show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
+            }
+
             // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` (pruned on rotation).
 
             if setup_started {

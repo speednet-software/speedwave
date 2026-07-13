@@ -344,8 +344,14 @@ pub fn render_compose_in(
     );
 
     // Resolved PII policy: always written + mounted :ro into mcp-hub — absence
-    // would silently degrade the hub to its compiled-in default policy.
-    crate::pii_policy::write_policy_config_in(data_dir, project_name, &resolved_config.pii_policy)?;
+    // would silently degrade the hub to its compiled-in default policy. Unlike
+    // telemetry (global, boot-check-only), a broken per-project policy also
+    // hard-fails the render itself: the boot check only covers the active project.
+    let pii_policy = resolved_config
+        .pii_policy
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
+    crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
     let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
     yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
     yaml = yaml.replace(
@@ -1543,6 +1549,40 @@ mod tests {
             "render_compose must pre-create the proxy token mount source"
         );
         assert!(data_dir.path().join("claude-resources").is_dir());
+    }
+
+    /// A per-project PII policy resolution error must hard-fail `render_compose`
+    /// itself (`?`) — unlike telemetry (global, boot-check-only), the active
+    /// project's boot check does not cover every project that could later render.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_fails_when_pii_policy_is_unresolvable() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-bad-pii-policy-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+            pii_policy: Err("unknown PII policy id \"bogus\"".to_string()),
+            ..Default::default()
+        };
+        let err = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect_err("render must fail closed on an unresolvable PII policy");
+        assert!(err.to_string().contains("bogus"));
     }
 
     #[test]

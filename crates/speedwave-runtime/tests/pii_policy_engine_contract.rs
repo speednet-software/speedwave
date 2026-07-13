@@ -23,10 +23,11 @@ fn every_builtin_template_resolves_to_a_policy_the_engine_accepts() {
 
     for template in templates {
         let user = PiiPolicyUserConfig {
-            template_id: Some(template.id.clone()),
+            policies: vec![template.id.clone()],
             ..Default::default()
         };
-        let resolved = resolve_pii_policy(Some(&user), None);
+        let resolved =
+            resolve_pii_policy(Some(&user), None).expect("builtin template id always resolves");
         let json = serde_json::to_string(&resolved).expect("resolved policy serializes");
 
         let compiled = compile_policy_v2(&json).unwrap_or_else(|e| {
@@ -77,20 +78,28 @@ fn every_builtin_template_resolves_to_a_policy_the_engine_accepts() {
 
 #[test]
 fn custom_selection_with_extra_pattern_still_compiles() {
+    use speedwave_runtime::config::PiiPolicyDefinition;
     use speedwave_runtime::pii_policy::CustomPiiPattern;
 
     let user = PiiPolicyUserConfig {
-        template_id: Some("gdpr-art32".to_string()),
-        custom_patterns: Some(vec![CustomPiiPattern {
-            id: "EMPLOYEE_ID".to_string(),
-            display_name: "Employee ID".to_string(),
-            pattern: r"\bEMP-\d{4,8}\b".to_string(),
-            case_insensitive: false,
-            forced: false,
-        }]),
-        ..Default::default()
+        policies: vec!["gdpr-art32".to_string(), "custom".to_string()],
+        custom_policies: vec![PiiPolicyDefinition {
+            id: "custom".to_string(),
+            name: "Custom".to_string(),
+            categories: speedwave_runtime::pii_policy::PiiCategoryFlags::ALL_ON.into(),
+            custom_patterns: vec![CustomPiiPattern {
+                id: "EMPLOYEE_ID".to_string(),
+                display_name: "Employee ID".to_string(),
+                pattern: r"\bEMP-\d{4,8}\b".to_string(),
+                case_insensitive: false,
+                tokenize: true,
+                log: false,
+            }],
+            sensitive_keys: Default::default(),
+        }],
     };
-    let resolved = resolve_pii_policy(Some(&user), None);
+    let resolved =
+        resolve_pii_policy(Some(&user), None).expect("gdpr-art32 + custom always resolves");
     let json = serde_json::to_string(&resolved).expect("resolved policy serializes");
     let compiled = compile_policy_v2(&json).expect("engine accepts a custom selection");
     assert!(compiled.rules().iter().any(|r| r.category == "EMPLOYEE_ID"));
@@ -98,7 +107,7 @@ fn custom_selection_with_extra_pattern_still_compiles() {
 
 #[test]
 fn a_hand_corrupted_policy_json_is_rejected_by_the_engine() {
-    let resolved = resolve_pii_policy(None, None);
+    let resolved = resolve_pii_policy(None, None).expect("empty policy always resolves");
     let mut value = serde_json::to_value(&resolved).expect("resolved policy serializes");
     value["bogusTopLevelField"] = serde_json::json!(true);
     let json = serde_json::to_string(&value).expect("value serializes");
