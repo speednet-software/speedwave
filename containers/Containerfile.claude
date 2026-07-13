@@ -7,11 +7,10 @@ FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736
 ENV HOME=/home/speedwave
 RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 
-# Apt resilience: retries for update (network), --force-unsafe-io for install (skips fsync during
-# dpkg unpack — safe since layers are disposable; eliminates the fsync bottleneck in nested virt).
+# No --force-unsafe-io: under nested virt a layer snapshot can commit an unpacked
+# file before its data is flushed, baking 0-byte binaries into the image (torn git).
 RUN apt-get update -o Acquire::Retries=3 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        -o Dpkg::Options::="--force-unsafe-io" \
         bash \
         ca-certificates \
         curl \
@@ -24,6 +23,9 @@ RUN apt-get update -o Acquire::Retries=3 && \
         tzdata \
         wget \
     && rm -rf /var/lib/apt/lists/*
+
+# Separate layer: catch torn/empty binaries from the unpack above at build time.
+RUN git --version && jq --version && python3 --version && curl --version >/dev/null
 
 # Create directories for resources (read-only mount point)
 RUN mkdir -p /speedwave/resources && \
