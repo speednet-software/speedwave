@@ -187,7 +187,7 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     use sha2::{Digest, Sha256};
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
-    collect_files_recursive(plugin_dir, &mut files)?;
+    collect_files_recursive(plugin_dir, plugin_dir, &mut files)?;
 
     // Relative path normalized to posix '/' on every host (matches sign script).
     let mut entries: Vec<(String, &std::path::PathBuf)> = files
@@ -228,7 +228,13 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(hasher.finalize().to_vec())
 }
 
-fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> anyhow::Result<()> {
+/// Only the top-level `SIGNATURE` (the detached signature) is excluded from the
+/// digest; a `SIGNATURE`-named file nested deeper is unsigned content and rejected.
+fn collect_files_recursive(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -241,9 +247,14 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> any
             );
         }
         if file_type.is_dir() {
-            collect_files_recursive(&path, out)?;
+            collect_files_recursive(root, &path, out)?;
         } else if path.file_name().map(|n| n != "SIGNATURE").unwrap_or(true) {
             out.push(path);
+        } else if path.parent() != Some(root) {
+            anyhow::bail!(
+                "plugin contains a nested SIGNATURE file which is not allowed: {}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -500,6 +511,23 @@ mod tests {
         std::fs::write(dir.join("SIGNATURE"), "some-signature").unwrap();
         let d2 = compute_plugin_digest(dir).unwrap();
         assert_eq!(d1, d2, "SIGNATURE file must be excluded from digest");
+    }
+
+    #[test]
+    fn test_compute_digest_rejects_nested_signature_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
+        std::fs::write(dir.join("SIGNATURE"), "root-sig").unwrap();
+        let sub = dir.join("claude-resources").join("skills");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("SIGNATURE"), "smuggled").unwrap();
+
+        let err = compute_plugin_digest(dir).unwrap_err().to_string();
+        assert!(
+            err.contains("nested SIGNATURE"),
+            "a nested SIGNATURE file must be rejected, not silently excluded: {err}"
+        );
     }
 
     /// Pins that `CHANGELOG.md` (surfaced verbatim in the Desktop UI) is covered by the digest:
