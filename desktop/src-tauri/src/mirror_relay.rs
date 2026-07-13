@@ -34,12 +34,12 @@ pub fn ensure_relay_for_port(bind_port: u16) {
 }
 
 /// Tears down the relay for a listener bound on `bind_port` (bounded, synchronous).
-/// Unconditional on Windows: a mode flip or detection failure must never orphan a unit.
+/// Runs on Windows regardless of the detected addressing mode (a mode flip or detection
+/// failure must never orphan a unit) — but skips when the distro is not running, since
+/// transient units die with it and probing must not boot a stopped distro.
 pub fn remove_relay_for_port(bind_port: u16) {
     #[cfg(all(target_os = "windows", not(test)))]
     {
-        // Transient systemd units die with the distro — nothing to tear down, and the
-        // probe (`--list --running`) never boots a stopped distro on app exit.
         if !distro_is_running() {
             return;
         }
@@ -101,23 +101,34 @@ fn ensure_relay_blocking(bind_port: u16) {
     sweep_orphan_relay_units_once();
     // socat upstream = the bridge's bind address (127.0.0.1 under mirrored), from the
     // addressing SSOT rather than hardcoded, so the two can never diverge (ADR-079).
-    let upstream =
-        speedwave_runtime::compose::host_bind_address().unwrap_or_else(|_| "127.0.0.1".to_string());
+    let upstream = match speedwave_runtime::compose::host_bind_address() {
+        Ok(addr) => addr,
+        Err(e) => {
+            // mirror_relay_port just resolved, so this is a poison/race edge — surface it.
+            log::warn!("relay ensure for bind {bind_port}: host_bind_address unavailable ({e}); assuming 127.0.0.1");
+            "127.0.0.1".to_string()
+        }
+    };
     let gateway = speedwave_runtime::consts::MIRROR_RELAY_GATEWAY_IP;
-    let script = relay_setup_script(relay_port, bind_port, gateway, &upstream);
+    let script = relay_setup_script(
+        RelayRoute {
+            relay_port,
+            bind_port,
+        },
+        gateway,
+        &upstream,
+    );
     let _ops = relay_ops_lock();
     let outcome = run_in_distro_root(&script);
     let mut failed = FAILED_RELAY_PORTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match outcome {
-        // The script prints CREATED only when it actually started the unit AND saw it
-        // active — an already-up relay polled every 30 s stays quiet.
-        Ok(out) if out.contains("SPW_RELAY_CREATED") => {
+    match outcome.map(|out| classify_relay_output(&out)) {
+        Ok(RelayOutcome::Created) => {
             failed.remove(&bind_port);
             log::info!("relay up: {gateway}:{relay_port} -> {upstream}:{bind_port}");
         }
-        Ok(out) if out.contains("SPW_RELAY_FAILED") => {
+        Ok(RelayOutcome::Failed) => {
             if failed.insert(bind_port) {
                 log::warn!(
                     "relay unit started but socat is not active for \
@@ -125,7 +136,7 @@ fn ensure_relay_blocking(bind_port: u16) {
                 );
             }
         }
-        Ok(_) => {
+        Ok(RelayOutcome::AlreadyActive) => {
             failed.remove(&bind_port);
             log::debug!("relay for bind {bind_port} already active");
         }
@@ -144,7 +155,7 @@ fn sweep_orphan_relay_units_once() {
     static SWEEP: std::sync::Once = std::sync::Once::new();
     SWEEP.call_once(|| {
         let _ops = relay_ops_lock();
-        match run_in_distro_root(RELAY_SWEEP_SCRIPT) {
+        match run_in_distro_root(&relay_sweep_script()) {
             Ok(_) => log::info!("swept orphaned relay units"),
             Err(e) => log::warn!("orphan relay-unit sweep failed: {e}"),
         }
@@ -153,98 +164,160 @@ fn sweep_orphan_relay_units_once() {
 
 /// True when the Speedwave distro is currently running. `--list --running` reports
 /// without booting anything (a `-d <distro>` exec would start a stopped distro).
+/// Negative results are cached briefly: exit paths tear down one relay per port, and a
+/// wedged/stopped WSL must cost one probe stall, not one per port.
 #[cfg(all(target_os = "windows", not(test)))]
 fn distro_is_running() -> bool {
-    let child = speedwave_runtime::binary::system_command("wsl.exe")
-        .args(["--list", "--running", "--quiet"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("wsl.exe --list --running spawn failed: {e}");
+    const NEGATIVE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+    static NEGATIVE_UNTIL: std::sync::Mutex<Option<std::time::Instant>> =
+        std::sync::Mutex::new(None);
+    let mut negative_until = NEGATIVE_UNTIL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(until) = *negative_until {
+        if std::time::Instant::now() < until {
             return false;
         }
-    };
-    match speedwave_runtime::binary::wait_with_output_timeout(
-        child,
+    }
+    let running = match speedwave_runtime::binary::run_wsl_bounded(
+        &["--list", "--running", "--quiet"],
+        None,
         std::time::Duration::from_secs(15),
     ) {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|l| l.trim().trim_matches('\0') == speedwave_runtime::consts::wsl_distro_name()),
+        Ok(out) if out.status.success() => running_list_names_distro(
+            &speedwave_runtime::runtime::decode_wsl_output(&out.stdout),
+            speedwave_runtime::consts::wsl_distro_name(),
+        ),
         Ok(_) => false,
         Err(e) => {
             log::warn!("wsl.exe --list --running failed: {e}");
             false
         }
-    }
+    };
+    *negative_until = (!running).then(|| std::time::Instant::now() + NEGATIVE_TTL);
+    running
 }
 
+/// True when a decoded `wsl --list --running --quiet` output names `distro`.
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+fn running_list_names_distro(decoded: &str, distro: &str) -> bool {
+    decoded
+        .lines()
+        .any(|l| l.trim().trim_matches('\0') == distro)
+}
+
+/// Runs `script` as root in the distro via stdin `bash -s` — bare `bash -lc <script>`
+/// splicing breaks on wsl.exe's default-shell reparse of the post-`--` line (ADR-079).
 #[cfg(all(target_os = "windows", not(test)))]
 fn run_in_distro_root(script: &str) -> anyhow::Result<String> {
-    let child = speedwave_runtime::binary::system_command("wsl.exe")
-        .args([
+    let out = speedwave_runtime::binary::run_wsl_bounded(
+        &[
             "-d",
             speedwave_runtime::consts::wsl_distro_name(),
             "-u",
             "root",
             "--",
             "bash",
-            "-lc",
-            script,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    // Bounded — a wedged wsl.exe must not pin a thread forever (ADR-079).
-    let out = speedwave_runtime::binary::wait_with_output_timeout(
-        child,
+            "-s",
+        ],
+        Some(script),
         std::time::Duration::from_secs(30),
     )?;
     if !out.status.success() {
         anyhow::bail!(
             "wsl.exe relay command exited with {}: {}",
             out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
+            speedwave_runtime::runtime::decode_wsl_output(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(speedwave_runtime::runtime::decode_wsl_output(&out.stdout))
 }
 
-/// Transient systemd unit name for a relay serving `bind_port` — the one place the
-/// scheme is encoded, so setup and teardown can never target divergent names.
+/// The one place the relay unit-name scheme is encoded — `relay_unit_name` and the
+/// sweep glob both derive from it, so setup/teardown/sweep can never diverge.
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+const RELAY_UNIT_PREFIX: &str = "spw-mirror-relay-";
+
+/// Printed by the setup script only when it started the unit AND saw socat active.
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+const RELAY_CREATED_MARKER: &str = "SPW_RELAY_CREATED";
+
+/// Printed by the setup script when the unit started but socat never went active.
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+const RELAY_FAILED_MARKER: &str = "SPW_RELAY_FAILED";
+
+/// What one setup-script run reported (see the marker consts).
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+#[derive(Debug, PartialEq, Eq)]
+enum RelayOutcome {
+    Created,
+    Failed,
+    AlreadyActive,
+}
+
+/// Maps setup-script stdout to its outcome; no marker means the early
+/// `is-active && exit 0` path fired (relay already up).
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+fn classify_relay_output(stdout: &str) -> RelayOutcome {
+    if stdout.contains(RELAY_CREATED_MARKER) {
+        RelayOutcome::Created
+    } else if stdout.contains(RELAY_FAILED_MARKER) {
+        RelayOutcome::Failed
+    } else {
+        RelayOutcome::AlreadyActive
+    }
+}
+
+/// Transient systemd unit name for a relay serving `bind_port`.
 #[cfg(any(all(target_os = "windows", not(test)), test))]
 fn relay_unit_name(bind_port: u16) -> String {
-    format!("spw-mirror-relay-{bind_port}")
+    format!("{RELAY_UNIT_PREFIX}{bind_port}")
 }
 
-/// Stops every `spw-mirror-relay-*` unit (orphan sweep); `--all` also catches `failed`
-/// crash-looped units so their `Restart=on-failure` cycle ends.
+/// Stops every relay unit (orphan sweep); `--all` also catches `failed` crash-looped
+/// units so their `Restart=on-failure` cycle ends.
 #[cfg(any(all(target_os = "windows", not(test)), test))]
-const RELAY_SWEEP_SCRIPT: &str = "systemctl list-units --plain --no-legend --all \
-     'spw-mirror-relay-*' | awk '{print $1}' | while IFS= read -r u; do \
-     systemctl stop \"$u\" 2>/dev/null; systemctl reset-failed \"$u\" 2>/dev/null; done; true";
+fn relay_sweep_script() -> String {
+    format!(
+        "systemctl list-units --plain --no-legend --all \
+         '{RELAY_UNIT_PREFIX}*' | awk '{{print $1}}' | while IFS= read -r u; do \
+         systemctl stop \"$u\" 2>/dev/null; systemctl reset-failed \"$u\" 2>/dev/null; done; true"
+    )
+}
+
+/// Bind→relay port pair for one relay; named fields prevent transposing the two
+/// same-typed ports (a swap would forward the wrong direction and still type-check).
+#[cfg(any(all(target_os = "windows", not(test)), test))]
+struct RelayRoute {
+    /// Guest-side port socat listens on (`mirror_relay_port(bind_port)`).
+    relay_port: u16,
+    /// Host-side port the bridge bound; socat's forward target.
+    bind_port: u16,
+}
 
 /// Adds the relay address to `lo` and starts `socat` as a transient systemd unit; prints
-/// `SPW_RELAY_CREATED` once verified active, `SPW_RELAY_FAILED` when socat cannot hold the port.
+/// [`RELAY_CREATED_MARKER`] once verified active, [`RELAY_FAILED_MARKER`] when socat
+/// cannot hold the port.
 #[cfg(any(all(target_os = "windows", not(test)), test))]
-fn relay_setup_script(relay_port: u16, bind_port: u16, gateway_ip: &str, upstream: &str) -> String {
-    let unit = relay_unit_name(bind_port);
+fn relay_setup_script(route: RelayRoute, gateway_ip: &str, upstream: &str) -> String {
+    let unit = relay_unit_name(route.bind_port);
     format!(
         "ip addr add {gw}/32 dev lo 2>/dev/null; \
          systemctl reset-failed '{unit}' 2>/dev/null; \
          systemctl is-active --quiet '{unit}' && exit 0; \
          systemd-run --quiet --unit='{unit}' \
          --property=Restart=on-failure --property=RestartSec=1 \
-         socat TCP-LISTEN:{relay_port},bind={gw},fork,reuseaddr TCP:{upstream}:{bind_port} \
-         || {{ echo SPW_RELAY_FAILED; exit 0; }}; \
+         socat TCP-LISTEN:{relay},bind={gw},fork,reuseaddr TCP:{upstream}:{bind} \
+         || {{ echo {failed}; exit 0; }}; \
          for i in 1 2 3 4 5; do \
-         systemctl is-active --quiet '{unit}' && {{ echo SPW_RELAY_CREATED; exit 0; }}; \
+         systemctl is-active --quiet '{unit}' && {{ echo {created}; exit 0; }}; \
          sleep 0.2; done; \
-         echo SPW_RELAY_FAILED",
-        gw = gateway_ip
+         echo {failed}",
+        gw = gateway_ip,
+        relay = route.relay_port,
+        bind = route.bind_port,
+        created = RELAY_CREATED_MARKER,
+        failed = RELAY_FAILED_MARKER
     )
 }
 
@@ -258,12 +331,23 @@ fn relay_teardown_script(bind_port: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{relay_setup_script, relay_teardown_script, RELAY_SWEEP_SCRIPT};
+    use super::{
+        classify_relay_output, relay_setup_script, relay_sweep_script, relay_teardown_script,
+        running_list_names_distro, RelayOutcome, RelayRoute, RELAY_CREATED_MARKER,
+        RELAY_FAILED_MARKER, RELAY_UNIT_PREFIX,
+    };
+
+    fn sample_route() -> RelayRoute {
+        // 60123 ^ 0x4000 = 43739 (the deterministic relay port).
+        RelayRoute {
+            relay_port: 43739,
+            bind_port: 60123,
+        }
+    }
 
     #[test]
     fn setup_script_listens_on_relay_port_forwards_to_bind_port() {
-        // 60123 ^ 0x4000 = 43739 (the deterministic relay port).
-        let s = relay_setup_script(43739, 60123, "10.200.0.1", "127.0.0.1");
+        let s = relay_setup_script(sample_route(), "10.200.0.1", "127.0.0.1");
         assert!(s.contains("ip addr add 10.200.0.1/32 dev lo"));
         assert!(
             s.contains("socat TCP-LISTEN:43739,bind=10.200.0.1,fork,reuseaddr TCP:127.0.0.1:60123")
@@ -279,8 +363,10 @@ mod tests {
     fn setup_script_verifies_socat_active_before_claiming_success() {
         // systemd-run returns 0 at unit START; a socat that cannot bind (port collision)
         // crash-loops — success must be claimed only after an is-active poll.
-        let s = relay_setup_script(43739, 60123, "10.200.0.1", "127.0.0.1");
-        let created = s.find("SPW_RELAY_CREATED").expect("CREATED marker present");
+        let s = relay_setup_script(sample_route(), "10.200.0.1", "127.0.0.1");
+        let created = s
+            .find(RELAY_CREATED_MARKER)
+            .expect("CREATED marker present");
         let poll = s
             .find("for i in 1 2 3 4 5")
             .expect("is-active poll present");
@@ -288,11 +374,37 @@ mod tests {
             poll < created,
             "CREATED must be printed inside the poll, after systemd-run"
         );
-        assert!(s.contains("SPW_RELAY_FAILED"), "failure marker present");
+        assert!(s.contains(RELAY_FAILED_MARKER), "failure marker present");
         assert!(
-            s.ends_with("echo SPW_RELAY_FAILED"),
+            s.ends_with(&format!("echo {RELAY_FAILED_MARKER}")),
             "poll exhaustion must report failure"
         );
+    }
+
+    #[test]
+    fn classify_relay_output_maps_markers_to_outcomes() {
+        assert_eq!(
+            classify_relay_output("noise\nSPW_RELAY_CREATED\n"),
+            RelayOutcome::Created
+        );
+        assert_eq!(
+            classify_relay_output("SPW_RELAY_FAILED\n"),
+            RelayOutcome::Failed
+        );
+        assert_eq!(classify_relay_output(""), RelayOutcome::AlreadyActive);
+        assert_eq!(
+            classify_relay_output("unit already up, no marker"),
+            RelayOutcome::AlreadyActive
+        );
+    }
+
+    #[test]
+    fn classify_relay_output_markers_match_setup_script() {
+        // The classifier and the script share the marker consts; this pins that the
+        // script actually emits them (a one-sided edit cannot silently misclassify).
+        let s = relay_setup_script(sample_route(), "10.200.0.1", "127.0.0.1");
+        assert!(s.contains(RELAY_CREATED_MARKER));
+        assert!(s.contains(RELAY_FAILED_MARKER));
     }
 
     #[test]
@@ -304,16 +416,28 @@ mod tests {
 
     #[test]
     fn sweep_script_stops_all_relay_units_and_only_relay_units() {
-        assert!(RELAY_SWEEP_SCRIPT.contains("'spw-mirror-relay-*'"));
+        let s = relay_sweep_script();
+        // The glob derives from RELAY_UNIT_PREFIX — same namespace the setup script
+        // creates units in, so a prefix rename can never strand the sweep.
+        assert!(s.contains(&format!("'{RELAY_UNIT_PREFIX}*'")));
+        assert!(s.contains("--all"), "must catch failed units");
+        assert!(s.contains("systemctl stop"));
+        assert!(s.contains("reset-failed"));
         assert!(
-            RELAY_SWEEP_SCRIPT.contains("--all"),
-            "must catch failed units"
-        );
-        assert!(RELAY_SWEEP_SCRIPT.contains("systemctl stop"));
-        assert!(RELAY_SWEEP_SCRIPT.contains("reset-failed"));
-        assert!(
-            !RELAY_SWEEP_SCRIPT.contains("systemctl stop socat"),
+            !s.contains("systemctl stop socat"),
             "must never stop units outside the spw-mirror-relay-* namespace"
         );
+    }
+
+    #[test]
+    fn running_list_matcher_handles_trim_and_nul_padding() {
+        assert!(running_list_names_distro("Speedwave\n", "Speedwave"));
+        assert!(running_list_names_distro(
+            "Ubuntu\n  Speedwave\u{0}\u{0}\n",
+            "Speedwave"
+        ));
+        assert!(!running_list_names_distro("Ubuntu\n", "Speedwave"));
+        assert!(!running_list_names_distro("", "Speedwave"));
+        assert!(!running_list_names_distro("Speedwave-old\n", "Speedwave"));
     }
 }

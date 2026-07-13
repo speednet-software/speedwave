@@ -494,14 +494,22 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Provision script for `ensure_relay_packages`: fails (exit 1) only when `iptables` is
-/// still missing after install; a missing `socat` degrades to the `SPW_SOCAT_MISSING` marker.
+/// Marker printed by `relay_packages_script` when `socat` is still missing after install
+/// (non-fatal — the relay degrades). One SSOT for the emitter and the `ensure` matcher.
 #[cfg(any(target_os = "windows", test))]
-const RELAY_PACKAGES_SCRIPT: &str = "\
-command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0\n\
-apt-get update -qq && apt-get install -y -qq iptables socat >/dev/null\n\
-command -v iptables >/dev/null 2>&1 || { echo 'iptables missing after install' >&2; exit 1; }\n\
-command -v socat >/dev/null 2>&1 || echo SPW_SOCAT_MISSING\n";
+const SPW_SOCAT_MISSING_MARKER: &str = "SPW_SOCAT_MISSING";
+
+/// Provision script for `ensure_relay_packages`: fails (exit 1) only when `iptables` is
+/// still missing after install; a missing `socat` degrades to `SPW_SOCAT_MISSING_MARKER`.
+#[cfg(any(target_os = "windows", test))]
+fn relay_packages_script() -> String {
+    format!(
+        "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0\n\
+         apt-get update -qq && apt-get install -y -qq iptables socat >/dev/null\n\
+         command -v iptables >/dev/null 2>&1 || {{ echo 'iptables missing after install' >&2; exit 1; }}\n\
+         command -v socat >/dev/null 2>&1 || echo {SPW_SOCAT_MISSING_MARKER}\n"
+    )
+}
 
 /// Ensures `iptables` (CNI-critical — error when missing) and `socat` (ADR-079 relay —
 /// warn-only) in the distro. Idempotent; runs as root via `bash -s` on stdin; bounded.
@@ -523,17 +531,23 @@ fn ensure_relay_packages() -> anyhow::Result<()> {
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(RELAY_PACKAGES_SCRIPT.as_bytes())?;
+        stdin.write_all(relay_packages_script().as_bytes())?;
     }
     let output =
-        crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(120))?;
+        crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(120))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "ensuring relay packages (iptables/socat) in distro '{}': {e}",
+                    consts::wsl_distro_name()
+                )
+            })?;
     if !output.status.success() {
         anyhow::bail!(
             "iptables provisioning failed (CNI networking cannot work without it): {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    if String::from_utf8_lossy(&output.stdout).contains("SPW_SOCAT_MISSING") {
+    if String::from_utf8_lossy(&output.stdout).contains(SPW_SOCAT_MISSING_MARKER) {
         log::warn!(
             "socat unavailable in the distro — WSL2 mirrored-mode host relay (ADR-079) \
              is disabled until it installs"
@@ -1511,6 +1525,13 @@ pub fn ensure_windows_invariants() {
         if let Err(e) = ensure_wslconfig_vpn_compat() {
             log::warn!("could not verify .wslconfig VPN compat: {e}");
         }
+        // Upgrades skip the setup wizard (check_runtime returns Ready, so init_vm_windows
+        // never runs); this per-start path is the only place the upgrade population installs
+        // iptables (CNI) + socat (ADR-079 relay). Warn-only here — a failed compose up
+        // surfaces the iptables error on its own.
+        if let Err(e) = ensure_relay_packages() {
+            log::warn!("could not ensure relay packages (iptables/socat): {e}");
+        }
     });
 }
 
@@ -2025,23 +2046,45 @@ mod tests {
     fn relay_packages_script_is_fatal_on_iptables_soft_on_socat() {
         // Contract: a failed iptables install must FAIL provisioning (CNI-critical);
         // a missing socat only degrades the ADR-079 relay via the marker.
-        assert!(RELAY_PACKAGES_SCRIPT.contains("apt-get install -y -qq iptables socat"));
+        let script = relay_packages_script();
+        assert!(script.contains("apt-get install -y -qq iptables socat"));
         assert!(
-            RELAY_PACKAGES_SCRIPT.contains("command -v iptables >/dev/null 2>&1 || { echo"),
+            script.contains("command -v iptables >/dev/null 2>&1 || { echo"),
             "iptables absence must be checked after install"
         );
         assert!(
-            RELAY_PACKAGES_SCRIPT.contains("exit 1"),
+            script.contains("exit 1"),
             "iptables absence must exit non-zero (fatal)"
         );
+        // Marker is single-sourced: the emitter and the `ensure` matcher share the const.
         assert!(
-            RELAY_PACKAGES_SCRIPT.contains("|| echo SPW_SOCAT_MISSING"),
+            script.contains(&format!("|| echo {SPW_SOCAT_MISSING_MARKER}")),
             "socat absence must only emit the degradation marker"
         );
         // Short-circuit: both present → exit 0 before touching apt.
-        assert!(RELAY_PACKAGES_SCRIPT.starts_with(
+        assert!(script.starts_with(
             "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0"
         ));
+    }
+
+    #[test]
+    fn ensure_windows_invariants_installs_relay_packages_for_upgrades() {
+        // Wiring guard: upgrades skip the setup wizard (check_runtime Ready →
+        // init_vm_windows never runs), so the per-start invariants path is the ONLY
+        // installer of iptables/socat for the upgrade population — dropping this call
+        // strands mirrored-mode relay dead on every upgraded install (ADR-079).
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn ensure_windows_invariants() {\n")
+            .expect("windows ensure_windows_invariants must exist");
+        let region = &src[start..];
+        let end = region
+            .find("\n/// No-op off Windows.")
+            .unwrap_or(region.len());
+        assert!(
+            region[..end].contains("ensure_relay_packages"),
+            "the per-start Windows invariants path must call ensure_relay_packages()"
+        );
     }
 
     #[test]

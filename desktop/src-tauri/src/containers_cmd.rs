@@ -866,27 +866,24 @@ pub async fn factory_reset(
     // 1. Stop mcp-os watchdog
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // 2. Stop IDE Bridge
-    if let Ok(mut guard) = ide_bridge.lock() {
-        if let Some(mut bridge) = guard.take() {
+    // 2. Take the subsystems out of their guards; the actual stops run inside the blocking
+    //    wipe below. IDE Bridge stop() does synchronous relay teardown (ADR-079) that would
+    //    otherwise block this async command — and it's pointless here, since the VM wipe
+    //    kills the transient relay units anyway (same reason mcp-os skips remove_relay).
+    let ide_bridge_to_stop = ide_bridge.lock().ok().and_then(|mut guard| guard.take());
+    let mcp_os_to_stop = mcp_os.lock().ok().and_then(|mut guard| guard.take());
+
+    // 3. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(mut bridge) = ide_bridge_to_stop {
             if let Err(e) = bridge.stop() {
                 log::warn!("factory_reset: IDE Bridge stop: {e}");
             }
         }
-    }
-
-    // 3. Stop mcp-os (kill child, join drain threads, release log handles);
-    //    explicit stop + cleanup_files keeps parity with run_exit_cleanup.
-    if let Ok(mut guard) = mcp_os.lock() {
-        if let Some(proc) = guard.take() {
-            // No remove_relay_for_port: the wipe below deletes the VM and transient
-            // relay units die with the distro (ADR-079).
+        // Kill child, join drain threads, release log handles — parity with run_exit_cleanup.
+        if let Some(proc) = mcp_os_to_stop {
             let _ = crate::reconcile::stop_worker("factory_reset: mcp-os", proc);
         }
-    }
-
-    // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
-    let result = tokio::task::spawn_blocking(|| {
         log::info!("factory_reset: starting wipe");
         setup_wizard::factory_reset().map_err(|e| {
             log::error!("factory_reset: error: {e}");

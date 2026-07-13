@@ -288,6 +288,17 @@ fn mcp_os_health_outcome(
     }
 }
 
+/// Relay swap after a host worker respawns on a possibly-new port: drop the old relay
+/// only when the port actually changed — an ephemeral-port reuse keeps the existing relay
+/// valid (it still forwards to the same loopback port), and an unconditional async remove
+/// would race the fresh ensure and kill the new relay for ~30 s. ADR-079.
+fn swap_relay_for_respawn(old_port: u16, new_port: u16) {
+    if old_port != new_port {
+        crate::mirror_relay::remove_relay_for_port_async(old_port);
+    }
+    crate::mirror_relay::ensure_relay_for_port(new_port);
+}
+
 /// mcp-os watchdog thread.
 fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -357,10 +368,7 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
                 }
                 Tick::Respawned { old, new } => {
                     log::info!("mcp-os watchdog: respawned (port {new})");
-                    if new != old {
-                        crate::mirror_relay::remove_relay_for_port_async(old);
-                    }
-                    crate::mirror_relay::ensure_relay_for_port(new);
+                    swap_relay_for_respawn(old, new);
                     reconcile::reconcile_compose_port(&app_handle);
                 }
                 Tick::Cooldown => {
@@ -490,6 +498,10 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
     oauth_consumers.sort();
 
+    // Relay port of a worker we stopped to respawn; its teardown is deferred until the new
+    // port is known so an ephemeral-port reuse keeps the relay instead of racing it (S3/ADR-079).
+    let mut old_relay_port: Option<u16> = None;
+
     // A running worker's consumer set is fixed at spawn; reconcile against the desired set.
     if let Some(running) = map.get(project) {
         let mut current: Vec<String> = running.spec().consumers().to_vec();
@@ -506,10 +518,8 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
                     "oauth[{project}]: consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
                 );
                 if let Some(proc) = map.remove(project) {
-                    let port = reconcile::stop_worker(&format!("oauth[{project}]"), proc);
-                    // Async: teardown can block for tens of seconds and we hold the oauth
-                    // map lock; the fresh spawn below ensures the new relay (ADR-079).
-                    crate::mirror_relay::remove_relay_for_port_async(port);
+                    old_relay_port =
+                        Some(reconcile::stop_worker(&format!("oauth[{project}]"), proc));
                 }
                 if clear_bearer_map {
                     // Drop the stale bearer-map so compose stops injecting into orphaned containers.
@@ -526,6 +536,10 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
 
     if oauth_consumers.is_empty() {
+        // No replacement worker follows — drop the stopped worker's relay now.
+        if let Some(old) = old_relay_port {
+            crate::mirror_relay::remove_relay_for_port_async(old);
+        }
         log::debug!(
             "ensure_oauth_running: no oauth-consuming integration enabled for '{project}' — not spawning"
         );
@@ -539,6 +553,9 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     let script = match speedwave_runtime::build::resolve_oauth_script() {
         Some(s) => s.to_string_lossy().to_string(),
         None => {
+            if let Some(old) = old_relay_port {
+                crate::mirror_relay::remove_relay_for_port_async(old);
+            }
             log::warn!(
                 "ensure_oauth_running: oauth worker script not found — \
                  OAuth refresh will be unavailable for '{project}'"
@@ -555,15 +572,22 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         Ok(proc) => {
             let port = proc.port();
             log::info!("oauth[{project}]: started (port {port})");
-            // Container workers dial WORKER_OAUTH_URL; under WSL2 mirrored mode that
-            // reaches the guest relay, so ensure it here too (ADR-079).
-            crate::mirror_relay::ensure_relay_for_port(port);
+            // Container workers dial WORKER_OAUTH_URL; under WSL2 mirrored mode that reaches
+            // the guest relay. Swap (not blind re-add) so an ephemeral-port reuse across the
+            // respawn doesn't tear down the fresh relay (ADR-079).
+            match old_relay_port {
+                Some(old) => swap_relay_for_respawn(old, port),
+                None => crate::mirror_relay::ensure_relay_for_port(port),
+            }
             map.insert(project.to_string(), proc);
             drop(map);
             OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
             true
         }
         Err(e) => {
+            if let Some(old) = old_relay_port {
+                crate::mirror_relay::remove_relay_for_port_async(old);
+            }
             log::error!("oauth[{project}]: spawn failed: {e}");
             false
         }
@@ -681,10 +705,7 @@ fn start_per_project_watchdog<P>(
             }
             // Recreate containers (panic-isolated per project) so consumers pick up the new port.
             for worker in outcome.respawned {
-                if worker.old_port != worker.new_port {
-                    crate::mirror_relay::remove_relay_for_port_async(worker.old_port);
-                }
-                crate::mirror_relay::ensure_relay_for_port(worker.new_port);
+                swap_relay_for_respawn(worker.old_port, worker.new_port);
                 let name = worker.name;
                 let n = name.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1741,13 +1762,14 @@ mod tests {
             .expect("start_per_project_watchdog must exist");
         let region = &source[start..];
         let end = region.find("\nfn ").unwrap_or(region.len());
+        // Match the CALL token, not the bare identifier — a comment must not satisfy it.
         assert!(
-            region[..end].contains("ensure_relay_for_port"),
-            "per-project watchdog must re-ensure relays for live + respawned workers"
+            region[..end].contains("mirror_relay::ensure_relay_for_port("),
+            "per-project watchdog must re-ensure relays for live workers"
         );
         assert!(
-            region[..end].contains("remove_relay_for_port"),
-            "per-project watchdog must drop the old relay on a port-changing respawn"
+            region[..end].contains("swap_relay_for_respawn("),
+            "per-project watchdog must swap relays on a port-changing respawn"
         );
     }
 
@@ -1762,9 +1784,35 @@ mod tests {
         // Bound to this fn (up to the next top-level `fn`) so we don't match a neighbour.
         let region = &source[start..];
         let end = region.find("\nfn ").unwrap_or(region.len());
+        // Match the CALL token, not the bare identifier — a comment must not satisfy it.
         assert!(
-            region[..end].contains("ensure_relay_for_port"),
+            region[..end].contains("mirror_relay::ensure_relay_for_port("),
             "mcp-os watchdog must re-ensure the relay so a distro restart self-heals"
+        );
+        assert!(
+            region[..end].contains("swap_relay_for_respawn("),
+            "mcp-os watchdog must swap the relay on respawn"
+        );
+    }
+
+    #[test]
+    fn swap_relay_for_respawn_only_drops_old_when_port_changed() {
+        // Guard against an ephemeral-port reuse tearing down the fresh relay: the old
+        // relay is dropped ONLY when the port actually changed (ADR-079 / S3).
+        let source = include_str!("main.rs");
+        let start = source
+            .find("fn swap_relay_for_respawn")
+            .expect("swap_relay_for_respawn must exist");
+        let region = &source[start..];
+        let end = region.find("\nfn ").unwrap_or(region.len());
+        assert!(
+            region[..end].contains("if old_port != new_port"),
+            "swap must guard the old-relay teardown on a port change"
+        );
+        assert!(
+            region[..end].contains("mirror_relay::remove_relay_for_port_async(")
+                && region[..end].contains("mirror_relay::ensure_relay_for_port("),
+            "swap must drop the old relay and ensure the new one"
         );
     }
 

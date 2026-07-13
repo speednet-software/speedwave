@@ -1,7 +1,9 @@
 # ADR-007: IDE Bridge as Proxy
 
-> **Status:** Accepted
+> **Status:** Accepted (Windows bind revised by [ADR-079](ADR-079-wsl2-mirrored-container-host-relay.md))
 > **Context:** Claude runs inside a VM (Lima on macOS, WSL2 on Windows) and cannot see the host's IDE lock files, yet Claude Code's IDE integration depends on them.
+>
+> **Update (ADR-079):** the "binds the WSL vEthernet adapter IP on Windows" note below holds only under **NAT** networking. Under **mirrored** networking (the default) the bridge binds `127.0.0.1` and containers reach it via a guest-side `socat` relay — invisible to the LAN either way.
 
 ## Decision
 

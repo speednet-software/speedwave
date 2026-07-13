@@ -32,14 +32,14 @@ pub use proxy::{
 
 // Host addressing SSOT (ADR-067) — public API surface.
 pub use addressing::{
-    container_facing_port, host_addressing, host_bind_address, host_gateway_ip,
-    invalidate_host_addressing_cache, mirror_relay_port, AddressingMode, HostAddressing,
-    HostAddressingComputer,
+    container_facing_port, container_facing_port_for, host_addressing, host_bind_address,
+    host_bind_port_for_container_facing, host_gateway_ip, invalidate_host_addressing_cache,
+    mirror_relay_port, AddressingMode, HostAddressing, HostAddressingComputer,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use addressing::{
     pin_direct_addressing, pin_mirrored_addressing, reset_host_addressing_computer_for_test,
-    set_host_addressing_computer_for_test, AddressingGuard, FixedComputer,
+    set_host_addressing_computer_for_test, AddressingGuard,
 };
 
 // Final YAML env-scalar quoting pass — `harden_env_scalar_quoting` is called by

@@ -14,15 +14,19 @@ pub enum AddressingMode {
 
 /// Container-side `gateway_ip` + host-side `bind_address`. On Windows NAT both equal the
 /// WSL adapter IP; mirrored mode splits them (bind `127.0.0.1`, gateway = relay IP) — ADR-079.
+///
+/// Fields are private so the two constructors are the ONLY way to build one: they uphold the
+/// cross-field invariant (`MirroredRelay` ⇒ relay gateway + loopback bind) a raw literal could
+/// violate. Read the halves through `host_gateway_ip()`/`host_bind_address()`/`container_facing_port_for`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostAddressing {
     /// IP a container's `host.docker.internal` resolves to.
-    pub gateway_ip: String,
+    gateway_ip: String,
     /// Address the host process binds listeners on.
-    pub bind_address: String,
+    bind_address: String,
     /// Explicit mode — never inferred from `gateway_ip` (a user-pinned WSL NAT subnet
     /// can legitimately equal the relay IP and must not trigger port translation).
-    pub mode: AddressingMode,
+    mode: AddressingMode,
 }
 
 impl HostAddressing {
@@ -120,10 +124,41 @@ fn relay_port_for(bind_port: u16) -> u16 {
     }
 }
 
+/// Inverse of [`relay_port_for`] (the 3-cycle runs the other way: 16384→32768→49152→16384).
+fn relay_port_inverse(relay_port: u16) -> u16 {
+    match relay_port {
+        0xC000 => 0x4000,
+        0x4000 => 0x8000,
+        p => p ^ 0x4000,
+    }
+}
+
 /// The port a container dials to reach a host listener bound on `bind_port`: the relay
 /// port under WSL2 mirrored mode, else unchanged. The one bind→container port SSOT.
 pub fn container_facing_port(bind_port: u16) -> u16 {
     mirror_relay_port(bind_port).unwrap_or(bind_port)
+}
+
+/// Container-facing port for `bind_port` under an already-resolved `addressing` snapshot —
+/// no cache read, so a caller holding one addressing value avoids a re-resolve race (the
+/// cache can flip to `Err` mid-call and silently untranslate a live relay port).
+pub fn container_facing_port_for(bind_port: u16, addressing: &HostAddressing) -> u16 {
+    match addressing.mode {
+        AddressingMode::MirroredRelay => relay_port_for(bind_port),
+        AddressingMode::Direct => bind_port,
+    }
+}
+
+/// Inverse of [`container_facing_port`]: the host bind port a `container_facing` port maps
+/// back to under the current addressing. Off mirrored mode (or on detection failure) the
+/// container-facing port equals the bind port, so the identity is correct.
+pub fn host_bind_port_for_container_facing(container_facing: u16) -> u16 {
+    match host_addressing() {
+        Ok(addr) if addr.mode == AddressingMode::MirroredRelay => {
+            relay_port_inverse(container_facing)
+        }
+        _ => container_facing,
+    }
 }
 
 /// Clears the cached `HostAddressing` so the next call recomputes.
@@ -180,18 +215,20 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
 /// Test seam: inject a fixture computer. Pair with `#[serial_test::serial(host_addressing)]`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
-    if let Ok(mut slot) = COMPUTER.write() {
-        *slot = Some(computer);
-    }
+    // Recover from poison rather than silently skipping the install — a prior test panic
+    // must not leave the next test running against the wrong (real) computer.
+    *COMPUTER
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(computer);
     invalidate_host_addressing_cache();
 }
 
 /// Test seam: restore the platform default computer.
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_host_addressing_computer_for_test() {
-    if let Ok(mut slot) = COMPUTER.write() {
-        *slot = None;
-    }
+    *COMPUTER
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     invalidate_host_addressing_cache();
 }
 
@@ -536,7 +573,8 @@ mod resolver_tests {
         assert_eq!(mirror_relay_port(60123), Some(60123 ^ 0x4000));
         assert_ne!(mirror_relay_port(60123), Some(60123));
 
-        // 16384's XOR image is 0 (invalid); the bijection swaps it with 32768's.
+        // 16384's XOR image is 0 (invalid); the bijection routes the 3-cycle
+        // 16384→49152→32768→16384 around it instead.
         assert_eq!(mirror_relay_port(0x4000), Some(0xC000));
         assert_eq!(mirror_relay_port(0x8000), Some(0x4000));
 
@@ -571,6 +609,42 @@ mod resolver_tests {
             );
             seen[relay as usize] = true;
         }
+    }
+
+    #[test]
+    fn relay_port_inverse_round_trips_forward_mapping() {
+        for bind in 1..=u16::MAX {
+            assert_eq!(
+                relay_port_inverse(relay_port_for(bind)),
+                bind,
+                "inverse must undo relay_port_for for bind {bind}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn container_facing_port_round_trips_via_host_bind_port() {
+        let _mirrored = pin_mirrored_addressing();
+        for bind in [1u16, 60123, 0x4000, 0x8000, 0xC000, u16::MAX] {
+            let facing = container_facing_port(bind);
+            assert_ne!(facing, bind, "mirrored must translate bind {bind}");
+            assert_eq!(host_bind_port_for_container_facing(facing), bind);
+        }
+
+        // Direct mode: container-facing == bind, and the reverse is the identity.
+        let _direct = pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
+        assert_eq!(container_facing_port(60123), 60123);
+        assert_eq!(host_bind_port_for_container_facing(60123), 60123);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn container_facing_port_for_uses_snapshot_not_cache() {
+        let mirrored = HostAddressing::mirrored_relay();
+        let direct = HostAddressing::direct(crate::consts::LIMA_VZ_HOST_IP, "127.0.0.1");
+        assert_eq!(container_facing_port_for(60123, &mirrored), 60123 ^ 0x4000);
+        assert_eq!(container_facing_port_for(60123, &direct), 60123);
     }
 
     #[test]

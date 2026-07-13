@@ -21,7 +21,7 @@ GLPI's API supports all three grants, and the actor in its historical records de
 The host runs the initial exchange:
 
 1. Generate a PKCE verifier + S256 challenge[^4] and a random `state` (CSRF).
-2. Bind a one-shot callback server on **`127.0.0.1:<port>`** — the browser-side loopback, deliberately distinct from `host_bind_address()` (which targets container reach and is the WSL adapter IP on Windows). A fixed `redirect_port` is supported for IdPs that require a registered redirect URI; otherwise an ephemeral port is used.[^5]
+2. Bind a one-shot callback server on **`127.0.0.1:<port>`** — the browser-side loopback, deliberately distinct from `host_bind_address()` (which targets container reach — the WSL adapter IP under **NAT**, but loopback fronted by the ADR-079 guest relay under **mirrored** mode). A fixed `redirect_port` is supported for IdPs that require a registered redirect URI; otherwise an ephemeral port is used.[^5]
 3. Open the browser to `authorize_url` with `redirect_uri` + `state` + `code_challenge`.
 4. Receive the callback, verify `state`, exchange the `code` (+ verifier) for access + refresh tokens, and persist the full state via the shared writer.
 

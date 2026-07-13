@@ -767,8 +767,8 @@ fn is_propagation_error(e: &anyhow::Error) -> bool {
             .any(|frag| s.contains(frag))
 }
 
-/// True for the CNI collision family left when a prior container's CNI DEL never ran
-/// (crash, `wsl --shutdown`, reboot): next start hits "Chain already exists" or a stale IP.
+/// True for stale-CNI collisions (a prior CNI DEL never ran: crash/`wsl --shutdown`/reboot)
+/// and, via the last arm, ANY `cni.setup … failed` — the named-state cleanup no-ops if none match.
 fn is_stale_cni_error(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
     s.contains("chain already exists")
@@ -802,9 +802,10 @@ pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
     );
     for ch in scan_cni_ids(&msg, "CNI-") {
         // Guarded `eval`: only shell parsing survives the `\"` in %q comments (xargs dies
-        // on "unmatched double quote"); the case-guard rejects `$`/backtick lines first.
+        // on "unmatched double quote"); the case-guard skips any rule line carrying a shell
+        // metacharacter ($, backtick, ;, |, &, redirects) — a root command-substitution sink.
         script.push_str(&format!(
-            "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do case \"$r\" in *'$'*|*'`'*) continue;; esac; eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
+            "iptables -t nat -S 2>/dev/null | grep -- '-j {ch}' | sed 's/^-A/-D/' | while IFS= read -r r; do case \"$r\" in *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*) continue;; esac; eval \"iptables -t nat $r\" 2>/dev/null || true; done\n\
              iptables -t nat -F {ch} 2>/dev/null || true\n\
              iptables -t nat -X {ch} 2>/dev/null || true\n"
         ));
@@ -826,7 +827,7 @@ where
 {
     match up() {
         Err(e) if is_stale_cni_error(&e) => {
-            log::warn!("compose up hit stale CNI state ({e}); flushing the named CNI state and retrying once");
+            log::warn!("compose up hit a CNI setup failure ({e}); flushing any named CNI state and retrying once");
             if let Err(ce) = cleanup(&e) {
                 log::warn!("CNI cleanup failed (continuing to retry): {ce}");
             }
@@ -2650,6 +2651,21 @@ services:
     }
 
     #[test]
+    fn scan_cni_ids_excludes_shared_hostport_infrastructure_chains() {
+        // Deliberate: the hex-suffix filter targets ONLY per-container `CNI-<hex>` chains.
+        // The shared `CNI-HOSTPORT-*`/`CNI-DN-*` portmap chains are reused across every
+        // container — flushing them would break port-forwarding for healthy containers, so
+        // they must NOT match. This pins the exclusion as intended behavior, not an oversight.
+        let s =
+            "CNI-HOSTPORT-DNAT CNI-HOSTPORT-SETMARK CNI-HOSTPORT-MASQ CNI-DN-abcdef CNI-68fe31e0";
+        assert_eq!(
+            scan_cni_ids(s, "CNI-"),
+            vec!["CNI-68fe31e0"],
+            "only the per-container hex chain is targeted; shared HOSTPORT/DN chains are spared"
+        );
+    }
+
+    #[test]
     fn cni_cleanup_command_is_quote_free_base64_pipe() {
         let cmd = cni_cleanup_command(&anyhow::anyhow!("iptables: Chain already exists"));
         assert!(
@@ -2700,8 +2716,10 @@ services:
         assert!(script.contains("eval \"iptables -t nat $r\""));
         assert!(script.contains("while IFS= read -r r"));
         assert!(
-            script.contains("case \"$r\" in *'$'*|*'`'*) continue;; esac"),
-            "eval must be guarded against $/backtick (root command-substitution sink): {script}"
+            script.contains(
+                "case \"$r\" in *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*) continue;; esac"
+            ),
+            "eval must skip any rule line with a shell metacharacter (root command-substitution sink): {script}"
         );
         assert!(
             !script.contains("xargs"),

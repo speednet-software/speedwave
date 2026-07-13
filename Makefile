@@ -194,7 +194,8 @@ setup-dev-windows:
 	  MINGW*|MSYS*|CYGWIN*) ;; \
 	  *) echo "❌ setup-dev-windows is Windows-only (run from Git Bash)."; exit 1;; \
 	esac
-	@powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-windows.ps1
+	@ps="$${SYSTEMROOT:-C:\\Windows}"; ps="$${ps//\\//}/System32/WindowsPowerShell/v1.0/powershell.exe"; \
+	 "$$ps" -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-windows.ps1
 
 # ── Aggregate targets ────────────────────────────────────────────────────────
 

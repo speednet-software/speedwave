@@ -1,7 +1,9 @@
 # ADR-013: mcp-os as Host Process — Implementation Details
 
-> **Status:** Accepted
+> **Status:** Accepted (Windows bind revised by [ADR-079](ADR-079-wsl2-mirrored-container-host-relay.md))
 > **Context:** OS-integration APIs (Calendar, Reminders, Mail on macOS; Outlook/MAPI on Windows) are host-only and cannot be reached from inside an isolated container.
+>
+> **Update (ADR-079):** the "`MCP_LISTEN_HOST` = WSL vEthernet adapter IP because mirrored mode breaks `127.0.0.1`" note below holds only under **NAT** networking. Under genuine **mirrored** networking (the default) mcp-os binds `127.0.0.1` and containers reach it through a guest-side `socat` relay — so the `127.0.0.1` server-factory default is the intended mirrored bind, not a macOS-only fallback.
 
 ## Decision
 
