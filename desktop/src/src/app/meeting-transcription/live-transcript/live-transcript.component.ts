@@ -2,11 +2,16 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  ElementRef,
+  Injector,
+  afterNextRender,
   computed,
+  effect,
   inject,
   input,
   output,
   signal,
+  viewChild,
 } from '@angular/core';
 import { Router } from '@angular/router';
 
@@ -52,7 +57,12 @@ interface TranscriptLine {
         </div>
       }
 
-      <div class="flex-1 overflow-y-auto" data-testid="transcript-body">
+      <div
+        #body
+        class="flex-1 overflow-y-auto"
+        data-testid="transcript-body"
+        (scroll)="onBodyScroll()"
+      >
         @if (lines().length === 0) {
           <p class="text-[12px] text-[var(--ink-mute)]">No transcript yet.</p>
         }
@@ -139,6 +149,49 @@ export class LiveTranscriptComponent {
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly router = inject(Router);
+  private readonly injector = inject(Injector);
+
+  /** The scrollable transcript body. */
+  private readonly body = viewChild<ElementRef<HTMLDivElement>>('body');
+  /** False once the user scrolls up; re-arms when they return to the bottom. */
+  private readonly stickToBottom = signal(true);
+  /** Id-only view of the session, so snapshot updates don't retrigger effects. */
+  private readonly sessionId = computed(() => this.session()?.id ?? '');
+
+  /** Wires the auto-scroll effects (constructor = injection context). */
+  constructor() {
+    // A newly opened session always starts pinned to the newest lines.
+    effect(() => {
+      this.sessionId();
+      this.stickToBottom.set(true);
+    });
+    // Follow the live tail while recording, unless the user scrolled up to read.
+    effect(() => {
+      this.lines();
+      this.draft();
+      if (this.status() === 'recording' && this.stickToBottom()) this.scrollToBottom();
+    });
+  }
+
+  /** Tracks whether the user sits at (within 50 px of) the bottom. */
+  onBodyScroll(): void {
+    const el = this.body()?.nativeElement;
+    if (!el) return;
+    this.stickToBottom.set(el.scrollHeight - el.scrollTop - el.clientHeight < 50);
+  }
+
+  /** Pins the transcript body to the bottom after Angular commits new lines. */
+  private scrollToBottom(): void {
+    afterNextRender(
+      {
+        write: () => {
+          const el = this.body()?.nativeElement;
+          if (el) el.scrollTop = el.scrollHeight;
+        },
+      },
+      { injector: this.injector }
+    );
+  }
 
   /** Confirms, drops the transcript into the chat, then opens the chat tab. */
   async sendToChat(): Promise<void> {

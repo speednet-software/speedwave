@@ -167,6 +167,93 @@ describe('LiveTranscriptComponent', () => {
     expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain('chat');
   });
 
+  describe('auto-scroll', () => {
+    /**
+     * The scrollable body element, with jsdom-stubbed scroll metrics.
+     * @param scrollTop - simulated scroll position (scrollHeight 1000, clientHeight 200)
+     */
+    function bodyEl(scrollTop: number): HTMLElement {
+      const el = fixture.nativeElement.querySelector('[data-testid="transcript-body"]');
+      Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+      el.scrollTop = scrollTop;
+      return el;
+    }
+    function scrollSpy() {
+      return vi.spyOn(component as unknown as { scrollToBottom(): void }, 'scrollToBottom');
+    }
+
+    it('follows new lines while recording', () => {
+      const spy = scrollSpy();
+      fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
+      fixture.detectChanges();
+      expect(spy).toHaveBeenCalled();
+      spy.mockClear();
+      fixture.componentRef.setInput(
+        'session',
+        session({ live_segments: [seg(0, 'a'), seg(1, 'b')] })
+      );
+      fixture.detectChanges();
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('follows draft updates while recording', () => {
+      fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
+      fixture.detectChanges();
+      const spy = scrollSpy();
+      svc.liveDraft.set('tail in progress');
+      fixture.detectChanges();
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('stops following once the user scrolls up, and re-arms at the bottom', () => {
+      fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
+      fixture.detectChanges();
+      const el = bodyEl(100); // 1000 - 100 - 200 = 700 from the bottom
+      el.dispatchEvent(new Event('scroll'));
+      const spy = scrollSpy();
+      fixture.componentRef.setInput(
+        'session',
+        session({ live_segments: [seg(0, 'a'), seg(1, 'b')] })
+      );
+      fixture.detectChanges();
+      expect(spy).not.toHaveBeenCalled();
+
+      el.scrollTop = 790; // 1000 - 790 - 200 = 10 → within the 50 px re-arm band
+      el.dispatchEvent(new Event('scroll'));
+      fixture.componentRef.setInput(
+        'session',
+        session({ live_segments: [seg(0, 'a'), seg(1, 'b'), seg(2, 'c')] })
+      );
+      fixture.detectChanges();
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('does not auto-scroll a finished session', () => {
+      const spy = scrollSpy();
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'a')] })
+      );
+      fixture.detectChanges();
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('re-arms the bottom pin when switching to a different session', () => {
+      fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
+      fixture.detectChanges();
+      const el = bodyEl(100);
+      el.dispatchEvent(new Event('scroll')); // user reads older lines
+      const spy = scrollSpy();
+      fixture.componentRef.setInput(
+        'session',
+        session({ id: 'sess-2', live_segments: [seg(0, 'x')] })
+      );
+      fixture.detectChanges();
+      expect(spy).toHaveBeenCalled();
+    });
+  });
+
   describe('recording gate', () => {
     it('disables the Send to chat button while recording', () => {
       fixture.componentRef.setInput(
