@@ -1,18 +1,6 @@
 /**
- * Atomic owner-only file write for OAuth state and other secrets.
- * Mirrors Rust SSOT `crate::fs_perms::write_restricted_file`.
- *
- * Used by the host-side `oauth` worker to write `oauth.json` and refreshed
- * `access_token` files. The Rust supervisor must create the parent directory
- * with mode 0o700 before this is called — POSIX permissions on the directory
- * are the systemic gate; this helper is the file-level gate.
- *
- * Atomicity: writes to `${path}.tmp.<pid>.<rand>`, chmod 0o600, fsync, rename.
- * On rename failure the tmp file is unlinked.
- *
- * Windows: relies on parent directory ACL being owner-only (set by Rust
- * supervisor via `set_owner_only` on the directory). Node-side asserts this
- * before write — refuses to write into a world-readable parent on POSIX.
+ * Atomic owner-only write for OAuth secrets (mirrors Rust `crate::fs_perms::write_restricted_file`); parent dir must
+ * already be owner-only (0o700 POSIX / ACL Windows) — refuses a world-readable POSIX parent. Writes via tmp+chmod+fsync+rename.
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';

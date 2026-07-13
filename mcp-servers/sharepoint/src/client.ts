@@ -26,32 +26,18 @@ import { TokenManager } from './token-manager.js';
 import { PathValidator } from './path-validator.js';
 import { splitPath } from './path-utils.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ───────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * SharePoint worker runtime config. Post-ADR-060 the worker holds only the
- * mount-resident state (`accessToken` + `siteId`); refresh is delegated to
- * the host-side `oauth` worker.
+ * SharePoint worker runtime config. Post-ADR-060 the worker holds only the mount-resident state
+ * (`accessToken` + `siteId`); refresh is delegated to the host-side `oauth` worker.
  */
 export interface SharePointConfig {
   siteId: string;
   accessToken: string;
 }
 
-/**
- * Represents a SharePoint file or folder with metadata
- * @interface SharePointFile
- * @property {string} [id] - File/folder ID
- * @property {string} name - File/folder name
- * @property {string} path - Relative path
- * @property {number} [size] - File size in bytes
- * @property {string} [lastModified] - Last modified date (ISO string)
- * @property {boolean} isFolder - Whether this is a folder
- * @property {string} [webUrl] - SharePoint web URL
- * @property {string} [eTag] - Entity tag for change detection
- */
+/** A SharePoint file or folder with metadata. */
 export interface SharePointFile {
   id?: string;
   name: string;
@@ -63,14 +49,7 @@ export interface SharePointFile {
   eTag?: string;
 }
 
-/**
- * Represents a SharePoint user with authentication details
- * @interface SharePointUser
- * @property {string} displayName - User's display name
- * @property {string} email - User's email address
- * @property {string} userPrincipalName - User principal name
- * @property {string} id - User ID
- */
+/** A SharePoint user with authentication details. */
 export interface SharePointUser {
   displayName: string;
   email: string;
@@ -78,20 +57,7 @@ export interface SharePointUser {
   id: string;
 }
 
-/**
- * Metadata for a SharePoint drive item from Microsoft Graph API
- * @interface DriveItemMetadata
- * @property {string} [id] - Item ID
- * @property {string} name - Item name
- * @property {number} [size] - Item size
- * @property {string} [lastModifiedDateTime] - Last modified date
- * @property {string} [webUrl] - Web URL
- * @property {Object} [file] - File metadata
- * @property {string} file.mimeType - MIME type
- * @property {Object} [folder] - Folder metadata
- * @property {number} folder.childCount - Number of children
- * @property {string} [eTag] - Entity tag for version control
- */
+/** Metadata for a SharePoint drive item from Microsoft Graph API. */
 export interface DriveItemMetadata {
   id?: string;
   name: string;
@@ -122,14 +88,31 @@ export interface DriveItemForImage {
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Client Class
-//═══════════════════════════════════════════════════════════════════════════════
+/** Carries the HTTP status of a failed Graph response so callers can branch on it. */
+export class GraphApiError extends Error {
+  /**
+   * Build an error tagged with the failed Graph response status.
+   * @param message - Human-readable failure detail.
+   * @param status - HTTP status of the failed Graph response.
+   */
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'GraphApiError';
+  }
+}
+
+/** Minimum spacing between siteId resolve retries while the worker is wedged. */
+const RESOLVE_RETRY_COOLDOWN_MS = TIMEOUTS.API_CALL_MS;
+
+// ── Client Class ────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Conditional debug logging — only when the DEBUG env var is set.
- * @param {string} message - Debug message
- * @param {unknown} data - Context object to log alongside the message
+ * @param message - Debug message.
+ * @param data - Context object to log alongside the message.
  */
 function debugLog(message: string, data: unknown): void {
   if (process.env.DEBUG) {
@@ -137,11 +120,7 @@ function debugLog(message: string, data: unknown): void {
   }
 }
 
-/**
- * SharePoint/Microsoft Graph API client with automatic token refresh and error handling
- * Acts as a facade coordinating TokenManager and PathValidator modules
- * @class SharePointClient
- */
+/** SharePoint/Graph API client with automatic token refresh; facades TokenManager + validator. */
 export class SharePointClient {
   private config: SharePointConfig;
   private tokensDir: string;
@@ -155,11 +134,13 @@ export class SharePointClient {
   private readonly _resolveSiteIdMemo = memoizedPromise<void>({
     fetch: () => this._resolveSiteIdOnce(),
   });
+  /** Epoch ms before which a wedged-call resolve retry is skipped (cooldown). */
+  private _resolveRetryBlockedUntil = 0;
 
   /**
-   * Create a SharePoint client
-   * @param {SharePointConfig} config - SharePoint configuration
-   * @param {string} tokensDir - Path to tokens directory
+   * Create a SharePoint client.
+   * @param config - SharePoint configuration.
+   * @param tokensDir - Path to tokens directory.
    */
   constructor(config: SharePointConfig, tokensDir: string) {
     this.config = config;
@@ -216,19 +197,12 @@ export class SharePointClient {
     });
   }
 
-  /**
-   * Get the last token save error (if any)
-   * This allows callers to check if token refresh succeeded but saving to disk failed
-   * @returns {Error | null} Last token save error or null if no error occurred
-   */
+  /** Get the last token save error, if refresh succeeded but disk save failed. */
   getLastTokenSaveError(): Error | null {
     return this.tokenManager.getLastTokenSaveError();
   }
 
-  /**
-   * Clear the last token save error
-   * Useful after handling the error or acknowledging it
-   */
+  /** Clear the last token save error, after handling or acknowledging it. */
   clearTokenSaveError(): void {
     this.tokenManager.clearTokenSaveError();
   }
@@ -243,16 +217,11 @@ export class SharePointClient {
   }
 
   /**
-   * Public Graph API wrapper used by `tools/page-tools.ts` and other domain
-   * tools that need to call non-file Graph endpoints (PR4 / PR5). Accepts a
-   * full URL or a `/sites/{site-id}/...` path; the path form auto-substitutes
-   * the configured site id and prefixes `https://graph.microsoft.com/v1.0`.
-   * Inherits the 401-refresh + retry behaviour of the file methods.
-   * @param method - HTTP method (GET, POST, PATCH, DELETE)
-   * @param urlOrPath - absolute URL or `/sites/{site-id}/...` path
-   * @param body - optional JSON-serialisable body
-   * @returns parsed JSON response (or undefined for 204 No Content)
-   * @throws {Error} on non-2xx status (with Graph error message when present)
+   * Public Graph API wrapper for domain tools calling non-file Graph endpoints. Accepts a full URL
+   * or `/sites/{site-id}/...` path (auto-substituted); inherits 401-refresh + retry behaviour.
+   * @param method - HTTP method (GET, POST, PATCH, DELETE).
+   * @param urlOrPath - Absolute URL or `/sites/{site-id}/...` path.
+   * @param body - Optional JSON-serialisable body.
    */
   async graphRequest<T = unknown>(
     method: string,
@@ -278,46 +247,52 @@ export class SharePointClient {
       } catch {
         // body not JSON — keep status line
       }
-      throw new Error(`Graph API ${method} ${url} failed: ${detail}`);
+      throw new GraphApiError(`Graph API ${method} ${url} failed: ${detail}`, response.status);
     }
     if (response.status === 204) return undefined;
     return (await response.json()) as T;
   }
 
   /**
-   * Return the configured site id. Page/list tools use this to enforce the
-   * "no site_id from model" invariant (ADR-060): the model never picks a site,
-   * the worker always uses the one stored in `/tokens/site_id`.
+   * Return the configured site id. Enforces the "no site_id from model" invariant (ADR-060): the
+   * model never picks a site, the worker always uses the one stored in `/tokens/site_id`.
    */
   getSiteId(): string {
     return this.config.siteId;
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Error Handling
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Error Handling ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Format error messages consistently
-   * Sanitizes errors and provides user-friendly messages
-   * @param {unknown} error - Error object from Graph API
-   * @returns {string} Formatted, user-friendly error message
+   * Sanitize a Graph API error into a consistent, user-friendly message. Numeric status codes
+   * are read from `GraphApiError.status`, not matched as message substrings (the message embeds the request URL, which can itself contain a colliding numeric id).
+   * @param error - Error object from the Graph API call.
    */
   static formatError(error: unknown): string {
     const e = error as { message?: string };
     const message = e.message || '';
+    // Substring fallback only for non-GraphApiError inputs (network/timeout/etc).
+    const status = error instanceof GraphApiError ? error.status : undefined;
+    const numeric = (code: string): boolean => status === undefined && message.includes(code);
 
-    // Handle Graph API error responses
-    if (message.includes('401') || message.includes('Unauthorized')) {
+    if (status === 401 || numeric('401') || message.includes('Unauthorized')) {
       return withSetupGuidance('Authentication failed. Your SharePoint token may have expired.');
     }
 
-    if (message.includes('403') || message.includes('Forbidden')) {
+    if (status === 403 || numeric('403') || message.includes('Forbidden')) {
       return 'Permission denied. Your SharePoint token may not have sufficient permissions.';
     }
 
-    if (message.includes('404') || message.includes('not found')) {
+    if (status === 404 || numeric('404') || message.includes('not found')) {
       return 'Resource not found in SharePoint.';
+    }
+
+    if (status === 429 || numeric('429') || message.includes('activityLimitReached')) {
+      return 'Rate limited by Microsoft Graph (429). Wait and retry the same call.';
+    }
+
+    if (status === 423 || numeric('423') || message.includes('resourceLocked')) {
+      return 'Resource is locked in SharePoint (checked out or being edited elsewhere). Retry later.';
     }
 
     if (message.includes('security check failed') || message.includes('traversal')) {
@@ -331,25 +306,21 @@ export class SharePointClient {
     return message || 'SharePoint API error';
   }
 
-  /**
-   * Get current config (for external access to updated tokens)
-   * @returns {SharePointConfig} Current configuration with potentially refreshed tokens
-   */
+  /** Get current config, for external access to potentially refreshed tokens. */
   getConfig(): SharePointConfig {
     return this.config;
   }
 
   /**
-   * Call Graph API with shared refresh-retry (ADR-060). Delegates proactive
-   * refresh, the 401 retry, and single-flight locking to {@link authedRequest};
-   * scope-mismatch propagates as a typed error for the re-consent UI.
-   * @param url - Graph API endpoint URL
-   * @param options - fetch options (Authorization is added by the helper)
-   * @returns API response (caller checks `response.ok`)
-   * @throws {Error} on request timeout
+   * Call Graph API with shared refresh-retry (ADR-060) via {@link authedRequest}.
+   * @param url - Graph API endpoint URL.
+   * @param options - Fetch options (Authorization is added by the helper).
    * @throws {OAuthScopeMismatchError} when refresh detects scope mismatch
    */
   private async callGraphAPI(url: string, options: RequestInit = {}): Promise<Response> {
+    if (this.statusTracker.getStatus() === 'failed') {
+      url = await this._retryWedgedResolve(url);
+    }
     // Live view onto config.accessToken so the helper's writes are shared.
     const config = this.config;
     const state: AuthedTokenState = {
@@ -391,11 +362,45 @@ export class SharePointClient {
   }
 
   /**
-   * Encode path for Graph API
-   * Encodes each path segment separately to handle special characters
-   * @param {string} pathStr - Path to encode
-   * @returns {string} URL-encoded path
-   * @private
+   * Re-resolve the siteId for a wedged worker and rewrite `url` with the fresh id so this very
+   * call benefits; cooldown-guarded, scope-mismatch propagated.
+   * @param url - Graph URL built from the stale siteId.
+   */
+  private async _retryWedgedResolve(url: string): Promise<string> {
+    if (Date.now() < this._resolveRetryBlockedUntil) {
+      throw this._siteConnectionError();
+    }
+    const staleSiteId = this.config.siteId;
+    try {
+      await this._resolveSiteIdMemo();
+    } catch (err) {
+      this._resolveRetryBlockedUntil = Date.now() + RESOLVE_RETRY_COOLDOWN_MS;
+      if (err instanceof OAuthScopeMismatchError) throw err;
+      throw this._siteConnectionError();
+    }
+    this._resolveRetryBlockedUntil = 0;
+    if (this.config.siteId === staleSiteId) {
+      return url;
+    }
+    // Every Graph URL this worker builds addresses the site via a `/sites/{siteId}` path
+    // segment — rewrite only that segment, not any substring match anywhere in the URL.
+    const sitesSegment = `/sites/${staleSiteId}`;
+    return url.includes(sitesSegment)
+      ? url.replace(sitesSegment, `/sites/${this.config.siteId}`)
+      : url;
+  }
+
+  /** Teaching error for a wedged worker whose siteId still cannot be resolved. */
+  private _siteConnectionError(): Error {
+    return new Error(
+      'SharePoint site connection is not established (siteId resolve failed). ' +
+        'This is a configuration issue, not a parameter problem: ask the user to check the SharePoint integration settings.'
+    );
+  }
+
+  /**
+   * Encode a path for Graph API, encoding each segment separately for special characters.
+   * @param pathStr - Path to encode.
    */
   private encodeGraphPath(pathStr: string): string {
     return pathStr
@@ -405,10 +410,8 @@ export class SharePointClient {
   }
 
   /**
-   * Build URL for folder children endpoint
-   * @param {string} parentDir - Parent directory path
-   * @returns {string} Graph API URL for folder children
-   * @private
+   * Build the Graph API URL for a folder's children endpoint.
+   * @param parentDir - Parent directory path.
    */
   private buildFolderChildrenUrl(parentDir: string): string {
     if (parentDir) {
@@ -417,21 +420,13 @@ export class SharePointClient {
     return `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root/children`;
   }
 
-  //═════════════════════════════════════════════════════════════════════════════
-  // Tool Implementations
-  //═════════════════════════════════════════════════════════════════════════════
+  // ── Tool Implementations ───────────────────────────────────────────────────────────────────────
 
   /**
-   * List files in context directory with pagination support
-   * Handles Microsoft Graph API pagination via `@odata.nextLink` to ensure
-   * complete listings for directories with more items than the default page size.
-   *
-   * **404 Handling:** Returns empty array if folder doesn't exist.
-   * This enables push operations to create new folders safely.
-   * @param {Object} [params={}] - Parameters
-   * @param {string} [params.path] - Relative path to list (default: root)
-   * @returns {Promise<{files: SharePointFile[], exists: boolean}>} Array of files and exists flag
-   * @throws {Error} If path is invalid or API call fails (except 404)
+   * List files in a directory, paginating via `@odata.nextLink`. Returns `exists: false` with an
+   * empty array on 404 (folder doesn't exist yet) so push operations can create it safely.
+   * @param params - Listing parameters.
+   * @param params.path - Relative path to list (default: root).
    */
   async listFiles(
     params: { path?: string } = {}
@@ -442,9 +437,8 @@ export class SharePointClient {
       throw new Error('Invalid path (security check failed)');
     }
 
-    // Empty path → list the site's drive root; otherwise list the supplied
-    // path relative to the drive root. `site_id` already scopes the worker
-    // to a single site, so no additional `base_path` sandbox is applied.
+    // Empty path → list the site's drive root; `site_id` already scopes the worker to a single
+    // site, so no additional `base_path` sandbox is applied.
     const initialUrl = relativePath
       ? `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(relativePath)}:/children`
       : `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root/children`;
@@ -511,10 +505,8 @@ export class SharePointClient {
   }
 
   /**
-   * Get file metadata by ID
-   * @param {string} fileId - SharePoint file/folder ID
-   * @returns {Promise<DriveItemMetadata>} File metadata including download URL
-   * @throws {Error} If file not found or API call fails
+   * Get file metadata by ID.
+   * @param fileId - SharePoint file/folder ID.
    */
   async getFileMetadata(fileId: string): Promise<DriveItemMetadata> {
     const url = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/items/${fileId}`;
@@ -522,18 +514,20 @@ export class SharePointClient {
     const response = await this.callGraphAPI(url);
 
     if (!response.ok) {
-      const errorData = (await response.json()) as { error?: { message?: string } };
-      throw new Error(errorData.error?.message || 'Failed to get file metadata');
+      let detail = 'Failed to get file metadata';
+      try {
+        const errorData = (await response.json()) as { error?: { message?: string } };
+        if (errorData.error?.message) detail = errorData.error.message;
+      } catch {
+        // body not JSON — keep the generic fallback message
+      }
+      throw new GraphApiError(detail, response.status);
     }
 
     return (await response.json()) as DriveItemMetadata;
   }
 
-  /**
-   * Get current authenticated user
-   * @returns {Promise<SharePointUser>} User information including display name and email
-   * @throws {Error} If API call fails
-   */
+  /** Get the current authenticated user. */
   async getCurrentUser(): Promise<SharePointUser> {
     const response = await this.callGraphAPI('https://graph.microsoft.com/v1.0/me');
 
@@ -558,15 +552,14 @@ export class SharePointClient {
   }
 
   /**
-   * Upload file from local path to SharePoint with optional Compare-And-Swap (CAS)
-   * @param {string} sharepointPath - SharePoint path relative to the site's drive root
-   * @param {string} localPath - Local file path (must be within /workspace)
-   * @param {Object} [options] - Upload options
-   * @param {string} [options.expectedEtag] - Expected ETag for CAS (If-Match header)
-   * @param {boolean} [options.createOnly] - Only create if file doesn't exist (If-None-Match: *)
-   * @param {boolean} [options.overwrite] - Overwrite existing file without ETag check
-   * @returns {Promise<{ etag?: string; size?: number }>} Result with new etag from SharePoint
-   * @throws {Error} If local path is outside allowed directories or upload fails
+   * Upload a file from a local path to SharePoint with optional Compare-And-Swap (`expectedEtag`
+   * → If-Match, `createOnly` → If-None-Match: *, `overwrite` → no conditional headers).
+   * @param sharepointPath - SharePoint path relative to the site's drive root.
+   * @param localPath - Local file path (must be within /workspace).
+   * @param options - Upload options.
+   * @param options.expectedEtag - Expected ETag for CAS (If-Match header).
+   * @param options.createOnly - Only create if file doesn't exist (If-None-Match: *).
+   * @param options.overwrite - Overwrite existing file without ETag check.
    */
   async uploadFile(
     sharepointPath: string,
@@ -624,10 +617,8 @@ export class SharePointClient {
   }
 
   /**
-   * Fetch a driveItem by its path under the site's default drive.
-   * @param sharepointPath - path relative to the drive root (e.g. "speedwave-hero.jpg")
-   * @returns driveItem id, sharepointIds, image dimensions, webUrl, name
-   * @throws {Error} If path is invalid or the driveItem is not found
+   * Fetch a driveItem (id, sharepointIds, image dimensions, webUrl, name) by its path.
+   * @param sharepointPath - Path relative to the drive root (e.g. "speedwave-hero.jpg").
    */
   async getDriveItemForSharePointPath(sharepointPath: string): Promise<DriveItemForImage> {
     if (!this.pathValidator.validatePath(sharepointPath)) {
@@ -652,25 +643,20 @@ export class SharePointClient {
   }
 
   /**
-   * Download file from SharePoint to local path using streaming
-   * @param {string} sharepointPath - SharePoint path relative to the site's drive root
-   * @param {string} localPath - Local destination path (must be within /workspace)
-   * @returns {Promise<void>}
-   * @throws {Error} If local path is outside allowed directories or download fails
+   * Download a file from SharePoint to a local path (must be within /workspace) via streaming.
+   * @param sharepointPath - SharePoint path relative to the site's drive root.
+   * @param localPath - Local destination path (must be within /workspace).
    */
   async downloadFile(sharepointPath: string, localPath: string): Promise<void> {
-    // Validate local path for security
     if (!this.pathValidator.validateLocalPath(localPath)) {
       throw new Error('Invalid local_path: must be under /workspace');
     }
 
-    // Security: validate sharepoint path for defense-in-depth
     if (!this.pathValidator.validatePath(sharepointPath)) {
       throw new Error('Invalid sharepoint_path (security check failed)');
     }
 
-    // `site_id` already scopes us to a single site; the supplied path is
-    // resolved against the site's drive root (no `base_path` prefix).
+    // `site_id` already scopes us to a single site; no `base_path` prefix is applied.
     const metadataUrl = `https://graph.microsoft.com/v1.0/sites/${this.config.siteId}/drive/root:/${this.encodeGraphPath(sharepointPath)}`;
     const metadataResponse = await this.callGraphAPI(metadataUrl);
 
@@ -683,7 +669,9 @@ export class SharePointClient {
     const downloadUrl = metadata['@microsoft.graph.downloadUrl'];
 
     if (!downloadUrl) {
-      throw new Error('No download URL available for file');
+      throw new Error(
+        'No download URL available for file. This can happen if the item is a folder, is checked out to another user, or is an online-only document type; verify with getFileFull or listFileIds first.'
+      );
     }
 
     // Ensure parent directory exists
@@ -708,10 +696,8 @@ export class SharePointClient {
   }
 
   /**
-   * Create a remote folder on SharePoint
-   * @param {string} remotePath - SharePoint folder path relative to the site's drive root
-   * @returns {Promise<void>}
-   * @throws {Error} If path is invalid, permission denied, or API call fails (except 409 Conflict)
+   * Create a remote folder on SharePoint; 409 Conflict (already exists) is treated as success.
+   * @param remotePath - SharePoint folder path relative to the site's drive root.
    */
   async createRemoteFolder(remotePath: string): Promise<void> {
     // Security: validate remote path to prevent path traversal attacks
@@ -768,14 +754,11 @@ export class SharePointClient {
   }
 
   /**
-   * Ensure parent folders exist
-   * Recursively creates parent folders if they don't exist
-   * @param {string} fullPath - Full path including filename
-   * @returns {Promise<void>}
+   * Recursively create parent folders of `fullPath` that don't yet exist.
+   * @param fullPath - Full path including filename.
    */
   async ensureParentFolders(fullPath: string): Promise<void> {
-    // Security: validate full path to prevent path traversal attacks
-    // This is defense-in-depth - callers should validate, but we verify here too
+    // Defense-in-depth: callers should validate, but we verify here too.
     if (!this.pathValidator.validatePath(fullPath)) {
       throw new Error('Invalid path in ensureParentFolders (security check failed)');
     }
@@ -826,9 +809,7 @@ export class SharePointClient {
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Factory & Initialization
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Factory & Initialization ───────────────────────────────────────────────────────────────────
 
 /** Outcome of `resolveCompositeSiteId` — successful id or a typed error. */
 export type ResolveResult =
@@ -837,12 +818,12 @@ export type ResolveResult =
 
 /**
  * Resolve a path-form site id to its composite id; re-validates via `validateGraphSiteId`.
- * @param siteId - site id loaded from `/tokens/site_id` (any accepted form)
- * @param accessToken - bearer token used for the lookup
- * @param opts - cold-start refresh tuning
- * @param opts.tokensDir - tokens mount path (default {@link defaultTokensDir}); only read when refreshing
- * @param opts.refreshOn401 - on a 401, refresh via `authedRequest` and retry once (default true)
- * @returns the composite id (or untouched value if already composite), or a typed error
+ * On a 401 refreshes via `authedRequest` and retries once when `opts.refreshOn401` (default true).
+ * @param siteId - Site id loaded from `/tokens/site_id` (any accepted form).
+ * @param accessToken - Bearer token used for the lookup.
+ * @param opts - Cold-start refresh tuning.
+ * @param opts.tokensDir - Tokens mount path (default {@link defaultTokensDir}); only read when refreshing.
+ * @param opts.refreshOn401 - On a 401, refresh via `authedRequest` and retry once (default true).
  */
 export async function resolveCompositeSiteId(
   siteId: string,
@@ -867,9 +848,8 @@ export async function resolveCompositeSiteId(
   }
   const refreshOn401 = opts.refreshOn401 !== false;
   const tokensDir = opts.tokensDir ?? defaultTokensDir();
-  // Cold-start hang here blocks initializeSharePointClient indefinitely, which
-  // in turn blocks the hub's discovery retry budget. Apply the same per-request
-  // timeout the steady-state path uses (callGraphAPI's TIMEOUTS.API_CALL_MS).
+  // A cold-start hang here blocks initializeSharePointClient and the hub's discovery retry
+  // budget; apply the same per-request timeout the steady-state path uses.
   const siteLookupWithTimeout = async (bearer: string): Promise<Response> => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), TIMEOUTS.API_CALL_MS);
@@ -897,7 +877,7 @@ export async function resolveCompositeSiteId(
           tokensDir,
         });
       } catch (err) {
-        // Scope mismatch can't self-heal — propagate so the re-consent UI fires.
+        // Scope mismatch can't self-heal; propagate so the re-consent UI fires.
         if (err instanceof OAuthScopeMismatchError) throw err;
         console.warn(
           `${ts()} SharePoint site lookup: token refresh failed during init — ${err instanceof Error ? err.message : String(err)}`
@@ -929,6 +909,8 @@ export async function resolveCompositeSiteId(
     }
     return { ok: true, compositeId: id };
   } catch (e) {
+    // Scope mismatch can't self-heal; propagate so the re-consent UI fires.
+    if (e instanceof OAuthScopeMismatchError) throw e;
     if (e instanceof Error && e.name === 'AbortError') {
       return {
         ok: false,
@@ -946,8 +928,7 @@ export async function resolveCompositeSiteId(
 
 /**
  * Validate a Graph site id, fail-closed (accept only composite or path form).
- * @param siteId - raw value loaded from `/tokens/site_id`
- * @returns user-facing error message, or `null` when the value is acceptable
+ * @param siteId - Raw value loaded from `/tokens/site_id`.
  */
 export function validateGraphSiteId(siteId: string): string | null {
   const guidance =
@@ -988,10 +969,8 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
   try {
     const tokensDir = defaultTokensDir();
 
-    // Load tokens that live in the worker-mounted dir (ADR-060). After PR3,
-    // `client_id`, `tenant_id`, and `refresh_token` are NO LONGER mounted into
-    // this container — they live in `~/.speedwave/oauth/<project>/sharepoint.json`
-    // on the host and are read only by the `oauth` worker.
+    // Load tokens from the worker-mounted dir (ADR-060); `client_id`/`tenant_id`/`refresh_token`
+    // are NOT mounted here — they live host-side in `~/.speedwave/oauth/<project>/sharepoint.json`.
     const accessToken = await loadToken(path.join(tokensDir, 'access_token'));
     const siteId = await loadToken(path.join(tokensDir, 'site_id'));
 
@@ -1017,16 +996,12 @@ export async function initializeSharePointClient(): Promise<SharePointClient | n
 
     console.log(`${ts()} ✅ SharePoint tokens loaded from /tokens/`);
 
-    // Store the raw siteId from /tokens/. Path-form values get resolved to
-    // composite by SharePointClient.warmupSiteId() in the background, which
-    // mutates this.config.siteId in place once Graph responds. Most Graph
-    // endpoints accept both forms during the warm-up window.
+    // Store the raw siteId; warmupSiteId() resolves path-form to composite in the background
+    // and mutates config.siteId in place. Most Graph endpoints accept both forms meanwhile.
     const config: SharePointConfig = { siteId, accessToken };
 
     const client = new SharePointClient(config, tokensDir);
-    // Fire-and-forget: resolves to composite + re-reads access_token after
-    // any refresh-on-401. Server starts immediately; tools degrade gracefully
-    // if Graph is slow or unreachable at boot.
+    // Fire-and-forget: server starts immediately; tools degrade gracefully if Graph is slow.
     client.warmupSiteId();
     return client;
   } catch (error) {

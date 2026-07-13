@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -11,12 +12,13 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const listLabelsTool: Tool = {
-  name: 'listLabels',
+  name: TOOL_NAMES.LIST_LABELS,
   description: 'List labels defined in a repository.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['github', 'labels', 'list', 'tags'],
   example: 'const { labels, count } = await github.listLabels({ owner: "octocat", repo: "hello" })',
   inputSchema: {
@@ -24,7 +26,10 @@ const listLabelsTool: Tool = {
     properties: {
       owner: { type: 'string', description: 'Repository owner (user or org)' },
       repo: { type: 'string', description: 'Repository name' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['owner', 'repo'],
   },
@@ -69,7 +74,7 @@ const createLabelTool: Tool = {
   name: 'createLabel',
   description: 'Create a new label in a repository.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'label', 'create', 'new', 'tag'],
   example:
     'const label = await github.createLabel({ owner: "octocat", repo: "hello", name: "urgent", color: "FF0000" })',

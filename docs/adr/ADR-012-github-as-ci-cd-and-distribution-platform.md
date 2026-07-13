@@ -9,8 +9,8 @@ Speedwave uses GitHub Actions for CI/CD and GitHub Releases for binary distribut
 
 ## Why
 
-- Free CI/CD minutes and free binary hosting for public repositories — no server to run, no CDN to pay for.
-- GitHub Releases doubles as the update server: the Tauri updater protocol is built around it (`latest.json` is generated during the release workflow and uploaded as a release artifact).
+- Free CI/CD minutes[^1] and free binary hosting[^2] for public repositories — no server to run, no CDN to pay for.
+- GitHub Releases doubles as the update server: the Tauri updater protocol is built around it[^3] (`latest.json` is generated during the release workflow and uploaded as a release artifact).
 - Native integration with the open-source workflow (Issues, Discussions, PRs, tags, changelogs).
 - Release versioning is automated by release-please; the desktop release workflow uploads platform artifacts to the release it manages.
 
@@ -29,7 +29,7 @@ The two macOS DMGs are produced from one matrix per arch (`aarch64-apple-darwin`
 
 ## SHA256 Verification in CI
 
-Bundled dependencies are verified by SHA256 before they go into a release artifact. For Lima (macOS), the build fetches the upstream `SHA256SUMS` from the Lima GitHub release, verifies the downloaded tarball against it, and fails the build immediately on mismatch — preventing a compromised download from injecting code into the app.
+Bundled dependencies are verified by SHA256 before they go into a release artifact. For Lima (macOS), the build fetches the upstream `SHA256SUMS` from the Lima GitHub release[^4], verifies the downloaded tarball against it, and fails the build immediately on mismatch — preventing a compromised download from injecting code into the app.
 
 ## Where it lives in code
 
@@ -49,7 +49,10 @@ Bundled dependencies are verified by SHA256 before they go into a release artifa
 
 ## References
 
-- [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/)
-- [GitHub Actions — billing for public repos](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)
-- [GitHub Releases — about releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
-- [Lima GitHub Releases](https://github.com/lima-vm/lima/releases)
+[^1]: [GitHub Actions - billing for public repos](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)
+
+[^2]: [GitHub Releases - about releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
+
+[^3]: [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/)
+
+[^4]: [Lima GitHub Releases](https://github.com/lima-vm/lima/releases)

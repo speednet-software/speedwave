@@ -107,8 +107,7 @@ extract_embedded_plist() {
         expected="${EXPECTED_BUNDLE_ID[$svc]}"
         if [ "$actual" != "$expected" ]; then
             echo "$svc-cli embedded CFBundleIdentifier='$actual', expected '$expected'" >&2
-            echo "  TCC will bind the permission to the wrong identifier — tccutil reset commands" >&2
-            echo "  in docs/troubleshooting.md will not match." >&2
+            echo "  TCC will bind the permission to the wrong identifier." >&2
             rm -f "$tmp"
             return 1
         fi

@@ -1,6 +1,5 @@
 /**
- * Jira Agile tools — listBoards, getBoard, getBoardConfiguration, listSprints,
- * getSprint, moveIssuesToSprint. 6 tools.
+ * Jira Agile tools — boards, board configuration, sprints, moving issues into a sprint. 6 tools.
  * @module mcp-atlassian/tools/jira-agile-tools
  */
 
@@ -10,18 +9,21 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  teachingErrorResult,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
 import { AtlassianClient } from '../client.js';
-import { createJiraAgileClient } from '../domains/jira-agile.js';
+import { createJiraAgileClient, MOVE_ISSUES_MAX } from '../domains/jira-agile.js';
 import { withValidation } from './validation.js';
 
 const listBoardsTool: Tool = {
   name: 'listBoards',
-  description: 'List Jira Agile boards (restricted to the configured project allowlist, if any).',
+  description:
+    'List Jira Agile boards (restricted to the configured project allowlist, if any; a board with no associated project is excluded whenever an allowlist is configured).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'boards', 'scrum', 'kanban', 'list'],
   example: 'const { boards } = await atlassian.listBoards({ projectKeyOrId: "PROJ" })',
   inputSchema: {
@@ -50,9 +52,10 @@ const listBoardsTool: Tool = {
 
 const getBoardTool: Tool = {
   name: 'getBoard',
-  description: 'Get a single Jira Agile board by ID.',
+  description:
+    'Get a single Jira Agile board by ID. Restricted to the configured project allowlist, if any.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'board', 'get', 'detail'],
   example: 'const board = await atlassian.getBoard({ boardId: 12 })',
   inputSchema: {
@@ -76,7 +79,7 @@ const getBoardConfigurationTool: Tool = {
   name: 'getBoardConfiguration',
   description: "Get a board's configuration (filter ID and column names).",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'board', 'configuration', 'columns', 'filter'],
   example: 'const config = await atlassian.getBoardConfiguration({ boardId: 12 })',
   inputSchema: {
@@ -100,7 +103,7 @@ const listSprintsTool: Tool = {
   name: 'listSprints',
   description: 'List sprints on a Jira Agile board, optionally filtered by state.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprints', 'list', 'board'],
   example: 'const { sprints } = await atlassian.listSprints({ boardId: 12, state: "active" })',
   inputSchema: {
@@ -133,9 +136,10 @@ const listSprintsTool: Tool = {
 
 const getSprintTool: Tool = {
   name: 'getSprint',
-  description: 'Get a single Jira Agile sprint by ID.',
+  description:
+    "Get a single Jira Agile sprint by ID. Restricted to the configured project allowlist, if any, via the sprint's board.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprint', 'get', 'detail'],
   example: 'const sprint = await atlassian.getSprint({ sprintId: 34 })',
   inputSchema: {
@@ -157,9 +161,9 @@ const getSprintTool: Tool = {
 
 const moveIssuesToSprintTool: Tool = {
   name: 'moveIssuesToSprint',
-  description: 'Move issues into a sprint (up to 50 per call).',
+  description: `Move issues into a sprint. Rejects with a teaching error if more than ${MOVE_ISSUES_MAX} issueKeysOrIds are given: the Agile API caps a single call at ${MOVE_ISSUES_MAX}; split larger batches into multiple calls.`,
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'agile', 'sprint', 'move', 'issues', 'assign'],
   example:
     'await atlassian.moveIssuesToSprint({ sprintId: 34, issueKeysOrIds: ["PROJ-1", "PROJ-2"] })',
@@ -170,7 +174,7 @@ const moveIssuesToSprintTool: Tool = {
       issueKeysOrIds: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Issue keys or IDs (max 50)',
+        description: `Issue keys or IDs (max ${MOVE_ISSUES_MAX} per call, rejected if exceeded)`,
       },
     },
     required: ['sprintId', 'issueKeysOrIds'],
@@ -191,7 +195,6 @@ const moveIssuesToSprintTool: Tool = {
 /**
  * Build the Jira Agile tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for boards and sprints.
  */
 export function createJiraAgileTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [
@@ -259,8 +262,22 @@ export function createJiraAgileTools(client: AtlassianClient | null): ToolDefini
           sprintId: number;
           issueKeysOrIds: string[];
         };
+        if (issueKeysOrIds.length === 0) {
+          return teachingErrorResult({
+            paramName: 'issueKeysOrIds',
+            received: '0 issues',
+            nextStep: 'Provide at least one issue key or ID to move into the sprint.',
+          });
+        }
+        if (issueKeysOrIds.length > MOVE_ISSUES_MAX) {
+          return teachingErrorResult({
+            paramName: 'issueKeysOrIds',
+            received: `${issueKeysOrIds.length} issues`,
+            nextStep: `The Agile API accepts at most ${MOVE_ISSUES_MAX} issues per call; split this batch into multiple calls of ${MOVE_ISSUES_MAX} or fewer.`,
+          });
+        }
         await agile.moveIssuesToSprint(sprintId, issueKeysOrIds);
-        return jsonResult({ moved: true, count: Math.min(issueKeysOrIds.length, 50) });
+        return jsonResult({ moved: true, count: issueKeysOrIds.length });
       }),
     },
   ];

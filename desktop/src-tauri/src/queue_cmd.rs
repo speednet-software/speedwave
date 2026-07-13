@@ -1,18 +1,12 @@
-//! Tauri commands for the one-slot queued-message service (ADR-045).
-//!
-//! Composer wires `queue_message` when `is_streaming` is true (turn already
-//! running) and `cancel_queued_message` for the explicit X button. Drain
-//! happens server-side from the stream-reader thread when a `Result` event
-//! arrives — the frontend never explicitly drains, it clears its local slot
-//! on the `QueueDrained` chat_stream event.
+//! Tauri commands for the one-slot queued-message service (ADR-045). Drain is server-side
+//! (stream-reader thread on `Result`) — frontend clears its slot on `QueueDrained`.
 
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::session::QueuedMessageService;
 use speedwave_runtime::stream::QueuedMessage;
 
-/// Frontend-facing payload for a queued message — mirrors
-/// `speedwave_runtime::stream::QueuedMessage` exactly so the chat_stream
-/// events and these RPC return types share one JSON shape.
+/// Frontend-facing payload for a queued message — mirrors `stream::QueuedMessage`
+/// exactly so chat_stream events and these RPC return types share one JSON shape.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct QueuedMessagePayload {
     pub text: String,
@@ -46,9 +40,8 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Place a message in the one-slot queue for `session_id`. Returns the
-/// message that was displaced (if any) so the composer can surface
-/// "replaced previous queued: …".
+/// Place a message in the one-slot queue for `session_id`. Returns the displaced
+/// message (if any) so the composer can surface "replaced previous queued: …".
 #[tauri::command]
 pub async fn queue_message(
     session_id: String,
@@ -71,9 +64,8 @@ pub async fn queue_message(
     Ok(prior)
 }
 
-/// Drop the queued message for `session_id`. Returns whether a slot was
-/// occupied beforehand — the composer uses this to keep the UI honest if
-/// the slot was racing-cleared by a background drain.
+/// Drop the queued message for `session_id`. Returns whether a slot was occupied
+/// beforehand, so the composer stays honest if a background drain raced it.
 #[tauri::command]
 pub async fn cancel_queued_message(
     session_id: String,
@@ -86,7 +78,7 @@ pub async fn cancel_queued_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
     use speedwave_runtime::session::QueuedMessageService;

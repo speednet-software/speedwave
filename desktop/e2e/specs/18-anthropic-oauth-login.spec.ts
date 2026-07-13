@@ -12,7 +12,7 @@
  * project-agnostic factory reset runs afterwards.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -21,10 +21,16 @@ import { openSettings } from '../helpers/llm';
 
 const NO_LLM_PROJECT = 'e2e-second';
 
-/** Installed CLI path — link_cli writes it during the wizard (spec 02). */
+/** Installed CLI path — independent oracle mirroring consts::cli_install_path_for
+ *  (Unix: ~/.local/bin, ignores data_dir; Windows: <data_dir>\bin\…exe). */
 function cliPath(): string {
-  const bin = process.platform === 'win32' ? 'speedwave.exe' : 'speedwave';
-  return path.join(os.homedir(), '.speedwave', 'bin', bin);
+  if (process.platform === 'win32') {
+    // Empty string falls back too, matching consts::data_dir_from.
+    const envDir = process.env.SPEEDWAVE_DATA_DIR;
+    const dataDir = envDir ? envDir : path.join(os.homedir(), '.speedwave');
+    return path.join(dataDir, 'bin', 'speedwave.exe');
+  }
+  return path.join(os.homedir(), '.local', 'bin', 'speedwave');
 }
 
 describe('Anthropic OAuth Login (no-provider first start)', function () {
@@ -66,14 +72,11 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
     try {
       // The sign-in banner prints AFTER render_compose + first-ever compose up
       // + ensure_exec_healthy — everything the incident broke.
-      await browser.waitUntil(
-        async () => output.includes('Starting Anthropic sign-in'),
-        {
-          timeout: 240_000,
-          interval: 2_000,
-          timeoutMsg: `speedwave login never reached the sign-in stage; output:\n${output.slice(-2000)}`,
-        }
-      );
+      await browser.waitUntil(async () => output.includes('Starting Anthropic sign-in'), {
+        timeout: 240_000,
+        interval: 2_000,
+        timeoutMsg: `speedwave login never reached the sign-in stage; output:\n${output.slice(-2000)}`,
+      });
       expect(output).not.toContain('exit code 137');
       expect(output).not.toContain('Permission denied');
       await browser.waitUntil(async () => containersRunning(NO_LLM_PROJECT), {
@@ -85,7 +88,13 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
       expect(output).not.toContain('exit code 137');
       expect(exited && output.includes('exit code')).toBe(false);
     } finally {
-      child.kill('SIGKILL');
+      // TerminateProcess kills only the direct child on Windows; taskkill /T sweeps
+      // the whole tree so no descendant keeps bin\speedwave.exe locked for spec 07.
+      if (process.platform === 'win32' && child.pid !== undefined) {
+        spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+      } else {
+        child.kill('SIGKILL');
+      }
     }
   });
 });

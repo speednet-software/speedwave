@@ -1,6 +1,5 @@
-//! Host-side WebSocket bridges connecting in-container workers to host apps:
-//! `host_bridge` (generic skeleton), `plugin_host_bridge` (per-plugin),
-//! `ide_bridge` (Claude Code IDE proxy).
+//! Host-side WebSocket bridges to host apps: `host_bridge` (generic skeleton),
+//! `plugin_host_bridge` (per-plugin), `ide_bridge` (Claude Code IDE proxy).
 
 pub mod host_bridge;
 pub mod ide_bridge;

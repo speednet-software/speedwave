@@ -21,16 +21,9 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
     let secrets_dir = data_dir.join("secrets").join(project);
     std::fs::create_dir_all(&secrets_dir)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode_700 = std::fs::Permissions::from_mode(0o700);
-        // secrets_dir = data_dir/secrets/<project>
-        std::fs::set_permissions(&secrets_dir, mode_700.clone())?;
-        if let Some(secrets_parent) = secrets_dir.parent() {
-            // secrets_parent = data_dir/secrets/ — one level above, stop here
-            std::fs::set_permissions(secrets_parent, mode_700)?;
-        }
+    crate::fs_perms::set_owner_only_dir(&secrets_dir).map_err(anyhow::Error::msg)?;
+    if let Some(secrets_parent) = secrets_dir.parent() {
+        crate::fs_perms::set_owner_only_dir(secrets_parent).map_err(anyhow::Error::msg)?;
     }
 
     Ok(secrets_dir)
@@ -38,9 +31,8 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
 
 // ── Local-LLM token paths ────────────────────────────────────────────────
 
-/// Services with token files under `~/.speedwave/tokens/<project>/<service>/`.
-/// Whitelist enforced by `tokens_path`. Plugins use a separate path discipline
-/// (validated by `plugin::validate_manifest`).
+/// Services with token files under `~/.speedwave/tokens/<project>/<service>/`. Whitelist enforced
+/// by `tokens_path`. Plugins use a separate discipline (validated by `plugin::validate_manifest`).
 const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
 
 /// Proxy per-provider key namespace (ADR-073), reserved against plugin
@@ -128,9 +120,8 @@ pub fn tokens_path_in(
         .join(file))
 }
 
-/// Ensures `~/.speedwave/tokens/<project>/<service>/` exists with owner-only
-/// perms on every level (`tokens/`, `tokens/<project>/`,
-/// `tokens/<project>/<service>/`). Validates segments via `tokens_path`.
+/// Ensures `~/.speedwave/tokens/<project>/<service>/` exists with owner-only perms on every level
+/// (`tokens/`, `tokens/<project>/`, `tokens/<project>/<service>/`). Validates via `tokens_path`.
 pub fn ensure_token_dir(project: &str, service: &str) -> anyhow::Result<PathBuf> {
     ensure_token_dir_in(consts::data_dir().as_path(), project, service)
 }
@@ -155,12 +146,59 @@ pub fn ensure_token_dir_in(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test-only module: unwraps assert setup succeeded"
+)]
 mod tests {
     use super::*;
 
     fn data_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    // ── init_secrets_dir_in ──────────────────────────────────────────────
+
+    #[test]
+    fn init_secrets_dir_creates_project_and_parent_dirs() {
+        let d = data_dir();
+        let secrets_dir = init_secrets_dir_in(d.path(), "proj").unwrap();
+        assert!(secrets_dir.is_dir());
+        assert!(secrets_dir.ends_with("secrets/proj"), "got {secrets_dir:?}");
+        assert!(secrets_dir.parent().unwrap().is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_secrets_dir_sets_owner_only_mode_on_dir_and_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = data_dir();
+        let secrets_dir = init_secrets_dir_in(d.path(), "proj").unwrap();
+
+        let mode = std::fs::metadata(&secrets_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "expected 0o700 on secrets_dir, got 0o{mode:o}");
+
+        let parent_mode = std::fs::metadata(secrets_dir.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            parent_mode, 0o700,
+            "expected 0o700 on secrets parent, got 0o{parent_mode:o}"
+        );
+    }
+
+    #[test]
+    fn init_secrets_dir_idempotent() {
+        let d = data_dir();
+        init_secrets_dir_in(d.path(), "proj").unwrap();
+        let secrets_dir = init_secrets_dir_in(d.path(), "proj").unwrap();
+        assert!(secrets_dir.is_dir());
     }
 
     // ── llm token namespace (ADR-073) ────────────────────────────────────

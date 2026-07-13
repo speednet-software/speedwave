@@ -11,6 +11,11 @@ pub fn instance_env_argv(id: &str) -> Vec<String> {
     vec!["env".to_string(), format!("{SESSION_INSTANCE_ENV}={id}")]
 }
 
+/// Fresh per-spawn instance id for [`SESSION_INSTANCE_ENV`].
+pub fn new_instance_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Busybox-safe `sh -c` body killing only process(es) whose environ carries
 /// `SPW_SESSION_INSTANCE_ID=<id>`; no procps, other sessions untouched.
 pub fn kill_by_instance_command(id: &str) -> Vec<String> {
@@ -24,9 +29,16 @@ done; true"
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_instance_ids_are_unique_and_nonempty() {
+        let a = new_instance_id();
+        let b = new_instance_id();
+        assert!(!a.is_empty());
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn instance_env_argv_prefixes_env_assignment() {

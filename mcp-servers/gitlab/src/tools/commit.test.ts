@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createCommitTools } from './commit-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -98,10 +99,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'listBranchCommits');
       const result = await tool!.handler({ project_id: 123, branch: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should handle API errors', async () => {
@@ -303,10 +301,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'listCommits');
       const result = await tool!.handler({ project_id: 999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should handle network errors', async () => {
@@ -326,9 +321,29 @@ describe('commit-tools', () => {
         isError: true,
       });
     });
+
+    it('declares only fields the client actually returns (no authored_date/web_url)', () => {
+      const tools = createCommitTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listBranchCommits')?.tool;
+
+      const outputProps = tool?.outputSchema?.properties as Record<string, unknown>;
+      const itemProps = (outputProps.commits as { items: { properties: Record<string, unknown> } })
+        .items.properties;
+      expect(itemProps).not.toHaveProperty('authored_date');
+      expect(itemProps).not.toHaveProperty('web_url');
+      expect(itemProps).toHaveProperty('created_at');
+    });
   });
 
   describe('searchCommits', () => {
+    it('describes the client-side substring search over the last 100 commits', () => {
+      const tools = createCommitTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'searchCommits')?.tool;
+
+      expect(tool?.description).toContain('100 commits');
+      expect(tool?.description).toContain('client-side');
+    });
+
     it('should search commits successfully', async () => {
       const mockCommits = [
         {
@@ -485,15 +500,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'searchCommits');
       const result = await tool!.handler({ project_id: 123, query: 'test' });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
   });
 
@@ -646,10 +653,7 @@ describe('commit-tools', () => {
       const tool = tools.find((t) => t.tool.name === 'getCommitDiff');
       const result = await tool!.handler({ project_id: 123, commit_sha: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should handle invalid SHA errors', async () => {

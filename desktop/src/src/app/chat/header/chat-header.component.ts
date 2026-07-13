@@ -4,11 +4,8 @@ import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /**
- * Chat header strip — terminal-minimal layout.
- *
- * Full mode shows the conversation controls (history / memory / new) plus the
- * project pill. `compact` hides the conversation controls so blocked chat
- * states (no-provider, auth-required) still expose the project switcher.
+ * Chat header strip — terminal-minimal layout. Full mode shows conversation controls (history/memory/new) plus the project pill.
+ * `compact` hides the conversation controls so blocked chat states (no-provider, auth-required) still expose the project switcher.
  */
 @Component({
   selector: 'app-chat-header',

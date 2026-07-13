@@ -41,4 +41,8 @@ Make `LockedRuntime` the sole public runtime handle. It wraps the now-`pub(crate
 - **Single global `Mutex<()>`** (the status quo before this ADR): process-local only, so the cross-process race remained; also coarse-grained.
 - **A `parking_lot` reentrant mutex**: adds a dependency; the thread-local marker is portable, explicit, and tests cleanly.
 - **Per-callsite lock blocks without a wrapper struct**: not type-system enforced, so future callers would silently bypass it.
-- **Hand-rolled advisory locks via filesystem rename**: an exclusive file lock (`flock` on Unix, `LockFileEx` on Windows) is the standard primitive for exactly this purpose.
+- **Hand-rolled advisory locks via filesystem rename**: an exclusive file lock (`flock`[^1] on Unix, `LockFileEx`[^2] on Windows) is the standard primitive for exactly this purpose.
+
+[^1]: [flock(2) - Linux manual page](https://man7.org/linux/man-pages/man2/flock.2.html) - `LOCK_EX` places an exclusive advisory lock; only one process may hold it at a time.
+
+[^2]: [LockFileEx function (fileapi.h) - Win32 apps, Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex) - `LOCKFILE_EXCLUSIVE_LOCK` requests exclusive access to the locked region.

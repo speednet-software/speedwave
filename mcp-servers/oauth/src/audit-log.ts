@@ -1,8 +1,6 @@
 /**
- * Append-only audit log for OAuth refresh/forget events (ADR-060 §"Threat model").
- *
- * One line per event, ISO-8601 timestamp, no token contents. Log file mode 0o600.
- * Rotates to `<logPath>.1` when it exceeds {@link DEFAULT_MAX_BYTES}.
+ * Append-only audit log for OAuth refresh/forget events (ADR-060 "Threat model"): one line per
+ * event, ISO-8601 timestamp, no token contents, mode 0o600, rotates past {@link DEFAULT_MAX_BYTES}.
  */
 import { appendFile, chmod, rename, stat } from 'node:fs/promises';
 

@@ -49,9 +49,8 @@ const PLAN_MODE_PREFIX =
   '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
 
 /**
- * Stateless composer: textarea, slash button, slash-menu popover, send button.
- * Enter submits, Shift+Enter inserts a newline; `/` at start opens the slash menu.
- * ADR-045: while `streaming`, submit emits `queueRequested` instead of `submitted`.
+ * Stateless composer: textarea, slash button, slash-menu popover, send button. Enter submits, Shift+Enter
+ * newlines, `/` opens the slash menu; ADR-045: while `streaming`, submit emits `queueRequested`, not `submitted`.
  */
 @Component({
   selector: 'app-composer',

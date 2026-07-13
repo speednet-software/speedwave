@@ -1,15 +1,6 @@
 /**
- * `oauth` MCP worker — host-side, per-project (ADR-060).
- * Exposes `refresh` and `forget` tools to authenticated consumers.
- *
- * Env inputs (set by the Rust supervisor `oauth_process.rs`):
- *   PORT             — listening port (0 = OS picks)
- *   OAUTH_STATE_DIR  — per-project state dir `~/.speedwave/oauth/<project>/`
- *   OAUTH_LOG_FILE   — audit log path (append-only, 0o600)
- *   OAUTH_PROJECT    — project id (embedded in audit log entries)
- *   OAUTH_SUPERVISOR_TOKEN — primary bearer (for supervisor health probes)
- *
- * Consumer bearers are read at startup from `<OAUTH_STATE_DIR>/.bearer-map.json`.
+ * `oauth` MCP worker — host-side, per-project (ADR-060), exposing `refresh`/`forget`. Env set by
+ * Rust supervisor `oauth_process.rs`; consumer bearers load from `.bearer-map.json` in state dir.
  */
 import { join } from 'node:path';
 import { createMCPServer, ts } from '@speedwave/mcp-shared';

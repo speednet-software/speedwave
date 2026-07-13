@@ -7,6 +7,7 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, withClients, ToolResult } from './validation.js';
 import { SlackClients, getFileContent, downloadFile, formatSlackError } from '../client.js';
@@ -31,7 +32,7 @@ const getFileContentTool: Tool = {
     required: ['file'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['slack', 'file', 'read', 'download', 'content', 'attachment', 'upload'],
   example: 'const file = await slack.getFileContent({ file: "F0123ABC456" })',
   outputSchema: {
@@ -71,7 +72,7 @@ const downloadFileTool: Tool = {
     required: ['file'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['slack', 'file', 'download', 'save', 'pdf', 'binary', 'workspace', 'attachment'],
   example: 'const saved = await slack.downloadFile({ file: "F0123ABC456" })',
   outputSchema: {
@@ -96,7 +97,7 @@ const downloadFileTool: Tool = {
 };
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */
@@ -116,7 +117,7 @@ export async function handleDownloadFile(
 }
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */

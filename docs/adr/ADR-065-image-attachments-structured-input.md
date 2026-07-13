@@ -10,7 +10,7 @@ Pasted and dropped images are **never inlined as base64 on the wire**. The compo
 ## Why
 
 - The container can read `/workspace` but not the host clipboard. A file under the project dir is already mounted into the container, so a path reference is the simplest transport that needs zero changes to Claude Code itself.
-- Inlining base64 image blocks OOM-killed the in-container process (exit 137) at payloads near Anthropic's documented 5 MB cap: the stream-json parser buffers the whole user message before sending upstream. File-mounting sidesteps the parser-buffer blowup entirely.
+- Inlining base64 image blocks OOM-killed the in-container process (exit 137) at payloads near Anthropic's documented base64 image size cap[^1]: the stream-json parser buffers the whole user message before sending upstream. File-mounting sidesteps the parser-buffer blowup entirely.
 - One transport (text-only) keeps plan-mode prefixing, structured submit, and the one-slot queue coherent. No second block-typed transport to gate capabilities in two places.
 
 ## Wire shape
@@ -27,7 +27,7 @@ Pasted and dropped images are **never inlined as base64 on the wire**. The compo
 ## Desktop save + preprocessing
 
 - The pasted/dropped bytes are saved by the `save_pasted_image` Tauri command in `desktop/src-tauri/src/paste_cmd.rs` (validates magic bytes against the declared media type, host-side 10 MB cap, writes under `<project>/.speedwave/pastes/`, returns the `/workspace/...` container path).
-- The renderer downscales first via `desktop/src/src/app/services/image-preprocessor.service.ts` (pica Lanczos resampler in a Web Worker). Per-model native long edges follow Anthropic's published values: Opus 2576 px, Sonnet/Haiku 1568 px; a second resize at 1568 px runs if the first attempt still exceeds the per-image cap. The post-resample cap is `MAX_IMAGE_BYTES = 3 MB` (below Anthropic's 5 MB, to leave parser headroom); over it surfaces `ERROR_TOO_LARGE` as a composer toast. JPEG/WebP re-encode at q=0.92; PNG re-encodes lossless to keep transparency; GIF passes through.
+- The renderer downscales first via `desktop/src/src/app/services/image-preprocessor.service.ts` (pica Lanczos resampler in a Web Worker). Per-model native long edges follow Anthropic's published resolution tiers: 2576 px for the high-resolution tier (used by Opus), 1568 px for the standard tier (used by Sonnet/Haiku)[^2]; a second resize at 1568 px runs if the first attempt still exceeds the per-image cap. The post-resample cap is `MAX_IMAGE_BYTES = 3 MB` (below Anthropic's smallest documented per-image size cap, to leave parser headroom)[^1]; over it surfaces `ERROR_TOO_LARGE` as a composer toast. JPEG/WebP re-encode at q=0.92; PNG re-encodes lossless to keep transparency; GIF passes through.
 
 ## Queue stays text-only
 
@@ -39,14 +39,24 @@ Pasted and dropped images are **never inlined as base64 on the wire**. The compo
 
 ## CLI parity
 
-- `speedwave run` spawns the host-side `PasteWatcher` (`crates/speedwave-cli/src/paste_watcher.rs`): it polls `arboard` every `POLL_MS = 250` ms and, on an image change, writes `<project>/.speedwave/pastes/clip.png` (chmod 0600 on Unix). `arboard` is cross-platform and short-circuits when the clipboard is unchanged; the watcher exits with `speedwave run`.
-- Inside the container, `containers/osc52-copy.sh` (ADR-052) is symlinked as exactly six names — `pbcopy`, `xclip`, `xsel`, `wl-copy`, `clip.exe`, `powershell.exe` (`containers/Containerfile.claude`) — and serves `clip.png` on read so the TUI's own paste path gets the bytes without changing Claude Code. The `powershell.exe` name catches the platform-`wsl` interop Claude Code ≥ 2.1.160 uses on Windows hosts: `Set-Clipboard` routes to the copy path, `Get-Clipboard`/`ContainsImage` exit 1 so the `xclip` read path stays authoritative for images. `SPEEDWAVE_CLIP_FILE` overrides the read path (default `/workspace/.speedwave/pastes/clip.png`), used by the bats suite and as a debug escape hatch.
+- `speedwave run` spawns the host-side `PasteWatcher` (`crates/speedwave-cli/src/paste_watcher.rs`): it polls `arboard` every `POLL_MS = 250` ms and, on an image change, writes `<project>/.speedwave/pastes/clip.png` (chmod 0600 on Unix). `arboard` is a cross-platform Rust clipboard crate (Windows/macOS/Linux X11+Wayland)[^3] and short-circuits when the clipboard is unchanged; the watcher exits with `speedwave run`.
+- Inside the container, `containers/osc52-copy.sh` (ADR-052) is symlinked as exactly six names — `pbcopy`, `xclip`, `xsel`, `wl-copy`, `clip.exe`, `powershell.exe` (`containers/Containerfile.claude`) — and serves `clip.png` on read so the TUI's own paste path gets the bytes without changing Claude Code. The `powershell.exe` name catches the PowerShell clipboard interop Claude Code introduced for WSL in version 2.1.160[^4] and uses on Windows hosts: `Set-Clipboard` routes to the copy path, `Get-Clipboard`/`ContainsImage` exit 1 so the `xclip` read path stays authoritative for images. `SPEEDWAVE_CLIP_FILE` overrides the read path (default `/workspace/.speedwave/pastes/clip.png`), used by the bats suite and as a debug escape hatch.
 
 ## Rejected alternatives
 
-- **Inline base64 `image` blocks on the wire** (the original design). OOM-killed the in-container parser near 5 MB payloads; file-mount avoids buffering the whole expansion. There is deliberately no open `Image`/`ImageSource` extension point on the wire enum.
+- **Inline base64 `image` blocks on the wire** (the original design). OOM-killed the in-container parser near Anthropic's documented base64 image size cap[^1]; file-mount avoids buffering the whole expansion. There is deliberately no open `Image`/`ImageSource` extension point on the wire enum.
 - **Always JPEG q=0.85 for every input.** Saves a branch but damages PNG transparency and degrades OCR on dense screenshots. Per-format choice keeps quality and size where each matters.
 - **Client-side per-provider `supports_vision` matrix** blocking paste for non-vision models. Goes stale on every new local model; the Anthropic catalog has no non-vision 4.x entries; the API already returns a clear error block. Letting the user try beats guessing.
 - **Queue carrying image attachments.** Would force the `QueuedMessage` shape and `MAX_QUEUED_LEN` to change with no compelling UX gain (queuing an image mid-stream is rarely wanted). Mutual exclusion is simpler.
-- **Anthropic Files API (`files-api-2025-04-14`).** Beta header that saves bandwidth, not tokens; without a re-reference UX it is pure overhead. Path-based file-mount is simpler and ships today.
+- **Anthropic Files API (`files-api-2025-04-14`).** Beta header[^5] that saves bandwidth, not tokens; without a re-reference UX it is pure overhead. Path-based file-mount is simpler and ships today.
 - **Restart-session payload resend.** ADR-046 forbids Speedwave resending payloads; retry is native session resume from Claude's own JSONL transcript. We carry no state for retries.
+
+[^1]: [Anthropic Vision docs, Request limits](https://platform.claude.com/docs/en/docs/build-with-claude/vision#request-limits): maximum base64-encoded image size is 5 MB on Amazon Bedrock/Google Cloud and 10 MB on the direct Claude API/claude.ai.
+
+[^2]: [Anthropic Vision docs, Resolution and token cost](https://platform.claude.com/docs/en/docs/build-with-claude/vision#resolution-and-token-cost): high-resolution-tier models (including Claude Opus) cap at a 2576 px long edge; standard-tier models (including Claude Sonnet/Haiku) cap at 1568 px.
+
+[^3]: [`arboard` on docs.rs](https://docs.rs/arboard/latest/arboard/): "Image and text handling for the OS clipboard", with platform backends for Windows, macOS, and Linux (X11 and Wayland).
+
+[^4]: [Claude Code CHANGELOG.md, version 2.1.160](https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md): "Fixed copy-on-select not writing to the Windows clipboard on WSL - now uses PowerShell interop instead of OSC 52, which terminals like MobaXterm don't support."
+
+[^5]: [Anthropic Files API docs, How to use the Files API](https://platform.claude.com/docs/en/build-with-claude/files#how-to-use-the-files-api): "To use the Files API, you'll need to include the beta feature header: `anthropic-beta: files-api-2025-04-14`."

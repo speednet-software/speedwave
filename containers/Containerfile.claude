@@ -1,23 +1,14 @@
-# OCI Containerfile for Speedwave Claude container
-# Base: node:24-bookworm-slim (Debian)
+# OCI Containerfile for Speedwave Claude container. Base: node:24-bookworm-slim (Debian).
 # Multi-arch: linux/amd64 + linux/arm64 (Apple Silicon)
 FROM node:24-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 
-# Security: container user is set via compose `user:` field to "1000:1000"
-# (unprivileged; containerd runs as root inside the VM on both supported
-# platforms — Lima on macOS, WSL2 on Windows).
-# The base image has uid/gid 1000 ("node"). Rootless BuildKit cannot modify
-# /etc/passwd or /etc/group (overlayfs restrictions). We skip user renaming:
-# the container only needs a writable home at /home/speedwave.
-# See also: crates/speedwave-runtime/src/consts.rs::CONTAINER_USER_UNPRIVILEGED
-# and compose.template.yml (user: "${CONTAINER_USER}").
+# Security: user is set via compose `user:` "1000:1000" (containerd runs as root inside the Lima/WSL2
+# VM). Base image already has uid/gid 1000; rootless BuildKit can't rename it (see consts.rs::CONTAINER_USER_UNPRIVILEGED).
 ENV HOME=/home/speedwave
 RUN mkdir -p /home/speedwave && chown 1000:1000 /home/speedwave
 
-# Apt resilience: retries for update (network), unsafe-io for install (nested virt I/O).
-# --force-unsafe-io skips fsync during dpkg unpack — safe in a container build context
-# (layers are disposable) and eliminates the fsync bottleneck in nested virtualization
-# environments (WSL2/Hyper-V inside VMware). Installed files are byte-identical.
+# Apt resilience: retries for update (network), --force-unsafe-io for install (skips fsync during
+# dpkg unpack — safe since layers are disposable; eliminates the fsync bottleneck in nested virt).
 RUN apt-get update -o Acquire::Retries=3 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         -o Dpkg::Options::="--force-unsafe-io" \
@@ -25,6 +16,7 @@ RUN apt-get update -o Acquire::Retries=3 && \
         ca-certificates \
         curl \
         git \
+        jq \
         ncurses-term \
         python3 \
         python3-pip \
@@ -41,12 +33,8 @@ RUN mkdir -p /speedwave/resources && \
 RUN mkdir -p /workspace && \
     chown 1000:1000 /workspace
 
-# Install Claude Code as speedwave user, then copy binary to image layer.
-# `claude install` puts the binary at ~/.local/bin/claude (~210MB) and
-# ~/.local/share/claude/versions/. At runtime /home/speedwave is a VirtioFS
-# volume mount — reading 210MB through VirtioFS causes a ~10s freeze (Apple
-# Virtualization hypervisor spike). Fix: install as speedwave, then copy the
-# resolved binary to /usr/local/bin which lives on the VM's ext4 disk.
+# Install Claude Code as speedwave user, then copy binary to image layer: /home/speedwave is a
+# VirtioFS mount at runtime, and reading the ~210MB binary through it causes a ~10s freeze.
 
 # Copy reusable installer (DRY — also used by entrypoint.sh at runtime)
 COPY --chmod=755 install-claude.sh /usr/local/bin/install-claude.sh
@@ -65,9 +53,8 @@ RUN CLAUDE_BIN=$(readlink -f /home/speedwave/.local/bin/claude) && \
     rm -f /home/speedwave/.local/bin/claude && \
     ln -sf /usr/local/bin/claude /home/speedwave/.local/bin/claude
 
-# OSC 52 clipboard wrappers — six symlinks redirect to one script. Claude Code
-# copies via wl-copy/xclip/xsel (probe gated on WAYLAND_DISPLAY, injected by
-# defaults.rs::base_env) or powershell.exe on Windows hosts. See ADR-052.
+# OSC 52 clipboard wrappers — six symlinks to one script. Claude Code copies via wl-copy/xclip/xsel
+# (probe gated on WAYLAND_DISPLAY, defaults.rs::base_env) or powershell.exe on Windows. ADR-052.
 COPY --chmod=755 osc52-copy.sh /usr/local/bin/osc52-copy.sh
 RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/xclip && \
@@ -75,6 +62,25 @@ RUN ln -s osc52-copy.sh /usr/local/bin/pbcopy && \
     ln -s osc52-copy.sh /usr/local/bin/wl-copy && \
     ln -s osc52-copy.sh /usr/local/bin/clip.exe && \
     ln -s osc52-copy.sh /usr/local/bin/powershell.exe
+
+# TypeScript language server for the typescript-lsp plugin (Apache-2.0): the plugin only ships an
+# lspServers metadata entry pointing at the bare command; baking it into /usr/local puts it on PATH.
+# Tarballs are fetched via `npm pack` and SHA256-verified before install, matching this file's
+# SHA256-verified download convention rather than trusting the registry response outright.
+ARG TS_LANGUAGE_SERVER_VERSION=5.3.0
+ARG TYPESCRIPT_VERSION=6.0.3
+ARG TS_LANGUAGE_SERVER_SHA256=398cacc17fff2108652e7b4050e3182008d17063246b3fea7dcf5fae2ce1560e
+ARG TYPESCRIPT_SHA256=33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a
+RUN NPM_PACK_DIR=$(mktemp -d) && \
+    cd "$NPM_PACK_DIR" && \
+    npm pack "typescript-language-server@${TS_LANGUAGE_SERVER_VERSION}" "typescript@${TYPESCRIPT_VERSION}" && \
+    echo "${TS_LANGUAGE_SERVER_SHA256}  typescript-language-server-${TS_LANGUAGE_SERVER_VERSION}.tgz" | sha256sum -c - && \
+    echo "${TYPESCRIPT_SHA256}  typescript-${TYPESCRIPT_VERSION}.tgz" | sha256sum -c - && \
+    npm install -g \
+        "${NPM_PACK_DIR}/typescript-language-server-${TS_LANGUAGE_SERVER_VERSION}.tgz" \
+        "${NPM_PACK_DIR}/typescript-${TYPESCRIPT_VERSION}.tgz" && \
+    npm cache clean --force && \
+    rm -rf "$NPM_PACK_DIR"
 
 # Copy entrypoint late to avoid busting the ~210MB Claude Code layer cache
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh

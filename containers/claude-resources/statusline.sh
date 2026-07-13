@@ -1,6 +1,6 @@
 #!/bin/bash
-# Speedwave statusline for Claude Code — reads JSON state from stdin, outputs
-# a single status-bar line (model, context usage, rate limits, cost).
+# Speedwave statusline for Claude Code — reads JSON state from stdin, outputs a single status-bar
+# line (model, context usage, rate limits, cost).
 
 set -f
 
@@ -119,14 +119,33 @@ if [[ -n "$INPUT" ]]; then
 fi
 model_name="${model_name:-Claude}"
 
-# Context window size
-context_window_size="$(extract_json_number "$INPUT" "context_window_size")"
+# Context fields live under "context_window" (CC >=2.1.132). jq parses the real object
+# regardless of key order; the regex scope-scan is a fallback for a missing/broken jq.
+context_window_size=0
+used_pct=0
+have_context_window=false
+if command -v jq >/dev/null 2>&1; then
+    cw_json="$(printf '%s' "$INPUT" | jq -e -c '.context_window | select(type == "object")' 2>/dev/null)"
+    if [[ -n "$cw_json" ]]; then
+        have_context_window=true
+        context_window_size="$(printf '%s' "$cw_json" | jq -r '.context_window_size // 0' 2>/dev/null)"
+        used_pct_raw="$(printf '%s' "$cw_json" | jq -r '.used_percentage // 0' 2>/dev/null)"
+    fi
+fi
+if [[ "$have_context_window" == false ]]; then
+    cw_pattern='"context_window"[[:space:]]*:[[:space:]]*\{'
+    if [[ "$INPUT" =~ $cw_pattern ]]; then
+        cw_scope="${INPUT#*\"context_window\"}"
+        cw_scope="${cw_scope%%\"rate_limits\"*}"
+        context_window_size="$(extract_json_number "$cw_scope" "context_window_size")"
+        used_pct_raw="$(extract_json_float "$cw_scope" "used_percentage")"
+    fi
+fi
 context_window_size="${context_window_size:-0}"
-
-# Context usage percentage — truncate to integer for bash arithmetic
-used_pct_raw="$(extract_json_float "$INPUT" "used_percentage")"
+[[ "$context_window_size" =~ ^[0-9]+$ ]] || context_window_size=0
 used_pct="${used_pct_raw%%.*}"
 used_pct="${used_pct:-0}"
+[[ "$used_pct" =~ ^[0-9]+$ ]] || used_pct=0
 
 # Rate limits — detect rate_limits key, then extract five_hour/seven_day from INPUT.
 has_rl_key=false
@@ -176,11 +195,8 @@ cost_cache="$USAGE_DIR/cost-cache.jsonl"
 # No usage-window filter here (the shell can't read the full JSONL cheaply);
 # prune_cost_cache_in drops orphans, so this may briefly exceed the dashboard.
 if [[ -r "$cost_cache" ]]; then
-    # LC_ALL=C: force '.' as the decimal point regardless of the host locale.
-    # The number pattern accepts scientific notation (serde_json emits e.g. 2.5e-6).
-    # Dedup by response_id (last write wins, mirrors usage_cost::read_cost_cache_in):
-    # re-enrichment may append duplicate ids; sum the per-id map, not every line.
-    # `n` counts priced ids so an all-zero (free local) sidecar still shows $0.
+    # LC_ALL=C forces '.' as decimal point; pattern accepts scientific notation. Dedup by
+    # response_id (last write wins); `n` counts priced ids so an all-zero sidecar still shows $0.
     ssot_cost="$(LC_ALL=C awk '
         {
             id = ""
@@ -207,8 +223,7 @@ if [[ -r "$cost_cache" ]]; then
 fi
 
 # ── Git branch ───────────────────────────────────────────────────────────────
-# No [ -d .git ] check: in git worktrees .git is a file, not a dir.
-# STATUSLINE_WORKSPACE_DIR overrides the workspace path (tests).
+# No [ -d .git ] check (worktrees: .git is a file); STATUSLINE_WORKSPACE_DIR overrides for tests.
 
 WORKSPACE="${STATUSLINE_WORKSPACE_DIR:-/workspace}"
 git_branch=""

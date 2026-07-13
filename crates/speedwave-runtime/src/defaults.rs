@@ -4,9 +4,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.201";
+pub const CLAUDE_VERSION: &str = "2.1.206";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
+
+/// Official Anthropic marketplace the bundled plugins install from.
+pub const BUNDLED_PLUGIN_MARKETPLACE: &str = "claude-plugins-official";
+
+/// Official Anthropic plugins installed and enabled by default at container start (entrypoint
+/// runs `claude plugin install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`.
+pub const BUNDLED_PLUGINS: &[&str] = &[
+    "frontend-design",
+    "feature-dev",
+    "claude-md-management",
+    "superpowers",
+    "typescript-lsp",
+];
 
 /// Per-model price list, USD per 1 million tokens. SSOT for the Desktop
 /// cost meter (`chat/pricing.ts` derives from this via `list_anthropic_models`).
@@ -208,7 +221,11 @@ pub fn anthropic_default_models_env() -> HashMap<String, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only module: unwraps/expects assert setup succeeded"
+)]
 mod tests {
     use super::*;
 
@@ -222,6 +239,34 @@ mod tests {
             re.is_match(CLAUDE_VERSION),
             "CLAUDE_VERSION must be a semver (e.g. '2.1.76'), got: '{}'",
             CLAUDE_VERSION
+        );
+    }
+
+    #[test]
+    fn bundled_plugins_are_valid_slugs() {
+        assert!(
+            !BUNDLED_PLUGINS.is_empty(),
+            "must bundle at least one plugin"
+        );
+        let slug = regex::Regex::new(r"^[a-z][a-z0-9-]*$").unwrap();
+        for p in BUNDLED_PLUGINS {
+            assert!(slug.is_match(p), "plugin slug must be kebab-case: '{p}'");
+            assert!(
+                !p.contains('@'),
+                "plugin const holds bare names, not name@marketplace: '{p}'"
+            );
+        }
+        let mut sorted = BUNDLED_PLUGINS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            BUNDLED_PLUGINS.len(),
+            "BUNDLED_PLUGINS has duplicates"
+        );
+        assert!(
+            !BUNDLED_PLUGIN_MARKETPLACE.is_empty(),
+            "marketplace must be set"
         );
     }
 

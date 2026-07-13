@@ -1,12 +1,6 @@
 #!/usr/bin/env bats
-# Tests for scripts/bundle-build-context.sh
-# Verifies that the script creates the expected directory structure.
-#
-# Note: bundle-build-context.ps1 (Windows equivalent) receives identical
-# changes but is only exercised inside Windows E2E VMs (scripts/e2e-vm.sh).
-#
-# Prerequisite: `make build-mcp` must be run first so that mcp-servers/os/dist/
-# and mcp-servers/shared/dist/ exist for dev-mode copying.
+# Tests for scripts/bundle-build-context.sh (expected dir structure); bundle-build-context.ps1
+# mirrors this, exercised only in Windows E2E VMs. Prerequisite: `make build-mcp` for os/shared dist dirs.
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.sh"
 

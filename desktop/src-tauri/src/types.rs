@@ -16,9 +16,7 @@ impl<T> IntoAnyhow<T> for Result<T, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// DTOs
-// ---------------------------------------------------------------------------
+// ── DTOs ──
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ProjectEntry {
@@ -41,9 +39,8 @@ pub(crate) struct BundleReconcileStatus {
     pub(crate) applied_bundle_id: Option<String>,
 }
 
-/// Write-only (backend → frontend) flattened snapshot of `claude.llm` plus
-/// the computed `default_base_url`. Optional fields added to `LlmConfig` must
-/// use `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+/// Write-only (backend → frontend) flattened snapshot of `claude.llm` plus the computed
+/// `default_base_url`; new optional `LlmConfig` fields need `skip_serializing_if` set.
 #[derive(Serialize)]
 pub(crate) struct LlmConfigResponse {
     #[serde(flatten)]
@@ -126,13 +123,8 @@ impl AuthStatusResponse {
     }
 }
 
-/// Update DTO for the LLM settings save path. Mirrors `LlmConfig` plus two
-/// tri-state credential fields (`api_key`/`custom_headers`) stored off-config.
-///
-/// Tri-state semantics via `serde_with::rust::double_option`:
-/// - **field omitted** (`None`) — leave on-disk file unchanged
-/// - **explicit `null`** (`Some(None)`) — delete on-disk file, flag becomes false
-/// - **string** (`Some(Some(value))`) — write/replace; empty string also deletes
+/// Update DTO for the LLM settings save path; mirrors `LlmConfig` plus tri-state
+/// `api_key`/`custom_headers` (`double_option`): omitted=unchanged, null=delete, string=write.
 #[derive(Deserialize, Default)]
 pub(crate) struct LlmConfigUpdate {
     pub(crate) provider: Option<String>,
@@ -144,9 +136,8 @@ pub(crate) struct LlmConfigUpdate {
     pub(crate) api_key: Option<Option<String>>,
     #[serde(default, with = "serde_with::rust::double_option")]
     pub(crate) custom_headers: Option<Option<String>>,
-    /// v2 provider list (ADR-073). When present, replaces the stored list
-    /// wholesale (the UI always sends the full set). Key VALUES never ride
-    /// this DTO — they go through `set_llm_provider_key`.
+    /// v2 provider list (ADR-073). When present, replaces the stored list wholesale (UI always
+    /// sends the full set). Key VALUES never ride this DTO — see `set_llm_provider_key`.
     #[serde(default)]
     pub(crate) providers: Option<Vec<speedwave_runtime::config::LlmProviderEntry>>,
     /// v2 active provider+model selection (ADR-073).
@@ -155,6 +146,85 @@ pub(crate) struct LlmConfigUpdate {
     /// ADR-073 kill-switch passthrough; omitted = leave unchanged.
     #[serde(default)]
     pub(crate) proxy_enabled: Option<bool>,
+}
+
+/// Which telemetry fields MDM locked, by semantic name — mirrors `TelemetryConfig`'s
+/// field set so the UI greys the right controls without knowing any `OTEL_*` key.
+#[derive(Serialize, Default)]
+pub(crate) struct TelemetryLocks {
+    pub(crate) enabled: bool,
+    pub(crate) endpoint: bool,
+    pub(crate) protocol: bool,
+    pub(crate) export_metrics: bool,
+    pub(crate) export_logs: bool,
+    pub(crate) headers: bool,
+    pub(crate) resource_attributes: bool,
+    pub(crate) include_account_uuid: bool,
+    pub(crate) log_user_prompts: bool,
+    pub(crate) log_assistant_responses: bool,
+    pub(crate) log_tool_details: bool,
+    pub(crate) log_raw_api_bodies: bool,
+    pub(crate) metric_export_interval_ms: bool,
+    pub(crate) logs_export_interval_ms: bool,
+}
+
+/// Effective telemetry the frontend renders. Never carries the headers value —
+/// only `has_headers` — so the secret stays on the host.
+#[derive(Serialize)]
+pub(crate) struct TelemetryConfigResponse {
+    pub(crate) enabled: bool,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) protocol: speedwave_runtime::config::OtlpProtocol,
+    pub(crate) export_metrics: bool,
+    pub(crate) export_logs: bool,
+    /// True when a headers secret is set (the value itself is never sent).
+    pub(crate) has_headers: bool,
+    pub(crate) resource_attributes: Option<String>,
+    pub(crate) include_account_uuid: bool,
+    pub(crate) log_user_prompts: bool,
+    pub(crate) log_assistant_responses: bool,
+    pub(crate) log_tool_details: bool,
+    pub(crate) log_raw_api_bodies: bool,
+    pub(crate) metric_export_interval_ms: Option<u64>,
+    pub(crate) logs_export_interval_ms: Option<u64>,
+    /// Per-field lock flags so the UI greys locked fields.
+    pub(crate) locks: TelemetryLocks,
+    pub(crate) any_locked: bool,
+    pub(crate) kill_switch: bool,
+}
+
+/// User-supplied telemetry update. `headers` is tri-state (omit = keep, null =
+/// clear, string = replace). MDM-locked fields are ignored server-side.
+#[derive(Deserialize, Default)]
+pub(crate) struct TelemetryConfigUpdate {
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) endpoint: Option<Option<String>>,
+    #[serde(default)]
+    pub(crate) protocol: Option<speedwave_runtime::config::OtlpProtocol>,
+    #[serde(default)]
+    pub(crate) export_metrics: Option<bool>,
+    #[serde(default)]
+    pub(crate) export_logs: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) headers: Option<Option<String>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) resource_attributes: Option<Option<String>>,
+    #[serde(default)]
+    pub(crate) include_account_uuid: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_user_prompts: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_assistant_responses: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_tool_details: Option<bool>,
+    #[serde(default)]
+    pub(crate) log_raw_api_bodies: Option<bool>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) metric_export_interval_ms: Option<Option<u64>>,
+    #[serde(default, with = "serde_with::rust::double_option")]
+    pub(crate) logs_export_interval_ms: Option<Option<u64>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -204,9 +274,7 @@ pub(crate) struct IntegrationsResponse {
     pub(crate) os: Vec<OsIntegrationStatusEntry>,
 }
 
-// ---------------------------------------------------------------------------
-// Integration metadata helpers — delegates to consts SSOT
-// ---------------------------------------------------------------------------
+// ── Integration metadata helpers — delegates to consts SSOT ──
 
 pub(crate) fn get_allowed_fields(service: &str) -> Option<&'static [&'static str]> {
     speedwave_runtime::consts::find_mcp_service(service).map(|svc| svc.credential_files)
@@ -226,9 +294,8 @@ pub(crate) fn field_storage(
     })
 }
 
-/// `true` if `key` is allowed on `service`, considering both storage tiers
-/// (worker-mounted credential files + OAuth state fields). Used by save paths
-/// to accept UI form fields whose physical home is `oauth/<project>/<service>.json`.
+/// `true` if `key` is allowed on `service`, across both storage tiers (worker credential files
+/// + OAuth state fields) — accepts UI fields whose home is `oauth/<project>/<service>.json`.
 pub(crate) fn is_allowed_field(service: &str, key: &str) -> bool {
     let Some(svc) = speedwave_runtime::consts::find_mcp_service(service) else {
         return false;
@@ -271,12 +338,14 @@ pub(crate) fn check_project(name: &str) -> Result<(), String> {
     speedwave_runtime::validation::validate_project_name(name).map_err(|e| e.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions use unwrap/expect"
+)]
 mod tests {
     use super::*;
 

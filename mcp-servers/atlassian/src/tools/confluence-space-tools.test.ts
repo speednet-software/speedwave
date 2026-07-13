@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 
 const stub = { list: vi.fn(), getByKey: vi.fn() };
 vi.mock('../domains/confluence-spaces.js', () => ({ createConfluenceSpacesClient: () => stub }));
@@ -35,8 +36,8 @@ describe('definitions', () => {
     const byName = Object.fromEntries(
       createConfluenceSpaceTools(FAKE_CLIENT).map((d) => [d.tool.name, d.tool])
     );
-    expect(byName.listSpaces._meta).toEqual({ deferLoading: false });
-    expect(byName.getSpace._meta).toEqual({ deferLoading: true });
+    expect(byName.listSpaces._meta).toEqual({ [META_KEYS.DEFER_LOADING]: false });
+    expect(byName.getSpace._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
     for (const { tool } of createConfluenceSpaceTools(FAKE_CLIENT)) {
       expect(tool.keywords?.length).toBeGreaterThan(0);
       expect(tool.outputSchema?.required).toContain('success');

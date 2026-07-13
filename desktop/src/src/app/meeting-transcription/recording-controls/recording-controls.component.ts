@@ -44,10 +44,8 @@ function accelLabel(backends: Backend[]): string {
 }
 
 /**
- * Recording controls: language toggle (PL/EN — never auto-detected), audio
- * source picker (Whole meeting / System / Microphone), an acceleration badge,
- * and Start/Stop. Emits `started`/`stopped` so the parent can subscribe to /
- * detach from the session's live stream.
+ * Recording controls: language toggle (PL/EN, never auto-detected), audio source picker
+ * (Whole meeting / System / Microphone), acceleration badge, Start/Stop; emits `started`/`stopped`.
  */
 @Component({
   selector: 'app-recording-controls',
@@ -172,8 +170,6 @@ export class RecordingControlsComponent implements OnInit {
   readonly backends = signal<Backend[]>([]);
   /** Derived acceleration label. */
   readonly accel = computed(() => accelLabel(this.backends()));
-  /** `true` while a recording is in progress. */
-  readonly recording = signal(false);
   /** Disables Start/Stop while a transition is in flight. */
   readonly busy = signal(false);
   /** Local error string. */
@@ -199,11 +195,15 @@ export class RecordingControlsComponent implements OnInit {
     const k = this.sources()[this.sourceIndex()]?.source.kind;
     return k === 'mixed' || k === 'microphone';
   });
-  /** The active session id (set on start, cleared on stop). */
-  private activeSessionId: string | null = null;
 
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
+
+  /**
+   * `true` while a recording is in progress — read from the service so it
+   * survives this tab being destroyed on navigation (the driver keeps going).
+   */
+  readonly recording = computed(() => this.transcription.recordingSessionId() !== null);
 
   /** Loads backends + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
@@ -212,11 +212,20 @@ export class RecordingControlsComponent implements OnInit {
       this.backends.set(caps.backends);
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
-      // Default to "Whole meeting" (mixed) if offered, else "System
-      // (everything)", else the first entry.
-      const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
-      const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
-      this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
+      const inProgressSource = this.transcription.recordingSource();
+      if (inProgressSource) {
+        // A recording started before this instance existed (remount) — restore its
+        // picker selection instead of showing the compile-time defaults.
+        this.restoreFromInProgressRecording(list, inProgressSource);
+      } else {
+        // Default to "Whole meeting" (mixed) if offered, else "System
+        // (everything)", else the first entry.
+        const mixedIdx = list.findIndex((s) => s.source.kind === 'mixed');
+        const sysIdx = list.findIndex((s) => s.source.kind === 'system_wide');
+        this.sourceIndex.set(mixedIdx >= 0 ? mixedIdx : sysIdx >= 0 ? sysIdx : 0);
+      }
+      const inProgressLanguage = this.transcription.recordingLanguage();
+      if (inProgressLanguage) this.language.set(inProgressLanguage);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
@@ -224,6 +233,18 @@ export class RecordingControlsComponent implements OnInit {
     }
     await this.refreshModelAvailability();
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Restores `sourceIndex`/`micDevice` to match the source of a recording already in progress.
+   * @param list - the freshly-loaded source list.
+   * @param source - the in-progress recording's source.
+   */
+  private restoreFromInProgressRecording(list: AudioSourceInfo[], source: AudioSource): void {
+    const idx = list.findIndex((s) => s.source.kind === source.kind);
+    if (idx >= 0) this.sourceIndex.set(idx);
+    if (source.kind === 'mixed') this.micDevice.set(source.mic);
+    else if (source.kind === 'microphone') this.micDevice.set(source.device);
   }
 
   /**
@@ -288,28 +309,47 @@ export class RecordingControlsComponent implements OnInit {
     this.busy.set(true);
     this.error.set('');
     try {
+      if (src.kind !== 'system_wide' && !(await this.ensureMicConsent())) {
+        return;
+      }
       const ack = await this.transcription.startRecording(src, this.language());
-      this.activeSessionId = ack.session_id;
-      this.recording.set(true);
       this.started.emit(ack.session_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
       this.errorOccurred.emit(msg);
+    } finally {
+      this.busy.set(false);
+      this.cdr.markForCheck();
     }
-    this.busy.set(false);
-    this.cdr.markForCheck();
+  }
+
+  /**
+   * Resolves mic consent before a mic-including capture starts; on refusal
+   * surfaces the error and, for an earlier refusal, deep-links to Settings.
+   */
+  private async ensureMicConsent(): Promise<boolean> {
+    const verdict = await this.transcription.requestMicrophonePermission();
+    if (verdict === 'granted') return true;
+    if (verdict === 'previously_denied') {
+      // Nothing to re-prompt — only the Settings pane can restore access.
+      await this.transcription.openMicrophonePrivacyPane().catch(() => undefined);
+    }
+    const msg =
+      'microphone permission denied — enable Speedwave under System Settings → ' +
+      'Privacy & Security → Microphone, then start again';
+    this.error.set(msg);
+    this.errorOccurred.emit(msg);
+    return false;
   }
 
   /** Stops the in-progress recording. */
   async stop(): Promise<void> {
-    const id = this.activeSessionId;
+    const id = this.transcription.recordingSessionId();
     if (!id) return;
     this.busy.set(true);
     try {
       await this.transcription.stopRecording(id);
-      this.recording.set(false);
-      this.activeSessionId = null;
       this.stopped.emit(id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

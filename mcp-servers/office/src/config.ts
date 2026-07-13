@@ -1,6 +1,5 @@
 /**
- * Static configuration for the office worker — paths, limits, timeouts.
- * All values are fixed at build time except those overridable via env (documented).
+ * Static configuration for the office worker — paths, limits, timeouts. Fixed at build time except where overridable via env (documented per-const).
  * @module mcp-office/config
  */
 
@@ -49,9 +48,8 @@ export const DEFAULT_MAX_CHARS = 4000;
 
 /**
  * Parse a positive integer from an env var, falling back to `fallback` for missing/invalid/non-positive values.
- * @param raw - The raw env-var string (or undefined).
- * @param fallback - The value to use when `raw` is absent or not a positive integer.
- * @returns The parsed positive integer, or `fallback`.
+ * @param raw - the raw env-var string (or undefined)
+ * @param fallback - the value to use when `raw` is absent or not a positive integer
  */
 export function parsePositiveInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined) {

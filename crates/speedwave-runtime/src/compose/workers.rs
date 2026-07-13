@@ -1,6 +1,5 @@
-//! Host-side worker + built-in MCP worker wiring: per-worker Bearer auth
-//! tokens, the integrations filter (drop disabled services + their hub env),
-//! and the gateway URL a container uses to reach a host-side worker.
+//! Host-side worker + built-in MCP worker wiring: per-worker Bearer auth tokens, the integrations
+//! filter (drop disabled services + their hub env), and the URL to reach a host-side worker.
 
 use super::{
     add_hub_volume, add_service_env_var, ensure_host_gateway_extra_host, init_secrets_dir_in,
@@ -11,17 +10,8 @@ use crate::consts;
 use crate::engine_path::to_engine_path;
 use crate::plugin;
 
-/// Generates per-worker Bearer auth tokens and injects them into the compose YAML.
-///
-/// For each enabled MCP service:
-/// - Reads or generates a UUID v4 token at `~/.speedwave/secrets/<project>/<service>-auth-token`
-/// - Injects `MCP_<SERVICE>_AUTH_TOKEN=<token>` env var into the worker container
-/// - Mounts the token file as `/secrets/<service>-auth-token:ro` into the hub
-///
-/// Hub reads tokens from `/secrets/` files (auth-tokens.ts); workers from env
-/// vars — asymmetry enforced by `check_no_tokens_in_hub`.
-/// Injects `SPW_CREDENTIALS_DIGEST` into every enabled MCP worker so credential
-/// rotation changes its config-hash (token bytes never enter the YAML).
+/// Generates per-worker Bearer tokens (UUID v4): `MCP_<SERVICE>_AUTH_TOKEN` on the worker, a
+/// `/secrets/<service>-auth-token:ro` mount (`check_no_tokens_in_hub`), `SPW_CREDENTIALS_DIGEST`.
 pub(crate) fn apply_credentials_digests_in(
     data_dir: &std::path::Path,
     yaml: &str,
@@ -130,10 +120,8 @@ pub(crate) fn apply_worker_auth_tokens_in(
     apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, &plugins)
 }
 
-/// Testable version: accepts explicit secrets directory and plugin list.
-/// Reads or generates a Bearer auth token, writes it atomically with 0o600
-/// permissions, injects the env var into the worker container, and mounts
-/// the token file into the hub.
+/// Testable version: accepts explicit secrets directory and plugin list. Reads or generates a
+/// Bearer auth token, writes it atomically at 0o600, injects the env var, mounts into the hub.
 fn ensure_worker_auth_token(
     doc: &mut serde_yaml_ng::Value,
     secrets_dir: &std::path::Path,
@@ -173,16 +161,7 @@ fn ensure_worker_auth_token(
         uuid::Uuid::new_v4().to_string()
     };
 
-    // Atomic write with 0o600; unique suffix avoids concurrent-write collisions.
-    let tmp_name = format!("{}.{}.tmp", token_file_name, uuid::Uuid::new_v4());
-    let tmp_path = secrets_dir.join(&tmp_name);
-    std::fs::write(&tmp_path, &token)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&tmp_path, &token_path)?;
+    crate::fs_perms::write_restricted_file_atomic(&token_path, &token)?;
 
     // Inject env var into worker container (fail-loud)
     add_service_env_var(doc, compose_name, env_key, &token)?;
@@ -195,7 +174,7 @@ fn ensure_worker_auth_token(
             to_engine_path(&token_path)?,
             token_file_name
         ),
-    );
+    )?;
 
     Ok(())
 }
@@ -243,11 +222,8 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Service IDs enabled by `integrations`, as the hub's `ENABLED_SERVICES` expects:
-/// built-in MCP config keys (`slack`, ...), `os` when any OS sub-integration is on,
-/// and enabled plugin service IDs. Excludes the always-on `claude` / `mcp-hub`.
-/// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`; `build::enabled_images`
-/// uses the same per-service predicate (`is_service_enabled`) on the `IMAGES` list.
+/// Service IDs enabled by `integrations` (`ENABLED_SERVICES`): MCP keys, `os` if any sub-on,
+/// plugin IDs (excl. `claude`/`mcp-hub`). SSOT; `build::enabled_images` reuses is_service_enabled.
 pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec<String> {
     let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
         .iter()
@@ -266,15 +242,8 @@ pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec
     ids
 }
 
-/// Filters compose services based on integrations config.
-/// - Removes disabled MCP service containers from the `services` map
-/// - Removes corresponding WORKER_*_URL from hub environment
-/// - Injects ENABLED_SERVICES (comma-separated, see [`enabled_hub_service_ids`])
-///   into both the `mcp-hub` (for tool routing) and the `claude` container
-///   (so `entrypoint.sh` can gate per-integration claude-resources)
-/// - Injects DISABLED_OS_SERVICES into both `mcp-hub` (for sub-tool routing) and
-///   `claude` (so `entrypoint.sh` can gate per-OS-sub-service claude-resources)
-///   when any OS sub-integrations are disabled
+/// Filters compose services by integrations: removes disabled MCP containers + their hub
+/// WORKER_*_URL; injects ENABLED_SERVICES/DISABLED_OS_SERVICES (see [`enabled_hub_service_ids`]).
 pub(crate) fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
@@ -354,9 +323,8 @@ pub(crate) fn apply_integrations_filter(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Removes an environment variable from an arbitrary service's `environment`
-/// sequence. No-op if the service or its `environment` sequence is absent —
-/// same posture as [`inject_env_into`].
+/// Removes an environment variable from an arbitrary service's `environment` sequence. No-op if
+/// the service or its `environment` sequence is absent — same posture as [`inject_env_into`].
 pub(crate) fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env_name: &str) {
     let Some(services) = doc.get_mut("services") else {
         return;
@@ -378,8 +346,7 @@ pub(crate) fn remove_env_from(doc: &mut serde_yaml_ng::Value, service: &str, env
 }
 
 /// Inject `<env_var>=<gateway-url>` + mount `<token_mount_path>:/secrets/<secret_name>:ro`
-/// into the hub iff `lock.json` is readable and the mount-token file exists.
-/// No-op (unchanged YAML) when files absent; any read failure is treated as not running.
+/// into the hub iff `lock.json`+token file are readable; no-op/absent-treated on any failure.
 pub(crate) fn apply_worker_config(
     yaml: &str,
     label: &str,
@@ -416,7 +383,7 @@ pub(crate) fn apply_worker_config(
             "{}:/secrets/{secret_name}:ro",
             to_engine_path(token_mount_path)?
         ),
-    );
+    )?;
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
@@ -442,7 +409,11 @@ pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test-only module: unwraps/expects assert setup succeeded"
+)]
 mod credentials_digest_tests {
     use super::*;
 

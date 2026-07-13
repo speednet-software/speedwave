@@ -23,6 +23,7 @@ import {
 import {
   chatInputFromText,
   chatInputToBlocks,
+  contextTokensFrom,
   type ChatInput,
   type ChatMessage,
   type MessageBlock,
@@ -83,8 +84,8 @@ export function mapNotLoggedInError(raw: string): string | null {
 }
 
 /**
- * Gate predicate: the backend failure means the session is unauthenticated, so
- * the UI routes to auth_required (display mapping stays in `mapNotLoggedInError`).
+ * Gate predicate: the backend failure means the session is unauthenticated, so the UI
+ * routes to auth_required (display mapping stays in `mapNotLoggedInError`).
  * @param msg - Raw error message from the backend.
  */
 export function isNotAuthenticatedError(msg: string): boolean {
@@ -126,15 +127,15 @@ export class ChatStateService {
   /** Read-only signal mirror so OnPush components re-render on stats changes. */
   readonly sessionStatsFromState: Signal<SessionStats | null> = this._sessionStats.asReadonly();
 
-  /** input_tokens from the most recent successful Result; survives stream reset. */
-  get lastSuccessfulInputTokens(): number | null {
-    return this._lastSuccessfulInputTokens;
+  /** Context tokens of the last main-chain API call; survives stream reset. */
+  get lastContextTokens(): number | null {
+    return this._lastContextTokens;
   }
 
   private _model = '';
   private _rateLimit: RateLimitInfo | null = null;
   private _totalOutputTokens = 0;
-  private _lastSuccessfulInputTokens: number | null = null;
+  private _lastContextTokens: number | null = null;
   /** Context window for the active model; `null` until populated or if unknown. */
   private _contextWindowSize: number | null = null;
   /** Active LLM provider id from `get_llm_config().provider`. */
@@ -262,8 +263,8 @@ export class ChatStateService {
 
   /**
    * Test-only setter for private backing fields.
+   * @param state - Partial state to merge into the service.
    * @internal
-   * @param state - partial state to merge into the service
    */
   _setState(
     state: Partial<{
@@ -531,9 +532,9 @@ export class ChatStateService {
 
   /**
    * Records one slot's answer for a multi-question AskUserQuestion block.
-   * @param toolUseId   tool_use_id of the AskUserQuestion control_request.
-   * @param questionIdx slot index being answered (0-based).
-   * @param value       chosen value (multi-select labels pre-joined with `", "`).
+   * @param toolUseId - Tool_use_id of the AskUserQuestion control_request.
+   * @param questionIdx - Slot index being answered (0-based).
+   * @param value - Chosen value (multi-select labels pre-joined with `", "`).
    */
   async submitAnswer(toolUseId: string, questionIdx: number, value: string): Promise<void> {
     const capturedTurn = this._turnId;
@@ -785,10 +786,14 @@ export class ChatStateService {
           Number.isFinite(chunk.data.total_cost)
             ? chunk.data.total_cost
             : null;
+        // The parser retains the last main-chain call across turns; a Result
+        // without one (no API call yet) keeps the previous/seeded meter value.
+        const contextUsage = chunk.data.context_usage ?? this._sessionStats()?.context_usage;
         this._sessionStats.set({
           session_id: chunk.data.session_id,
           total_cost: livePreviewCost,
           usage: chunk.data.usage,
+          context_usage: contextUsage,
           model: resolvedModel,
           rate_limit: this._rateLimit ?? undefined,
           context_window_size: this._contextWindowSize,
@@ -799,8 +804,8 @@ export class ChatStateService {
           this._lastKnownSessionId = chunk.data.session_id;
           void this.flushDeferredQueue(chunk.data.session_id);
         }
-        if (typeof chunk.data.usage?.input_tokens === 'number') {
-          this._lastSuccessfulInputTokens = chunk.data.usage.input_tokens;
+        if (contextUsage) {
+          this._lastContextTokens = contextTokensFrom(contextUsage);
         }
         // Reconcile footer + per-message cost from the proxy SSOT (CC is a preview).
         void this.reconcileFooterCost(chunk.data.assistant_uuid);
@@ -931,12 +936,9 @@ export class ChatStateService {
   }
 
   /**
-   * Queue a message as the next turn (ADR-045); replace semantics. The local
-   * slot fills immediately; before the first session id (init not yet parsed)
-   * the backend registration is deferred to {@link flushDeferredQueue} so an
-   * early queue is never silently dropped.
+   * Queue a message as the next turn (ADR-045); replace semantics. Before the first session id
+   * (init not yet parsed), backend registration defers to {@link flushDeferredQueue} so an early queue is never dropped.
    * @param text - The message to queue.
-   * @returns the displaced queued text, or `null` if the slot was empty.
    */
   async queueMessage(text: string): Promise<string | null> {
     if (!text) return null;
@@ -1105,7 +1107,7 @@ export class ChatStateService {
     // The ready-triggered cache refresh is async and may still hold the previous
     // model's window — re-read so the fit decision sees the post-restart model.
     await this.refreshLlmConfigCache();
-    if (historyFitsTarget(this._lastSuccessfulInputTokens, this._persistedContextTokens)) {
+    if (historyFitsTarget(this._lastContextTokens, this._persistedContextTokens)) {
       void this.resumeConversation(id);
       return;
     }
@@ -1182,6 +1184,9 @@ export class ChatStateService {
       }
       // Seed session id immediately so retry/queue work without waiting for live Result.
       this.seedSessionId(sessionId);
+      // Ctx meter + fit-gate from the transcript's last per-call usage, so the
+      // footer is truthful before the first live Result of the resumed session.
+      this.seedContextFromTranscript();
     } catch (err) {
       // Drop the optimistic accent so a failed resume isn't shown as active.
       this._optimisticSessionId = null;
@@ -1213,8 +1218,8 @@ export class ChatStateService {
   private static readonly DEFERRED_RECONCILE_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 
   /**
-   * Reconciles the footer + per-message cost from the proxy SSOT (invariant 6),
-   * retrying on a backoff while OpenRouter cost is `deferred`. Best-effort.
+   * Reconciles the footer + per-message cost from the proxy SSOT (invariant 6), retrying on a
+   * backoff while OpenRouter cost is `deferred`. Best-effort.
    * @param assistantUuid - The `result` event's `assistant_uuid` (== proxy `response_id`).
    * @param attempt - Backoff index for a deferred re-reconcile (0 on the first call).
    */
@@ -1262,8 +1267,7 @@ export class ChatStateService {
   }
 
   /**
-   * Response ids of the current conversation's assistant turns, for the footer
-   * cost sum.
+   * Response ids of the current conversation's assistant turns, for the footer cost sum.
    * @param latestUuid - just-finished turn's assistant uuid (caller guards non-empty).
    */
   private conversationResponseIds(latestUuid: string): string[] {
@@ -1277,7 +1281,7 @@ export class ChatStateService {
 
   /**
    * Overwrite an assistant entry's per-message cost from the proxy SSOT.
-   * @param uuid - assistant_uuid identifying the entry.
+   * @param uuid - Assistant_uuid identifying the entry.
    * @param cost - proxy cost in USD, or null/unpriced → hide the segment.
    */
   private overwriteEntryCost(uuid: string, cost: number | null): void {
@@ -1292,8 +1296,21 @@ export class ChatStateService {
     ];
   }
 
+  /** Seeds `context_usage` from the loaded transcript's last assistant per-call usage. */
+  private seedContextFromTranscript(): void {
+    const usage = findLastNonZeroAssistantUsage(this._messages);
+    if (!usage) return;
+    this._lastContextTokens = contextTokensFrom(usage);
+    const cur = this._sessionStats();
+    if (cur) {
+      this._sessionStats.set({ ...cur, context_usage: usage });
+      this.notifyChange();
+    }
+  }
+
   /**
-   * Context-window fallback: live → SSOT → persisted → previous → Anthropic default; local stays `null`.
+   * Context-window fallback: live → SSOT → persisted → previous → Anthropic default; local
+   * stays `null`.
    * @param liveValue - Authoritative value carried by the stream (highest priority).
    * @param model - Resolved model id used for the SSOT lookup.
    */
@@ -1331,9 +1348,8 @@ export class ChatStateService {
     try {
       this.unlisten = await this.tauri.listen<StreamChunk>('chat_stream', (event) => {
         const chunk = event.payload;
-        // Chunks legitimate between/after turns: metadata (SystemInit,
-        // trailing RateLimit) and QueueDrained — the drain fires right AFTER
-        // Result flipped isStreaming=false and itself starts the next turn.
+        // Legitimate between/after turns: metadata (SystemInit, trailing RateLimit) and
+        // QueueDrained — fires right after Result sets isStreaming=false, starting the next turn.
         if (
           chunk.chunk_type === 'SystemInit' ||
           chunk.chunk_type === 'RateLimit' ||
@@ -1485,6 +1501,32 @@ function findLastUserIndexMissingUuid(msgs: readonly ChatMessage[]): number {
   return -1;
 }
 
+/**
+ * Last assistant per-call usage that isn't all-zero, matching the live-stream path's
+ * `TurnUsage::default()` skip (chat.rs) so an aborted/errored call doesn't seed a false ctx=0%.
+ * @param msgs The conversation messages, oldest first.
+ */
+function findLastNonZeroAssistantUsage(msgs: readonly ChatMessage[]): TurnUsage | undefined {
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    const usage = msgs[i].role === 'assistant' ? msgs[i].meta?.usage : undefined;
+    if (usage && !isZeroUsage(usage)) return usage;
+  }
+  return undefined;
+}
+
+/**
+ * True when every field of `u` is zero, mirroring Rust's `TurnUsage::default()`.
+ * @param u The per-call usage to test.
+ */
+function isZeroUsage(u: TurnUsage): boolean {
+  return (
+    u.input_tokens === 0 &&
+    u.output_tokens === 0 &&
+    u.cache_read_tokens === 0 &&
+    u.cache_write_tokens === 0
+  );
+}
+
 /** Snapshot of the legacy `ChatStateService` fields needed for projection. */
 export interface LegacyStateSnapshot {
   messages: readonly ChatMessage[];
@@ -1554,8 +1596,8 @@ export function buildStateTreeFromLegacy(src: LegacyStateSnapshot): Conversation
 }
 
 /**
- * Project committed `state().entries` onto the legacy `ChatMessage[]` shape;
- * the trailing live-streaming entry is dropped (it lives under `currentBlocksFromState`).
+ * Project committed `state().entries` onto the legacy `ChatMessage[]` shape; the trailing
+ * live-streaming entry is dropped (it lives under `currentBlocksFromState`).
  * @param entries - State-tree entries to convert.
  */
 export function stateEntriesToChatMessages(
@@ -1656,9 +1698,9 @@ function cloneQuestionItem(q: AskUserQuestionItem): AskUserQuestionItem {
 }
 
 /**
- * Converts SDK message blocks into the serializable shape persisted to the
- * chat state store (drops live-only fields and normalizes tool payloads).
- * @param blocks Live message blocks emitted by the agent SDK for one turn.
+ * Converts SDK message blocks into the serializable shape persisted to the chat state store
+ * (drops live-only fields and normalizes tool payloads).
+ * @param blocks - Live message blocks emitted by the agent SDK for one turn.
  */
 export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBlockState[] {
   const out: MessageBlockState[] = [];
@@ -1719,8 +1761,8 @@ export function blocksToPlainText(blocks: readonly MessageBlock[]): string {
 }
 
 /**
- * Null handling is asymmetric: unknown history defaults to fits (resume),
- * unknown window defaults to doesn't fit (ask) — local models with no discovery.
+ * Null handling is asymmetric: unknown history defaults to fits (resume), unknown window
+ * defaults to doesn't fit (ask) — local models with no discovery.
  * @param historyTokens - Tokens used by the conversation so far, or null if unknown.
  * @param windowTokens - Target model's context window, or null if undiscovered.
  */

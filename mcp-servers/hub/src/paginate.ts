@@ -3,9 +3,7 @@
  * @module paginate
  */
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ───────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Configuration options for pagination
@@ -71,12 +69,10 @@ type PaginatedResponse<T> = {
   [key: string]: unknown;
 };
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Main Pagination Generator
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Main Pagination Generator ──────────────────────────────────────────────────────────────
 
 /**
- * Create async generator for paginated API calls.
+ * Create an async generator that yields a PageResult<T> for each page of a paginated API call.
  * @param fetcher - Function that fetches a page given offset and limit
  * @param config - Pagination configuration
  * @yields {PageResult<T>} PageResult for each page
@@ -134,7 +130,7 @@ export async function* paginate<T>(
 }
 
 /**
- * Extract items array from various response shapes
+ * Extract the items array from various worker response shapes.
  * @param result - API response object
  * @returns Array of items extracted from response
  */
@@ -167,9 +163,7 @@ function extractItems<T>(result: PaginatedResponse<T>): T[] {
   return [];
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Helper Functions
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Helper Functions ────────────────────────────────────────────────────────────────────────
 
 /**
  * Collect all pages into a single array.
@@ -185,10 +179,9 @@ export async function collectPages<T>(generator: AsyncGenerator<PageResult<T>>):
 }
 
 /**
- * Find first item matching predicate across all pages.
+ * Find the first item matching predicate across all pages, or undefined.
  * @param generator - Pagination generator
  * @param predicate - Function to test each item
- * @returns First matching item or undefined
  */
 export async function findInPages<T>(
   generator: AsyncGenerator<PageResult<T>>,
@@ -204,10 +197,9 @@ export async function findInPages<T>(
 }
 
 /**
- * Count items matching predicate across all pages
+ * Count items matching predicate across all pages (counts all items if predicate is omitted).
  * @param generator - Pagination generator
  * @param predicate - Optional filter (counts all if not provided)
- * @returns Total count of matching items
  */
 export async function countInPages<T>(
   generator: AsyncGenerator<PageResult<T>>,
@@ -225,10 +217,9 @@ export async function countInPages<T>(
 }
 
 /**
- * Filter items across all pages
+ * Filter items across all pages.
  * @param generator - Pagination generator
  * @param predicate - Filter function
- * @returns All matching items
  */
 export async function filterPages<T>(
   generator: AsyncGenerator<PageResult<T>>,
@@ -242,10 +233,9 @@ export async function filterPages<T>(
 }
 
 /**
- * Map items across all pages
+ * Map items across all pages.
  * @param generator - Pagination generator
  * @param mapper - Transform function
- * @returns Transformed items from all pages
  */
 export async function mapPages<T, U>(
   generator: AsyncGenerator<PageResult<T>>,
@@ -259,10 +249,9 @@ export async function mapPages<T, U>(
 }
 
 /**
- * Take first N items across pages.
+ * Take the first N items across pages.
  * @param generator - Pagination generator
  * @param n - Number of items to take
- * @returns First N items
  */
 export async function takeFromPages<T>(
   generator: AsyncGenerator<PageResult<T>>,

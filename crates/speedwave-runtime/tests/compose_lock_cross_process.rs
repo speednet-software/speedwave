@@ -1,8 +1,11 @@
-//! Cross-process file-lock test — re-execs the test binary as parent+child
-//! per `tests/data_dir_integration.rs` pattern, asserts the second process
-//! blocks until the first releases.
+//! Cross-process file-lock test — re-execs the test binary as parent+child per
+//! `tests/data_dir_integration.rs`; asserts the child blocks until the parent releases.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+#![expect(
+    clippy::expect_used,
+    clippy::print_stderr,
+    reason = "test child process reports failure on stderr and asserts on setup calls"
+)]
 
 use std::process::Command;
 use std::time::Duration;

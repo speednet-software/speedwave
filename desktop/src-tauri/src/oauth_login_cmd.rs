@@ -1,23 +1,20 @@
-//! Tauri command: open the host's terminal application running
-//! `speedwave login` for the chosen project. OAuth happens in the container;
-//! Speedwave never sees or stores the token.
+//! Tauri command: open the host's terminal running `speedwave login` for the chosen
+//! project. OAuth happens in the container; Speedwave never sees or stores the token.
 
 use crate::auth_commands::{
     build_auth_command_for_platform, ensure_cli_installed, resolve_project_dirs,
 };
 use crate::types::check_project;
 
-/// Returns true when `s` contains any control character (`< 0x20` or DEL).
-/// AppleScript `do script` interprets newlines and other control bytes — we
-/// reject them to avoid command-injection-shaped surprises.
+/// Returns true when `s` contains any control character (`< 0x20` or DEL) — AppleScript
+/// `do script` interprets these, so we reject them to avoid command-injection surprises.
 #[cfg(target_os = "macos")]
 fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7f)
 }
 
-/// Escapes a string for embedding inside an AppleScript double-quoted literal.
-/// Order matters: backslashes must be doubled before quotes are escaped, or a
-/// pre-existing `\` would consume the leading backslash of `\"`.
+/// Escapes a string for an AppleScript double-quoted literal. Order matters: backslashes
+/// must be doubled before quotes are escaped, or a pre-existing `\` consumes the `\"` lead.
 #[cfg(target_os = "macos")]
 pub(crate) fn escape_for_applescript(s: &str) -> anyhow::Result<String> {
     if contains_control_chars(s) {
@@ -38,9 +35,8 @@ fn is_safe_shell_path(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'.' | b'-'))
 }
 
-/// Validates a candidate shell path (typically `$SHELL`), falling back to
-/// `DEFAULT_LOGIN_SHELL` when it's missing or not a plain absolute path.
-/// Pure — takes the candidate so it's testable without mutating the env.
+/// Validates a candidate shell path (typically `$SHELL`), falling back to `DEFAULT_LOGIN_SHELL`
+/// when missing or not a plain absolute path. Pure — testable without mutating the env.
 #[cfg(target_os = "macos")]
 fn sanitize_login_shell(candidate: Option<&str>) -> String {
     match candidate {
@@ -94,7 +90,7 @@ fn spawn_iterm2(cmd: &str) -> anyhow::Result<()> {
          \tcreate window with default profile command \"{escaped}\"\n\
          end tell"
     );
-    let status = std::process::Command::new("osascript")
+    let status = speedwave_runtime::binary::system_command("osascript")
         .args(["-e", &script])
         .status()?;
     if !status.success() {
@@ -110,7 +106,7 @@ fn spawn_apple_terminal(cmd: &str) -> anyhow::Result<()> {
         "tell application \"Terminal\" to do script \"{escaped}\"\n\
          tell application \"Terminal\" to activate"
     );
-    let status = std::process::Command::new("osascript")
+    let status = speedwave_runtime::binary::system_command("osascript")
         .args(["-e", &script])
         .status()?;
     if !status.success() {
@@ -119,9 +115,8 @@ fn spawn_apple_terminal(cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawns the OS-native terminal running `cmd` (macOS: iTerm2 if installed,
-/// otherwise Apple Terminal — both via `osascript`). Returns once the
-/// terminal has been **launched**; does not wait for `cmd` to finish.
+/// Spawns the OS-native terminal running `cmd` (macOS: iTerm2 if installed, else Apple
+/// Terminal, both via `osascript`). Returns once **launched**; does not wait for `cmd`.
 #[cfg(target_os = "macos")]
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     if iterm2_installed() {
@@ -198,9 +193,8 @@ fn build_powershell_argv(cmd: &str) -> [String; 3] {
     ]
 }
 
-/// Spawns a new terminal window running `cmd` (PowerShell syntax). Prefers
-/// `pwsh.exe`, then `powershell.exe`; prefers Windows Terminal, else direct
-/// PowerShell spawn. `-NoExit` keeps the window open.
+/// Spawns a new terminal window running `cmd` (PowerShell syntax). Prefers `pwsh.exe` then
+/// `powershell.exe`, Windows Terminal then direct spawn. `-NoExit` keeps the window open.
 #[cfg(target_os = "windows")]
 fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
     let ps = if crate::path_util::which_in_path("pwsh.exe").is_some() {
@@ -211,7 +205,10 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
 
     // wt.exe is an App Execution Alias; spawn by name (is_file() returns false).
     let argv = build_wt_terminal_argv(ps, cmd);
-    match std::process::Command::new("wt.exe").args(argv).status() {
+    match speedwave_runtime::binary::interactive_command("wt.exe")
+        .args(argv)
+        .status()
+    {
         Ok(s) if s.success() => return Ok(()),
         Ok(s) => log::warn!("wt.exe exited {s}; falling back to direct PowerShell"),
         Err(e) => log::warn!("wt.exe not available ({e}); falling back to direct PowerShell"),
@@ -219,18 +216,19 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
 
     // Direct PowerShell spawn (its own console window) — pumps input from start.
     let argv = build_powershell_argv(cmd);
-    std::process::Command::new(ps).args(argv).spawn()?;
+    speedwave_runtime::binary::interactive_command(ps)
+        .args(argv)
+        .spawn()?;
     Ok(())
 }
 
-/// Tauri command: opens a system terminal that runs `speedwave login` for the
-/// requested project. The actual OAuth flow happens inside Claude Code in the
-/// container; this command only launches the terminal.
+/// Tauri command: opens a system terminal that runs `speedwave login` for the requested
+/// project. OAuth happens inside Claude Code in the container; this only launches the terminal.
 #[tauri::command]
 pub async fn start_oauth_login(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        log::info!("start_oauth_login: project={project}");
+        log::info!("starting OAuth login terminal for project {project}");
 
         let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         ensure_cli_installed()?;
@@ -245,7 +243,7 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
             cfg!(target_os = "windows"),
         );
         open_terminal_with_command(&cmd).map_err(|e| {
-            log::error!("start_oauth_login: terminal spawn failed: {e}");
+            log::error!("failed to spawn OAuth login terminal: {e}");
             e.to_string()
         })
     })
@@ -254,7 +252,11 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unwrap/expect are fine in test assertions"
+)]
 mod tests {
     #[cfg(target_os = "macos")]
     use super::*;

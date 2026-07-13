@@ -1,10 +1,5 @@
-//! Conversation state-tree types (ADR-042).
-//!
-//! [`state_tree`] is the SSOT for the shapes mirrored by the Angular
-//! frontend (`models/state-tree.ts`, `models/chat.ts::MessageBlock`) and
-//! for the wire types carried by `chat_stream` chunks (AskUser, queue).
-//! The JSON-Patch transport that once lived here (MsgStore, patches,
-//! entry indices) was retired — see the ADR-042 status note.
+//! Conversation state-tree types (ADR-042). [`state_tree`] is the SSOT for shapes mirrored by
+//! the Angular frontend and `chat_stream` wire types; the old JSON-Patch transport was retired.
 
 pub mod state_tree;
 

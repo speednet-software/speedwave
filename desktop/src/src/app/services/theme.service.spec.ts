@@ -9,9 +9,9 @@ import {
 } from './theme.service';
 
 /**
- * Installs a controllable `matchMedia` on `window`.
- * @param prefersDark Initial `matches` for `(prefers-color-scheme: dark)`.
- * @returns `fireChange` to simulate OS theme toggles; `restore` to remove the stub.
+ * Installs a controllable `matchMedia` on `window`; returns `fireChange` to simulate OS
+ * theme toggles and `restore` to remove the stub.
+ * @param prefersDark - Initial `matches` for `(prefers-color-scheme: dark)`.
  */
 function mockMatchMedia(prefersDark: boolean): {
   fireChange: (prefersDarkNow: boolean) => void;

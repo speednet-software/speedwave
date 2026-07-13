@@ -140,9 +140,9 @@ export class ProjectStateService {
   }
 
   /**
-   * Fires on container-restart completion (distinct from plain ready) so the
-   * chat layer resumes the live session across a model switch. Returns unsubscribe.
-   * @param cb - The callback to invoke after a successful restart.
+   * Fires on container-restart completion (distinct from plain ready) so the chat layer resumes
+   * the live session across a model switch. Returns unsubscribe.
+   * @param cb - The callback to invoke on restart completion.
    */
   onRestartComplete(cb: () => void): () => void {
     this.restartListeners.push(cb);
@@ -434,9 +434,8 @@ export class ProjectStateService {
       }
       return;
     }
-    // next is a pre-ready state (no_provider | auth_required). Never downgrade a
-    // live session: opening Settings must not blank a running chat on a transient
-    // or false negative (e.g. a dangling-active config reading provider_configured=false).
+    // next is pre-ready (no_provider | auth_required); never downgrade a live session — opening
+    // Settings must not blank a running chat on a transient/false negative (e.g. stale config read).
     if (this.status() === 'ready') return;
     this.status.set(next);
     this.notifyChange();
@@ -515,10 +514,9 @@ export class ProjectStateService {
   }
 
   /**
-   * Registers a status re-fetcher; the integrations component uses this so
-   * that on a failed enable (build/restart) the row visibly reverts.
-   * @param cb - Callback invoked after a failed restart so the caller can
-   *   re-fetch integration statuses and reflect the backend's rollback.
+   * Registers a status re-fetcher; the integrations component uses this so that on a failed
+   * enable (build/restart) the row visibly reverts to reflect the backend's rollback.
+   * @param cb - The refresher callback to register.
    */
   registerIntegrationStatusRefresher(cb: () => void): () => void {
     this.statusRefreshers.push(cb);
@@ -589,7 +587,7 @@ export class ProjectStateService {
   /**
    * The ONLY way to add projects from the frontend.
    * @param name - The project name.
-   * @param dir - The absolute path to the project directory.
+   * @param dir - The project directory path.
    */
   async addProject(name: string, dir: string): Promise<void> {
     await this.tauri.invoke('add_project', { name, dir });

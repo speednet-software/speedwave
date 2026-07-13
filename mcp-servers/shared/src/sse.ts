@@ -1,7 +1,4 @@
-/**
- * SSE (Server-Sent Events) Streaming Module for MCP
- * Implements Streamable HTTP transport (MCP spec 2025-03-26)
- */
+/** SSE (Server-Sent Events) streaming module for MCP: implements Streamable HTTP transport (spec 2025-03-26). */
 
 import { Response } from 'express';
 import type { SSEEvent, JSONRPCResponse, JSONRPCError } from './types.js';
@@ -14,24 +11,20 @@ export function sanitizeSSEField(value: string): string {
   return value.replace(/[\r\n]/g, '');
 }
 
-/**
- * SSE Stream class for sending Server-Sent Events
- */
+/** SSE Stream class for sending Server-Sent Events. */
 export class SSEStream {
   private res: Response;
   private eventId = 0;
 
   /**
-   * Creates a new SSE stream for the given response
+   * Creates a new SSE stream for the given response.
    * @param res - Express response object to stream to
    */
   constructor(res: Response) {
     this.res = res;
   }
 
-  /**
-   * Initialize SSE headers
-   */
+  /** Initialize SSE headers. */
   public initialize(): void {
     this.res.setHeader('Content-Type', 'text/event-stream');
     this.res.setHeader('Cache-Control', 'no-cache');
@@ -41,7 +34,7 @@ export class SSEStream {
   }
 
   /**
-   * Send a JSON-RPC response as SSE message
+   * Send a JSON-RPC response as SSE message.
    * @param response - JSON-RPC response to send
    */
   public sendMessage(response: JSONRPCResponse): void {
@@ -54,8 +47,8 @@ export class SSEStream {
   }
 
   /**
-   * Send multiple responses as batch
-   * @param responses - Array of JSON-RPC responses to send
+   * Send multiple responses as batch.
+   * @param responses - array of JSON-RPC responses to send
    */
   public sendBatch(responses: JSONRPCResponse[]): void {
     for (const response of responses) {
@@ -94,9 +87,9 @@ export class SSEStream {
   }
 
   /**
-   * Send an error response
+   * Send an error response correlated to `requestId`.
    * @param error - JSON-RPC error object to send
-   * @param requestId - Request ID to correlate the error with
+   * @param requestId - request ID to correlate the error with
    */
   public sendError(error: JSONRPCError, requestId: string | number): void {
     const response: JSONRPCResponse = {
@@ -107,26 +100,21 @@ export class SSEStream {
     this.sendMessage(response);
   }
 
-  /**
-   * Close the SSE stream
-   */
+  /** Close the SSE stream. */
   public close(): void {
     this.res.write(': stream closing\n\n');
     this.res.end();
   }
 
-  /**
-   * Send a heartbeat comment
-   */
+  /** Send a heartbeat comment. */
   public sendHeartbeat(): void {
     this.res.write(': heartbeat\n\n');
   }
 }
 
 /**
- * Create and initialize an SSE stream
- * @param res Express response object
- * @returns Initialized SSE stream
+ * Create and initialize an SSE stream.
+ * @param res - Express response object
  */
 export function createSSEStream(res: Response): SSEStream {
   const stream = new SSEStream(res);
@@ -135,10 +123,9 @@ export function createSSEStream(res: Response): SSEStream {
 }
 
 /**
- * Send a standard JSON response (non-SSE).
- * Accepts a single response or an array (batch).
- * @param res Express response object
- * @param response JSON-RPC response or array of responses
+ * Send a standard JSON response (non-SSE). Accepts a single response or an array (batch).
+ * @param res - Express response object
+ * @param response - JSON-RPC response or array of responses
  */
 export function sendJSONResponse(
   res: Response,

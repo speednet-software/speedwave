@@ -57,14 +57,19 @@ def _edit(src: str, output: str, ops: list) -> None:
     from docx import Document
 
     doc = Document(src)
+    # `find` strings already replaced earlier in this batch: a later op with the same `find`
+    # legitimately sees zero matches once consumed, and that is idempotent success, not a failure.
+    already_replaced: set[str] = set()
     for op in ops:
         kind = op.get("op")
         if kind == "append":
             _add_element(doc, op["element"])
         elif kind == "replace_text":
             find, replace = str(op["find"]), str(op["replace"])
+            matches = 0
             for para in doc.paragraphs:
                 if find in para.text:
+                    matches += 1
                     # Replace across the whole paragraph text (rebuild a single run).
                     new_text = para.text.replace(find, replace)
                     for r in list(para.runs):
@@ -77,7 +82,16 @@ def _edit(src: str, output: str, ops: list) -> None:
                 for row in table.rows:
                     for cell in row.cells:
                         if find in cell.text:
+                            matches += 1
                             cell.text = cell.text.replace(find, replace)
+            if matches == 0 and find not in already_replaced:
+                fail(
+                    f"replace_text: '{find}' was not found in any paragraph or table cell "
+                    "-- text may be split across runs (e.g. mixed formatting mid-phrase); "
+                    "use readDocument first to confirm the exact text"
+                )
+            if matches > 0:
+                already_replaced.add(find)
         elif kind == "delete_paragraph":
             idx = int(op["index"])
             paras = doc.paragraphs

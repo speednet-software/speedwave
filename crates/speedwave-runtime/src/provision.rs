@@ -1,15 +1,11 @@
-//! VM provisioning primitives (Lima / WSL2 / nerdctl).
-//!
-//! SSOT for the Lima VM YAML builder + migration check, WSL2 distro import,
-//! nerdctl-full install, and the `.wslconfig` / `wsl.conf` mergers.
+//! VM provisioning primitives (Lima / WSL2 / nerdctl): SSOT for the Lima VM YAML builder +
+//! migration check, WSL2 distro import, nerdctl-full install, and `.wslconfig`/`wsl.conf` mergers.
 
 use crate::consts;
 #[cfg(any(target_os = "windows", test))]
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Lima VM config (macOS)
-// ---------------------------------------------------------------------------
+// ── Lima VM config (macOS) ─────────────────────────────────────────────────
 
 /// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
 /// Adaptive from [`crate::resources`]: host_ram / 2, clamped 4–32 GiB.
@@ -81,9 +77,8 @@ provision:
     )
 }
 
-/// Returns a `Command` for `limactl` with bundled-binary resolution and
-/// isolated `LIMA_HOME`. Delegates to [`crate::binary::command`] which resolves
-/// the binary path and ensures LIMA_HOME is set.
+/// Returns a `Command` for `limactl` with bundled-binary resolution and isolated `LIMA_HOME`,
+/// via [`crate::binary::command`].
 #[cfg(target_os = "macos")]
 fn limactl_command() -> std::process::Command {
     crate::binary::command("limactl")
@@ -94,9 +89,8 @@ fn limactl_command() -> std::process::Command {
 #[cfg(any(target_os = "macos", test))]
 const LIMA_VPN_PROVISION_SENTINEL: &str = "99-speedwave-prefer-vznat.yaml";
 
-/// Returns `true` if the Lima config needs regenerating: the VPN netplan
-/// drop-in is missing, or `memory`/`cpus` drifted from the SSOT formulas.
-/// Unparseable values are treated as no-drift (don't touch a hand-mangled file).
+/// Returns `true` if the Lima config needs regenerating: VPN netplan drop-in missing, or
+/// `memory`/`cpus` drifted from SSOT. Unparseable = no-drift (never touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
 pub fn lima_vm_config_needs_update(config_content: &str) -> bool {
     use crate::resources;
@@ -111,10 +105,8 @@ pub fn lima_vm_config_needs_update_with(
     desired_gib: u32,
     desired_cpus: u32,
 ) -> bool {
-    // Trigger migration when the VPN-aware netplan drop-in is absent —
-    // existing pre-update installs (including ones with the old `ip route del`
-    // provision) need the new netplan-based fix injected on next boot.
-    // See `lima_config()` doc and lima-vm/lima#2984.
+    // Trigger migration when the VPN-aware netplan drop-in is absent — pre-update installs need
+    // the new netplan-based fix injected on next boot. See `lima_config()`, lima-vm/lima#2984.
     if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL) {
         return true;
     }
@@ -139,9 +131,8 @@ pub fn lima_vm_config_needs_update_with(
     needs_update("memory:", desired_gib) || needs_update("cpus:", desired_cpus)
 }
 
-/// Rewrites only the managed `memory:`/`cpus:` values in an existing lima.yaml,
-/// preserving every other line (user mounts, disk size). `None` when either
-/// managed line is absent — the caller falls back to full regeneration.
+/// Rewrites only the managed `memory:`/`cpus:` values in an existing lima.yaml, preserving every
+/// other line (user mounts, disk size). `None` when a managed line is absent (caller falls back).
 #[cfg(any(target_os = "macos", test))]
 pub fn update_lima_managed_fields(
     content: &str,
@@ -153,9 +144,8 @@ pub fn update_lima_managed_fields(
     rewrite_first_line(&with_memory, "cpus:", &format!("cpus: {desired_cpus}"))
 }
 
-/// Replaces the first line whose trimmed form starts with `prefix` (same match
-/// rule as the drift check), keeping indentation and line ending. `None` if no
-/// line matches.
+/// Replaces the first line whose trimmed form starts with `prefix` (same match rule as the drift
+/// check), keeping indentation and line ending. `None` if no line matches.
 #[cfg(any(target_os = "macos", test))]
 fn rewrite_first_line(content: &str, prefix: &str, replacement: &str) -> Option<String> {
     let mut replaced = false;
@@ -181,10 +171,8 @@ fn rewrite_first_line(content: &str, prefix: &str, replacement: &str) -> Option<
     replaced.then_some(out)
 }
 
-/// Updates the managed `memory`/`cpus` fields of `lima.yaml` (or regenerates
-/// it from [`lima_config`] when the VPN netplan drop-in or a managed line is
-/// missing), rewrites source + instance config, and restarts the VM if running.
-/// No-op on fresh install or no drift. ADR-068.
+/// Updates the managed `memory`/`cpus` fields of `lima.yaml` (or regenerates from [`lima_config`]
+/// if VPN netplan/a line is missing), restarts VM if running; no-op on no drift (ADR-068).
 #[cfg(target_os = "macos")]
 pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     use crate::binary;
@@ -202,7 +190,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     }
 
     log::info!(
-        "Lima VM config migration: applying SSOT values (memory {}, cpus {}; host_ram/2 + host_cores/2)",
+        "migrating Lima VM config to SSOT values (memory {}, cpus {}; host_ram/2 + host_cores/2)",
         desired_lima_vm_memory(),
         desired_lima_vm_cpus()
     );
@@ -395,9 +383,7 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Windows / WSL2 provisioning
-// ---------------------------------------------------------------------------
+// ── Windows / WSL2 provisioning ────────────────────────────────────────────
 
 /// Escapes a path for safe interpolation inside PowerShell single-quoted strings.
 /// PowerShell single-quoted strings only require doubling of single quotes.
@@ -432,24 +418,24 @@ fn nerdctl_sha256_for_arch() -> anyhow::Result<&'static str> {
     }
 }
 
-/// Verifies SHA256 of a file using PowerShell. Returns `true` if the hash matches.
+/// Verifies SHA256 of a file using PowerShell. `Ok(bool)` is a real match/mismatch;
+/// `Err` (spawn failure or timeout) is not a mismatch and must be handled separately.
 #[cfg(target_os = "windows")]
-fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> bool {
+fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> anyhow::Result<bool> {
     let escaped = ps_escape(file_path);
     let cmd = format!(
         "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
         escaped
     );
-    let output = crate::binary::powershell_command()
-        .args(["-NoProfile", "-Command", &cmd])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let actual = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            actual == expected_sha256
-        }
-        _ => false,
+    let output = crate::binary::run_powershell_capture(
+        &["-NoProfile", "-Command", &cmd],
+        std::time::Duration::from_secs(120),
+    )?;
+    if !output.status.success() {
+        return Ok(false);
     }
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(actual == expected_sha256)
 }
 
 /// Runs the Windows VM provisioning sequence: WSL availability + auto-install,
@@ -467,7 +453,7 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
 
     // Enable WSL2 mirrored networking before any distro starts; non-fatal.
     if let Err(e) = ensure_wslconfig_vpn_compat() {
-        log::warn!("ensure_wslconfig_vpn_compat failed (non-fatal): {e}");
+        log::warn!("failed to ensure .wslconfig VPN compatibility (non-fatal): {e}");
     }
 
     let list = crate::binary::system_command("wsl.exe")
@@ -490,9 +476,8 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes/updates `%USERPROFILE%\.wslconfig` so `[wsl2]` declares
-/// `networkingMode=mirrored`, `dnsTunneling=true`, `autoProxy=true` (Win11
-/// 22H2+). Preserves all other keys/sections; missing file → fresh skeleton.
+/// Writes/updates `%USERPROFILE%\.wslconfig` so `[wsl2]` declares `networkingMode=mirrored`,
+/// `dnsTunneling=true`, `autoProxy=true` (Win11 22H2+); preserves other keys; missing → skeleton.
 #[cfg(target_os = "windows")]
 pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
     let home = dirs::home_dir()
@@ -504,10 +489,7 @@ pub fn ensure_wslconfig_vpn_compat() -> anyhow::Result<()> {
         // Shared write: the WSL service must read this file — an owner-only
         // protected DACL breaks it ("access denied" in non-user contexts).
         crate::fs_perms::write_shared_file_atomic(&path, &updated)?;
-        log::info!(
-            "ensure_wslconfig_vpn_compat: wrote VPN-compatible [wsl2] keys to {}",
-            path.display()
-        );
+        log::info!("wrote VPN-compatible [wsl2] keys to {}", path.display());
         // .wslconfig is read only on WSL2 boot; new keys need `wsl --shutdown`.
         log::warn!(
             ".wslconfig changed — run `wsl --shutdown` from PowerShell to \
@@ -562,9 +544,8 @@ pub fn read_existing_wslconfig(
     }
 }
 
-/// Pure transform: takes existing `.wslconfig` content (may be empty) and
-/// returns a version with the three VPN-compat keys inserted/updated under
-/// `[wsl2]`. All other sections and keys are preserved verbatim. Idempotent.
+/// Pure transform: takes existing `.wslconfig` content (may be empty), returns a version with the
+/// three VPN-compat keys inserted/updated under `[wsl2]`; other sections preserved. Idempotent.
 #[cfg(any(target_os = "windows", test))]
 pub fn merge_wslconfig_vpn_keys(input: &str) -> String {
     const VPN_KEYS: &[(&str, &str)] = &[
@@ -573,9 +554,8 @@ pub fn merge_wslconfig_vpn_keys(input: &str) -> String {
         ("autoProxy", "true"),
     ];
 
-    // Match the dominant line ending of the input — `.wslconfig` written by
-    // Notepad on Windows is CRLF; emitting bare LF for new keys would yield
-    // a mixed-ending file (tolerated by WSL but cosmetically ugly).
+    // Match the dominant line ending of the input — `.wslconfig` from Notepad is CRLF; bare LF
+    // for new keys yields a mixed-ending file (tolerated by WSL but cosmetically ugly).
     let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
 
     let mut out = String::with_capacity(input.len() + 128);
@@ -650,9 +630,8 @@ pub fn merge_wslconfig_vpn_keys(input: &str) -> String {
     out
 }
 
-/// Verifies an existing WSL2 distro [`consts::wsl_distro_name`] was created by
-/// Speedwave by checking for `ext4.vhdx` at the Speedwave install path; bails
-/// with a security error if absent (distro pre-registered elsewhere).
+/// Verifies an existing WSL2 distro [`consts::wsl_distro_name`] was created by Speedwave by
+/// checking for `ext4.vhdx` at the install path; bails with a security error if absent.
 #[cfg(target_os = "windows")]
 fn verify_wsl_distro_origin() -> anyhow::Result<()> {
     verify_wsl_distro_origin_in(consts::data_dir())
@@ -686,31 +665,47 @@ pub fn expected_wsl_vhdx_path_in(data_dir: &std::path::Path) -> PathBuf {
         .join("ext4.vhdx")
 }
 
-/// Installs WSL2 via elevated PowerShell. Always bails: either with a restart
-/// prompt (success) or an installation failure message.
-#[cfg(target_os = "windows")]
-fn attempt_wsl_install() -> anyhow::Result<()> {
-    let status = crate::binary::powershell_command()
-        .args([
-            "-Command",
-            "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
-        ])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!(
+/// Maps the elevated-install PowerShell outcome to the bail message for `attempt_wsl_install`,
+/// reporting a spawn/timeout distinctly from a genuine failed/cancelled install.
+#[cfg(any(target_os = "windows", test))]
+fn wsl_install_outcome_message(result: &anyhow::Result<std::process::ExitStatus>) -> anyhow::Error {
+    match result {
+        Err(e) => anyhow::anyhow!(
+            "WSL2 installation is taking longer than expected ({e}); it may still be \
+             running in the background under a separate elevated prompt. Wait for any \
+             Windows Security / UAC prompt to finish, then run Speedwave setup again. \
+             If no installation is in progress, see below.\n\
+             {}",
+            consts::WSL_NOT_AVAILABLE_MSG
+        ),
+        Ok(status) if !status.success() => anyhow::anyhow!(
             "WSL2 installation failed or was cancelled.\n\
              {}",
             consts::WSL_NOT_AVAILABLE_MSG
-        );
+        ),
+        Ok(_) => anyhow::anyhow!(
+            "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
+        ),
     }
-    anyhow::bail!(
-        "WSL2 has been installed. Please restart your computer and run Speedwave setup again."
-    );
 }
 
-/// Downloads the Ubuntu rootfs (with SHA256 verification) and imports it as a
-/// dedicated WSL2 distribution. Checks for a bundled rootfs first (offline
-/// install), then falls back to cached download, then fresh download.
+/// Installs WSL2 via elevated PowerShell. Always bails: either with a restart
+/// prompt (success), a timeout notice (install may still be running), or a
+/// failure message.
+#[cfg(target_os = "windows")]
+fn attempt_wsl_install() -> anyhow::Result<()> {
+    let result = crate::binary::run_powershell(
+        &[
+            "-Command",
+            "Start-Process wsl.exe -ArgumentList '--install','--no-distribution' -Verb RunAs -Wait",
+        ],
+        std::time::Duration::from_secs(900),
+    );
+    Err(wsl_install_outcome_message(&result))
+}
+
+/// Downloads the Ubuntu rootfs (SHA256-verified) and imports it as a dedicated WSL2 distribution:
+/// bundled rootfs first (offline install), then cached download, then fresh download.
 #[cfg(target_os = "windows")]
 fn import_wsl_distro() -> anyhow::Result<()> {
     use crate::runtime::decode_wsl_output;
@@ -726,19 +721,46 @@ fn import_wsl_distro() -> anyhow::Result<()> {
     let mut have_valid_rootfs = false;
 
     if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::UBUNTU_ROOTFS_ASSET) {
-        if verify_sha256_ps(&bundled, expected_sha256) {
-            // Copy bundled rootfs to the cache location for wsl --import
-            std::fs::copy(&bundled, &rootfs_path)?;
-            have_valid_rootfs = true;
+        match verify_sha256_ps(&bundled, expected_sha256) {
+            Ok(true) => {
+                // Copy bundled rootfs to the cache location for wsl --import
+                std::fs::copy(&bundled, &rootfs_path)?;
+                have_valid_rootfs = true;
+            }
+            Ok(false) => {
+                log::warn!(
+                    "bundled Ubuntu rootfs at {} does not match the pinned SHA256; \
+                     falling back to download",
+                    bundled.display()
+                );
+            }
+            Err(e) => log::warn!(
+                "could not verify bundled Ubuntu rootfs at {} ({e}); falling back to download",
+                bundled.display()
+            ),
         }
     }
 
     // Check cached download
     if !have_valid_rootfs && rootfs_path.exists() {
-        if verify_sha256_ps(&rootfs_path, expected_sha256) {
-            have_valid_rootfs = true;
-        } else {
-            let _ = std::fs::remove_file(&rootfs_path);
+        match verify_sha256_ps(&rootfs_path, expected_sha256) {
+            Ok(true) => have_valid_rootfs = true,
+            Ok(false) => {
+                log::warn!(
+                    "cached Ubuntu rootfs at {} does not match the pinned SHA256; \
+                     re-downloading",
+                    rootfs_path.display()
+                );
+                let _ = std::fs::remove_file(&rootfs_path);
+            }
+            Err(e) => {
+                // Verification didn't complete (e.g. AV-scan slowdown on a large file);
+                // keep the cached file on disk and fall through to a fresh download.
+                log::warn!(
+                    "could not verify cached Ubuntu rootfs at {} ({e}); re-downloading",
+                    rootfs_path.display()
+                );
+            }
         }
     }
 
@@ -761,9 +783,10 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             escaped_rootfs,
             expected_sha256
         );
-        let download = crate::binary::powershell_command()
-            .args(["-NoProfile", "-Command", &download_and_verify])
-            .status()?;
+        let download = crate::binary::run_powershell(
+            &["-NoProfile", "-Command", &download_and_verify],
+            std::time::Duration::from_secs(1800),
+        )?;
         if !download.success() {
             anyhow::bail!(
                 "Failed to download or verify Ubuntu rootfs for WSL2 \
@@ -838,7 +861,7 @@ pub fn wsl_conf_or_warn(read: anyhow::Result<String>, distro: &str, when: &str) 
     match read {
         Ok(content) => content,
         Err(e) => {
-            log::warn!("read_wsl_conf failed for {distro} ({when}); treating as empty: {e}");
+            log::warn!("failed to read wsl.conf for {distro} ({when}); treating as empty: {e}");
             String::new()
         }
     }
@@ -855,7 +878,7 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
     let updated = merge_wsl_conf_automount(&existing, &opts);
 
     if updated == existing {
-        log::debug!("ensure_wsl_distro_metadata: automount options already current in {distro}");
+        log::debug!("automount options already current in {distro}");
         return Ok(());
     }
 
@@ -881,17 +904,17 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
             .map(|s| s.success())
             .unwrap_or(false);
         if terminated {
-            log::info!(
-                "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (terminated to apply)"
-            );
+            log::info!("enabled metadata automount for {distro} (terminated to apply)");
         } else {
             log::warn!(
-                "ensure_wsl_distro_metadata: wrote metadata automount for {distro} but `wsl --terminate` failed; applies on next WSL restart"
+                "wrote metadata automount for {distro} but `wsl --terminate` failed; \
+                 applies on next WSL restart"
             );
         }
     } else {
         log::info!(
-            "ensure_wsl_distro_metadata: enabled metadata automount for {distro} (containers running; applies on next WSL restart)"
+            "enabled metadata automount for {distro} (containers running; \
+             applies on next WSL restart)"
         );
     }
     Ok(())
@@ -947,9 +970,7 @@ fn wsl_distro_has_running_containers(distro: &str) -> bool {
             &String::from_utf8_lossy(&o.stderr),
         ),
         Err(e) => {
-            log::warn!(
-                "wsl_distro_has_running_containers: spawn failed for {distro}; assuming busy: {e}"
-            );
+            log::warn!("spawn failed probing running containers for {distro}; assuming busy: {e}");
             true
         }
     }
@@ -970,9 +991,7 @@ pub fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) 
     if daemon_down {
         false // daemon not up ⇒ nothing running ⇒ idle
     } else {
-        log::warn!(
-            "wsl_distro_has_running_containers: nerdctl ps failed (assuming busy): {stderr}"
-        );
+        log::warn!("nerdctl ps failed (assuming busy): {stderr}");
         true
     }
 }
@@ -1096,9 +1115,8 @@ fn probe_indicates_absent(code: Option<i32>, stderr: &str) -> bool {
 #[cfg(any(target_os = "windows", test))]
 static NERDCTL_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Serializes the nerdctl ensure/install sequence across processes (Desktop
-/// `ensure_ready` + CLI startup). The loser re-probes the pin under the lock
-/// (first step of `install_nerdctl_full`) and skips if already aligned.
+/// Serializes the nerdctl ensure/install sequence across processes (Desktop `ensure_ready` + CLI
+/// startup); loser re-probes the pin under lock (`install_nerdctl_full` step 1), skips if aligned.
 #[cfg(any(target_os = "windows", test))]
 fn with_nerdctl_install_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Result<T>
 where
@@ -1108,9 +1126,8 @@ where
     crate::runtime::compose_locks::with_file_lock_in(&NERDCTL_INSTALL_LOCK, &lock_path, f)
 }
 
-/// Persisted download-backoff marker (`consts::NERDCTL_DOWNLOAD_BACKOFF_FILE`);
-/// written after a failed in-distro download so short-lived CLI processes back
-/// off instead of restarting the full download on every invocation.
+/// Persisted download-backoff marker (`consts::NERDCTL_DOWNLOAD_BACKOFF_FILE`); written after a
+/// failed download so short-lived CLI processes back off instead of retrying every invocation.
 #[cfg(any(target_os = "windows", test))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct NerdctlDownloadBackoff {
@@ -1208,7 +1225,7 @@ fn wait_with_output_timeout(
             Some(status) => break status,
             None if start.elapsed() >= timeout => {
                 if let Err(e) = child.kill() {
-                    log::warn!("wait_with_output_timeout: kill failed: {e}");
+                    log::warn!("failed to kill timed-out child process: {e}");
                 }
                 let _ = child.wait();
                 anyhow::bail!("child process timed out after {}s", timeout.as_secs());
@@ -1235,19 +1252,18 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         ])
         .output()?;
     let backoff_path = consts::data_dir().join(consts::NERDCTL_DOWNLOAD_BACKOFF_FILE);
-    let drift;
-    if nerdctl_check.status.success() {
+    let drift = if nerdctl_check.status.success() {
         let version_line = String::from_utf8_lossy(&nerdctl_check.stdout);
         if nerdctl_version_matches_pin(&version_line) {
             // Already aligned (possibly by the other lock holder) — drop any stale backoff.
             clear_download_backoff(&backoff_path);
             return Ok(());
         }
-        drift = format!(
+        format!(
             "in-distro nerdctl is not the pinned {} (got: {})",
             consts::NERDCTL_FULL_VERSION,
             version_line.trim()
-        );
+        )
     } else {
         // Probe failed: distinguish genuinely-absent from a transient transport error.
         let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
@@ -1259,28 +1275,32 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
                 stderr.trim()
             );
         }
-        drift = format!(
+        format!(
             "in-distro nerdctl absent; need {}",
             consts::NERDCTL_FULL_VERSION
-        );
-    }
+        )
+    };
 
     // Try bundled nerdctl-full tarball first (offline install from the bundle).
     let expected_sha256 = nerdctl_sha256_for_arch()?;
     let mut bundled_wsl_path: Option<String> = None;
-    let mut bundled_rejected: Option<PathBuf> = None;
+    let mut bundled_rejected: Option<(PathBuf, String)> = None;
 
     if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::NERDCTL_TARBALL_ASSET) {
-        if verify_sha256_ps(&bundled, expected_sha256) {
-            // Translate the bundled tarball's host path to WSL via the SSOT.
-            match crate::engine_path::to_engine_path(&bundled) {
-                Ok(wsl) => bundled_wsl_path = Some(wsl),
-                Err(e) => log::warn!(
-                    "could not translate bundled nerdctl path to WSL ({e}); will download instead"
-                ),
+        match verify_sha256_ps(&bundled, expected_sha256) {
+            Ok(true) => {
+                // Translate the bundled tarball's host path to WSL via the SSOT.
+                match crate::engine_path::to_engine_path(&bundled) {
+                    Ok(wsl) => bundled_wsl_path = Some(wsl),
+                    Err(e) => log::warn!(
+                        "could not translate bundled nerdctl path to WSL ({e}); will download instead"
+                    ),
+                }
             }
-        } else {
-            bundled_rejected = Some(bundled);
+            Ok(false) => {
+                bundled_rejected = Some((bundled, "does not match the pinned SHA256".to_string()))
+            }
+            Err(e) => bundled_rejected = Some((bundled, format!("could not be verified ({e})"))),
         }
     }
 
@@ -1299,9 +1319,9 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    if let Some(rejected) = bundled_rejected {
+    if let Some((rejected, reason)) = bundled_rejected {
         log::warn!(
-            "bundled nerdctl tarball at {} does not match the pinned {} SHA256; \
+            "bundled nerdctl tarball at {} {reason} (pinned {}); \
              falling back to in-distro download",
             rejected.display(),
             consts::NERDCTL_FULL_VERSION
@@ -1469,9 +1489,8 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
     Ok(())
 }
 
-/// Reinstalls the in-distro nerdctl if it drifted from the pin (ADR-072).
-/// Warn-only, once-per-process; Desktop and CLI serialize on the cross-process
-/// install lock, and the loser re-probes the pin under it.
+/// Reinstalls the in-distro nerdctl if it drifted from the pin (ADR-072). Warn-only,
+/// once-per-process; Desktop and CLI serialize on the cross-process lock, loser re-probes under it.
 #[cfg(target_os = "windows")]
 pub fn ensure_nerdctl_version() {
     use std::sync::Once;
@@ -1488,9 +1507,8 @@ pub fn ensure_nerdctl_version() {
 #[cfg(not(target_os = "windows"))]
 pub fn ensure_nerdctl_version() {}
 
-/// One-stop Windows invariants for every engine consumer (Desktop AND CLI):
-/// nerdctl pin, drvfs metadata automount (uid=1000, ADR-052) and the
-/// `.wslconfig` VPN-compat keys. Warn-only.
+/// One-stop Windows invariants for every engine consumer (Desktop AND CLI): nerdctl pin, drvfs
+/// metadata automount (uid=1000, ADR-052), `.wslconfig` VPN-compat keys. Warn-only.
 #[cfg(target_os = "windows")]
 pub fn ensure_windows_invariants() {
     ensure_nerdctl_version();
@@ -1511,7 +1529,11 @@ pub fn ensure_windows_invariants() {
 pub fn ensure_windows_invariants() {}
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
 
@@ -1920,18 +1942,19 @@ mod tests {
         );
     }
 
-    /// Structural pin: the migration restart (`init_vm_macos` start path) runs
-    /// under the provisioning-grade timeout with the download hint, not an
-    /// untimed `.output()`.
+    /// Structural pin: the migration restart (`init_vm_macos` start path) runs under the
+    /// provisioning-grade timeout with the download hint, not an untimed `.output()`.
     #[test]
     fn init_vm_macos_start_is_timed_and_names_download_cause() {
         let src = include_str!("provision.rs");
         let start = src
             .find("pub fn init_vm_macos")
             .expect("init_vm_macos must exist");
-        let end = src[start..]
-            .find("// -----")
-            .map(|i| start + i)
+        let tail = &src[start + 1..];
+        let end = tail
+            .find("pub fn ")
+            .or_else(|| tail.find("pub async fn "))
+            .map(|i| start + 1 + i)
             .unwrap_or(src.len());
         let body = &src[start..end];
         assert!(
@@ -2016,6 +2039,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wait_with_output_timeout_returns_output_and_kills_on_expiry() {
+        // SSOT-allow: test fixture spawn
         let fast = std::process::Command::new("sh")
             .args(["-c", "echo out"])
             .stdout(std::process::Stdio::piped())
@@ -2026,6 +2050,7 @@ mod tests {
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
 
+        // SSOT-allow: test fixture spawn
         let slow = std::process::Command::new("sh")
             .args(["-c", "sleep 30"])
             .stdout(std::process::Stdio::piped())
@@ -2565,6 +2590,92 @@ mod tests {
         }
     }
 
+    // ── verify_sha256_ps ─────────────────────────────────────────────────────
+
+    #[cfg(target_os = "windows")]
+    mod verify_sha256_ps_tests {
+        use super::super::verify_sha256_ps;
+
+        #[test]
+        fn matching_hash_returns_ok_true() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("file.txt");
+            std::fs::write(&path, b"hello").expect("write");
+            // SHA256("hello")
+            let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+            let result = verify_sha256_ps(&path, expected).expect("verification should run");
+            assert!(result, "hash of 'hello' should match the known SHA256");
+        }
+
+        #[test]
+        fn mismatched_hash_returns_ok_false() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("file.txt");
+            std::fs::write(&path, b"hello").expect("write");
+            let result =
+                verify_sha256_ps(&path, "0".repeat(64).as_str()).expect("verification should run");
+            assert!(!result, "wrong expected hash must not match");
+        }
+
+        #[test]
+        fn missing_file_returns_ok_false_not_err() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("does-not-exist.txt");
+            let result = verify_sha256_ps(&path, "0".repeat(64).as_str())
+                .expect("PowerShell reporting a missing file is not a spawn/timeout error");
+            assert!(!result);
+        }
+    }
+
+    // ── wsl_install_outcome_message ──────────────────────────────────────────
+
+    mod wsl_install_outcome_message_tests {
+        use super::super::wsl_install_outcome_message;
+
+        // SSOT-allow: test fixture spawn
+        fn status_with_code(success: bool) -> std::process::ExitStatus {
+            let script = if success { "exit 0" } else { "exit 1" };
+            if cfg!(windows) {
+                std::process::Command::new("cmd")
+                    .args(["/C", script])
+                    .status()
+                    .expect("spawn cmd fixture")
+            } else {
+                std::process::Command::new("sh")
+                    .args(["-c", script])
+                    .status()
+                    .expect("spawn sh fixture")
+            }
+        }
+
+        #[test]
+        fn timeout_or_spawn_error_reports_still_running_not_failed() {
+            let result: anyhow::Result<std::process::ExitStatus> = Err(anyhow::anyhow!(
+                "command 'powershell.exe' timed out after 900s"
+            ));
+            let msg = wsl_install_outcome_message(&result).to_string();
+            assert!(msg.contains("taking longer than expected"), "got: {msg}");
+            assert!(
+                !msg.contains("failed or was cancelled"),
+                "a timeout must not be reported as a hard failure, got: {msg}"
+            );
+        }
+
+        #[test]
+        fn nonzero_exit_reports_failed_or_cancelled() {
+            let result = Ok(status_with_code(false));
+            let msg = wsl_install_outcome_message(&result).to_string();
+            assert!(msg.contains("failed or was cancelled"), "got: {msg}");
+        }
+
+        #[test]
+        fn success_reports_restart_prompt() {
+            let result = Ok(status_with_code(true));
+            let msg = wsl_install_outcome_message(&result).to_string();
+            assert!(msg.contains("restart your computer"), "got: {msg}");
+        }
+    }
+
     // ── nerdctl download backoff + install lock + child timeout ────────────
 
     mod nerdctl_backoff {
@@ -2640,6 +2751,7 @@ mod tests {
             assert!(err.unwrap_err().to_string().contains("boom"));
         }
 
+        // SSOT-allow: test fixture spawn
         fn spawn_shell(script: &str) -> std::process::Child {
             let mut cmd = if cfg!(windows) {
                 let mut c = std::process::Command::new("cmd");

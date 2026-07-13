@@ -19,11 +19,7 @@ vi.mock('./auth-tokens.js', () => ({
   getAuthToken: vi.fn(() => null),
 }));
 
-/**
- * Create a mock fetch Response with proper headers support for parseResponse().
- * @param body - JSON body to return
- * @param options - Additional response options (ok, status, headers)
- */
+/** Create a mock fetch Response with proper headers support for parseResponse(). */
 function mockJsonResponse(
   body: unknown,
   options: { ok?: boolean; status?: number; sessionId?: string } = {}
@@ -44,12 +40,7 @@ function mockJsonResponse(
   };
 }
 
-/**
- * Create a mock fetch Response whose body is plain text (for non-2xx paths
- * that read the body via `.text()`).
- * @param text - Raw body text to return
- * @param options - Additional response options (ok, status)
- */
+/** Mock fetch Response whose body is plain text (non-2xx paths that read via `.text()`). */
 function mockTextResponse(text: string, options: { ok?: boolean; status?: number } = {}) {
   const { ok = true, status = 200 } = options;
   return {
@@ -61,11 +52,7 @@ function mockTextResponse(text: string, options: { ok?: boolean; status?: number
   };
 }
 
-/**
- * Mock fetch for the initialize / notifications/initialized / tools/list sequence.
- * @param tools - Tools to return from tools/list
- * @param sessionId - Optional session ID to return from initialize
- */
+/** Mock fetch for the initialize / notifications/initialized / tools/list sequence. */
 function createMcpMockFetch(tools: Tool[], sessionId?: string) {
   let callIndex = 0;
   return vi.fn().mockImplementation(() => {
@@ -398,6 +385,86 @@ describe('tool-discovery', () => {
       expect(result.timeoutMs).toBeUndefined(); // negative is invalid
       expect(result.osCategory).toBeUndefined(); // invalid category
     });
+
+    it('reads userScoped, currentUserTool, selfParam from legacy unprefixed _meta keys', () => {
+      const tool: Tool = {
+        ...baseTool,
+        _meta: {
+          deferLoading: false,
+          userScoped: true,
+          currentUserTool: 'getCurrentUser',
+          selfParam: 'user_id',
+        },
+      };
+      const result = mergeToolWithMeta(tool, 'redmine', 'listIssueIds');
+      expect(result.userScoped).toBe(true);
+      expect(result.currentUserTool).toBe('getCurrentUser');
+      expect(result.selfParam).toBe('user_id');
+    });
+
+    it('prefers prefixed speedwave.pl/ _meta keys over legacy unprefixed keys', () => {
+      const tool: Tool = {
+        ...baseTool,
+        _meta: {
+          'speedwave.pl/defer-loading': false,
+          deferLoading: true,
+          'speedwave.pl/user-scoped': true,
+          userScoped: false,
+          'speedwave.pl/current-user-tool': 'getCurrentUser',
+          currentUserTool: 'legacyGetCurrentUser',
+          'speedwave.pl/self-param': 'user_id',
+          selfParam: 'legacy_user_id',
+        },
+      };
+      const result = mergeToolWithMeta(tool, 'redmine', 'listIssueIds');
+      expect(result.deferLoading).toBe(false);
+      expect(result.userScoped).toBe(true);
+      expect(result.currentUserTool).toBe('getCurrentUser');
+      expect(result.selfParam).toBe('user_id');
+    });
+
+    it('prefers prefixed timeoutClass/timeoutMs/osCategory _meta keys over legacy unprefixed keys', () => {
+      const tool: Tool = {
+        ...baseTool,
+        _meta: {
+          'speedwave.pl/defer-loading': false,
+          'speedwave.pl/timeout-class': 'long',
+          timeoutClass: 'standard',
+          'speedwave.pl/timeout-ms': 600_000,
+          timeoutMs: 1_000,
+          'speedwave.pl/os-category': 'calendar',
+          osCategory: 'reminders',
+        },
+      };
+      const result = mergeToolWithMeta(tool, 'os', 'listEvents');
+      expect(result.timeoutClass).toBe('long');
+      expect(result.timeoutMs).toBe(600_000);
+      expect(result.osCategory).toBe('calendar');
+    });
+
+    it('leaves userScoped/currentUserTool/selfParam undefined when absent', () => {
+      const tool: Tool = { ...baseTool, _meta: { deferLoading: false } };
+      const result = mergeToolWithMeta(tool, 'redmine', 'createIssue');
+      expect(result.userScoped).toBeUndefined();
+      expect(result.currentUserTool).toBeUndefined();
+      expect(result.selfParam).toBeUndefined();
+    });
+
+    it('ignores non-boolean userScoped and non-string currentUserTool/selfParam', () => {
+      const tool: Tool = {
+        ...baseTool,
+        _meta: {
+          deferLoading: false,
+          userScoped: 'yes' as unknown,
+          currentUserTool: 42 as unknown,
+          selfParam: null as unknown,
+        } as Record<string, unknown>,
+      };
+      const result = mergeToolWithMeta(tool, 'redmine', 'createIssue');
+      expect(result.userScoped).toBeUndefined();
+      expect(result.currentUserTool).toBeUndefined();
+      expect(result.selfParam).toBeUndefined();
+    });
   });
 
   describe('discoverAndMergeService', () => {
@@ -561,6 +628,150 @@ describe('tool-discovery', () => {
       expect(result['sendChannel']).toBeDefined();
       expect(result['sendChannel'].deferLoading).toBe(true); // default
       expect(result['sendChannel'].timeoutClass).toBeUndefined(); // ignored
+    });
+
+    it('keeps currentUserTool when it points at an existing tool of the same service', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false, currentUserTool: 'getCurrentUser' },
+        },
+        {
+          name: 'get_current_user',
+          description: 'Get current Redmine user',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+
+      const result = await discoverAndMergeService('redmine');
+      expect(result['listIssueIds'].currentUserTool).toBe('getCurrentUser');
+    });
+
+    it('normalizes a currentUserTool given as the worker snake_case tool name', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false, currentUserTool: 'get_current_user' },
+        },
+        {
+          name: 'get_current_user',
+          description: 'Get current Redmine user',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+
+      const result = await discoverAndMergeService('redmine');
+      expect(result['listIssueIds'].currentUserTool).toBe('getCurrentUser');
+    });
+
+    it('drops a dangling currentUserTool and warns when the target tool does not exist', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false, currentUserTool: 'nonExistentTool' },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await discoverAndMergeService('redmine');
+
+      expect(result['listIssueIds']).toBeDefined();
+      expect(result['listIssueIds'].currentUserTool).toBeUndefined();
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(
+        warnCalls.some((m) => m.includes('nonExistentTool') && m.includes('does not exist'))
+      ).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('keeps selfParam when it names an existing input parameter', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: { assigned_to: { type: 'string' } } },
+          _meta: { deferLoading: false, userScoped: true, selfParam: 'assigned_to' },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+
+      const result = await discoverAndMergeService('redmine');
+      expect(result['listIssueIds'].selfParam).toBe('assigned_to');
+    });
+
+    it('drops a dangling selfParam and warns when the param is not an input parameter', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: { status: { type: 'string' } } },
+          _meta: { deferLoading: false, userScoped: true, selfParam: 'assigned_to' },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await discoverAndMergeService('redmine');
+
+      expect(result['listIssueIds']).toBeDefined();
+      expect(result['listIssueIds'].selfParam).toBeUndefined();
+      const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+      expect(
+        warnCalls.some((m) => m.includes('assigned_to') && m.includes('is not an input parameter'))
+      ).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('warns once at discovery when a userScoped tool declares no companion, keeping the tool', async () => {
+      process.env.WORKER_REDMINE_URL = 'http://mcp-redmine:3003';
+
+      const mockTools: Tool[] = [
+        {
+          name: 'list_issue_ids',
+          description: 'List Redmine issue IDs',
+          inputSchema: { type: 'object', properties: {} },
+          _meta: { deferLoading: false, userScoped: true },
+        },
+      ];
+
+      vi.stubGlobal('fetch', createMcpMockFetch(mockTools));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await discoverAndMergeService('redmine');
+
+      expect(result['listIssueIds']).toBeDefined();
+      expect(result['listIssueIds'].userScoped).toBe(true);
+      const companionWarnings = warnSpy.mock.calls
+        .map((c) => c.join(' '))
+        .filter((m) => m.includes('neither currentUserTool nor selfParam'));
+      expect(companionWarnings).toHaveLength(1);
+      warnSpy.mockRestore();
     });
   });
 

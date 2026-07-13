@@ -62,9 +62,7 @@ describe('SharePoint handler integration', () => {
     vi.clearAllMocks();
   });
 
-  //=============================================================================
-  // createToolDefinitions routing
-  //=============================================================================
+  // ── createToolDefinitions routing ──────────────────────────────────────────────────────────────
 
   describe('createToolDefinitions', () => {
     it('returns all tool definitions with correct names', () => {
@@ -123,9 +121,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Not configured (null client) - withClient guard
-  //=============================================================================
+  // ── Not configured (null client) - withClient guard ────────────────────────────────────────────
 
   describe('not configured (null client)', () => {
     it('listFileIds returns NOT_CONFIGURED error', async () => {
@@ -191,9 +187,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Authentication error handling
-  //=============================================================================
+  // ── Authentication error handling ──────────────────────────────────────────────────────────────
 
   describe('authentication errors', () => {
     it('handleListFileIds returns error on 401 Unauthorized', async () => {
@@ -255,9 +249,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Path traversal rejection
-  //=============================================================================
+  // ── Path traversal rejection ───────────────────────────────────────────────────────────────────
 
   describe('path traversal rejection at handler level', () => {
     it('handleUploadFile rejects path with ../ traversal', async () => {
@@ -301,9 +293,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Empty / malformed API responses
-  //=============================================================================
+  // ── Empty / malformed API responses ────────────────────────────────────────────────────────────
 
   describe('empty and malformed responses', () => {
     it('handleListFileIds handles undefined files array', async () => {
@@ -354,9 +344,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // handleUploadFile parameter validation
-  //=============================================================================
+  // ── handleUploadFile parameter validation ──────────────────────────────────────────────────────
 
   describe('handleUploadFile parameter validation', () => {
     it('returns MISSING_PARAM when localPath is missing', async () => {
@@ -420,9 +408,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // handleDownloadFile parameter validation
-  //=============================================================================
+  // ── handleDownloadFile parameter validation ────────────────────────────────────────────────────
 
   describe('handleDownloadFile parameter validation', () => {
     it('returns MISSING_PARAM when sharepointPath is missing', async () => {
@@ -463,9 +449,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Rate limiting (HTTP 429)
-  //=============================================================================
+  // ── Rate limiting (HTTP 429) ───────────────────────────────────────────────────────────────────
 
   describe('rate limiting', () => {
     it('handleListFileIds returns error on HTTP 429', async () => {
@@ -527,9 +511,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Network errors
-  //=============================================================================
+  // ── Network errors ─────────────────────────────────────────────────────────────────────────────
 
   describe('network errors', () => {
     it('handleListFileIds handles ECONNREFUSED', async () => {
@@ -578,9 +560,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // Non-Error objects thrown
-  //=============================================================================
+  // ── Non-Error objects thrown ───────────────────────────────────────────────────────────────────
 
   describe('non-Error objects thrown', () => {
     it('handleListFileIds handles string thrown', async () => {
@@ -604,9 +584,7 @@ describe('SharePoint handler integration', () => {
     });
   });
 
-  //=============================================================================
-  // withValidation wrapper (tested through createToolDefinitions)
-  //=============================================================================
+  // ── withValidation wrapper (tested through createToolDefinitions) ──────────────────────────────
 
   describe('withValidation wrapper', () => {
     it('wraps successful results in ToolsCallResult format', async () => {

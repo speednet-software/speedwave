@@ -1,14 +1,12 @@
-//! Startup self-heal of legacy `oauth/<project>/<service>.json` whose IdP
-//! identity sits at top level instead of nested under `providerData`
-//! (ADR-060 §addendum). Shape-only, best-effort, idempotent.
+//! Startup self-heal of legacy `oauth/<project>/<service>.json` with IdP identity at top level
+//! instead of under `providerData` (ADR-060 §addendum); shape-only, best-effort, idempotent.
 
 use std::path::Path;
 
 use crate::consts;
 
-/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys,
-/// pinned to the descriptor SSOT by
-/// `identity_keys_match_oauth_state_provider_data_descriptors`.
+/// Top-level keys lifted into `providerData` — SSOT for the IdP identity keys, pinned to the
+/// descriptor SSOT by `identity_keys_match_oauth_state_provider_data_descriptors`.
 pub const IDENTITY_KEYS: &[&str] = &["clientId", "tenantId"];
 
 /// Run migration once at startup; returns the count of files rewritten.
@@ -17,9 +15,8 @@ pub fn run_oauth_state_migration_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
 
-/// Inner entry point parameterised by the data dir. Tests pass an explicit tmp
-/// dir to avoid the `consts::data_dir()` `OnceLock` cache shared across the
-/// `cargo test` binary.
+/// Inner entry point parameterised by the data dir. Tests pass an explicit tmp dir to avoid
+/// the `consts::data_dir()` `OnceLock` cache shared across the `cargo test` binary.
 fn run_with_data_dir(data_dir: &Path) -> usize {
     let oauth_root = data_dir.join(consts::OAUTH_SUBDIR);
     if !oauth_root.exists() {
@@ -29,7 +26,7 @@ fn run_with_data_dir(data_dir: &Path) -> usize {
         Ok(e) => e,
         Err(e) => {
             log::warn!(
-                "oauth_state_migration: cannot read {}: {e}",
+                "cannot read oauth state directory {}: {e}",
                 oauth_root.display()
             );
             return 0;
@@ -40,7 +37,7 @@ fn run_with_data_dir(data_dir: &Path) -> usize {
         let project = match project {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("oauth_state_migration: skipping unreadable entry: {e}");
+                log::warn!("skipping unreadable oauth state entry: {e}");
                 continue;
             }
         };
@@ -60,7 +57,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
         Ok(e) => e,
         Err(e) => {
             log::warn!(
-                "oauth_state_migration: cannot read {}: {e}",
+                "cannot read oauth project directory {}: {e}",
                 project_dir.display()
             );
             return 0;
@@ -71,7 +68,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
         let path = match entry {
             Ok(e) => e.path(),
             Err(e) => {
-                log::warn!("oauth_state_migration: skipping unreadable entry: {e}");
+                log::warn!("skipping unreadable oauth state entry: {e}");
                 continue;
             }
         };
@@ -80,7 +77,7 @@ fn migrate_project_dir(project_dir: &Path) -> usize {
         }
         if migrate_file(&path) {
             migrated += 1;
-            log::info!("oauth_state_migration: healed {}", path.display());
+            log::info!("healed legacy oauth state layout in {}", path.display());
         }
     }
     migrated
@@ -91,7 +88,7 @@ fn migrate_file(path: &Path) -> bool {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("oauth_state_migration: cannot read {}: {e}", path.display());
+            log::warn!("cannot read oauth state file {}: {e}", path.display());
             return false;
         }
     };
@@ -112,7 +109,7 @@ fn migrate_file(path: &Path) -> bool {
         Ok(s) => s + "\n",
         Err(e) => {
             log::warn!(
-                "oauth_state_migration: cannot serialise {}: {e}",
+                "cannot serialise migrated oauth state {}: {e}",
                 path.display()
             );
             return false;
@@ -121,10 +118,7 @@ fn migrate_file(path: &Path) -> bool {
     match crate::fs_perms::write_restricted_file(path, &body) {
         Ok(()) => true,
         Err(e) => {
-            log::warn!(
-                "oauth_state_migration: cannot write {}: {e}",
-                path.display()
-            );
+            log::warn!("cannot write migrated oauth state {}: {e}", path.display());
             false
         }
     }
@@ -142,9 +136,8 @@ fn needs_migration(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
         .any(|k| obj.get(*k).is_some_and(|v| v.is_string()))
 }
 
-/// Move top-level identity strings under a fresh `providerData` object and drop
-/// the top-level copies. Returns `true` if at least one key was moved. Does not
-/// touch an existing `providerData` — callers gate on [`needs_migration`].
+/// Move top-level identity strings under a fresh `providerData` object, dropping the top-level
+/// copies. Returns `true` if moved; never touches an existing `providerData` ([`needs_migration`]).
 fn nest_identity(obj: &mut serde_json::Map<String, serde_json::Value>) -> bool {
     let mut provider_data = serde_json::Map::new();
     for &key in IDENTITY_KEYS {
@@ -177,7 +170,7 @@ pub fn oauth_json_key_for(key: &str) -> &str {
             );
             #[cfg(not(debug_assertions))]
             if other.contains('_') {
-                log::warn!("oauth_json_key_for: unknown snake_case key — add an arm");
+                log::warn!("unknown snake_case oauth state key — add a mapping arm");
             }
             other
         }
@@ -203,7 +196,7 @@ pub fn ensure_provider_data_object(obj: &mut serde_json::Map<String, serde_json:
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -228,8 +221,7 @@ mod tests {
     }
 
     /// Drift guard: `IDENTITY_KEYS` must match the camelCase JSON keys of every
-    /// `OAuthStateProviderData`-tagged descriptor field, mapped through
-    /// `oauth_json_key_for`.
+    /// `OAuthStateProviderData`-tagged descriptor field, mapped through `oauth_json_key_for`.
     #[test]
     fn identity_keys_match_oauth_state_provider_data_descriptors() {
         let mut expected: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES

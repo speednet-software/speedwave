@@ -1,6 +1,5 @@
-//! Host addressing SSOT: container-side gateway IP + host-side bind address,
-//! cached behind a pluggable computer (Lima static on macOS, WSL-detected on
-//! Windows). See ADR-067.
+//! Host addressing SSOT: container-side gateway IP + host-side bind address, cached behind a
+//! pluggable computer (Lima static on macOS, WSL-detected on Windows). See ADR-067.
 
 /// Container-side `gateway_ip` + host-side `bind_address`. On Windows both
 /// equal the WSL vEthernet adapter IP (mirrored-mode 127.0.0.1 broken — WSL#11312).
@@ -95,7 +94,10 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
 
 /// Test-only: inject a fixture computer. Pair with `#[serial_test::serial]`.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: lock poisoning is a hard test bug"
+)]
 pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
     *COMPUTER.write().expect("COMPUTER write lock") = Some(computer);
     invalidate_host_addressing_cache();
@@ -103,7 +105,10 @@ pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAd
 
 /// Test-only: restore the platform default computer.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: lock poisoning is a hard test bug"
+)]
 pub fn reset_host_addressing_computer_for_test() {
     *COMPUTER.write().expect("COMPUTER write lock") = None;
     invalidate_host_addressing_cache();
@@ -249,7 +254,7 @@ mod host_addressing_impls {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod resolver_tests {
     use super::*;
 

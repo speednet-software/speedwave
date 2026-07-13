@@ -7,8 +7,10 @@ import {
   ToolDefinition,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
+  type ResultValidationOptions,
 } from '@speedwave/mcp-shared';
-import { withValidation, withClients, ToolResult } from './validation.js';
+import { withValidation, withClients, missingParamResult, ToolResult } from './validation.js';
 import { SlackClients, listDms, openDm, formatSlackError } from '../client.js';
 import { peekUserDirectory, displayNameOf } from '../user-directory.js';
 
@@ -25,7 +27,11 @@ const listDirectMessagesTool: Tool = {
     properties: {},
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'dm', 'direct', 'message', 'im', 'mpim', 'conversation', 'list', 'private'],
   example: 'const { dms } = await slack.listDirectMessages({})',
   outputSchema: {
@@ -83,7 +89,11 @@ const openDirectMessageTool: Tool = {
     required: ['users'],
   },
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['slack', 'dm', 'direct', 'message', 'open', 'start', 'conversation', 'person'],
   example: 'const { id } = await slack.openDirectMessage({ users: ["U0123ABC456"] })',
   outputSchema: {
@@ -104,9 +114,9 @@ const openDirectMessageTool: Tool = {
 };
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param _params - Tool parameters (none)
+ * Handler for `listDirectMessages` — lists the signed-in user's DM conversations with resolved member names.
+ * @param clients - The Slack client container.
+ * @param _params - Unused (no input parameters).
  */
 export async function handleListDirectMessages(
   clients: SlackClients,
@@ -130,14 +140,21 @@ export async function handleListDirectMessages(
 }
 
 /**
- * Tool handler function
- * @param clients - Slack client instances
- * @param params - Tool parameters
+ * Handler for `openDirectMessage` — opens (or returns the existing) DM conversation with one or more users.
+ * @param clients - The Slack client container.
+ * @param params - Recipients.
  */
 export async function handleOpenDirectMessage(
   clients: SlackClients,
   params: OpenDirectMessageParams
 ): Promise<ToolResult> {
+  if (!Array.isArray(params.users) || params.users.length === 0) {
+    return missingParamResult(
+      'users',
+      params.users,
+      'Provide an array of 1-8 user IDs (from findUsers) or exact e-mail addresses.'
+    );
+  }
   try {
     const result = await openDm(clients, params);
     return { success: true, data: result };
@@ -147,8 +164,16 @@ export async function handleOpenDirectMessage(
 }
 
 /**
+ * Required-param options for {@link withValidation}, driven by the tool's own declared `inputSchema.required` so the guard can never drift from the schema.
+ * @param tool - The tool whose schema drives the required-param set.
+ */
+function requiredOf(tool: Tool): ResultValidationOptions {
+  return { required: tool.inputSchema.required ?? [], toolName: tool.name };
+}
+
+/**
  * Tool factory (shared NOT_CONFIGURED gating).
- * @param clients - Slack client instances
+ * @param clients - The Slack client container.
  */
 export function createDmTools(clients: SlackClients): ToolDefinition[] {
   const gate = withClients(clients);
@@ -160,7 +185,10 @@ export function createDmTools(clients: SlackClients): ToolDefinition[] {
     },
     {
       tool: openDirectMessageTool,
-      handler: withValidation<OpenDirectMessageParams>(gate(handleOpenDirectMessage)),
+      handler: withValidation<OpenDirectMessageParams>(
+        gate(handleOpenDirectMessage),
+        requiredOf(openDirectMessageTool)
+      ),
     },
   ];
 }

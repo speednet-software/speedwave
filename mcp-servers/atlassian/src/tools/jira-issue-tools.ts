@@ -1,6 +1,5 @@
 /**
- * Jira issue tools — search (enhanced JQL), get/create/update, transitions,
- * assignment, and the current account. 8 tools.
+ * Jira issue tools — search/CRUD, transitions, assignment, current account, attachments (10).
  * @module mcp-atlassian/tools/jira-issue-tools
  */
 
@@ -10,19 +9,77 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  teachingErrorResult,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  DESTRUCTIVE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
 import { AtlassianClient } from '../client.js';
 import { createJiraIssuesClient } from '../domains/jira-issues.js';
 import type { AdfDoc } from '../types.js';
 import { withValidation } from './validation.js';
 
+/** Shared account-ID resolution guidance (no user-search tool exists here). */
+const ACCOUNT_ID_RESOLUTION_GUIDANCE =
+  'Resolve your own account ID via getMyself; for someone else, reuse an assignee/reporter account_id already present in a prior getIssue/searchIssues result, or ask the user rather than guessing.';
+
+/**
+ * Max attachment size this worker will buffer and upload, well under its 128 MiB memory budget.
+ * Override: `ATLASSIAN_MAX_ATTACHMENT_BYTES`.
+ */
+const MAX_ATTACHMENT_BYTES = (() => {
+  const raw = process.env.ATLASSIAN_MAX_ATTACHMENT_BYTES;
+  const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : 25 * 1024 * 1024;
+})();
+
+/** Root of the read-only project mount inside the worker (overridable for tests). */
+function workspaceRoot(): string {
+  return process.env.WORKSPACE_DIR || '/workspace';
+}
+
+/**
+ * Read `filePath` from the read-only workspace mount, rejecting any path escaping it (traversal
+ * or symlink) so a tokened worker can't read `/tokens` etc, or exceeding {@link MAX_ATTACHMENT_BYTES}.
+ * @param filePath - Path relative to (or inside) the workspace root.
+ * @returns The file bytes and its basename.
+ */
+async function readWorkspaceFile(filePath: string): Promise<{ buffer: Buffer; name: string }> {
+  const root = await fsp.realpath(workspaceRoot());
+  const candidate = path.resolve(root, filePath);
+  let real: string;
+  try {
+    real = await fsp.realpath(candidate);
+  } catch {
+    throw new Error(`File not found under workspace: ${filePath}`);
+  }
+  if (real !== root && !real.startsWith(root + path.sep)) {
+    throw new Error('filePath must resolve to a location inside the workspace');
+  }
+  const stat = await fsp.stat(real);
+  if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
+  if (stat.size > MAX_ATTACHMENT_BYTES) {
+    throw new Error(
+      `File is too large to attach (${stat.size} bytes > ${MAX_ATTACHMENT_BYTES} byte limit): ${filePath}. ` +
+        'Split the file or reduce it before attaching.'
+    );
+  }
+  return { buffer: await fsp.readFile(real), name: path.basename(real) };
+}
+
 const searchIssuesTool: Tool = {
   name: 'searchIssues',
-  description: 'Search Jira issues with JQL (enhanced search; paginated by nextPageToken).',
+  description:
+    'Search Jira issues with JQL (enhanced search; paginated by nextPageToken). For "my"/"assigned to me" queries use `assignee = currentUser()` directly in the JQL — no need to resolve an account ID first. If a project allowlist is configured, matches outside it are silently removed from the returned issues, and next_page_token/is_last still reflect the unfiltered upstream page (so a page that looks "last" may still be hiding excluded items).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issues', 'search', 'jql', 'query', 'tickets', 'find'],
   example:
     'const { issues, next_page_token } = await atlassian.searchIssues({ jql: "project = PROJ AND status = \\"To Do\\" ORDER BY created DESC", maxResults: 20 })',
@@ -63,7 +120,7 @@ const getIssueTool: Tool = {
   name: 'getIssue',
   description: 'Get a single Jira issue by key or ID.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['jira', 'issue', 'get', 'show', 'ticket', 'detail'],
   example: 'const issue = await atlassian.getIssue({ issueIdOrKey: "PROJ-123" })',
   inputSchema: {
@@ -93,7 +150,11 @@ const createIssueTool: Tool = {
   description:
     'Create a Jira issue. `bodyText` (plain text) becomes the description as ADF; pass `bodyAdf` for a pre-built ADF document.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issue', 'create', 'new', 'ticket', 'open'],
   example:
     'const issue = await atlassian.createIssue({ projectKey: "PROJ", summary: "Fix login", issueType: "Bug", bodyText: "Steps to reproduce..." })',
@@ -110,7 +171,10 @@ const createIssueTool: Tool = {
       },
       priority: { type: 'string', description: 'Priority name (e.g. High)' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Labels to apply' },
-      assigneeAccountId: { type: 'string', description: 'Account ID to assign to' },
+      assigneeAccountId: {
+        type: 'string',
+        description: `Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+      },
     },
     required: ['projectKey', 'summary', 'issueType'],
   },
@@ -158,7 +222,11 @@ const updateIssueTool: Tool = {
   description:
     'Update fields of a Jira issue (only provided fields change). `bodyText`/`bodyAdf` set the description.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'issue', 'update', 'edit', 'change', 'modify', 'ticket'],
   example:
     'await atlassian.updateIssue({ issueIdOrKey: "PROJ-123", summary: "New title", priority: "Low" })',
@@ -174,6 +242,10 @@ const updateIssueTool: Tool = {
       bodyAdf: { type: 'object', description: 'New ADF description (overrides bodyText)' },
       priority: { type: 'string', description: 'New priority name' },
       labels: { type: 'array', items: { type: 'string' }, description: 'Replacement label set' },
+      assigneeAccountId: {
+        type: 'string',
+        description: `Cloud account ID to reassign to (e.g. 5b10ac8d82e05b22cc7d4ef5), not a username or email. ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
+      },
     },
     required: ['issueIdOrKey'],
   },
@@ -200,6 +272,7 @@ const updateIssueTool: Tool = {
         bodyText: 'Y',
         priority: 'High',
         labels: ['a', 'b'],
+        assigneeAccountId: '5b10a...',
       },
     },
   ],
@@ -209,7 +282,7 @@ const getTransitionsTool: Tool = {
   name: 'getTransitions',
   description: 'List the workflow transitions currently available for an issue.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'transitions', 'workflow', 'status', 'list'],
   example: 'const { transitions } = await atlassian.getTransitions({ issueIdOrKey: "PROJ-123" })',
   inputSchema: {
@@ -233,7 +306,7 @@ const transitionIssueTool: Tool = {
   name: 'transitionIssue',
   description: 'Move an issue through a workflow transition by transition ID (see getTransitions).',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'transition', 'workflow', 'status', 'move', 'close', 'resolve'],
   example: 'await atlassian.transitionIssue({ issueIdOrKey: "PROJ-123", transitionId: "31" })',
   inputSchema: {
@@ -256,9 +329,13 @@ const transitionIssueTool: Tool = {
 
 const assignIssueTool: Tool = {
   name: 'assignIssue',
-  description: 'Assign an issue to an account, or unassign it (omit accountId or pass null).',
+  description: `Assign an issue to an account, or unassign it (omit accountId or pass null). ${ACCOUNT_ID_RESOLUTION_GUIDANCE}`,
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getMyself',
+  },
   keywords: ['jira', 'assign', 'assignee', 'unassign', 'owner'],
   example: 'await atlassian.assignIssue({ issueIdOrKey: "PROJ-123", accountId: "5b10a..." })',
   inputSchema: {
@@ -267,7 +344,8 @@ const assignIssueTool: Tool = {
       issueIdOrKey: { type: 'string', description: 'Issue key or ID' },
       accountId: {
         type: ['string', 'null'],
-        description: 'Account ID to assign to (null/omit to unassign)',
+        description:
+          'Cloud account ID to assign to (e.g. 5b10ac8d82e05b22cc7d4ef5), or null/omit to unassign — not a username or email.',
       },
     },
     required: ['issueIdOrKey'],
@@ -290,7 +368,7 @@ const getMyselfTool: Tool = {
   name: 'getMyself',
   description: 'Get the Atlassian account this worker authenticates as.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['jira', 'me', 'myself', 'current user', 'account', 'whoami'],
   example: 'const me = await atlassian.getMyself()',
   inputSchema: { type: 'object', properties: {} },
@@ -306,10 +384,81 @@ const getMyselfTool: Tool = {
   inputExamples: [{ description: 'Who am I', input: {} }],
 };
 
+const addAttachmentTool: Tool = {
+  name: 'addAttachment',
+  description: `Attach a file to a Jira issue. The worker reads \`filePath\` (a path under /workspace) fully into memory before uploading, so it is capped at ${MAX_ATTACHMENT_BYTES} bytes regardless of Jira's own attachment-size limit.`,
+  annotations: WRITE_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'attachment', 'attach', 'upload', 'file', 'screenshot', 'image', 'załącznik'],
+  example:
+    'await atlassian.addAttachment({ issueIdOrKey: "PROJ-123", filePath: "/workspace/bug.png" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      issueIdOrKey: { type: 'string', description: 'Issue key (e.g. PROJ-123) or numeric ID' },
+      filePath: {
+        type: 'string',
+        description: `Path under /workspace to read (e.g. /workspace/bug.png), max ${MAX_ATTACHMENT_BYTES} bytes`,
+      },
+      filename: {
+        type: 'string',
+        description: 'Attachment file name; defaults to the basename of filePath',
+      },
+      contentType: { type: 'string', description: 'MIME type (default application/octet-stream)' },
+    },
+    required: ['issueIdOrKey', 'filePath'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      attachment: { type: 'object' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'From a workspace file',
+      input: { issueIdOrKey: 'PROJ-123', filePath: '/workspace/bug.png' },
+    },
+    {
+      description: 'With an explicit filename and MIME type',
+      input: {
+        issueIdOrKey: 'PROJ-123',
+        filePath: '/workspace/.speedwave/shot.png',
+        filename: 'bug.png',
+        contentType: 'image/png',
+      },
+    },
+  ],
+};
+
+const deleteAttachmentTool: Tool = {
+  name: 'deleteAttachment',
+  description: 'Delete a Jira attachment by its attachment ID (irreversible).',
+  annotations: DESTRUCTIVE_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['jira', 'attachment', 'delete', 'remove', 'załącznik', 'usuń'],
+  example: 'await atlassian.deleteAttachment({ attachmentId: "10475" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      attachmentId: { type: 'string', description: 'Attachment ID (e.g. 10475)' },
+    },
+    required: ['attachmentId'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: { success: { type: 'boolean' }, error: { type: 'string' } },
+    required: ['success'],
+  },
+  inputExamples: [{ description: 'Delete an attachment', input: { attachmentId: '10475' } }],
+};
+
 /**
  * Build the Jira issue tool definitions.
  * @param client - The Atlassian client (`null` when the service is not configured).
- * @returns Tool definitions for issue search/CRUD/transitions/assignment.
  */
 export function createJiraIssueTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [
@@ -321,6 +470,8 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     transitionIssueTool,
     assignIssueTool,
     getMyselfTool,
+    addAttachmentTool,
+    deleteAttachmentTool,
   ];
   if (!client) {
     const unconfigured = async () => errorResult(notConfiguredMessage('Atlassian'));
@@ -384,6 +535,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
           bodyAdf?: AdfDoc;
           priority?: string;
           labels?: string[];
+          assigneeAccountId?: string;
         };
         const body = p.bodyAdf ?? p.bodyText;
         return jsonResult({
@@ -392,6 +544,7 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
             body,
             priority: p.priority,
             labels: p.labels,
+            assigneeAccountId: p.assigneeAccountId,
           }),
         });
       }),
@@ -428,6 +581,58 @@ export function createJiraIssueTools(client: AtlassianClient | null): ToolDefini
     {
       tool: getMyselfTool,
       handler: withValidation(client, async () => jsonResult({ user: await issues.getMyself() })),
+    },
+    {
+      tool: addAttachmentTool,
+      handler: withValidation(client, async (_c, params) => {
+        const { issueIdOrKey, filename, filePath, contentType } = params as {
+          issueIdOrKey: string;
+          filename?: string;
+          filePath?: string;
+          contentType?: string;
+        };
+        if (!issueIdOrKey) {
+          return teachingErrorResult({
+            paramName: 'issueIdOrKey',
+            received: issueIdOrKey,
+            nextStep:
+              'Provide the Jira issue key (e.g. PROJ-123) or numeric ID to attach the file to.',
+          });
+        }
+        if (!filePath) {
+          return teachingErrorResult({
+            paramName: 'filePath',
+            received: filePath,
+            nextStep:
+              'Provide a path under /workspace to the file to attach (e.g. /workspace/bug.png).',
+          });
+        }
+
+        const file = await readWorkspaceFile(filePath);
+        return jsonResult({
+          attachment: await issues.addAttachment(issueIdOrKey, {
+            filename: filename || file.name,
+            data: file.buffer,
+            contentType: contentType || 'application/octet-stream',
+          }),
+        });
+      }),
+    },
+    {
+      tool: deleteAttachmentTool,
+      handler: withValidation(client, async (_c, params) => {
+        const { attachmentId } = params as { attachmentId: string };
+        if (!attachmentId) {
+          return teachingErrorResult({
+            paramName: 'attachmentId',
+            received: attachmentId,
+            nextStep:
+              'Provide the Jira attachment ID to delete (e.g. from a prior getIssue/addAttachment result).',
+          });
+        }
+        await issues.deleteAttachment(attachmentId);
+        return jsonResult({ deleted: true });
+      }),
     },
   ];
 }

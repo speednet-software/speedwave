@@ -1,18 +1,10 @@
-//! Host filesystem permission auto-fix for security-sensitive paths.
-//!
-//! Called before `SecurityCheck::run()` on all container start paths (CLI,
-//! Desktop, update, rollback) to silently fix incorrect mode bits.
-//! `speedwave check` does NOT call autofix — it reports violations only.
+//! Host filesystem permission auto-fix for security-sensitive paths. Called before
+//! `SecurityCheck::run()` on all start paths to fix mode bits; `speedwave check` reports-only.
 
 use crate::consts;
 
-/// Fixes permissions on existing security-sensitive paths under the default
-/// data directory (`~/.speedwave/`).
-///
-/// Directories are set to `0o700`, files to `0o600`. Missing paths and
-/// symlinks are silently skipped. Idempotent — safe to call on every startup.
-///
-/// On non-Unix platforms this is a no-op.
+/// Fixes permissions under the default data directory (`~/.speedwave/`): dirs to `0o700`, files to
+/// `0o600`. Skips missing paths and symlinks; idempotent; no-op on non-Unix.
 pub fn ensure_data_dir_permissions(project: &str) -> anyhow::Result<()> {
     ensure_data_dir_permissions_in(consts::data_dir(), project)
 }
@@ -104,14 +96,8 @@ pub(crate) fn ensure_data_dir_permissions_in(
     Ok(())
 }
 
-/// Enumerates security-sensitive paths under `data_dir` for a project.
-///
-/// Returns `(dirs, files)` where:
-/// - `dirs` must have mode `0o700` (owner rwx only)
-/// - `files` must have mode `0o600` (owner rw only)
-///
-/// Used by both `ensure_data_dir_permissions_in()` (to fix) and
-/// `SecurityCheck::check_file_security_with_uid()` (to validate).
+/// Enumerates security-sensitive paths under `data_dir`: `dirs` must be `0o700`, `files` must be `0o600`.
+/// Used by both the autofix path and `SecurityCheck::check_file_security_with_uid()`.
 #[cfg(unix)]
 pub(crate) fn collect_security_paths(
     data_dir: &std::path::Path,
@@ -130,6 +116,9 @@ pub(crate) fn collect_security_paths(
         data_dir.join("ide-bridge"),
         data_dir.join("tokens").join(project),
         data_dir.join(consts::OAUTH_SUBDIR).join(project),
+        // Native Claude Code managed-settings dir (MDM telemetry policy), 0o700.
+        data_dir.join(consts::CLAUDE_MANAGED_SUBDIR),
+        data_dir.join(consts::CLAUDE_MANAGED_SUBDIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
@@ -211,11 +200,19 @@ pub(crate) fn collect_security_paths(
         }
     }
 
+    // --- claude-managed/<project>/managed-settings.json (MDM telemetry), 0o600 ---
+    files.push(crate::claude_managed::managed_settings_path(
+        data_dir, project,
+    ));
+
     (dirs, files)
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test-only module: unwraps assert setup succeeded"
+)]
 mod tests {
     use super::*;
 
@@ -296,8 +293,8 @@ mod tests {
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected 14 dirs.
-        assert_eq!(dirs.len(), 14, "expected 14 dirs, got: {dirs:?}");
+        // Expected 16 dirs (14 legacy + claude-managed + claude-managed/proj).
+        assert_eq!(dirs.len(), 16, "expected 16 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
         assert!(dirs.contains(&data_dir.join("snapshots")));
@@ -312,9 +309,11 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("ide-bridge")));
         assert!(dirs.contains(&data_dir.join("oauth")));
         assert!(dirs.contains(&data_dir.join("oauth/proj")));
+        assert!(dirs.contains(&data_dir.join("claude-managed")));
+        assert!(dirs.contains(&data_dir.join("claude-managed/proj")));
 
-        // Expected 15 files: 8 legacy + 6 oauth + 1 mcp-os singleton.
-        assert_eq!(files.len(), 15, "expected 15 files, got: {files:?}");
+        // Expected 16 files: 8 legacy + 6 oauth + 1 mcp-os singleton + managed-settings.json.
+        assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
         assert!(files.contains(&data_dir.join("tokens/proj/gitlab/key.txt")));
@@ -330,6 +329,7 @@ mod tests {
         assert!(files.contains(&data_dir.join("oauth/proj/lock.json")));
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log")));
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log.1")));
+        assert!(files.contains(&data_dir.join("claude-managed/proj/managed-settings.json")));
 
         // non-.lock file must NOT be included
         assert!(

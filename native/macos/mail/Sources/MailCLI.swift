@@ -129,13 +129,14 @@ func searchEmails(params: [String: Any]) throws -> [String: Any] {
     }
     let client = try resolveClient(preferred: params["client"] as? String)
     let limit = params["limit"] as? Int ?? 10
+    let mailbox = params["mailbox"] as? String
 
     let emails: [[String: Any]]
     switch client {
     case "outlook":
-        emails = try OutlookClient.searchEmails(query: query, limit: limit)
+        emails = try OutlookClient.searchEmails(query: query, limit: limit, mailbox: mailbox)
     default:
-        emails = try AppleMailClient.searchEmails(query: query, limit: limit)
+        emails = try AppleMailClient.searchEmails(query: query, limit: limit, mailbox: mailbox)
     }
     return ["emails": emails]
 }
@@ -143,6 +144,9 @@ func searchEmails(params: [String: Any]) throws -> [String: Any] {
 func sendEmail(params: [String: Any]) throws -> [String: Any] {
     guard let to = params["to"] as? String else {
         throw MailError.missingField("to")
+    }
+    guard !splitAddressList(to).isEmpty else {
+        throw MailError.emptyRecipients("to")
     }
     guard let subject = params["subject"] as? String else {
         throw MailError.missingField("subject")
@@ -156,12 +160,21 @@ func sendEmail(params: [String: Any]) throws -> [String: Any] {
 
     let client = try resolveClient(preferred: params["client"] as? String)
     let cc = params["cc"] as? String
+    let bcc = params["bcc"] as? String
+    // A provided cc/bcc that reduces to zero addresses would silently vanish from the
+    // generated AppleScript; reject it the same way an empty `to` is rejected.
+    if let cc = cc, splitAddressList(cc).isEmpty {
+        throw MailError.emptyRecipients("cc")
+    }
+    if let bcc = bcc, splitAddressList(bcc).isEmpty {
+        throw MailError.emptyRecipients("bcc")
+    }
 
     switch client {
     case "outlook":
-        return try OutlookClient.sendEmail(to: to, subject: subject, body: body, cc: cc)
+        return try OutlookClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
     default:
-        return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc)
+        return try AppleMailClient.sendEmail(to: to, subject: subject, body: body, cc: cc, bcc: bcc)
     }
 }
 
@@ -194,6 +207,7 @@ enum MailError: LocalizedError {
     case clientNotAvailable(String)
     case unknownClient(String)
     case confirmRequired
+    case emptyRecipients(String)
 
     var errorDescription: String? {
         switch self {
@@ -205,6 +219,8 @@ enum MailError: LocalizedError {
             return "Unknown mail client: \(client). Available: mail, outlook"
         case .confirmRequired:
             return "Send confirmation required. Set confirm_send: true to send the email."
+        case .emptyRecipients(let field):
+            return "The '\(field)' field is empty. Provide at least one recipient email address."
         }
     }
 }

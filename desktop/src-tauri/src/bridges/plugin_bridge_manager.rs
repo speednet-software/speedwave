@@ -1,6 +1,5 @@
-//! Plugin host-bridge lifecycle: spawn at startup for each verified plugin
-//! whose manifest declares a `host_bridge` block, and replace/stop on install
-//! and remove.
+//! Plugin host-bridge lifecycle: spawn at startup for each verified plugin whose
+//! manifest declares a `host_bridge` block, and replace/stop on install and remove.
 
 use std::sync::Arc;
 

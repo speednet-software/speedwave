@@ -18,8 +18,8 @@ Migrate all MCP servers to MCP-spec-compliant Streamable HTTP transport:
 2. **`DELETE /` endpoint** for session termination
 3. **`GET /health`** for health checks (unchanged)
 4. **Session management** via `Mcp-Session-Id` header with server-generated UUIDs
-5. **Protocol version negotiation** during `initialize` handshake — server accepts `2024-11-05`, `2025-03-26`, and `2025-11-25`
-6. **Tool annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) replace the non-standard `category` field
+5. **Protocol version negotiation** during `initialize` handshake — server accepts `2024-11-05`[^3], `2025-03-26`, and `2025-11-25`
+6. **Tool annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)[^4] replace the non-standard `category` field
 7. **Progressive disclosure** via `search_tools` meta-tool (hub-level) replaces the removed `category` system
 
 ## Implementation
@@ -38,7 +38,7 @@ Implements MCP Streamable HTTP transport utilities shared by all servers:
 - Supports `initialize` / `notifications/initialized` handshake
 - Paginated `tools/list` with cursor-based pagination (page size: 100)
 - `tools/call` dispatches to registered tool handlers
-- `ping` method returns empty result per spec[^3]
+- `ping` method returns empty result per spec[^5]
 - Session state tracking (initialized flag, protocol version)
 
 ### Changes to workers
@@ -47,15 +47,15 @@ All worker tool definitions updated with `annotations` field (replacing removed 
 
 ### Notification response code
 
-Notifications return **202 Accepted** (not 204 No Content) per MCP spec 2025-11-25 requirement[^4]. This applies to both single notifications and batches containing only notifications.
+Notifications return **202 Accepted** (not 204 No Content) per MCP spec 2025-11-25 requirement[^6]. This applies to both single notifications and batches containing only notifications.
 
 ### Accept header validation
 
-POST requests are validated for Accept header compliance: clients must accept both `application/json` and `text/event-stream` per MCP spec[^5]. Returns 406 Not Acceptable when the Accept header is present but missing either content type. Wildcard `*/*` is accepted per RFC 9110 section 12.5.1[^6]. Initialize requests and requests without an Accept header are exempt from this validation.
+POST requests are validated for Accept header compliance: clients must accept both `application/json` and `text/event-stream` per MCP spec[^7]. Returns 406 Not Acceptable when the Accept header is present but missing either content type. Wildcard `*/*` is accepted per RFC 9110 section 12.5.1[^8]. Initialize requests and requests without an Accept header are exempt from this validation.
 
 ### Version negotiation fallback
 
-Server responds with `LATEST_PROTOCOL_VERSION` as fallback for unsupported client versions instead of rejecting with an error. Per MCP spec, servers MUST respond with the version they support rather than failing the handshake[^7].
+Server responds with `LATEST_PROTOCOL_VERSION` as fallback for unsupported client versions instead of rejecting with an error. Per MCP spec, servers MUST respond with the version they support rather than failing the handshake[^9].
 
 ### Changes to hub
 
@@ -63,7 +63,7 @@ Hub uses `JSONRPCHandler` directly (custom Express setup for meta-tools). Tool d
 
 ## Consequences
 
-- All MCP servers are protocol-compliant with MCP spec 2024-11-05, 2025-03-26, and 2025-11-25
+- All MCP servers are protocol-compliant with MCP spec 2024-11-05[^3], 2025-03-26, and 2025-11-25
 - External MCP clients can connect to Speedwave workers using standard MCP libraries
 - The non-standard `category` field is removed from all tool definitions
 - Progressive disclosure is handled at the hub level via `search_tools`, not per-tool metadata
@@ -72,12 +72,16 @@ Hub uses `JSONRPCHandler` directly (custom Express setup for meta-tools). Tool d
 
 [^2]: [MCP Specification 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/)
 
-[^3]: [MCP Specification — Ping](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/ping)
+[^3]: [MCP Specification 2024-11-05](https://modelcontextprotocol.io/specification/2024-11-05/)
 
-[^4]: [MCP Specification 2025-11-25 — Streamable HTTP Transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
+[^4]: [MCP Specification 2025-11-25 - Tools: ToolAnnotations](https://raw.githubusercontent.com/modelcontextprotocol/specification/main/schema/2025-11-25/schema.ts)
 
-[^5]: [MCP Specification 2025-11-25 — Sending Requests via HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#sending-requests-via-http)
+[^5]: [MCP Specification - Ping](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/ping)
 
-[^6]: [RFC 9110 — Content Negotiation, Section 12.5.1](https://www.rfc-editor.org/rfc/rfc9110#section-12.5.1)
+[^6]: [MCP Specification 2025-11-25 - Streamable HTTP Transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
 
-[^7]: [MCP Specification 2025-11-25 — Lifecycle: Initialization](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization)
+[^7]: [MCP Specification 2025-11-25 - Sending Requests via HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#sending-requests-via-http)
+
+[^8]: [RFC 9110 - Content Negotiation, Section 12.5.1](https://www.rfc-editor.org/rfc/rfc9110#section-12.5.1)
+
+[^9]: [MCP Specification 2025-11-25 - Lifecycle: Initialization](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization)

@@ -167,7 +167,7 @@ pub fn host_bridges_from_disk() -> HostBridgesInfo {
     match plugin::plugins_base_dir() {
         Ok(dir) => host_bridges_from_disk_in(&dir),
         Err(e) => {
-            log::warn!("host_bridges_from_disk: cannot resolve plugins dir: {e}");
+            log::warn!("cannot resolve plugins dir for host bridges: {e}");
             HostBridgesInfo::default()
         }
     }
@@ -181,7 +181,7 @@ fn host_bridges_from_disk_in(plugins_dir: &Path) -> HostBridgesInfo {
     let plugins = match plugin::list_verified_from_dir(plugins_dir) {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("host_bridges_from_disk: cannot list verified plugins: {e}");
+            log::warn!("cannot list verified plugins for host bridges: {e}");
             return HostBridgesInfo::default();
         }
     };
@@ -290,6 +290,11 @@ pub fn render_compose_in(
     yaml = yaml.replace("${TOKENS_DIR}", &to_engine_path(&tokens_dir)?);
     yaml = yaml.replace("${NETWORK_NAME}", &network_name);
     yaml = yaml.replace("${CLAUDE_VERSION}", defaults::CLAUDE_VERSION);
+    yaml = yaml.replace("${BUNDLED_PLUGINS}", &defaults::BUNDLED_PLUGINS.join(","));
+    yaml = yaml.replace(
+        "${BUNDLED_PLUGIN_MARKETPLACE}",
+        defaults::BUNDLED_PLUGIN_MARKETPLACE,
+    );
     yaml = yaml.replace("${PORT_HUB}", &port_hub.to_string());
     yaml = yaml.replace("${PORT_WORKER}", &port_worker.to_string());
     // Per-image build-input hash tags (ADR-072) — one placeholder per service.
@@ -305,11 +310,12 @@ pub fn render_compose_in(
     // Mount it as /home/speedwave/.claude/ide/ — no copying needed.
     let ide_lock_dir = data_dir.join("ide-bridge");
     std::fs::create_dir_all(&ide_lock_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ide_lock_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    crate::fs_perms::set_owner_only_dir(&ide_lock_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set owner-only perms on {}: {e}",
+            ide_lock_dir.display()
+        )
+    })?;
     yaml = yaml.replace("${IDE_LOCK_DIR}", &to_engine_path(&ide_lock_dir)?);
 
     // Speedwave proxy per-project mounts (ADR-073): rendered config (ro) + usage sink (rw).
@@ -318,12 +324,18 @@ pub fn render_compose_in(
     std::fs::create_dir_all(&proxy_config_dir)?;
     let proxy_usage_dir = data_dir.join("usage").join(project_name).join("proxy");
     std::fs::create_dir_all(&proxy_usage_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&proxy_config_dir, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&proxy_usage_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
+    crate::fs_perms::set_owner_only_dir(&proxy_config_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set owner-only perms on {}: {e}",
+            proxy_config_dir.display()
+        )
+    })?;
+    crate::fs_perms::set_owner_only_dir(&proxy_usage_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set owner-only perms on {}: {e}",
+            proxy_usage_dir.display()
+        )
+    })?;
     yaml = yaml.replace("${PROXY_CONFIG_DIR}", &to_engine_path(&proxy_config_dir)?);
     yaml = yaml.replace("${PROXY_USAGE_DIR}", &to_engine_path(&proxy_usage_dir)?);
     yaml = yaml.replace(
@@ -340,6 +352,25 @@ pub fn render_compose_in(
 
     // Inject Claude environment variables from resolved config
     yaml = inject_claude_env(&yaml, &resolved_config.env)?;
+
+    // Native managed-settings.json (MDM telemetry): mounted :ro only when MDM
+    // locked a key. An invalid policy is hard-stopped at boot, not here (ADR-076).
+    if resolved_config.telemetry.any_locked {
+        crate::claude_managed::write_managed_settings(
+            data_dir,
+            project_name,
+            &resolved_config.telemetry,
+        )?;
+        let src = crate::claude_managed::managed_settings_path(data_dir, project_name);
+        let mount = format!(
+            "{}:/etc/claude-code/{}:ro",
+            to_engine_path(&src)?,
+            crate::consts::MANAGED_SETTINGS_FILE
+        );
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml)?;
+        add_claude_volume(&mut doc, &mount)?;
+        yaml = serde_yaml_ng::to_string(&doc)?;
+    }
 
     // Handle LLM provider switching
     yaml = apply_llm_config_in(data_dir, &yaml, &resolved_config.llm, project_name)?;
@@ -472,11 +503,19 @@ fn ensure_data_dir_mount_sources(data_dir: &Path, yaml: &str) -> anyhow::Result<
         if rel.is_empty() {
             continue;
         }
-        let host = rel
-            .split('/')
-            .fold(data_dir.to_path_buf(), |p, seg| p.join(seg));
-        if !host.exists() {
-            std::fs::create_dir_all(&host)?;
+        create_missing_levels_owner_only(data_dir, rel)?;
+    }
+    Ok(())
+}
+
+/// Creates every missing path level from `data_dir` down through `rel` via
+/// [`crate::fs_perms::ensure_owner_only_dir`], so no level inherits an empty DACL.
+fn create_missing_levels_owner_only(data_dir: &Path, rel: &str) -> anyhow::Result<()> {
+    let mut level = data_dir.to_path_buf();
+    for seg in rel.split('/') {
+        level.push(seg);
+        if !level.exists() {
+            crate::fs_perms::ensure_owner_only_dir(&level)?;
         }
     }
     Ok(())
@@ -704,7 +743,7 @@ pub(crate) fn inject_claude_env(
                     }
                 } else {
                     log::warn!(
-                        "inject_claude_env: claude service 'environment' field is not a sequence \
+                        "claude service 'environment' field is not a sequence \
                          (got {:?}) — env vars not injected",
                         environment
                     );
@@ -734,7 +773,7 @@ fn inject_host_timezone(yaml: &str, tz: &str) -> anyhow::Result<String> {
                     // compose.template.yml uses sequence form uniformly; mapping form is intentionally skipped.
                     None => {
                         log::warn!(
-                            "inject_host_timezone: service 'environment' is not a sequence \
+                            "service 'environment' is not a sequence \
                              (got {:?}) — TZ not injected",
                             existing
                         );
@@ -902,7 +941,7 @@ fn apply_oauth_config_with_paths(
         if !bearer_file.exists() {
             // Lazily write the per-service bearer file (chmod 0o600).
             if let Err(e) = crate::fs_perms::write_restricted_file(&bearer_file, bearer) {
-                log::warn!("oauth: failed to write per-service bearer for '{service_id}': {e}");
+                log::warn!("failed to write per-service oauth bearer for '{service_id}': {e}");
                 continue;
             }
         }
@@ -912,7 +951,7 @@ fn apply_oauth_config_with_paths(
             "{}:/secrets/oauth-auth-token-{service_id}:ro",
             to_engine_path(&bearer_file)?
         );
-        add_service_volume(&mut doc, &compose_service, &mount);
+        add_service_volume(&mut doc, &compose_service, &mount)?;
     }
 
     Ok(serde_yaml_ng::to_string(&doc)?)
@@ -1031,7 +1070,7 @@ pub(crate) fn inject_env_into(
 ) {
     let Some(services) = doc.get_mut("services").and_then(|s| s.as_mapping_mut()) else {
         log::warn!(
-            "inject_env_into: 'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
+            "'services' key absent or not a mapping — cannot inject {env_name} into '{service}'"
         );
         return;
     };
@@ -1039,7 +1078,7 @@ pub(crate) fn inject_env_into(
         .get_mut(serde_yaml_ng::Value::String(service.to_string()))
         .and_then(|s| s.as_mapping_mut())
     else {
-        log::warn!("inject_env_into: service '{service}' absent — cannot inject {env_name}");
+        log::warn!("service '{service}' absent — cannot inject {env_name}");
         return;
     };
 
@@ -1048,7 +1087,9 @@ pub(crate) fn inject_env_into(
         .entry(env_key)
         .or_insert_with(|| serde_yaml_ng::Value::Sequence(Vec::new()));
     let Some(env_seq) = env_entry.as_sequence_mut() else {
-        log::warn!("inject_env_into: service '{service}' 'environment' is not a sequence — cannot inject {env_name}");
+        log::warn!(
+            "service '{service}' 'environment' is not a sequence — cannot inject {env_name}"
+        );
         return;
     };
 
@@ -1063,21 +1104,31 @@ pub(crate) fn inject_env_into(
     }
 }
 
-/// Adds a volume mount to the claude service.
-pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(claude) = services.get_mut("claude") {
-            if let Some(volumes) = claude.get_mut("volumes") {
-                if let Some(vol_seq) = volumes.as_sequence_mut() {
-                    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
-                }
-            }
-        }
+/// Adds a volume mount to the claude service, creating the `volumes:` sequence if
+/// absent. Errors when the claude service is missing (the mount is a security boundary).
+pub(crate) fn add_claude_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> anyhow::Result<()> {
+    let claude = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut("claude"))
+        .ok_or_else(|| anyhow::anyhow!("compose has no claude service to mount into"))?;
+    let map = claude
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("claude service is not a mapping"))?;
+    let key = serde_yaml_ng::Value::String("volumes".to_string());
+    if !map.contains_key(&key) {
+        map.insert(key.clone(), serde_yaml_ng::Value::Sequence(Vec::new()));
     }
+    let vol_seq = map
+        .get_mut(&key)
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| anyhow::anyhow!("claude volumes is not a sequence"))?;
+    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
+    Ok(())
 }
 
-/// Adds a volume mount to the mcp-hub service.
-pub(crate) fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) {
+/// Adds a volume mount to the mcp-hub service. Errors when mcp-hub is missing or
+/// malformed (the mount carries a Speedwave-internal bridge bearer token).
+pub(crate) fn add_hub_volume(doc: &mut serde_yaml_ng::Value, mount: &str) -> anyhow::Result<()> {
     add_service_volume(doc, "mcp-hub", mount)
 }
 
@@ -1114,22 +1165,30 @@ pub(crate) fn ensure_host_gateway_extra_host(
     Ok(())
 }
 
-/// Adds a volume mount to an arbitrary service. No-op if the service is absent.
-fn add_service_volume(doc: &mut serde_yaml_ng::Value, service: &str, mount: &str) {
-    if let Some(services) = doc.get_mut("services") {
-        if let Some(svc) = services.get_mut(service) {
-            if let Some(volumes) = svc.get_mut("volumes") {
-                if let Some(vol_seq) = volumes.as_sequence_mut() {
-                    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
-                }
-            } else {
-                svc["volumes"] =
-                    serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::String(
-                        mount.to_string(),
-                    )]);
-            }
-        }
+/// Adds a volume mount to an arbitrary service. Errors when the service is
+/// missing or malformed — a security-relevant mount must never vanish silently.
+fn add_service_volume(
+    doc: &mut serde_yaml_ng::Value,
+    service: &str,
+    mount: &str,
+) -> anyhow::Result<()> {
+    let svc = doc
+        .get_mut("services")
+        .and_then(|s| s.get_mut(service))
+        .ok_or_else(|| anyhow::anyhow!("compose has no '{service}' service to mount into"))?;
+    let map = svc
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("'{service}' service is not a mapping"))?;
+    let key = serde_yaml_ng::Value::String("volumes".to_string());
+    if !map.contains_key(&key) {
+        map.insert(key.clone(), serde_yaml_ng::Value::Sequence(Vec::new()));
     }
+    let vol_seq = map
+        .get_mut(&key)
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| anyhow::anyhow!("'{service}' volumes is not a sequence"))?;
+    vol_seq.push(serde_yaml_ng::Value::String(mount.to_string()));
+    Ok(())
 }
 
 /// Adds an environment variable to the claude service. Thin wrapper over
@@ -1139,12 +1198,16 @@ pub(crate) fn add_claude_env_var(doc: &mut serde_yaml_ng::Value, key: &str, valu
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 39;
+    const SECURITY_RULE_COUNT: usize = 47;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1194,6 +1257,156 @@ mod tests {
         )
     }
 
+    /// Builds a minimal ResolvedClaudeConfig whose telemetry is resolved from the
+    /// given user/MDM layers, for the managed-settings mount tests.
+    fn resolved_with_telemetry(
+        user: Option<&crate::config::TelemetryConfig>,
+        managed: Option<&crate::config::ManagedTelemetryConfig>,
+    ) -> ResolvedClaudeConfig {
+        let telemetry = crate::config::resolve_telemetry(user, managed)
+            .unwrap_or_else(|_| crate::config::ResolvedTelemetry::disabled());
+        let mut llm = crate::config::LlmConfig {
+            provider: Some("local".to_string()),
+            model: Some("test/model".to_string()),
+            base_url: Some("http://100.74.182.88:8888".to_string()),
+            ..Default::default()
+        };
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::None);
+        ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+            telemetry,
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn managed_settings_mount_present_only_when_locked() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("mdm-mount-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let managed = crate::config::ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            ..Default::default()
+        };
+        let resolved = resolved_with_telemetry(None, Some(&managed));
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+        assert!(yaml.contains("/etc/claude-code/managed-settings.json:ro"));
+
+        // Without MDM: no mount.
+        let resolved_none = resolved_with_telemetry(None, None);
+        let yaml_none = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved_none,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+        assert!(!yaml_none.contains("/etc/claude-code/managed-settings.json"));
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn telemetry_env_reaches_the_claude_service() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("otel-env-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let user = crate::config::TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://c.example.com:4318".into()),
+            protocol: Some(crate::config::OtlpProtocol::HttpProtobuf),
+            headers: Some("Authorization=Bearer abc==".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let mut resolved = resolved_with_telemetry(Some(&user), None);
+        // The shared fixture zeroes env; the renderer injects OTEL only from env.
+        resolved.env = crate::telemetry_env::telemetry_env_map(&resolved.telemetry);
+
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed");
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env = get_service_env_seq(&doc, "claude");
+        assert_eq!(
+            find_env_value(&env, "CLAUDE_CODE_ENABLE_TELEMETRY=").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_ENDPOINT=").as_deref(),
+            Some("https://c.example.com:4318")
+        );
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_PROTOCOL=").as_deref(),
+            Some("http/protobuf")
+        );
+        // The header value keeps its '=' (the de-dup keys only on the pre-'=' segment).
+        assert_eq!(
+            find_env_value(&env, "OTEL_EXPORTER_OTLP_HEADERS=").as_deref(),
+            Some("Authorization=Bearer abc==")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_omits_managed_mount_when_telemetry_failed_to_resolve() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("mdm-badurl-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let user = crate::config::TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("ftp://evil/".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        let resolved = resolved_with_telemetry(Some(&user), None);
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect("render must succeed (fail-closed handled at boot, not render)");
+        assert!(
+            !yaml.contains("/etc/claude-code/managed-settings.json"),
+            "an unresolvable telemetry policy must not produce a managed-settings mount"
+        );
+    }
+
     /// Renders via `render_compose` with a local LLM provider + multi-line
     /// custom_headers and checks the result re-parses (production code path).
     #[test]
@@ -1227,6 +1440,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig::default();
 
@@ -1291,6 +1505,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         render_compose_isolated(
             data_dir.path(),
@@ -1332,6 +1547,62 @@ mod tests {
         assert!(!Path::new("/workspace-elsewhere").exists());
     }
 
+    /// Windows regression proof: a plain `create_dir_all` child under a protected
+    /// parent inherits an empty DACL — every newly created level must be owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_data_dir_mount_sources_sets_owner_only_on_every_created_level() {
+        use std::os::unix::fs::PermissionsExt;
+        let data_dir = tempfile::tempdir().unwrap();
+        let prefix = to_engine_path(data_dir.path()).unwrap();
+        let yaml = format!(
+            "services:\n  x:\n    volumes:\n      - {prefix}/tokens/projx/newsvc:/tokens:ro\n"
+        );
+
+        ensure_data_dir_mount_sources(data_dir.path(), &yaml).unwrap();
+
+        for created in ["tokens", "tokens/projx", "tokens/projx/newsvc"] {
+            let mode = std::fs::metadata(data_dir.path().join(created))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700 on {created}, got 0o{mode:o}");
+        }
+    }
+
+    /// A pre-existing level (e.g. a user-customized dir) must keep its current
+    /// permissions — only the newly created child levels are tightened.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_data_dir_mount_sources_leaves_pre_existing_level_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let data_dir = tempfile::tempdir().unwrap();
+        let prefix = to_engine_path(data_dir.path()).unwrap();
+        let tokens_dir = data_dir.path().join("tokens");
+        std::fs::create_dir_all(&tokens_dir).unwrap();
+        std::fs::set_permissions(&tokens_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let yaml = format!(
+            "services:\n  x:\n    volumes:\n      - {prefix}/tokens/projx/newsvc:/tokens:ro\n"
+        );
+
+        ensure_data_dir_mount_sources(data_dir.path(), &yaml).unwrap();
+
+        let tokens_mode = std::fs::metadata(&tokens_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            tokens_mode, 0o755,
+            "pre-existing dir perms must be untouched, got 0o{tokens_mode:o}"
+        );
+        for created in ["tokens/projx", "tokens/projx/newsvc"] {
+            let mode = std::fs::metadata(data_dir.path().join(created))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "expected 0o700 on {created}, got 0o{mode:o}");
+        }
+    }
+
     #[test]
     fn render_compose_rejects_missing_project_dir() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1341,6 +1612,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let err = render_compose_isolated(
             data_dir.path(),
@@ -1358,9 +1630,8 @@ mod tests {
         );
     }
 
-    /// A project with a stale `anthropic_api_key` file but an active OpenRouter
-    /// provider must NOT get `ANTHROPIC_API_KEY` re-injected into `claude` (the
-    /// flat provider string masquerades as `anthropic` for downgrade compat).
+    /// A stale `anthropic_api_key` file with an active OpenRouter provider must NOT get
+    /// `ANTHROPIC_API_KEY` re-injected into `claude` (flat provider masquerades as `anthropic`).
     #[test]
     #[serial_test::serial(host_addressing)]
     fn render_compose_no_anthropic_key_when_openrouter_active() {
@@ -1396,6 +1667,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
 
         let yaml = render_compose_isolated(
@@ -1443,6 +1715,7 @@ mod tests {
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
 
         let yaml = render_compose_isolated(
@@ -1527,6 +1800,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -1588,9 +1862,8 @@ mod tests {
         assert!(header_entry.contains("X-Subscription-ID: bar"));
     }
 
-    /// Migrated, configured Anthropic-OAuth `LlmConfig` for tests that only need
-    /// *some* renderable LLM config as an unrelated fixture (SSOT gate requires
-    /// a resolved active provider — see `LlmConfig::is_unconfigured`).
+    /// Migrated, configured Anthropic-OAuth `LlmConfig` for tests needing *some* renderable LLM
+    /// config (SSOT gate requires a resolved provider — see `LlmConfig::is_unconfigured`).
     fn configured_anthropic_llm() -> LlmConfig {
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
@@ -2084,6 +2357,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -2158,6 +2432,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let manifest = bundle::load_current_bundle_manifest_from(&test_build_root()).unwrap();
 
@@ -2206,6 +2481,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2237,6 +2513,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2316,6 +2593,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             office: true,
@@ -2377,6 +2655,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2417,6 +2696,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2458,6 +2738,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             playwright: true,
@@ -2496,6 +2777,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             github: true,
@@ -2581,6 +2863,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             github: true,
@@ -2673,6 +2956,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2703,6 +2987,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2733,6 +3018,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2762,6 +3048,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2811,6 +3098,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -2914,6 +3202,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3032,6 +3321,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3130,6 +3420,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3154,6 +3445,47 @@ services:
         assert!(
             violations.is_empty(),
             "Generated compose should pass security check. Violations: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Renders the REAL `containers/compose.template.yml` (not a fixture) with every built-in
+    /// worker enabled and runs SecurityCheck — catches edits the all-disabled variant misses.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_rendered_compose_with_all_workers_enabled_passes_security_check() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &all_enabled_integrations(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test-project",
+            &[],
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
+            tmp.path(),
+        );
+        assert!(
+            violations.is_empty(),
+            "Generated compose with all workers enabled should pass security check. Violations: {:?}",
             violations
                 .iter()
                 .map(|v| format!("{}", v))
@@ -3334,7 +3666,8 @@ services:
         add_claude_volume(
             &mut doc,
             "/home/user/.speedwave/addons/example-plugin/claude-resources:/speedwave/addons/example-plugin:ro",
-        );
+        )
+        .unwrap();
 
         let claude = doc.get("services").unwrap().get("claude").unwrap();
         let vols = claude.get("volumes").unwrap().as_sequence().unwrap();
@@ -3343,6 +3676,29 @@ services:
                 .is_some_and(|s| s.contains("/speedwave/addons/example-plugin:ro"))
         });
         assert!(has_addon_vol, "Addon volume should be in claude volumes");
+    }
+
+    #[test]
+    fn add_claude_volume_creates_missing_volumes_key() {
+        // The security-boundary mount must not be silently dropped when the claude
+        // service has no `volumes:` block — the sequence is created on demand.
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
+        add_claude_volume(&mut doc, "/src:/etc/claude-code/managed-settings.json:ro").unwrap();
+        let vols = doc["services"]["claude"]["volumes"].as_sequence().unwrap();
+        assert!(vols
+            .iter()
+            .any(|v| v.as_str() == Some("/src:/etc/claude-code/managed-settings.json:ro")));
+    }
+
+    #[test]
+    fn add_claude_volume_errors_when_claude_service_absent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  other:\n    image: x\n").unwrap();
+        assert!(
+            add_claude_volume(&mut doc, "/src:/dst:ro").is_err(),
+            "a missing claude service must be an error, not a silent no-op"
+        );
     }
 
     #[test]
@@ -3525,6 +3881,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3562,6 +3919,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -3594,6 +3952,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3663,6 +4022,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: v2_llm("anthropic", None, None),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3708,6 +4068,7 @@ services:
                 Some("qwen3"),
                 Some("http://host.docker.internal:9000"),
             ),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3784,6 +4145,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3837,6 +4199,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3892,9 +4255,8 @@ services:
     #[test]
     #[serial_test::serial(host_addressing)]
     fn test_kill_switch_dangling_active_bails_no_provider_configured() {
-        // Dangling active (points at a missing entry) is unconfigured (SSOT
-        // gate) regardless of the proxy kill-switch: render must refuse rather
-        // than silently fall back to the Anthropic account default.
+        // Dangling active (points at a missing entry) is unconfigured (SSOT gate) regardless of
+        // the kill-switch: render must refuse, not fall back to the Anthropic account default.
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -3910,6 +4272,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let err = render_compose_isolated(
             data_dir.path(),
@@ -3948,6 +4311,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -3994,6 +4358,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -4097,6 +4462,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -4139,11 +4505,8 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_ollama_direct_injection() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Kill-switch off: this test asserts the legacy direct-injection path.
-        // Migration normalises the "ollama" alias to the generic "local" id
-        // (ADR-073), so the display label is "Local", not the v1 "Ollama" alias
-        // (that per-alias-string behavior is covered directly, unmigrated, by
-        // compose::llm::tests::legacy_in_ollama_uses_its_own_display_label).
+        // Kill-switch off: legacy direct-injection path. Migration normalises "ollama" to the
+        // generic "local" id (ADR-073); v1 label covered by llm::tests::legacy_in_ollama_label.
         let mut llm = LlmConfig {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
@@ -4159,6 +4522,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm,
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -4228,21 +4592,11 @@ services:
         );
     }
 
-    // test_lmstudio_default_url / test_llamacpp_default_url / test_llamacpp_custom_model_option_labels /
-    // test_lmstudio_custom_model_option_labels: relocated to compose::llm::tests as
-    // legacy_in_lmstudio_uses_its_own_default_port / legacy_in_llamacpp_uses_its_own_default_port /
-    // legacy_in_llamacpp_uses_its_own_display_label / legacy_in_lmstudio_uses_its_own_display_label.
-    // Migration collapses every LOCAL_PROVIDERS alias to the canonical "local" id
-    // (ADR-073) before it ever reaches the renderer, so the per-alias URL/label is
-    // only observable via the unmigrated, direct apply_llm_config_legacy_in call
-    // those tests already make.
+    // test_lmstudio/llamacpp_default_url + *_custom_model_option_labels: relocated to
+    // compose::llm::tests — migration collapses every LOCAL_PROVIDERS alias to "local" (ADR-073).
 
-    // test_unsupported_provider_rejected / test_custom_provider_rejected_after_removal:
-    // relocated to compose::llm::tests as legacy_in_rejects_unsupported_provider /
-    // legacy_in_rejects_custom_provider_after_removal — an unmigrated raw config
-    // now bails at the SSOT gate before ever reaching apply_llm_config_legacy_in's
-    // unsupported-provider check, so the direct-legacy-path variant is the only
-    // one still reachable through that code path.
+    // test_unsupported_provider_rejected / test_custom_provider_rejected_after_removal: relocated
+    // to compose::llm::tests — an unmigrated config now bails at the SSOT gate before that check.
 
     #[test]
     fn test_strip_trailing_v1() {
@@ -4697,6 +5051,24 @@ services:
         );
     }
 
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_mcp_os_config_errors_when_hub_service_absent() {
+        // The /secrets/os-auth-token mount is security-relevant — a doc missing
+        // mcp-hub must hard-fail, never silently drop the mount.
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_path, lock_path) = write_lock_and_token_mount(
+            tmp.path(),
+            crate::host_mcp_process::lock::LockService::McpOs,
+        );
+        let malformed_doc = "services:\n  claude:\n    image: test\n";
+        let result = apply_mcp_os_config_with_path(malformed_doc, &token_path, &lock_path);
+        assert!(
+            result.is_err(),
+            "missing mcp-hub service must be an error, not a silent no-op"
+        );
+    }
+
     /// Like the live helper but reaps a real child for a deterministically-dead
     /// PID, so apply_worker_config's liveness gate treats the lock as absent.
     fn write_dead_lock_and_token_mount(
@@ -4704,6 +5076,7 @@ services:
         service: crate::host_mcp_process::lock::LockService,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         use crate::host_mcp_process::lock::{self, LockFile};
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("true")
             .spawn()
             .or_else(|_| {
@@ -4767,6 +5140,30 @@ services:
             count_canonical_entries(&entries),
             1,
             "mcp-sharepoint must have exactly 1 host.docker.internal entry, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn apply_oauth_config_errors_when_consumer_service_absent() {
+        // The /secrets/oauth-auth-token-<service> mount is security-relevant — a doc
+        // missing the consumer service must hard-fail, never silently drop the mount.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
+        write_live_oauth_lock(&lock_path, 4090);
+        let bearer_map_path = tmp.path().join("bearer-map.json");
+        std::fs::write(
+            &bearer_map_path,
+            r#"{"bearer-sharepoint-secret":"sharepoint"}"#,
+        )
+        .unwrap();
+
+        let malformed_doc = "services:\n  claude:\n    image: test\n  mcp-hub:\n    image: hub\n";
+        let result =
+            apply_oauth_config_with_paths(malformed_doc, tmp.path(), &lock_path, &bearer_map_path);
+        assert!(
+            result.is_err(),
+            "missing oauth-consumer service must be an error, not a silent no-op"
         );
     }
 
@@ -5066,9 +5463,8 @@ services:
                 .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
             "Anthropic must route through the proxy passthrough, got: {env_anthropic:?}"
         );
-        // ADR-073: the proxy path sets this for every provider kind (prompt-cache
-        // only, OAuth-neutral) — no longer a local-only marker (see
-        // llm::tests::login_unset_keys_cover_local_proxy_env's OAUTH_NEUTRAL list).
+        // ADR-073: the proxy path sets this for every provider kind (prompt-cache only,
+        // OAuth-neutral), not just local — see login_unset_keys_cover_local_proxy_env's list.
         assert!(
             env_anthropic
                 .iter()
@@ -5096,6 +5492,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -5135,6 +5532,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -5401,7 +5799,8 @@ services:
         add_hub_volume(
             &mut doc,
             "/home/user/.speedwave/mcp-os-auth-token:/secrets/os-auth-token:ro",
-        );
+        )
+        .unwrap();
 
         let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
         let vols = hub.get("volumes").unwrap().as_sequence().unwrap();
@@ -5949,8 +6348,8 @@ services:
     /// Regression guard: a stale `lock.json` with a dead PID is treated as absent (no `WORKER_OAUTH_URL`).
     #[test]
     fn test_oauth_config_skipped_when_worker_pid_is_dead() {
-        // Reap a real child so its PID is deterministically dead (not merely
-        // "probably unused") — avoids the 999999-might-exist flakiness.
+        // Reap a real child so its PID is deterministically dead (not merely "probably unused").
+        // SSOT-allow: test fixture spawn
         let mut child = std::process::Command::new("true")
             .spawn()
             .or_else(|_| {
@@ -6237,7 +6636,7 @@ services:
         // Hub in the template has no volumes. add_hub_volume must create
         // the volumes key if it doesn't exist.
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
-        add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro").unwrap();
 
         let hub = doc.get("services").unwrap().get("mcp-hub").unwrap();
         let vols = hub.get("volumes").unwrap().as_sequence().unwrap();
@@ -6246,6 +6645,72 @@ services:
             vols[0].as_str().unwrap(),
             "/tmp/test-token:/secrets/os-auth-token:ro"
         );
+    }
+
+    #[test]
+    fn add_hub_volume_errors_when_hub_service_absent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: test\n").unwrap();
+        let result = add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        assert!(
+            result.is_err(),
+            "a missing mcp-hub service must hard-fail, not silently drop the mount"
+        );
+    }
+
+    #[test]
+    fn add_hub_volume_errors_when_hub_is_not_a_mapping() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  mcp-hub: not-a-mapping\n").unwrap();
+        let result = add_hub_volume(&mut doc, "/tmp/test-token:/secrets/os-auth-token:ro");
+        assert!(
+            result.is_err(),
+            "a malformed mcp-hub service must hard-fail, not silently drop the mount"
+        );
+    }
+
+    #[test]
+    fn add_service_volume_errors_when_service_absent() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: test\n").unwrap();
+        let result = add_service_volume(&mut doc, "mcp-slack", "/tmp/x:/secrets/x:ro");
+        assert!(
+            result.is_err(),
+            "a missing target service must hard-fail, not silently drop the mount"
+        );
+    }
+
+    #[test]
+    fn add_service_volume_creates_missing_volumes_key() {
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  mcp-slack:\n    image: x\n").unwrap();
+        add_service_volume(&mut doc, "mcp-slack", "/tmp/x:/secrets/x:ro").unwrap();
+        let vols = doc["services"]["mcp-slack"]["volumes"]
+            .as_sequence()
+            .unwrap();
+        assert!(vols
+            .iter()
+            .any(|v| v.as_str() == Some("/tmp/x:/secrets/x:ro")));
+    }
+
+    #[test]
+    fn add_service_volume_appends_to_existing_sequence() {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+            "services:\n  mcp-slack:\n    volumes:\n      - /existing:/existing:ro\n",
+        )
+        .unwrap();
+        add_service_volume(&mut doc, "mcp-slack", "/tmp/x:/secrets/x:ro").unwrap();
+        let vols = doc
+            .get("services")
+            .unwrap()
+            .get("mcp-slack")
+            .unwrap()
+            .get("volumes")
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(vols.len(), 2);
+        assert_eq!(vols[1].as_str().unwrap(), "/tmp/x:/secrets/x:ro");
     }
 
     #[test]
@@ -6258,6 +6723,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6276,6 +6742,55 @@ services:
                 .filter(|l| l.contains("ide"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_render_compose_sets_owner_only_perms_on_generated_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode_of(&data_dir.path().join("ide-bridge")),
+            0o700,
+            "ide_lock_dir must be owner-only"
+        );
+        assert_eq!(
+            mode_of(&proxy::proxy_config_dir_in(data_dir.path(), "test-project")),
+            0o700,
+            "proxy_config_dir must be owner-only"
+        );
+        assert_eq!(
+            mode_of(
+                &data_dir
+                    .path()
+                    .join("usage")
+                    .join("test-project")
+                    .join("proxy")
+            ),
+            0o700,
+            "proxy_usage_dir must be owner-only"
         );
     }
 
@@ -6325,6 +6840,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6354,12 +6870,68 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
+    fn test_render_compose_injects_bundled_plugins_from_ssot() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: vec![],
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            !yaml.contains("${BUNDLED_PLUGINS}") && !yaml.contains("${BUNDLED_PLUGIN_MARKETPLACE}"),
+            "render must substitute the bundled-plugin placeholders"
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let env_seq = doc["services"]["claude"]["environment"]
+            .as_sequence()
+            .expect("claude.environment must be a sequence");
+        let plugins_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("SPEEDWAVE_BUNDLED_PLUGINS="))
+            .expect("SPEEDWAVE_BUNDLED_PLUGINS entry present");
+        assert_eq!(
+            plugins_entry,
+            format!(
+                "SPEEDWAVE_BUNDLED_PLUGINS={}",
+                defaults::BUNDLED_PLUGINS.join(",")
+            ),
+            "env must carry the SSOT plugin list"
+        );
+        let mp_entry = env_seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| s.starts_with("SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="))
+            .expect("marketplace entry present");
+        assert_eq!(
+            mp_entry,
+            format!(
+                "SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE={}",
+                defaults::BUNDLED_PLUGIN_MARKETPLACE
+            )
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_substitutes_host_gateway() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6399,6 +6971,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let result = render_compose_isolated(
             data_dir.path(),
@@ -6446,6 +7019,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6484,6 +7058,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6522,6 +7097,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -6692,6 +7268,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: LlmConfig::default(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig::default();
         assert!(render_compose_isolated(
@@ -7023,6 +7600,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let integrations = ResolvedIntegrationsConfig {
             sharepoint: true,
@@ -7245,6 +7823,7 @@ services:
             env: crate::defaults::base_env(),
             flags: vec![],
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         // Enable all integrations so no services are filtered out
         let integrations = ResolvedIntegrationsConfig {
@@ -7560,6 +8139,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),
@@ -8392,6 +8972,248 @@ services:
         );
     }
 
+    // ── Atlassian built-in security tests: /workspace is :ro (SharePoint/Slack use :rw) ──
+
+    #[test]
+    fn test_security_check_atlassian_correct_mounts_pass() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        let atlassian_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.rule.is_atlassian())
+            .collect();
+        assert!(
+            atlassian_violations.is_empty(),
+            "Correct Atlassian mounts should not trigger violations, got: {:?}",
+            atlassian_violations
+                .iter()
+                .map(|v| &v.rule)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_flags_rw_workspace() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Atlassian requires :ro — a :rw mount (the SharePoint/Slack profile)
+        // must be rejected here.
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:rw
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianWorkspaceMountMode),
+            "Atlassian workspace mounted :rw should trigger ATLASSIAN_WORKSPACE_MOUNT_MODE"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_workspace_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /wrong/path:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianWorkspacePathMismatch),
+            "Wrong Atlassian workspace path should trigger ATLASSIAN_WORKSPACE_PATH_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_missing_workspace_mount() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianMissingWorkspaceMount),
+            "Atlassian without workspace mount should trigger ATLASSIAN_MISSING_WORKSPACE_MOUNT"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_flags_unauthorized_extra_volume() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /test/project:/workspace:ro
+      - /etc/passwd:/stolen:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianNoExtraVolumes),
+            "an unauthorized extra volume on atlassian must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_token_mount_mode() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /test/.speedwave/tokens/test/atlassian:/tokens:rw
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::PluginTokenMountMode
+                    && v.container == "mcp-atlassian"),
+            "a :rw token mount on atlassian must be flagged"
+        );
+    }
+
+    #[test]
+    fn test_security_check_atlassian_token_path_mismatch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            r#"
+version: "3"
+services:
+  mcp-atlassian:
+    image: speedwave-mcp-atlassian:latest
+    user: "{user}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    volumes:
+      - /wrong/tokens/path:/tokens:ro
+      - /test/project:/workspace:ro
+"#,
+            user = container_user()
+        );
+        let paths = test_expected_paths();
+        let violations =
+            SecurityCheck::run_with_data_dir(&yaml, "test", &[], &paths, data_dir.path());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::AtlassianTokenPathMismatch),
+            "Wrong Atlassian token path should trigger ATLASSIAN_TOKEN_PATH_MISMATCH"
+        );
+    }
+
     #[test]
     fn test_security_check_sharepoint_oauth_bearer_must_be_ro() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -8660,7 +9482,6 @@ services:
     // not apply_plugins directly (it reads the plugins filesystem).
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_enabled_by_slug_appears_in_speedwave_plugins() {
         // A plugin without service_id should be toggled by slug.
         // When enabled by slug, it should appear in SPEEDWAVE_PLUGINS.
@@ -8668,10 +9489,8 @@ services:
             plugins: std::collections::HashMap::from([("my-skills".to_string(), true)]),
             ..Default::default()
         };
-        // The key lookup: service_id.unwrap_or(slug) = "my-skills"
-        let slug = "my-skills";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "my-skills";
         assert!(
             integrations.is_plugin_enabled(plugin_key),
             "Resource-only plugin should be enabled when slug is in plugins map"
@@ -8679,16 +9498,14 @@ services:
     }
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_disabled_by_slug_excluded() {
         // A plugin without service_id should be excluded when disabled.
         let integrations = ResolvedIntegrationsConfig {
             plugins: std::collections::HashMap::from([("my-skills".to_string(), false)]),
             ..Default::default()
         };
-        let slug = "my-skills";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "my-skills";
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Resource-only plugin should be excluded when disabled"
@@ -8696,13 +9513,11 @@ services:
     }
 
     #[test]
-    #[allow(clippy::unnecessary_literal_unwrap)] // mirrors production `service_id.unwrap_or(slug)` key derivation
     fn test_resource_only_plugin_absent_from_config_is_disabled() {
         // A freshly installed plugin not in config should be disabled.
         let integrations = ResolvedIntegrationsConfig::default();
-        let slug = "new-plugin";
-        let service_id: Option<&str> = None;
-        let plugin_key = service_id.unwrap_or(slug);
+        // No service_id: the key lookup `service_id.unwrap_or(slug)` resolves to the slug.
+        let plugin_key = "new-plugin";
         assert!(
             !integrations.is_plugin_enabled(plugin_key),
             "Plugin not in config should be disabled by default"
@@ -8867,6 +9682,7 @@ services:
       - /tmp:noexec,nosuid,size=64m
     volumes:
       - /home/user/.speedwave/tokens/test/atlassian:/tokens:ro
+      - /home/user/projects/test:/workspace:ro
     environment:
       - PORT=3000
     networks:
@@ -9067,6 +9883,22 @@ networks:
                 expected_mount
             );
         }
+    }
+
+    #[test]
+    fn test_worker_auth_tokens_errors_when_hub_service_absent() {
+        // A doc missing mcp-hub must hard-fail — the /secrets/<service>-auth-token
+        // mount is a security-relevant boundary and must never be silently dropped.
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = all_enabled_integrations();
+        let malformed_doc = "services:\n  mcp-slack:\n    image: slack\n";
+
+        let result =
+            apply_worker_auth_tokens_with_dir(malformed_doc, tmp.path(), &integrations, &[]);
+        assert!(
+            result.is_err(),
+            "missing mcp-hub service must be an error, not a silent no-op"
+        );
     }
 
     #[test]
@@ -9759,6 +10591,10 @@ services:
             .filter(|r| r.to_string().starts_with("SLACK_"))
             .count();
         let slack_by_method = SecurityRule::iter().filter(|r| r.is_slack()).count();
+        let atlassian_by_prefix = SecurityRule::iter()
+            .filter(|r| r.to_string().starts_with("ATLASSIAN_"))
+            .count();
+        let atlassian_by_method = SecurityRule::iter().filter(|r| r.is_atlassian()).count();
         assert_eq!(
             slack_by_method, slack_by_prefix,
             "is_slack() count ({slack_by_method}) differs from SLACK-prefixed variant count \
@@ -9768,6 +10604,12 @@ services:
             by_prefix, by_method,
             "is_sharepoint() count ({by_method}) differs from SHAREPOINT-prefixed variant count \
              ({by_prefix}) — update SecurityRule::is_sharepoint() to include the new variant"
+        );
+        assert_eq!(
+            atlassian_by_method, atlassian_by_prefix,
+            "is_atlassian() count ({atlassian_by_method}) differs from ATLASSIAN-prefixed \
+             variant count ({atlassian_by_prefix}) — update SecurityRule::is_atlassian() \
+             to include the new variant"
         );
     }
 
@@ -10466,6 +11308,7 @@ services:
             env: crate::defaults::base_env(),
             flags: default_flags(),
             llm: configured_anthropic_llm(),
+            ..Default::default()
         };
         let yaml = render_compose_isolated(
             data_dir.path(),

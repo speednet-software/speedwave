@@ -12,8 +12,12 @@ const stub = {
   getSprint: vi.fn(),
   moveIssuesToSprint: vi.fn(),
 };
-vi.mock('../domains/jira-agile.js', () => ({ createJiraAgileClient: () => stub }));
+vi.mock('../domains/jira-agile.js', () => ({
+  createJiraAgileClient: () => stub,
+  MOVE_ISSUES_MAX: 50,
+}));
 
+import { META_KEYS } from '@speedwave/mcp-shared';
 import { createJiraAgileTools } from './jira-agile-tools.js';
 import type { AtlassianClient } from '../client.js';
 
@@ -43,9 +47,13 @@ describe('definitions', () => {
   });
   it('all defer loading and declare required fields', () => {
     for (const { tool } of createJiraAgileTools(FAKE_CLIENT)) {
-      expect(tool._meta).toEqual({ deferLoading: true });
+      expect(tool._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
       expect(tool.outputSchema?.required).toContain('success');
     }
+  });
+  it('getBoard documents the project allowlist restriction it enforces', () => {
+    const tool = createJiraAgileTools(FAKE_CLIENT).find((d) => d.tool.name === 'getBoard')?.tool;
+    expect(tool?.description).toContain('configured project allowlist');
   });
 });
 
@@ -97,13 +105,29 @@ describe('handlers', () => {
     });
   });
 
-  it('moveIssuesToSprint reports the capped count', async () => {
-    stub.moveIssuesToSprint.mockResolvedValueOnce(undefined);
+  it('moveIssuesToSprint rejects an empty array with a teaching error and does not call the domain', async () => {
+    const result = await handlerFor('moveIssuesToSprint')({ sprintId: 34, issueKeysOrIds: [] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/issueKeysOrIds/);
+    expect(stub.moveIssuesToSprint).not.toHaveBeenCalled();
+  });
+
+  it('moveIssuesToSprint rejects a batch over 50 with a teaching error and does not call the domain', async () => {
     const many = Array.from({ length: 60 }, (_, i) => `PROJ-${i}`);
+    const result = await handlerFor('moveIssuesToSprint')({ sprintId: 34, issueKeysOrIds: many });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/issueKeysOrIds/);
+    expect(result.content[0].text).toMatch(/50/);
+    expect(stub.moveIssuesToSprint).not.toHaveBeenCalled();
+  });
+
+  it('moveIssuesToSprint accepts exactly 50 issues', async () => {
+    stub.moveIssuesToSprint.mockResolvedValueOnce(undefined);
+    const fifty = Array.from({ length: 50 }, (_, i) => `PROJ-${i}`);
     expect(
-      payload(await handlerFor('moveIssuesToSprint')({ sprintId: 34, issueKeysOrIds: many }))
+      payload(await handlerFor('moveIssuesToSprint')({ sprintId: 34, issueKeysOrIds: fifty }))
     ).toEqual({ moved: true, count: 50 });
-    expect(stub.moveIssuesToSprint).toHaveBeenCalledWith(34, many);
+    expect(stub.moveIssuesToSprint).toHaveBeenCalledWith(34, fifty);
   });
 
   it('moveIssuesToSprint counts a small batch exactly', async () => {

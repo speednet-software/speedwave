@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Helper: launch `cargo tauri dev` on Windows.
-# GnuWin32 make 3.81 mishandles complex quoting inline; this wrapper
-# isolates the bash logic so make only needs to invoke it.
+# Helper: launch `cargo tauri dev` on Windows — GnuWin32 make 3.81 mishandles complex
+# quoting inline, so this wrapper isolates the bash logic and make just invokes it.
 set -euo pipefail
 
 cd desktop/src-tauri

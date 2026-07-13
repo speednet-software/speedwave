@@ -5,6 +5,20 @@ import SharedCLI
 enum OutlookClient {
     static let name = "Microsoft Outlook"
 
+    /// One `make new <kind> recipient...` AppleScript line per comma-separated address.
+    static func recipientClauses(_ addresses: String, kind: String) -> String {
+        makeRecipientClauses(addresses, kind: kind) { "email address:{address:\"\($0)\"}" }
+    }
+
+    /// True only when a probe confirms the folder is absent; a probe error returns false
+    /// so an unrelated -1728 surfaces its real cause rather than a wrong folder message.
+    static func mailboxDefinitelyMissing(_ name: String) -> Bool {
+        let script =
+            "tell application \"Microsoft Outlook\" to return (exists mail folder \"\(escapeAppleScript(name))\")"
+        guard let out = try? ScriptRunner.run(script, timeout: 10) else { return false }
+        return out == "false"
+    }
+
     /// Whether the Outlook process is running. Rethrows `.automationPermission`/`.timeout`;
     /// a genuine script failure maps to `false`.
     static func isAvailable() throws -> Bool {
@@ -73,7 +87,10 @@ enum OutlookClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runMailScript(
+            script, timeout: 30, mailbox: mailbox,
+            mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
+        )
         return parseDelimited(output, fields: ["id", "subject", "sender", "date", "read"])
     }
 
@@ -99,13 +116,14 @@ enum OutlookClient {
         return try parseEmailDetail(output, id: id)
     }
 
-    static func searchEmails(query: String, limit: Int) throws -> [[String: Any]] {
+    static func searchEmails(query: String, limit: Int, mailbox: String?) throws -> [[String: Any]] {
         let queryEsc = escapeAppleScript(query)
+        let sourceClause = mailbox.map { "mail folder \"\(escapeAppleScript($0))\"" } ?? "inbox"
         let script = """
         tell application "Microsoft Outlook"
             set output to ""
             set msgCount to 0
-            set msgs to (every message of inbox whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
+            set msgs to (every message of \(sourceClause) whose subject contains "\(queryEsc)" or content contains "\(queryEsc)")
             repeat with m in msgs
                 if msgCount < \(limit) then
                     set msgId to id of m as string
@@ -120,29 +138,28 @@ enum OutlookClient {
         end tell
         """
 
-        let output = try ScriptRunner.run(script, timeout: 30)
+        let output = try runMailScript(
+            script, timeout: 30, mailbox: mailbox,
+            mailboxMissing: { mailbox.map { Self.mailboxDefinitelyMissing($0) } ?? false }
+        )
         return parseDelimited(output, fields: ["id", "subject", "sender", "date"])
     }
 
-    static func sendEmail(to: String, subject: String, body: String, cc: String?) throws -> [String: Any] {
-        let toEsc = escapeAppleScript(to)
+    static func sendEmail(to: String, subject: String, body: String, cc: String?, bcc: String? = nil) throws -> [String: Any] {
         let subjectEsc = escapeAppleScript(subject)
         let bodyEsc = escapeAppleScript(body)
 
-        var ccClause = ""
-        if let cc = cc {
-            let ccEsc = escapeAppleScript(cc)
-            ccClause = """
-                        make new cc recipient at end of cc recipients with properties {email address:{address:"\(ccEsc)"}}
-            """
-        }
+        let toClause = recipientClauses(to, kind: "to")
+        let ccClause = cc.map { recipientClauses($0, kind: "cc") } ?? ""
+        let bccClause = bcc.map { recipientClauses($0, kind: "bcc") } ?? ""
 
         let script = """
         tell application "Microsoft Outlook"
             set newMsg to make new outgoing message with properties {subject:"\(subjectEsc)", plain text content:"\(bodyEsc)"}
             tell newMsg
-                make new to recipient at end of to recipients with properties {email address:{address:"\(toEsc)"}}
+        \(toClause)
         \(ccClause)
+        \(bccClause)
             end tell
             send newMsg
         end tell

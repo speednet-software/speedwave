@@ -1,11 +1,6 @@
 /**
- * Graph URL builders for the SharePoint list-column schema API.
- *
- * Endpoint set (PR5):
- *   - `POST   /sites/{site-id}/lists/{list-id}/columns`                  (addListColumn)
- *   - `DELETE /sites/{site-id}/lists/{list-id}/columns/{column-id}`      (removeListColumn)
- *
- * Column reads come through {@link ./lists-client.ts}; this module is write-only.
+ * Graph URL builders for the SharePoint list-column schema API: POST/DELETE
+ * `/sites/{site-id}/lists/{list-id}/columns[/{column-id}]`. Reads go through {@link ./lists-client.ts} — write-only.
  */
 import type { GraphRequester } from './site-client.js';
 import { ListsClient } from './lists-client.js';

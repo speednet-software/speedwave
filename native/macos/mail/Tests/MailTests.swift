@@ -89,6 +89,240 @@ final class MailTests: XCTestCase {
         XCTAssertThrowsError(try resolveClient(preferred: "thunderbird"))
     }
 
+    // MARK: - splitAddressList (shared)
+
+    func testSplitAddressListSingleAddress() {
+        XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
+    }
+
+    func testSplitAddressListMultipleAddressesTrimsWhitespace() {
+        XCTAssertEqual(
+            splitAddressList("alice@example.com, bob@example.com,  carol@example.com"),
+            ["alice@example.com", "bob@example.com", "carol@example.com"]
+        )
+    }
+
+    func testSplitAddressListDropsEmptyEntries() {
+        // Trailing/double commas must not produce a blank recipient.
+        XCTAssertEqual(splitAddressList("alice@example.com,, bob@example.com,"), ["alice@example.com", "bob@example.com"])
+    }
+
+    func testSplitAddressListEmptyStringReturnsEmptyArray() {
+        XCTAssertEqual(splitAddressList(""), [])
+    }
+
+    // MARK: - AppleMailClient.recipientClauses
+
+    func testAppleMailRecipientClausesSingleAddress() {
+        let result = AppleMailClient.recipientClauses("alice@example.com", kind: "to")
+        XCTAssertEqual(
+            result,
+            "        make new to recipient at end of to recipients with properties {address:\"alice@example.com\"}"
+        )
+    }
+
+    func testAppleMailRecipientClausesMultipleAddressesOneLinePerRecipient() {
+        let result = AppleMailClient.recipientClauses("alice@example.com,bob@example.com", kind: "cc")
+        let lines = result.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
+        XCTAssertTrue(lines[0].contains("cc recipient") && lines[0].contains("alice@example.com"))
+        XCTAssertTrue(lines[1].contains("cc recipient") && lines[1].contains("bob@example.com"))
+    }
+
+    func testAppleMailRecipientClausesEmptyStringProducesNoLines() {
+        XCTAssertEqual(AppleMailClient.recipientClauses("", kind: "bcc"), "")
+    }
+
+    // MARK: - OutlookClient.recipientClauses
+
+    func testOutlookRecipientClausesSingleAddress() {
+        let result = OutlookClient.recipientClauses("alice@example.com", kind: "to")
+        XCTAssertTrue(result.contains("email address:{address:\"alice@example.com\"}"))
+    }
+
+    func testOutlookRecipientClausesMultipleAddressesOneLinePerRecipient() {
+        let result = OutlookClient.recipientClauses("alice@example.com,bob@example.com", kind: "bcc")
+        let lines = result.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 2, "must emit one AppleScript line per recipient")
+        XCTAssertTrue(lines[0].contains("bcc recipient") && lines[0].contains("alice@example.com"))
+        XCTAssertTrue(lines[1].contains("bcc recipient") && lines[1].contains("bob@example.com"))
+    }
+
+    // MARK: - sendEmail bcc parameter (dispatch-level)
+
+    func testSendEmailParamsCarryBccUpToConfirmGate() {
+        // Real sendEmail(params:) dispatch: to/subject/body parse cleanly even with bcc
+        // present, and confirm_send=false still stops the call before any AppleScript runs.
+        let params: [String: Any] = [
+            "to": "alice@example.com",
+            "subject": "Test",
+            "body": "Hello",
+            "bcc": "carol@example.com",
+            "confirm_send": false,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.confirmRequired = error else {
+                return XCTFail("expected confirmRequired (proves to/subject/body/bcc parsed), got \(error)")
+            }
+        }
+    }
+
+    // MARK: - runMailScript (mailbox-not-found teaching error)
+
+    func testRunMailScriptMapsMailboxNotFoundToTeachingError() {
+        // A -1728 miss plus a probe confirming the mailbox is absent maps to the teaching error.
+        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
+        XCTAssertThrowsError(
+            try runMailScript(script, timeout: 5, mailbox: "Nope", mailboxMissing: { true })
+        ) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("listMailboxes"))
+        }
+    }
+
+    func testRunMailScriptPropagatesWhenMailboxExists() {
+        // A -1728 during a scoped call whose mailbox still exists (e.g. a per-message
+        // property read) must surface the raw failure, not a wrong "mailbox not found".
+        let script = "error \"Can\u{2019}t get subject of message 1 of mailbox \\\"Inbox\\\". (-1728)\""
+        XCTAssertThrowsError(
+            try runMailScript(script, timeout: 5, mailbox: "Inbox", mailboxMissing: { false })
+        ) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
+        }
+    }
+
+    func testRunMailScriptDoesNotWrapWhenMailboxIsNil() {
+        // Inbox-only calls (mailbox: nil) must surface the raw scriptFailed, not the
+        // mailbox teaching-error mapping, even for AppleScript output that looks like a miss.
+        let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
+        XCTAssertThrowsError(try runMailScript(script, timeout: 5, mailbox: nil)) { error in
+            guard case ScriptError.scriptFailed = error else {
+                return XCTFail("expected raw ScriptError.scriptFailed, got \(error)")
+            }
+        }
+    }
+
+    func testOutlookListEmailsMapsMailboxNotFoundToTeachingError() throws {
+        guard (try? OutlookClient.isAvailable()) == true else {
+            throw XCTSkip("Microsoft Outlook not installed/running in this environment")
+        }
+        XCTAssertThrowsError(
+            try OutlookClient.listEmails(limit: 1, mailbox: "SPW-Nonexistent-Folder-XYZ-123")
+        ) { error in
+            guard case CLIError.notFound(let message) = error else {
+                return XCTFail("expected CLIError.notFound, got \(error)")
+            }
+            XCTAssertTrue(message.contains("listMailboxes"))
+        }
+    }
+
+    // MARK: - Send Email Validation (empty 'to')
+
+    func testSendEmailRejectsEmptyTo() {
+        let params: [String: Any] = [
+            "to": "", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients("to") = error else {
+                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsWhitespaceOnlyTo() {
+        let params: [String: Any] = [
+            "to": "   ", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients("to") = error else {
+                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsCommaOnlyTo() {
+        // A raw "," is non-empty as a string but splits to zero recipients.
+        let params: [String: Any] = [
+            "to": ",", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients("to") = error else {
+                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsWhitespaceAndCommaOnlyTo() {
+        let params: [String: Any] = [
+            "to": " , ", "subject": "Test", "body": "Hello", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients("to") = error else {
+                return XCTFail("expected emptyRecipients(\"to\"), got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsCommaOnlyCc() {
+        // A provided cc that reduces to zero addresses must error, not silently vanish.
+        let params: [String: Any] = [
+            "to": "alice@example.com", "subject": "Test", "body": "Hello",
+            "cc": " , ", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients("cc") = error else {
+                return XCTFail("expected emptyRecipients(\"cc\"), got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailRejectsWhitespaceOnlyBcc() {
+        let params: [String: Any] = [
+            "to": "alice@example.com", "subject": "Test", "body": "Hello",
+            "bcc": "   ", "confirm_send": true,
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.emptyRecipients("bcc") = error else {
+                return XCTFail("expected emptyRecipients(\"bcc\"), got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailAllowsOmittedCcAndBcc() {
+        // Omitted cc/bcc are valid; the call must reach the confirm gate, not the empty guard.
+        let params: [String: Any] = [
+            "to": "alice@example.com", "subject": "Test", "body": "Hello",
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.confirmRequired = error else {
+                return XCTFail("expected confirmRequired, got \(error)")
+            }
+        }
+    }
+
+    func testSendEmailEmptyRecipientsErrorMessageNamesField() {
+        XCTAssertTrue(MailError.emptyRecipients("to").errorDescription!.contains("'to' field is empty"))
+        XCTAssertTrue(MailError.emptyRecipients("bcc").errorDescription!.contains("'bcc' field is empty"))
+        XCTAssertTrue(
+            MailError.emptyRecipients("cc").errorDescription!.contains("at least one recipient"))
+    }
+
+    func testSendEmailValidToStillReachesConfirmGate() {
+        // A valid 'to' must pass the emptiness check and fail only on the confirm gate.
+        let params: [String: Any] = [
+            "to": "alice@example.com", "subject": "Test", "body": "Hello",
+        ]
+        XCTAssertThrowsError(try sendEmail(params: params)) { error in
+            guard case MailError.confirmRequired = error else {
+                return XCTFail("expected confirmRequired (proves 'to' passed validation), got \(error)")
+            }
+        }
+    }
+
     // MARK: - Send Email Validation
 
     func testSendEmailRequiresConfirmation() {

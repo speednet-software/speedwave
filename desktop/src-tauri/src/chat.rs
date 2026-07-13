@@ -38,7 +38,9 @@ pub enum StreamChunk {
         session_id: String,
         /// Total session cost in USD — estimated from token counts at API pricing.
         total_cost: Option<f64>,
-        usage: Option<UsageInfo>,
+        /// Boxed to keep this variant under clippy's large-variant gap;
+        /// serde treats `Option<Box<T>>` exactly like `Option<T>`.
+        usage: Option<Box<UsageInfo>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         result_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +61,10 @@ pub enum StreamChunk {
         /// in the `result` message or from the most recent `SystemInit`.
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Usage of the most recent main-chain API call — the only valid
+        /// context-occupancy source (per-turn `usage` sums cache reads per call).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_usage: Option<TurnUsage>,
     },
     /// Interactive question(s) from Claude (AskUserQuestion tool).
     /// Up to 4 questions per the Agent SDK contract.
@@ -125,6 +131,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_usage,
             turn_cost,
             model,
+            context_usage,
         } => StreamChunk::Result {
             result_text: Some(sanitize(&text)),
             session_id,
@@ -135,6 +142,7 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             turn_usage,
             turn_cost,
             model,
+            context_usage,
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
@@ -232,6 +240,16 @@ pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
 /// Legacy flat cache names some CLI builds emit in `result.usage`.
 pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
+
+/// True when a parsed `assistant` line is a sidechain (subagent) call —
+/// checked via BOTH the live stream-json marker (`parent_tool_use_id`) and
+/// the on-disk transcript marker (`isSidechain`), since either can appear
+/// depending on source (live CLI stream vs resumed JSONL transcript).
+/// SSOT for both `capture_context_usage` (chat.rs) and the resume-snapshot
+/// / assistant-message readers (history.rs) — never re-check one field alone.
+pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
+    !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
+}
 
 /// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
 /// malformed fields. `None` when `usage` is not a JSON object.
@@ -354,6 +372,9 @@ pub struct StreamParser {
     /// Snapshot of cumulative session usage at the start of the current turn.
     /// Per-turn usage = current - previous.
     previous_session_usage: TurnUsage,
+    /// Usage of the most recent main-chain API call (sidechains excluded);
+    /// carried onto `Result` as the context-occupancy source.
+    last_context_usage: Option<TurnUsage>,
     /// Cumulative session cost in USD from the previous `Result`. Per-turn
     /// cost = current total - previous total, when both are authoritative.
     previous_session_cost: Option<f64>,
@@ -376,6 +397,7 @@ impl StreamParser {
             pending_assistant_uuid: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
+            last_context_usage: None,
             previous_session_cost: None,
             last_model: None,
             seen_unknown_types: std::collections::HashSet::new(),
@@ -389,10 +411,12 @@ impl StreamParser {
         usage: TurnUsage,
         total_cost: Option<f64>,
         model: Option<String>,
+        context_usage: Option<TurnUsage>,
     ) {
         self.previous_session_usage = usage;
         self.previous_session_cost = total_cost;
         self.last_model = model;
+        self.last_context_usage = context_usage;
     }
 
     /// Current cumulative usage snapshot. Tests use this to assert that the
@@ -416,6 +440,7 @@ impl StreamParser {
             "result" => option_to_vec(self.parse_result(parsed)),
             "assistant" => {
                 self.capture_assistant_uuid(parsed);
+                self.capture_context_usage(parsed);
                 (Vec::new(), None)
             }
             "system" => option_to_vec(self.parse_system_message(parsed)),
@@ -426,7 +451,7 @@ impl StreamParser {
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
                     && self.seen_unknown_types.insert(label.to_string())
                 {
-                    log::debug!("parse_line: unknown stream-json type '{label}' — ignored");
+                    log::debug!("ignored unknown stream-json type '{label}'");
                     return (
                         Vec::new(),
                         Some(LogEntry {
@@ -452,6 +477,19 @@ impl StreamParser {
         }
     }
 
+    /// Track `message.usage` of main-chain assistant events (last one wins).
+    /// Sidechain (subagent) calls and all-zero usage never move the meter.
+    fn capture_context_usage(&mut self, parsed: &serde_json::Value) {
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        if let Some(u) = turn_usage_from_jsonl(&parsed["message"]["usage"]) {
+            if u != TurnUsage::default() {
+                self.last_context_usage = Some(u);
+            }
+        }
+    }
+
     /// Reset per-message block state (e.g. on `message_stop`). Does NOT reset
     /// the session-wide usage snapshot — only `new_session()` does.
     pub fn reset(&mut self) {
@@ -467,6 +505,7 @@ impl StreamParser {
         self.reset();
         self.pending_assistant_uuid = None;
         self.previous_session_usage = TurnUsage::default();
+        self.last_context_usage = None;
         self.previous_session_cost = None;
         self.last_model = None;
         self.seen_unknown_types.clear();
@@ -511,7 +550,7 @@ impl StreamParser {
         // Drop entries without question text; logged at count level only.
         if question.trim().is_empty() {
             log::warn!(
-                "AskUserQuestion: dropping entry with empty question text \
+                "dropping AskUserQuestion entry with empty question text \
                  (header_present={}, options={})",
                 !header.is_empty(),
                 options.len()
@@ -541,7 +580,7 @@ impl StreamParser {
         let total = raw_questions.len();
         let bounded = if total > MAX_ASK_USER_QUESTIONS {
             log::warn!(
-                "AskUserQuestion: received {} questions, truncating to {}",
+                "received {} AskUserQuestion questions, truncating to {}",
                 total,
                 MAX_ASK_USER_QUESTIONS
             );
@@ -561,7 +600,7 @@ impl StreamParser {
     pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
         let questions = Self::parse_ask_user_questions(req);
         if questions.is_empty() {
-            log::warn!("AskUserQuestion: 'questions' array is empty after parsing");
+            log::warn!("AskUserQuestion 'questions' array is empty after parsing");
             return None;
         }
         Some(StreamChunk::AskUserQuestion {
@@ -591,9 +630,7 @@ impl StreamParser {
                         let id = match block["id"].as_str() {
                             Some(s) if !s.is_empty() => s.to_string(),
                             _ => {
-                                log::warn!(
-                                    "content_block_start: tool_use block missing 'id' field"
-                                );
+                                log::warn!("content_block_start tool_use block missing 'id' field");
                                 return (None, None);
                             }
                         };
@@ -601,7 +638,7 @@ impl StreamParser {
                             Some(s) if !s.is_empty() => s.to_string(),
                             _ => {
                                 log::warn!(
-                                    "content_block_start: tool_use block missing 'name' field"
+                                    "content_block_start tool_use block missing 'name' field"
                                 );
                                 return (None, None);
                             }
@@ -774,7 +811,7 @@ impl StreamParser {
             let tool_use_id = match block["tool_use_id"].as_str() {
                 Some(s) if !s.is_empty() => s.to_string(),
                 _ => {
-                    log::warn!("parse_user_message: tool_result block missing 'tool_use_id'");
+                    log::warn!("user message tool_result block missing 'tool_use_id'");
                     continue;
                 }
             };
@@ -827,10 +864,10 @@ impl StreamParser {
             if result_text.trim().is_empty() {
                 // `is_error=true` with empty `result`: placeholder chunk + DEBUG log.
                 log::warn!(
-                    "parse_result: is_error=true but result text is empty; \
+                    "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
                 );
-                log::debug!("parse_result: empty-error payload: {parsed}");
+                log::debug!("empty-error result payload: {parsed}");
                 return (
                     Some(StreamChunk::Error {
                         content: "The LLM returned an error without details. \
@@ -850,7 +887,7 @@ impl StreamParser {
 
         let session_id = parsed["session_id"].as_str().unwrap_or("").to_string();
         if session_id.is_empty() {
-            log::warn!("parse_result: result message missing 'session_id'");
+            log::warn!("result message missing 'session_id'");
         }
 
         // Cost: prefer total_cost_usd (real CLI), fall back to total_cost (legacy)
@@ -885,7 +922,7 @@ impl StreamParser {
         // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
-            Some(UsageInfo {
+            Some(Box::new(UsageInfo {
                 input_tokens: u[USAGE_INPUT_TOKENS].as_u64().unwrap_or(0),
                 output_tokens: u[USAGE_OUTPUT_TOKENS].as_u64().unwrap_or(0),
                 cache_read_tokens: u[USAGE_CACHE_READ_TOKENS]
@@ -894,7 +931,7 @@ impl StreamParser {
                 cache_write_tokens: u[USAGE_CACHE_WRITE_TOKENS]
                     .as_u64()
                     .or_else(|| u[USAGE_CACHE_WRITE_TOKENS_LEGACY].as_u64()),
-            })
+            }))
         } else {
             None
         };
@@ -902,7 +939,7 @@ impl StreamParser {
         // Per-turn usage: see `compute_turn_usage_from_result`.
         let turn_usage = compute_turn_usage_from_result(
             parsed,
-            usage.as_ref(),
+            usage.as_deref(),
             &mut self.previous_session_usage,
         );
 
@@ -938,6 +975,7 @@ impl StreamParser {
                 turn_usage,
                 turn_cost,
                 model,
+                context_usage: self.last_context_usage,
             }),
             log_entry,
         )
@@ -1182,7 +1220,8 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
         let key = q.question.as_str();
         if !seen_keys.insert(key) {
             log::warn!(
-                "AskUserQuestion: duplicate question text — refusing to emit lossy answers map"
+                "AskUserQuestion request has duplicate question text — \
+                 refusing to emit lossy answers map"
             );
             anyhow::bail!(
                 "AskUserQuestion request contained duplicate question text — \
@@ -1405,7 +1444,7 @@ impl ChatSession {
         // Reap a prior leaked process for this session before spawning a new one.
         self.reap_instance();
 
-        let instance_id = uuid::Uuid::new_v4().to_string();
+        let instance_id = speedwave_runtime::session::new_instance_id();
         let (args, container) = Self::prepare_args(
             &self.project_name,
             &user_config,
@@ -1476,7 +1515,7 @@ impl ChatSession {
                             );
                         }
                         Err(e) => {
-                            log::warn!("stderr reader: I/O error: {e}");
+                            log::warn!("stderr reader I/O error: {e}");
                             break;
                         }
                     }
@@ -1515,6 +1554,7 @@ impl ChatSession {
                     },
                     seed.total_cost,
                     seed.model,
+                    seed.context_usage,
                 );
             }
             let mut log_file = stdout_log_path
@@ -1527,7 +1567,7 @@ impl ChatSession {
                 let line = match line {
                     Ok(l) => l,
                     Err(e) => {
-                        log::warn!("stdout reader: I/O error: {e}");
+                        log::warn!("stdout reader I/O error: {e}");
                         break;
                     }
                 };
@@ -1705,7 +1745,7 @@ impl ChatSession {
             // this session down deliberately (that EOF is ours, not a crash).
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if !got_result && !stopping {
-                log::warn!("stdout reader: stream ended without result");
+                log::warn!("stdout reader stream ended without result");
                 let chunk = StreamChunk::Error {
                     content:
                         "Claude session ended unexpectedly. Check the session log for details."
@@ -1756,7 +1796,7 @@ impl ChatSession {
             );
         }
         log::info!(
-            "ChatSession::send_message: serialized={} bytes, blocks={}",
+            "sending user message: serialized={} bytes, blocks={}",
             serialized.len(),
             blocks.len()
         );
@@ -1914,12 +1954,10 @@ impl ChatSession {
             .lock()
             .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
         if let Err(e) = write_interrupt(&mut *stdin, &payload) {
-            log::error!(
-                "interrupt: failed to write control_request (request_id={request_id}): {e}"
-            );
+            log::error!("failed to write interrupt control_request (request_id={request_id}): {e}");
             return Err(e);
         }
-        log::info!("interrupt: control_request sent (request_id={request_id})");
+        log::info!("interrupt control_request sent (request_id={request_id})");
         Ok(())
     }
 
@@ -1935,10 +1973,10 @@ impl ChatSession {
         match rt.container_exec_piped(&container, &argv_refs) {
             Ok(mut cmd) => {
                 if let Err(e) = cmd.status() {
-                    log::warn!("reap_instance: kill exec failed: {e}");
+                    log::warn!("kill exec for orphaned instance failed: {e}");
                 }
             }
-            Err(e) => log::warn!("reap_instance: could not build kill exec: {e}"),
+            Err(e) => log::warn!("could not build kill exec for orphaned instance: {e}"),
         }
     }
 
@@ -1960,13 +1998,13 @@ impl ChatSession {
                     Ok(Some(_)) => break,
                     Ok(None) => {
                         if std::time::Instant::now() >= deadline {
-                            log::warn!("stop: child did not exit within 5s, abandoning");
+                            log::warn!("child did not exit within 5s of stop, abandoning");
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     Err(e) => {
-                        log::warn!("stop: try_wait error (treating as exited): {e}");
+                        log::warn!("try_wait error during stop (treating as exited): {e}");
                         break;
                     }
                 }
@@ -1985,12 +2023,13 @@ impl ChatSession {
             if !handle.is_finished() {
                 // Pipe wedged — detach so `stop()` returns in bounded time.
                 log::warn!(
-                    "stop: reader thread {name} still running after {READER_GRACE_MS}ms grace, detaching"
+                    "reader thread {name} still running after {READER_GRACE_MS}ms grace \
+                     on stop, detaching"
                 );
                 continue;
             }
             if let Err(e) = handle.join() {
-                log::warn!("stop: reader thread panicked: {e:?}");
+                log::warn!("reader thread panicked during stop: {e:?}");
             }
         }
         // Log session end ONLY if session actually started
@@ -2032,16 +2071,16 @@ fn drain_queued_message(
     match stdin.lock() {
         Ok(mut handle) => {
             if let Err(e) = writeln!(handle, "{}", payload) {
-                log::warn!("queued-message write failed: {e}");
+                log::warn!("failed to write queued message to stdin: {e}");
                 return;
             }
             if let Err(e) = handle.flush() {
-                log::warn!("queued-message flush failed: {e}");
+                log::warn!("failed to flush queued message to stdin: {e}");
                 return;
             }
         }
         Err(e) => {
-            log::warn!("queued-message stdin lock poisoned: {e}");
+            log::warn!("stdin lock poisoned while draining queued message: {e}");
             return;
         }
     }
@@ -2057,7 +2096,11 @@ fn drain_queued_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -2153,6 +2196,7 @@ mod tests {
             turn_usage: None,
             turn_cost: None,
             model: None,
+            context_usage: None,
         };
         let out = format!("{:?}", sanitize_chunk(chunk));
         assert!(!out.contains("secretsecretsecretsecret"), "leaked: {out}");
@@ -2536,18 +2580,19 @@ mod tests {
         let original = StreamChunk::Result {
             session_id: "abc".to_string(),
             total_cost: Some(0.05),
-            usage: Some(UsageInfo {
+            usage: Some(Box::new(UsageInfo {
                 input_tokens: 100,
                 output_tokens: 50,
                 cache_read_tokens: Some(10),
                 cache_write_tokens: None,
-            }),
+            })),
             result_text: None,
             context_window_size: None,
             assistant_uuid: Some("msg_test".to_string()),
             turn_usage: None,
             turn_cost: None,
             model: None,
+            context_usage: None,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let deserialized: StreamChunk = serde_json::from_str(&serialized).unwrap();
@@ -4428,6 +4473,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let result = ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None);
         assert!(result.is_err());
@@ -4451,6 +4497,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let result = ChatSession::prepare_args(
             "test",
@@ -4475,6 +4522,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let result = ChatSession::prepare_args(
             "test",
@@ -4499,6 +4547,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
         assert!(result.is_ok());
@@ -4520,6 +4569,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let result =
@@ -4549,6 +4599,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";
@@ -4792,6 +4843,7 @@ mod tests {
             turn_usage: None,
             turn_cost: None,
             model: None,
+            context_usage: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -4809,6 +4861,7 @@ mod tests {
         assert!(!json.contains("turn_usage"));
         assert!(!json.contains("turn_cost"));
         assert!(!json.contains("\"model\""));
+        assert!(!json.contains("context_usage"));
     }
 
     #[test]
@@ -4823,11 +4876,185 @@ mod tests {
             turn_usage: None,
             turn_cost: None,
             model: None,
+            context_usage: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
             json.contains("\"context_window_size\":1000000"),
             "context_window_size should be present when Some, got: {json}"
+        );
+    }
+
+    // ── context_usage (last main-chain API call) tests ──────────────
+
+    /// Assistant stream-json line with the given per-call usage numbers.
+    fn assistant_line(input: u64, cr: u64, cw: u64, out: u64, parent: Option<&str>) -> String {
+        let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+        format!(
+            r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"id":"msg_1","role":"assistant","usage":{{"input_tokens":{input},"cache_read_input_tokens":{cr},"cache_creation_input_tokens":{cw},"output_tokens":{out}}}}}}}"#
+        )
+    }
+
+    const RESULT_LINE: &str = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":20}}"#;
+
+    #[test]
+    fn result_carries_last_assistant_call_usage_not_the_turn_sum() {
+        // Three API calls in one turn: summed cache_read (110k+120k+130k)
+        // would overflow any window; context_usage must be the LAST call only.
+        let mut parser = StreamParser::new();
+        for cr in [110_000, 120_000, 130_000] {
+            parse_line_str(&mut parser, &assistant_line(5, cr, 100, 50, None));
+        }
+        let chunk = parse_line_str(&mut parser, RESULT_LINE).unwrap();
+        match chunk {
+            StreamChunk::Result { context_usage, .. } => {
+                let cu = context_usage.expect("context_usage must be present");
+                assert_eq!(cu.cache_read_tokens, 130_000);
+                assert_eq!(cu.input_tokens, 5);
+                assert_eq!(cu.cache_write_tokens, 100);
+                assert_eq!(cu.output_tokens, 50);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sidechain_assistant_usage_never_moves_the_context_meter() {
+        let mut parser = StreamParser::new();
+        parse_line_str(&mut parser, &assistant_line(5, 60_000, 100, 50, None));
+        // Subagent call with a huge foreign context must be ignored.
+        parse_line_str(
+            &mut parser,
+            &assistant_line(9, 180_000, 900, 90, Some("toolu_task_1")),
+        );
+        let chunk = parse_line_str(&mut parser, RESULT_LINE).unwrap();
+        match chunk {
+            StreamChunk::Result { context_usage, .. } => {
+                assert_eq!(context_usage.unwrap().cache_read_tokens, 60_000);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    // ── is_sidechain_event: shared heuristic (chat.rs live stream + history.rs transcript) ──
+
+    #[test]
+    fn is_sidechain_event_true_via_parent_tool_use_id() {
+        let v = serde_json::json!({"parent_tool_use_id": "toolu_1"});
+        assert!(is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_true_via_is_sidechain_flag() {
+        let v = serde_json::json!({"isSidechain": true});
+        assert!(is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_true_when_both_signals_present() {
+        let v = serde_json::json!({"parent_tool_use_id": "toolu_1", "isSidechain": true});
+        assert!(is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_false_when_neither_signal_present() {
+        let v = serde_json::json!({"type": "assistant"});
+        assert!(!is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_false_for_null_parent_and_false_is_sidechain() {
+        let v = serde_json::json!({"parent_tool_use_id": null, "isSidechain": false});
+        assert!(!is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn is_sidechain_event_false_for_non_boolean_is_sidechain() {
+        // Malformed/unexpected type on isSidechain must not be treated as truthy.
+        let v = serde_json::json!({"isSidechain": "true"});
+        assert!(!is_sidechain_event(&v));
+    }
+
+    #[test]
+    fn all_zero_assistant_usage_keeps_previous_context_usage() {
+        let mut parser = StreamParser::new();
+        parse_line_str(&mut parser, &assistant_line(5, 60_000, 100, 50, None));
+        parse_line_str(&mut parser, &assistant_line(0, 0, 0, 0, None));
+        let chunk = parse_line_str(&mut parser, RESULT_LINE).unwrap();
+        match chunk {
+            StreamChunk::Result { context_usage, .. } => {
+                assert_eq!(context_usage.unwrap().cache_read_tokens, 60_000);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_usage_absent_before_any_assistant_call_then_persists_across_turns() {
+        let mut parser = StreamParser::new();
+        // Turn 1: no API call (e.g. local slash command) — nothing to report.
+        match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
+            StreamChunk::Result { context_usage, .. } => assert!(context_usage.is_none()),
+            other => panic!("expected Result, got {other:?}"),
+        }
+        // Turn 2: a real call; turn 3 has no call and must keep turn 2's value.
+        parse_line_str(&mut parser, &assistant_line(5, 70_000, 100, 50, None));
+        parse_line_str(&mut parser, RESULT_LINE).unwrap();
+        match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
+            StreamChunk::Result { context_usage, .. } => {
+                assert_eq!(context_usage.unwrap().cache_read_tokens, 70_000);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_session_snapshot_seeds_context_usage_for_first_result() {
+        let mut parser = StreamParser::new();
+        parser.restore_session_snapshot(
+            TurnUsage::default(),
+            None,
+            None,
+            Some(TurnUsage {
+                input_tokens: 2,
+                output_tokens: 1_660,
+                cache_read_tokens: 66_844,
+                cache_write_tokens: 4_920,
+            }),
+        );
+        match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
+            StreamChunk::Result { context_usage, .. } => {
+                assert_eq!(context_usage.unwrap().cache_read_tokens, 66_844);
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_usage_serializes_with_full_turn_usage_shape() {
+        let chunk = StreamChunk::Result {
+            session_id: "abc".to_string(),
+            total_cost: None,
+            usage: None,
+            result_text: None,
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+            context_usage: Some(TurnUsage {
+                input_tokens: 2,
+                output_tokens: 3,
+                cache_read_tokens: 4,
+                cache_write_tokens: 5,
+            }),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(
+            json.contains(
+                "\"context_usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cache_read_tokens\":4,\"cache_write_tokens\":5}"
+            ),
+            "unexpected serialization: {json}"
         );
     }
 
@@ -5201,6 +5428,7 @@ mod tests {
             },
             Some(0.25),
             Some("claude-sonnet-4-6".to_string()),
+            None,
         );
 
         // First Result after resume: cumulative = {in:110, out:55, cR:200, cW:30}.
@@ -5327,6 +5555,7 @@ mod tests {
             },
             Some(0.5),
             Some("claude-opus-4-7".to_string()),
+            None,
         );
         parser.new_session();
         assert_eq!(parser.previous_session_usage(), TurnUsage::default());
@@ -5425,6 +5654,7 @@ mod tests {
             },
             Some(0.20),
             Some("claude-opus-4-7".to_string()),
+            None,
         );
 
         // First post-resume Result: cumulative jumps by {5 in, 3 out}.

@@ -1,6 +1,5 @@
-//! Windows firewall rules (ADR-067) — Desktop runtime fallback.
-//! Ensures both firewall layers exist before any host listener binds the WSL
-//! adapter IP. Runs at most once per process; fail-open, never blocks startup.
+//! Windows firewall rules (ADR-067) — Desktop runtime fallback. Ensures both firewall layers
+//! exist before any host listener binds the WSL adapter IP. Runs once per process; fail-open.
 
 /// Outcome of one `firewall.ps1 -Mode ensure` invocation.
 #[cfg(any(target_os = "windows", test))]
@@ -42,34 +41,31 @@ mod windows_impl {
 
     static FIREWALL_RULE_ONCE: Once = Once::new();
 
-    /// Ensures the Hyper-V firewall rule exists. Runs at most once per process.
-    /// Called as the first statement of every host-listener starter so the rule
-    /// precedes any bind on the WSL adapter IP (ADR-067).
+    /// Ensures the Hyper-V firewall rule exists. Runs at most once per process; called as the
+    /// first statement of every host-listener starter so the rule precedes any bind (ADR-067).
     pub(crate) fn ensure_firewall_rule() {
         FIREWALL_RULE_ONCE.call_once(ensure_firewall_rule_inner);
     }
 
     fn ensure_firewall_rule_inner() {
         let Some(script) = resolve_bundled_windows_script("firewall.ps1") else {
-            log::warn!(
-                "firewall: firewall.ps1 not found in bundle — skipping (WDF prompts may appear)"
-            );
+            log::warn!("firewall.ps1 not found in bundle — skipping (WDF prompts may appear)");
             return;
         };
         let programs = host_listener_programs();
 
         match run_firewall_mode(&script, "ensure", &programs) {
-            EnsureOutcome::Ready => log::info!("firewall: rules present"),
+            EnsureOutcome::Ready => log::info!("firewall rules present"),
             EnsureOutcome::Failed => {
-                log::warn!("firewall: ensure failed (non-fatal) — will retry next launch")
+                log::warn!("firewall ensure failed (non-fatal) — will retry next launch")
             }
             EnsureOutcome::Skipped => {
-                log::warn!("firewall: ensure could not run (non-fatal) — will retry next launch")
+                log::warn!("firewall ensure could not run (non-fatal) — will retry next launch")
             }
             EnsureOutcome::NeedsElevation => {
                 if !is_interactive_session() {
                     log::warn!(
-                        "firewall: rules missing and session non-interactive — skipping elevation"
+                        "firewall rules missing and session non-interactive — skipping elevation"
                     );
                     return;
                 }
@@ -93,7 +89,7 @@ mod windows_impl {
                     progs.push(node.to_string_lossy().into_owned());
                 } else {
                     log::warn!(
-                        "firewall: bundled node.exe not found at {} — skipping its allow rule",
+                        "bundled node.exe not found at {} — skipping its allow rule",
                         node.display()
                     );
                 }
@@ -139,27 +135,26 @@ mod windows_impl {
                     run_firewall_mode(script, "ensure", programs),
                     EnsureOutcome::Ready
                 ) {
-                    log::info!("firewall: rules created via elevation");
+                    log::info!("firewall rules created via elevation");
                 } else {
                     log::warn!(
-                        "firewall: elevation ran but rules still missing — will retry next launch"
+                        "firewall elevation ran but rules still missing — will retry next launch"
                     );
                 }
             }
             // UAC cancelled / elevation refused.
             Ok(Some(10)) => {
-                log::warn!("firewall: UAC declined — WDF prompts may appear until granted")
+                log::warn!("firewall UAC declined — WDF prompts may appear until granted")
             }
             Ok(other) => {
-                log::warn!("firewall: elevation launcher exited {other:?} (non-fatal) — will retry next launch")
+                log::warn!("firewall elevation launcher exited {other:?} (non-fatal) — will retry next launch")
             }
-            Err(e) => log::warn!("firewall: elevation spawn failed (non-fatal): {e}"),
+            Err(e) => log::warn!("firewall elevation spawn failed (non-fatal): {e}"),
         }
     }
 
-    /// Runs `firewall.ps1 -Mode <mode>` (non-elevated) with the program list and
-    /// classifies the exit. `Command::args` passes paths as OS argv, so spaces
-    /// need no quoting here.
+    /// Runs `firewall.ps1 -Mode <mode>` (non-elevated) with the program list and classifies the
+    /// exit. `Command::args` passes paths as OS argv, so spaces need no quoting here.
     fn run_firewall_mode(
         script: &std::path::Path,
         mode: &str,
@@ -184,7 +179,7 @@ mod windows_impl {
         match cmd.status() {
             Ok(status) => classify_ensure_exit(status.code()),
             Err(e) => {
-                log::warn!("firewall: spawn failed (non-fatal): {e}");
+                log::warn!("firewall spawn failed (non-fatal): {e}");
                 EnsureOutcome::Skipped
             }
         }
@@ -204,7 +199,6 @@ mod windows_impl {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

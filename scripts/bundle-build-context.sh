@@ -1,42 +1,22 @@
 #!/usr/bin/env bash
-# bundle-build-context.sh — Copies container build context, mcp-os, and the
-# oauth worker into desktop/src-tauri/ for Tauri resource bundling.
-#
-# Defines which MCP services are bundled into the Tauri app resource directory.
-# NOTE: Container image definitions live in crates/speedwave-runtime/src/build.rs (IMAGES constant).
-#       The IMAGES list and MCP_SERVICES list must stay aligned for overlapping services.
-#       os and oauth are NOT in IMAGES (they are host processes, not containers) —
-#       they are bundled as mcp-os/ and oauth/ here, and listed in
-#       crates/speedwave-runtime/src/bundle.rs::COMMON_BUNDLED_ASSETS.
-# Called from: Makefile (dev target), CI workflows (desktop-build, desktop-release).
-#
-# Usage:
-#   scripts/bundle-build-context.sh        # default: copies pre-built mcp-os / oauth dist
-#   scripts/bundle-build-context.sh --ci   # CI mode: builds mcp-os + oauth from source first
+# Copies container build context, mcp-os, and oauth into desktop/src-tauri/ for Tauri bundling
+# (IMAGES/MCP_SERVICES aligned; os/oauth as host processes, bundle.rs::COMMON_BUNDLED_ASSETS).
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Default to the in-repo Tauri resource dir for production. Tests override via
-# BUNDLE_DEST so concurrent `make test` and `make dev` do not race on the same
-# files (see _tests/desktop/bundle-build-context.bats).
+# Default to the in-repo Tauri resource dir; tests override via BUNDLE_DEST so concurrent
+# `make test`/`make dev` don't race (_tests/desktop/bundle-build-context.bats).
 DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 mkdir -p "$DEST"
 
-# Serialize concurrent runs on the same DEST. The body does `rm -rf` + non-atomic
-# copies; a parallel image build (e.g. `make dev` while `make test` bundles) can
-# read a half-written tree and bake a 0-byte mcp-shared/package.json into a worker
-# image (ERR_INVALID_PACKAGE_CONFIG, exit 1). `mkdir` is an atomic create-or-fail
-# on macOS/Windows/Linux with no external tool (unlike flock) — the second runner
-# spins until the first releases. The lock stores its holder PID so a run killed
-# with SIGKILL (untrappable) cannot deadlock future bundles: a lock whose PID is
-# gone is reclaimed. The trap clears our own lock on any exit incl. signals.
+# Serialize concurrent runs on DEST (non-atomic body can bake a 0-byte package.json into a worker
+# image otherwise). `mkdir` is atomic cross-platform; a lock whose holder PID is dead is reclaimed.
 LOCK_DIR="$DEST/.bundle.lock"
 while ! mkdir "$LOCK_DIR" 2>/dev/null; do
   holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  # Reclaim only when we can prove the holder is gone. A blank PID means the
-  # owner created the dir but has not written its PID yet — treat as alive and
-  # wait, so we never delete a lock another run is mid-acquiring.
+  # Reclaim only when we can prove the holder is gone; a blank PID means the owner is
+  # mid-acquiring — treat as alive and wait rather than delete it.
   if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
     rm -rf "$LOCK_DIR"  # holder process is dead — reclaim the stale lock
     continue
@@ -104,21 +84,15 @@ if [[ "${1:-}" == "--ci" ]]; then
     && npm run build --workspace=oauth)
 fi
 
-# stage_host_worker <worker-dir-name> <bundle-dir-name>
-#   Stages mcp-servers/<worker-dir-name>/dist + the @speedwave/mcp-shared
-#   dependency tree into $DEST/<bundle-dir-name>/, mirroring how mcp-os has
-#   always been bundled. The bundle layout is <bundle-dir-name>/<worker>/dist
-#   plus <bundle-dir-name>/shared (so Node resolves @speedwave/mcp-shared from
-#   <worker>/dist/index.js). Tauri's resource bundler doesn't reliably preserve
-#   symlinks in .dmg/.deb/NSIS packages, hence the cp -r of the shared tree.
+# stage_host_worker <worker-dir-name> <bundle-dir-name>: stages <worker>/dist + mcp-shared into
+#   $DEST/<bundle>/; cp -r not symlink (Tauri's bundler doesn't preserve symlinks).
 stage_host_worker() {
   local worker="$1" bundle="$2"
   mkdir -p "$DEST/$bundle/$worker" "$DEST/$bundle/shared"
   cp -r "$REPO_ROOT/mcp-servers/$worker/dist" "$DEST/$bundle/$worker/"
   cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/$bundle/shared/"
-  # Install production deps only. Cannot use the workspace-scoped
-  # package-lock.json directly — it has workspace-relative entries that don't
-  # resolve in isolation. Two-step: standalone lockfile, then deterministic npm ci.
+  # Production deps only; the workspace package-lock.json has workspace-relative entries
+  # that don't resolve in isolation, hence standalone lockfile then deterministic npm ci.
   cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/$bundle/shared/"
   (cd "$DEST/$bundle/shared" && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
   mkdir -p "$DEST/$bundle/$worker/node_modules/@speedwave"

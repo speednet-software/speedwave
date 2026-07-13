@@ -1,6 +1,5 @@
 /**
- * Context7 REST API client for `https://context7.com/api/v2/*`.
- * Anonymous mode (no API key): per-IP rate limit, see docs/architecture/security.md.
+ * Context7 REST API client for `https://context7.com/api/v2/*`. Anonymous mode: per-IP rate limit (~200/day).
  * @module mcp-context7/client
  */
 
@@ -37,10 +36,10 @@ export class Context7Error extends Error {
 
   /**
    * Build a typed Context7 error with HTTP status and quota tier preserved.
-   * @param message - Human-readable message
-   * @param status - HTTP status code (0 = network/timeout)
-   * @param tier - Quota tier reported by server
-   * @param retryable - Whether the call may be retried
+   * @param message - Human-readable error message
+   * @param status - HTTP status code (0 when no response)
+   * @param tier - Quota tier reported by the server
+   * @param retryable - Whether the client should retry the call
    */
   constructor(message: string, status: number, tier: QuotaTier, retryable: boolean) {
     super(message);
@@ -70,7 +69,7 @@ export class Context7Client {
 
   /**
    * Create a client with optional API key and dispatcher overrides.
-   * @param opts - Client options (see {@link Context7ClientOptions})
+   * @param opts - Client construction options
    */
   constructor(opts: Context7ClientOptions = {}) {
     this.apiKey = opts.apiKey?.trim() || undefined;
@@ -84,9 +83,9 @@ export class Context7Client {
   }
 
   /**
-   * Resolve a library name to Context7-compatible IDs.
-   * @param libraryName - Free-text name (e.g. `"react"`)
-   * @param query - User intent — used to rank results
+   * Resolve a free-text `libraryName` to Context7 IDs, ranked by `query` intent.
+   * @param libraryName - Free-text library name
+   * @param query - User intent used to rank results
    * @returns Top-N libraries plus the reported quota tier
    */
   async searchLibraries(
@@ -108,10 +107,10 @@ export class Context7Client {
   }
 
   /**
-   * Fetch documentation snippets for a known library ID.
-   * @param libraryId - Context7 library ID (e.g. `/facebook/react`)
+   * Fetch docs for a known `libraryId`; `tokens` is clamped to {@link MIN_OUTPUT_TOKENS}..{@link MAX_OUTPUT_TOKENS}.
+   * @param libraryId - Known Context7 library ID
    * @param query - User question
-   * @param tokens - Output cap (clamped to {@link MIN_OUTPUT_TOKENS}..{@link MAX_OUTPUT_TOKENS})
+   * @param tokens - Requested output token cap
    * @returns Plain-text documentation block plus the reported quota tier
    */
   async getContext(
@@ -133,8 +132,8 @@ export class Context7Client {
   }
 
   /**
-   * GET + JSON parse with retry. Caller validates schema.
-   * @param url - Fully constructed URL (must be on `this.baseUrl`).
+   * GET + JSON parse with retry, `url` must be on `this.baseUrl`; caller validates schema.
+   * @param url - Fully constructed request URL
    */
   private async fetchJSON<T>(url: string): Promise<Context7CallResult<T>> {
     const { body, tier } = await this.fetchRaw(url, 'application/json');
@@ -149,7 +148,7 @@ export class Context7Client {
 
   /**
    * GET + return body as plain text (used for `/context` which returns text/plain).
-   * @param url - Fully constructed URL
+   * @param url - Fully constructed request URL
    */
   private async fetchText(url: string): Promise<Context7CallResult<string>> {
     const { body, tier } = await this.fetchRaw(url, 'text/plain');
@@ -158,7 +157,7 @@ export class Context7Client {
 
   /**
    * Core fetch with retry, error mapping, and tier extraction.
-   * @param url - Fully constructed URL
+   * @param url - Fully constructed request URL
    * @param accept - `Accept` header value
    */
   private async fetchRaw(url: string, accept: string): Promise<{ body: string; tier: QuotaTier }> {
@@ -214,13 +213,12 @@ export class Context7Client {
 }
 
 /**
- * Map a Context7 HTTP status to a {@link Context7Error}.
+ * Map a Context7 HTTP status + body/headers/tier to a typed {@link Context7Error}.
  * @param status - HTTP status from Context7
  * @param body - Response body (already read)
  * @param headers - Response headers (used for `ratelimit-reset`)
- * @param tier - Quota tier extracted from response
+ * @param tier - Quota tier extracted from the response
  * @param hasApiKey - Whether the client had an API key configured
- * @returns Typed Context7 error
  */
 function mapErrorStatus(
   status: number,
@@ -306,8 +304,8 @@ function mapErrorStatus(
 }
 
 /**
- * Extract a human-readable message from a Context7 error body, falling back
- * to the truncated raw body when the body is not JSON.
+ * Extract a human-readable message from a Context7 error body, falling back to the
+ * truncated raw body when not JSON.
  * @param body - Raw response body
  */
 function extractMessage(body: string): string {
@@ -324,8 +322,8 @@ function extractMessage(body: string): string {
 }
 
 /**
- * Parse Context7's `ratelimit-reset` header. The value is a Unix timestamp in
- * seconds; returns a formatted ISO date or `null` when missing/invalid.
+ * Parse Context7's `ratelimit-reset` header (Unix seconds); returns an ISO date
+ * or `null` when missing/invalid.
  * @param raw - Header value (string, array, or undefined)
  */
 function parseResetHeader(raw: string | string[] | undefined): string | null {
@@ -338,7 +336,7 @@ function parseResetHeader(raw: string | string[] | undefined): string | null {
 
 /**
  * Map the `context7-quota-tier` header to our typed tier enum, defaulting to
- * `"unknown"` when the header is missing or carries an unrecognised value.
+ * `"unknown"` when missing or unrecognised.
  * @param raw - Header value (string, array, or undefined)
  */
 function headerToTier(raw: string | string[] | undefined): QuotaTier {
@@ -365,8 +363,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Drain a response body to a string, throwing if it would exceed `maxBytes`.
- * @param body - Undici response body (AsyncIterable of Buffer chunks)
+ * Drain a response body to a string, throwing if it would exceed `maxBytes`; `tier` is attached to the error.
+ * @param body - Undici response body (async iterable of chunks)
  * @param maxBytes - Upper bound on total bytes
  * @param tier - Quota tier to attach to the error
  */

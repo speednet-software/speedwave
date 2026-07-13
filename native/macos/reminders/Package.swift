@@ -1,9 +1,8 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Embeds Resources/Info.plist into the Mach-O `__TEXT,__info_plist` section so the
-// CLI binary carries `CFBundleIdentifier` + `NSRemindersFullAccessUsageDescription`
-// (required by TCC for EventKit on macOS 14+).
+// Embeds Resources/Info.plist into the Mach-O `__TEXT,__info_plist` section so the CLI binary
+// carries `CFBundleIdentifier` + `NSRemindersFullAccessUsageDescription` (TCC/EventKit, macOS 14+).
 let package = Package(
     name: "reminders-cli",
     platforms: [.macOS(.v13)],

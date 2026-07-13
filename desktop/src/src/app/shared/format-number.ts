@@ -10,7 +10,7 @@ export function formatTokens(n: number): string {
 }
 
 /**
- * Formats a USD amount as `$X.XX`. Each call site passes its own precision.
+ * Formats a USD amount as `$X.XX`; `decimals` defaults to 4, each call site passes its own precision.
  * @param n - Amount in dollars.
  * @param decimals - Fixed decimal places (default 4).
  */

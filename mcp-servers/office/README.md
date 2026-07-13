@@ -2,7 +2,7 @@
 
 Built-in MCP worker for office documents — read/write/create/edit Word, Excel, PowerPoint; generate PDF (Markdown/HTML → PDF, Office → PDF); manipulate PDF (merge/split/rotate/watermark/forms); convert Office ↔ Office (LibreOffice headless); render charts (matplotlib).
 
-A **pure file processor**: no service credentials, no `/tokens` mount, **no network egress** (compose attaches it to an `internal: true` network), only `/workspace:rw` mounted, behind a hard path policy. Architecture and the normative tool/DSL contract: [`docs/adr/ADR-055-built-in-office-document-worker.md`](../../docs/adr/ADR-055-built-in-office-document-worker.md). User-facing reference: [`docs/guides/integrations.md`](../../docs/guides/integrations.md).
+A **pure file processor**: no service credentials, no `/tokens` mount, **no network egress** (compose attaches it to an `internal: true` network), only `/workspace:rw` mounted, behind a hard path policy. Architecture and the normative tool/DSL contract: [`docs/adr/ADR-055-built-in-office-document-worker.md`](../../docs/adr/ADR-055-built-in-office-document-worker.md). User-facing reference: the Integrations section of https://speedwave.dev/docs.
 
 ## Layout
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -108,6 +109,30 @@ describe('issue-tools', () => {
       });
     });
 
+    it('filters issues by identity scope without needing a username ("issues assigned to me")', async () => {
+      mockClient.listIssues.mockResolvedValue([]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssues')?.handler;
+
+      await handler!({
+        project_id: 'test/project',
+        scope: 'assigned_to_me',
+      });
+
+      expect(mockClient.listIssues).toHaveBeenCalledWith('test/project', {
+        scope: 'assigned_to_me',
+      });
+    });
+
+    it('declares scope in the input schema and mentions getCurrentUser in its description', () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listIssues')?.tool;
+
+      expect(tool?.inputSchema.properties).toHaveProperty('scope');
+      expect(tool?.description).toContain('scope');
+    });
+
     it('applies limit parameter', async () => {
       mockClient.listIssues.mockResolvedValue([]);
 
@@ -191,10 +216,7 @@ describe('issue-tools', () => {
 
       const result = await handler!({ project_id: 'nonexistent/project' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
   });
 
@@ -261,7 +283,7 @@ describe('issue-tools', () => {
       expect(mockClient.getIssue).toHaveBeenCalledWith(123, 10);
     });
 
-    it('handles non-existent issue', async () => {
+    it('handles non-existent issue (formatError, not a silent null)', async () => {
       mockClient.getIssue.mockRejectedValue(new Error('404 Issue Not Found'));
 
       const tools = createIssueTools(mockClient as unknown as GitLabClient);
@@ -272,11 +294,78 @@ describe('issue-tools', () => {
         issue_iid: 9999,
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
+
+    it('passes the real client not-found message through to the tool result end-to-end (not the generic 404 text)', async () => {
+      // Uses the real GitLabClient (not a hand-mocked one) so getIssue's own
+      // TeachingError survives withValidation's formatError call unmangled.
+      const { GitLabClient: RealGitLabClient } = await import('../client.js');
+      const realClient = new RealGitLabClient({ token: 'x', host: 'https://gitlab.example.com' });
+      (realClient as unknown as { gitlab: { Issues: { all: Mock } } }).gitlab.Issues.all = vi
+        .fn()
+        .mockResolvedValue([]);
+
+      const tools = createIssueTools(realClient);
+      const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+      const result = await handler!({ project_id: 'my-group/my-project', issue_iid: 999 });
+
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain(
+        "Issue #999 not found in project 'my-group/my-project'"
+      );
+      expect((result.content[0] as { text: string }).text).not.toContain(
+        'list valid values with the corresponding list* tool first'
+      );
+    });
+
+    it('accepts a numeric-string issue_iid', async () => {
+      mockClient.getIssue.mockResolvedValue({ id: 1, iid: 42, title: 'Issue' });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: '42' });
+
+      expect(mockClient.getIssue).toHaveBeenCalledWith('test/project', 42);
+    });
+
+    it('accepts a "#"-prefixed issue_iid', async () => {
+      mockClient.getIssue.mockResolvedValue({ id: 1, iid: 42, title: 'Issue' });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: '#42' });
+
+      expect(mockClient.getIssue).toHaveBeenCalledWith('test/project', 42);
+    });
+
+    it('returns a teaching error for a non-numeric issue_iid without calling the client', async () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 'not-a-number' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('issue_iid');
+      expect(mockClient.getIssue).not.toHaveBeenCalled();
+    });
+
+    it.each(['', '   ', '#'])(
+      'returns a teaching error for issue_iid %j instead of coercing to 0, without calling the client',
+      async (issue_iid) => {
+        const tools = createIssueTools(mockClient as unknown as GitLabClient);
+        const handler = tools.find((t) => t.tool.name === 'getIssue')?.handler;
+
+        const result = await handler!({ project_id: 'test/project', issue_iid });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('issue_iid');
+        expect(mockClient.getIssue).not.toHaveBeenCalled();
+      }
+    );
 
     it('handles permission errors', async () => {
       mockClient.getIssue.mockRejectedValue(new Error('403 Forbidden'));
@@ -289,15 +378,7 @@ describe('issue-tools', () => {
         issue_iid: 1,
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
   });
 
@@ -479,15 +560,7 @@ describe('issue-tools', () => {
         title: 'Issue',
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
   });
 
@@ -657,10 +730,34 @@ describe('issue-tools', () => {
         title: 'Updated',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
+      expectNotFoundTeachingError(result);
+    });
+
+    it('accepts a numeric-string issue_iid', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 1, iid: 5 });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: '5', title: 'Updated' });
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith('test/project', 5, {
+        title: 'Updated',
       });
+    });
+
+    it('returns a teaching error for a non-numeric issue_iid without calling the client', async () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')?.handler;
+
+      const result = await handler!({
+        project_id: 'test/project',
+        issue_iid: 'nope',
+        title: 'Updated',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.updateIssue).not.toHaveBeenCalled();
     });
 
     it('handles permission errors', async () => {
@@ -675,15 +772,7 @@ describe('issue-tools', () => {
         title: 'Updated',
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
 
     it('handles validation errors', async () => {
@@ -776,10 +865,28 @@ describe('issue-tools', () => {
         issue_iid: 9999,
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
+    });
+
+    it('accepts a "#"-prefixed issue_iid', async () => {
+      mockClient.closeIssue.mockResolvedValue({ id: 1, iid: 42, state: 'closed' });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'closeIssue')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: '#42' });
+
+      expect(mockClient.closeIssue).toHaveBeenCalledWith('test/project', 42);
+    });
+
+    it('returns a teaching error for a non-numeric issue_iid without calling the client', async () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'closeIssue')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 'bad' });
+
+      expect(result.isError).toBe(true);
+      expect(mockClient.closeIssue).not.toHaveBeenCalled();
     });
 
     it('handles permission errors', async () => {
@@ -793,15 +900,7 @@ describe('issue-tools', () => {
         issue_iid: 1,
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
 
     it('handles already closed issue', async () => {

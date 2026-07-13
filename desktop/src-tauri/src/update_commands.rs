@@ -5,17 +5,15 @@ use crate::types::BundleReconcileStatus;
 use crate::updater;
 use speedwave_runtime::{bundle, config};
 
-// ---------------------------------------------------------------------------
-// App update commands
-// ---------------------------------------------------------------------------
+// ── App update commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub(crate) async fn check_for_update(
     app: tauri::AppHandle,
 ) -> Result<updater::UpdateCheckOutcome, String> {
-    log::info!("check_for_update: starting");
+    log::info!("starting update check");
     updater::check_for_update(&app).await.map_err(|e| {
-        log::error!("check_for_update: error: {e}");
+        log::error!("update check failed: {e}");
         e
     })
 }
@@ -25,11 +23,11 @@ pub(crate) async fn install_update_and_reconcile(
     app: tauri::AppHandle,
     expected_version: String,
 ) -> Result<(), String> {
-    log::info!("install_update_and_reconcile: starting (expected_version={expected_version})");
+    log::info!("starting install and reconcile for update (expected_version={expected_version})");
     updater::verify_update_installable(&app, &expected_version)
         .await
         .map_err(|e| {
-            log::error!("install_update_and_reconcile: preflight failed: {e}");
+            log::error!("update install preflight failed: {e}");
             e
         })?;
 
@@ -37,9 +35,7 @@ pub(crate) async fn install_update_and_reconcile(
         let user_config = match config::load_user_config() {
             Ok(config) => config,
             Err(e) => {
-                log::warn!(
-                    "install_update_and_reconcile: failed to load user config, assuming no configured projects: {e}"
-                );
+                log::warn!("failed to load user config, assuming no configured projects: {e}");
                 config::SpeedwaveUserConfig::default()
             }
         };
@@ -58,15 +54,16 @@ pub(crate) async fn install_update_and_reconcile(
 
         if !running_projects.is_empty() && rt.is_available() {
             if let Err(stop_error) = reconcile::stop_projects(&running_projects, &rt) {
-                if let Err(restore_error) = reconcile::restore_projects(&running_projects, &rt)
-                {
-                    log::error!(
-                        "install_update_and_reconcile: failed to restore projects after stop error: {restore_error}"
-                    );
-                }
+                let retained = match reconcile::restore_projects(&running_projects, &rt) {
+                    Ok(retained) => retained,
+                    Err(restore_error) => {
+                        log::error!("failed to restore projects after stop error: {restore_error}");
+                        running_projects.clone()
+                    }
+                };
 
                 state.phase = bundle::BundleReconcilePhase::Done;
-                state.pending_running_projects.clear();
+                state.pending_running_projects = retained;
                 state.last_error = None;
                 let _ = bundle::save_bundle_state(&state);
                 return Err(stop_error);
@@ -80,9 +77,10 @@ pub(crate) async fn install_update_and_reconcile(
 
     if let Err(install_error) = updater::install_update(&app, expected_version).await {
         let projects_to_restore = running_projects.clone();
-        let restore_error = tokio::task::spawn_blocking(move || {
-            if projects_to_restore.is_empty() {
-                return Ok::<(), String>(());
+        let projects_for_task = projects_to_restore.clone();
+        let restore_result = tokio::task::spawn_blocking(move || {
+            if projects_for_task.is_empty() {
+                return Ok::<Vec<String>, String>(Vec::new());
             }
 
             let rt = speedwave_runtime::runtime::detect_runtime();
@@ -93,15 +91,19 @@ pub(crate) async fn install_update_and_reconcile(
                 );
             }
 
-            reconcile::restore_projects(&projects_to_restore, &rt)
+            reconcile::restore_projects(&projects_for_task, &rt)
         })
         .await
         .map_err(|e| e.to_string())?;
 
-        let clear_state_error = tokio::task::spawn_blocking(|| {
+        let retained = restore_result
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|_| projects_to_restore.clone());
+        let clear_state_error = tokio::task::spawn_blocking(move || {
             let mut state = bundle::load_bundle_state();
             state.phase = bundle::BundleReconcilePhase::Done;
-            state.pending_running_projects.clear();
+            state.pending_running_projects = retained;
             state.last_error = None;
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())
         })
@@ -110,27 +112,27 @@ pub(crate) async fn install_update_and_reconcile(
 
         let error = build_install_failure_message(
             install_error,
-            restore_error.err(),
+            restore_result.err(),
             clear_state_error.err(),
         );
-        log::error!("install_update_and_reconcile: install failed: {error}");
+        log::error!("update install failed: {error}");
         return Err(error);
     }
 
-    log::info!("install_update_and_reconcile: update installed, restarting");
+    log::info!("update installed, restarting");
     app.restart()
 }
 
 #[tauri::command]
 pub(crate) fn get_update_settings() -> Result<updater::UpdateSettings, String> {
-    log::debug!("get_update_settings");
+    log::debug!("fetching update settings");
     Ok(updater::load_update_settings())
 }
 
 #[tauri::command]
 pub(crate) fn set_update_settings(settings: updater::UpdateSettings) -> Result<(), String> {
     log::info!(
-        "set_update_settings: auto_check={}, interval={}h",
+        "saving update settings: auto_check={}, interval={}h",
         settings.auto_check,
         settings.check_interval_hours
     );
@@ -162,7 +164,6 @@ fn build_install_failure_message(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -201,5 +202,36 @@ mod tests {
         assert!(msg.starts_with("install failed"));
         assert!(msg.contains("restore boom"));
         assert!(msg.contains("state boom"));
+    }
+
+    #[test]
+    fn stop_error_branch_retains_running_projects_when_restore_also_fails() {
+        let source = include_str!("update_commands.rs");
+        let anchor = source
+            .find("if let Err(stop_error) = reconcile::stop_projects(")
+            .expect("stop_projects call must exist");
+        let restore_arm = source[anchor..]
+            .find("Err(restore_error) => {")
+            .expect("restore-error arm must exist");
+        let window = &source[anchor + restore_arm..anchor + restore_arm + 200];
+        assert!(
+            window.contains("running_projects.clone()"),
+            "a failed restore after a failed stop must retain running_projects, \
+             never drop them to Vec::new()"
+        );
+    }
+
+    #[test]
+    fn install_error_branch_retains_projects_to_restore_when_restore_also_fails() {
+        let source = include_str!("update_commands.rs");
+        let anchor = source
+            .find("let retained = restore_result")
+            .expect("post-install retained binding must exist");
+        let window = &source[anchor..anchor + 300];
+        assert!(
+            window.contains("unwrap_or_else(|_| projects_to_restore.clone())"),
+            "a failed restore after a failed install must retain projects_to_restore, \
+             never fall back to an empty Vec via unwrap_or_default"
+        );
     }
 }

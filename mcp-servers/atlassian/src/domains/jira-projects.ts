@@ -1,9 +1,10 @@
 /**
- * Jira projects — listing (allowlist-filtered), single-project lookup, and
- * issue-type metadata for a project.
+ * Jira projects — listing (allowlist-filtered), single-project lookup, and issue-type metadata
+ * for a project.
  * @module mcp-atlassian/domains/jira-projects
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { assertJiraProjectAllowed, filterByAllowlist } from '../scope.js';
 import { deriveBrowseUrl } from '../url.js';
@@ -21,15 +22,15 @@ export interface JiraProjectsClient {
 }
 
 /**
- * Create a Jira projects client.
+ * Create a {@link JiraProjectsClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
- * @returns A {@link JiraProjectsClient}.
+ * @returns A Jira projects client.
  */
 export function createJiraProjectsClient(client: AtlassianClient): JiraProjectsClient {
   return {
     async list(options = {}) {
       const params: Record<string, unknown> = {
-        maxResults: Math.min(Math.max(options.maxResults ?? 50, 1), 100),
+        maxResults: clampPageSize(options.maxResults, 50, 100),
         expand: 'lead',
       };
       if (options.query) params.query = options.query;
@@ -76,9 +77,8 @@ export function mapProject(raw: unknown): JiraProject {
 }
 
 /**
- * Map a raw Jira issue type to {@link JiraIssueType}.
+ * Map a raw Jira issue type (Atlassian REST API shape) to {@link JiraIssueType}.
  * @param raw - The raw object as returned by the Atlassian REST API.
- * @returns The normalised issue type.
  */
 export function mapIssueType(raw: unknown): JiraIssueType {
   const o = (raw ?? {}) as Record<string, unknown>;

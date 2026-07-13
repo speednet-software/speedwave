@@ -13,19 +13,19 @@ Apply three uniform changes to all four native macOS CLIs so their permission UX
 
 ## Why
 
-- On macOS 14+, `requestFullAccessToEvents` returns `granted=false` without a dialog unless `NSCalendarsFullAccessUsageDescription` is in the _calling process's_ `Info.plist`. A spawned CLI without an embedded plist silently rejected — the original Calendar bug. Reminders happened to grant on the same broken setup, masking the defect.
-- `codesign` defaults the identifier to the binary basename (`calendar-cli`), so a documented `tccutil reset Calendar pl.speedwave.desktop` cleared the wrong row and users could not recover from a denied state.
+- On macOS 14+, `requestFullAccessToEvents` returns `granted=false` without a dialog unless `NSCalendarsFullAccessUsageDescription` is in the _calling process's_ `Info.plist`[^1]. A spawned CLI without an embedded plist silently rejected — the original Calendar bug. Reminders happened to grant on the same broken setup, masking the defect.
+- `codesign` defaults the identifier to the binary basename (`calendar-cli`)[^2], so a documented `tccutil reset Calendar pl.speedwave.desktop` cleared the wrong row and users could not recover from a denied state.
 - The old AppleScript probe for mail / notes could not distinguish previously-denied from never-prompted from target-app-not-running — all three looked like "the script failed", with no recovery guidance.
 - A unified gate means a user's experience does not depend on which integration they enable first. `procNotFound` now tells the user to open the target app instead of recommending an unhelpful `tccutil reset`.
 
 ## Migration
 
-This is described here, not in another ADR. The legacy TCC.db rows were keyed by the codesign-default basename (`calendar-cli` etc.); the new build keys them by `pl.speedwave.desktop.<service>`. So existing users who already granted permission will, on first launch after upgrade, see a one-time amber banner listing services that were auto-disabled because their old grant no longer applies; one toggle click re-triggers the consent dialog (now bound to the new sub-identifier) and one _Allow_ finishes the migration. The stale `<svc>-cli` rows linger harmlessly and are not consulted for the new binaries; the cleanup-minded can clear them with `tccutil reset <Service> <svc>-cli` per service (documented in `docs/troubleshooting.md`). The startup reconciliation that drives this is `validate_os_integrations_on_startup` (whose doc comment also points back to this ADR).
+This is described here, not in another ADR. The legacy TCC.db rows were keyed by the codesign-default basename (`calendar-cli` etc.); the new build keys them by `pl.speedwave.desktop.<service>`. So existing users who already granted permission will, on first launch after upgrade, see a one-time amber banner listing services that were auto-disabled because their old grant no longer applies; one toggle click re-triggers the consent dialog (now bound to the new sub-identifier) and one _Allow_ finishes the migration. The stale `<svc>-cli` rows linger harmlessly and are not consulted for the new binaries; the cleanup-minded can clear them with `tccutil reset <Service> <svc>-cli` per service. The startup reconciliation that drives this is `validate_os_integrations_on_startup` (whose doc comment also points back to this ADR).
 
 ## Where it lives in code
 
 - Sub-identifier + TCC-service mapping and error text — `subBundleIdentifier(for:)`, `tccServiceName(for:)`, `composeErrorMessage` in `native/macos/shared/Sources/SharedCLI/Utilities.swift`
-- Canonical status enum + Apple Events OSStatus mapping (`noErr`→granted, `errAEEventNotPermitted` -1743→denied, `errAEEventWouldRequireUserConsent` -1744→notDetermined, `procNotFound` -600→targetNotRunning, else unknown) and the second-phase data-access probe — `native/macos/shared/Sources/SharedCLI/AppleEventsGate.swift`. The `typeKernelProcessID` addressing that backs the `procNotFound` fix is detailed in [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md).
+- Canonical status enum + Apple Events OSStatus mapping (`noErr`→granted, `errAEEventNotPermitted` -1743→denied, `errAEEventWouldRequireUserConsent` -1744→notDetermined, `procNotFound` -600→targetNotRunning, else unknown)[^3] and the second-phase data-access probe — `native/macos/shared/Sources/SharedCLI/AppleEventsGate.swift`. The `typeKernelProcessID` addressing that backs the `procNotFound` fix is detailed in [ADR-070](ADR-070-appleevents-kernel-process-id-gate.md).
 - Per-CLI embedded plists and `-sectcreate` linker flag — `native/macos/{calendar,reminders,mail,notes}/Resources/Info.plist` and each `Package.swift`
 - Build-time version stamping from `desktop/src-tauri/tauri.conf.json` — `scripts/build-native-macos.sh`
 - Post-sign identifier assertion — `verify_identifier` in `scripts/sign-bundled-binaries.sh`
@@ -35,7 +35,15 @@ This is described here, not in another ADR. The legacy TCC.db rows were keyed by
 
 ## Rejected alternatives
 
-- **Single shared `pl.speedwave.desktop` identifier for all CLIs** — rejected: four independently-signed Mach-Os claiming the same identifier as the parent `.app` confuses TCC, which expects one identifier per code-signed unit. Sub-identifiers (Apple's helper-tool convention) keep each helper distinct.
+- **Single shared `pl.speedwave.desktop` identifier for all CLIs** — rejected: four independently-signed Mach-Os claiming the same identifier as the parent `.app` confuses TCC, which expects one identifier per code-signed unit. Sub-identifiers (Apple's helper-tool convention[^4]) keep each helper distinct.
 - **Re-use `EKAuthorizationStatus` for the Apple Events gate** — rejected: it has no slot for `procNotFound`, forcing a lossy mapping to `.denied` that produces the wrong recovery text for a target-app-not-running situation.
 - **Two parallel orchestrators (one per API)** — rejected: the initial-status / request / re-query state machine is identical across both APIs; duplicating it invites drift where a fix to one bypasses the other. One orchestrator with a `RawAuthorizationStatus` seam was chosen instead.
 - **Drop the AppleScript data-access probe in mail / notes** — rejected: a TCC `.granted` does not always imply readable data (historical sandbox / Mail data-protection regressions); keeping the second-phase probe as `verifyDataAccess()` preserves the v1 invariant that the check touches real data.
+
+[^1]: [NSCalendarsFullAccessUsageDescription | Apple Developer Documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nscalendarsfullaccessusagedescription) - the usage-description key EventKit requires, in the calling process's `Info.plist`, before granting full calendar access.
+
+[^2]: [codesign(1) man page (mirror)](https://ss64.com/mac/codesign.html) - `-i, --identifier`: "If this option is omitted, the identifier is derived from either the Info.plist (if present), or the filename of the executable being signed."
+
+[^3]: [Felix Schwarz: "macOS Mojave gets new APIs around AppleEvent sandboxing"](https://www.felix-schwarz.org/blog/2018/08/new-apple-event-apis-in-macos-mojave) - documents `errAEEventNotPermitted` (-1743), `errAEEventWouldRequireUserConsent` (-1744), and `procNotFound` (-600) as the OSStatus values returned by the Apple Events automation-permission check.
+
+[^4]: [SMJobBless(_:_:_:_:) | Apple Developer Documentation](<https://developer.apple.com/documentation/servicemanagement/smjobbless(_:_:_:_:)>) - privileged-helper-tool identifiers are reverse-DNS labels distinct from, and scoped under, the parent app's identifier.

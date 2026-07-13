@@ -1,9 +1,5 @@
-//! Tauri commands for the meeting-transcription feature (ADR-056).
-//!
-//! Thin layer over `speedwave_runtime::transcription`: stores live in Tauri
-//! managed state; events forwarded via per-session `transcript_event::<id>`
-//! Tauri event channels (subscribe returns `{event_name, snapshot}` so a late
-//! subscriber doesn't miss what already happened — ADR-043 delivery shape).
+//! Tauri commands for meeting transcription (ADR-056); thin layer over `transcription` module.
+//! Events forward via per-session `transcript_event::<id>` channels (ADR-043 delivery shape).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -27,6 +23,9 @@ pub type DriversHandle = Arc<Mutex<HashMap<Uuid, StopSignal>>>;
 /// Sessions that already have a live event forwarder — guards against
 /// double-spawning on repeated `subscribe_transcript` calls.
 pub type ForwardersHandle = Arc<Mutex<HashSet<Uuid>>>;
+/// Model keys with a download in flight — single-flight guard: a second
+/// concurrent download would corrupt the shared `.part` temp file.
+pub type DownloadsHandle = Arc<Mutex<HashSet<String>>>;
 
 /// Per-session Tauri event name for transcript streams.
 pub fn transcript_event_name(id: Uuid) -> String {
@@ -43,9 +42,8 @@ fn parse_transcript_id(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| format!("invalid transcript id: {e}"))
 }
 
-/// Truncates a UUID for log lines so CodeQL's "log sensitive" heuristics
-/// (which key off the `session_id` name) don't flag every diagnostic. The
-/// first 8 hex chars are enough to correlate.
+/// Truncates a UUID for log lines so CodeQL's "log sensitive" heuristics (keyed off the
+/// `session_id` name) don't flag every diagnostic; first 8 hex chars are enough to correlate.
 fn short_id(id: Uuid) -> String {
     let mut s = id.to_string();
     s.truncate(8);
@@ -153,10 +151,8 @@ pub async fn start_transcription(
             .map_err(|e| e.to_string())?
     };
 
-    // Create the session, then start capture.
-    // The audio.wav path lives under `<root>/<id>/`, so we need the id before
-    // creating the session — pick it now so the path is correct from the first
-    // persisted write (no fragile post-create patch).
+    // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
+    // path is then correct from the first persisted write (no fragile post-create patch).
     let session_id = Uuid::new_v4();
     let session_dir = store.session_dir(session_id);
     let audio_wav = session_dir.join("audio.wav");
@@ -213,9 +209,8 @@ pub async fn start_transcription(
     let drivers_for_cleanup = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
-            // Log only the first chunk of the id — UUIDs are not secrets, but
-            // CodeQL's heuristics flag any "session_id"-looking variable in a
-            // log line. The short form is enough to correlate diagnostics.
+            // Log only the id's first chunk — CodeQL flags any "session_id"-looking variable;
+            // UUIDs aren't secrets and the short form is enough to correlate.
             log::warn!(
                 "transcript driver for {} ended with error: {e}",
                 short_id(session_id)
@@ -245,9 +240,8 @@ pub async fn stop_transcription(
     drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // Signal the driver to wind down and grab its finish-notifier (idempotent
-    // if the driver already exited — `await_finished` will then just suspend
-    // until the wind-down notify, or the timeout below trips).
+    // Signal the driver to wind down and grab its finish-notifier (idempotent if exited);
+    // `await_finished` then suspends until wind-down notify or the timeout below trips).
     let stop_handle = drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?
@@ -382,9 +376,8 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
     store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
-/// Picks the model for the offline pass: this build's model if downloaded, else
-/// the first downloaded Whisper model (the live one is guaranteed present here).
-/// `None` if somehow nothing is downloaded.
+/// Picks the model for the offline pass: this build's model if downloaded, else the first
+/// downloaded Whisper model (the live one is guaranteed present); `None` if none is downloaded.
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
     let best = transcription::best_model_for_this_build().key;
     if models.whisper_is_present_by_key(best) {
@@ -397,12 +390,8 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .map(|m| m.key)
 }
 
-/// Picks the model for the live pass:
-/// 1. `override_key` if given — must be downloaded, else an error.
-/// 2. The `recommended` model if it's downloaded.
-/// 3. Otherwise the first downloaded Whisper model (we don't auto-download a
-///    multi-GB file — the UI prompts for that).
-/// 4. If nothing is downloaded: an error with a download hint.
+/// Picks the model for the live pass: `override_key` (must be downloaded) → `recommended` (if
+/// downloaded) → first downloaded model → download-hint error (no auto-dl; UI prompts).
 fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, String> {
     if models.whisper_is_present_by_key(recommended) {
         return Ok(recommended.to_string());
@@ -460,7 +449,7 @@ fn spawn_event_forwarder(
     let sub = match store.subscribe(id) {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("subscribe_transcript: {e}");
+            log::warn!("failed to subscribe to transcript {}: {e}", short_id(id));
             if let Ok(mut set) = forwarders.lock() {
                 set.remove(&id);
             }
@@ -490,7 +479,7 @@ async fn forward_events(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                log::warn!("transcript {event_name}: subscriber lagged by {n} events");
+                log::warn!("transcript subscriber for {event_name} lagged by {n} events");
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -536,6 +525,40 @@ pub async fn get_transcript_markdown(
 
 // ---- 5) model management --------------------------------------------------
 
+/// RAII slot in the in-flight download registry: removed on drop, so the
+/// registry empties on every exit path of the owning download task.
+struct DownloadSlot {
+    downloads: DownloadsHandle,
+    key: String,
+}
+
+impl Drop for DownloadSlot {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.downloads.lock() {
+            set.remove(&self.key);
+        }
+    }
+}
+
+/// Claims the single download slot for `key`; errors if one is already live.
+fn try_begin_download(downloads: &DownloadsHandle, key: &str) -> Result<DownloadSlot, String> {
+    let mut set = downloads
+        .lock()
+        .map_err(|_| "download registry poisoned".to_string())?;
+    if !set.insert(key.to_string()) {
+        return Err(format!("model '{key}' is already downloading"));
+    }
+    Ok(DownloadSlot {
+        downloads: downloads.clone(),
+        key: key.to_string(),
+    })
+}
+
+/// `true` while a download of `key` is in flight.
+fn is_downloading(downloads: &DownloadsHandle, key: &str) -> bool {
+    downloads.lock().map(|s| s.contains(key)).unwrap_or(false)
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ModelsAck {
     /// Status of each Whisper model in the catalogue.
@@ -556,6 +579,8 @@ pub struct RecommendedModelAck {
     pub size_bytes: u64,
     /// `true` if already downloaded.
     pub downloaded: bool,
+    /// `true` while a download is in flight (a remounted UI re-syncs on this).
+    pub downloading: bool,
     /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
     pub accel_label: String,
 }
@@ -572,6 +597,7 @@ fn accel_label() -> String {
 #[tauri::command]
 pub async fn recommended_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
+    downloads: tauri::State<'_, DownloadsHandle>,
 ) -> Result<RecommendedModelAck, String> {
     let best = transcription::best_model_for_this_build();
     let status = models
@@ -584,6 +610,7 @@ pub async fn recommended_transcription_model(
         display_name: best.display_name.to_string(),
         size_bytes: status.size_bytes,
         downloaded: status.downloaded,
+        downloading: is_downloading(downloads.inner(), best.key),
         accel_label: accel_label(),
     })
 }
@@ -602,16 +629,24 @@ pub async fn list_transcription_models(
 pub async fn download_transcription_model(
     model_id: String,
     models: tauri::State<'_, ModelStoreHandle>,
+    downloads: tauri::State<'_, DownloadsHandle>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let slot = try_begin_download(downloads.inner(), &model_id)?;
     let models = models.inner().clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // The slot lives inside the blocking task: the registry entry clears
+        // exactly when the download work ends, even if this future is dropped.
+        let _slot = slot;
         models
             .ensure_model(&model_id, &mut |p| {
                 let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
             })
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| {
+                log::warn!(target: "transcription::models", "download of '{model_id}' failed: {e}");
+                e.to_string()
+            })
     })
     .await
     .map_err(|e| format!("download task panicked: {e}"))??;
@@ -627,7 +662,7 @@ pub async fn delete_transcription_model(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use speedwave_runtime::transcription::TranscriptSession;
@@ -701,10 +736,8 @@ mod tests {
         );
     }
 
-    /// Driving Tauri commands fully requires a `tauri::State` wrapper that
-    /// isn't trivial to fabricate in unit tests; instead, exercise the
-    /// underlying `TranscriptStore` calls that each command makes, plus the
-    /// validation helpers above (`parse_transcript_id` already covered).
+    /// Driving Tauri commands fully needs a `tauri::State` wrapper, not trivial to fabricate in
+    /// unit tests; instead exercise the underlying `TranscriptStore` calls each command makes.
     #[tokio::test]
     async fn store_round_trip_matches_what_the_commands_will_do() {
         let dir = tempfile::tempdir().unwrap();
@@ -743,6 +776,40 @@ mod tests {
         // Unknown id → default.
         let missing = Uuid::new_v4();
         assert_eq!(session_language(&store, missing), Language::Pl);
+    }
+
+    #[test]
+    fn try_begin_download_claims_then_rejects_a_second_claim() {
+        let downloads = DownloadsHandle::default();
+        let slot = try_begin_download(&downloads, "large-v3").unwrap();
+        assert!(is_downloading(&downloads, "large-v3"));
+        // Second concurrent claim of the same key is refused with the reason.
+        let err = try_begin_download(&downloads, "large-v3").err().unwrap();
+        assert!(err.contains("already downloading"), "got: {err}");
+        // A different key is independent.
+        let other = try_begin_download(&downloads, "large-v3-turbo").unwrap();
+        drop(other);
+        drop(slot);
+    }
+
+    #[test]
+    fn download_slot_clears_the_registry_on_drop() {
+        let downloads = DownloadsHandle::default();
+        {
+            let _slot = try_begin_download(&downloads, "large-v3").unwrap();
+            assert!(is_downloading(&downloads, "large-v3"));
+        }
+        assert!(!is_downloading(&downloads, "large-v3"));
+        // The key is claimable again after the slot dropped.
+        assert!(try_begin_download(&downloads, "large-v3").is_ok());
+    }
+
+    #[test]
+    fn is_downloading_is_false_for_an_empty_registry_and_unknown_keys() {
+        let downloads = DownloadsHandle::default();
+        assert!(!is_downloading(&downloads, "large-v3"));
+        let _slot = try_begin_download(&downloads, "large-v3").unwrap();
+        assert!(!is_downloading(&downloads, "some-other-model"));
     }
 
     #[test]

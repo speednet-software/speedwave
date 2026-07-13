@@ -19,8 +19,8 @@ Two changes to every MCP worker (GitLab, Slack, Redmine, SharePoint, and later G
 
 ## How it behaves
 
-- Backoff is exponential with additive jitter: base delays of 2s, 4s, 8s, capped at 15s, plus 0–30% random jitter on top (so total can slightly exceed the cap). Jitter avoids a thundering herd when many containers restart at once.
-- The retry helper catches both `null` returns and thrown exceptions (e.g. a `TypeError` from a failed DNS lookup); exceptions are logged as warnings and do not propagate.
+- Backoff is exponential with additive jitter: base delays of 2s, 4s, 8s, capped at 15s, plus 0–30% random jitter on top (so total can slightly exceed the cap) — see `mcp-servers/shared/src/retry.ts`. Jitter avoids a thundering herd when many containers restart at once, the standard rationale for combining exponential backoff with randomized jitter[^1].
+- The retry helper catches both `null` returns and thrown exceptions (e.g. a `TypeError` from a failed DNS lookup, the shape Node's `fetch()`/undici use to wrap a DNS resolution failure[^2]); exceptions are logged as warnings and do not propagate.
 - SharePoint keeps its fail-fast behavior: after retries are exhausted it still exits non-zero. The retry just gives its OAuth token refresh more chances to succeed first.
 - GitLab's `initializeGitLabClient()` no longer blocks on a network round-trip: it creates the client and returns immediately, then schedules `testConnection()` (which calls `gitlab.Users.showCurrentUser()`) in the background via `backgroundConnectionTest()`. The HTTP listener never waits on a slow or unreachable GitLab.
 
@@ -36,3 +36,7 @@ Two changes to every MCP worker (GitLab, Slack, Redmine, SharePoint, and later G
 
 - **Lazy init on first tool call** — would change the initialization contract from startup-time to per-tool and complicate the graceful-degradation pattern shared by all servers.
 - **Health-check-triggered re-init from the Hub** — requires new Hub↔worker IPC and breaks the stateless-worker model.
+
+[^1]: [Exponential Backoff And Jitter - AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) - jittered exponential backoff spreads out retry spikes and is the standard pattern AWS SDKs use for transient-failure retries.
+
+[^2]: [nodejs/undici issue #1116 - network errors are wrapped in static "fetch failed" error](https://github.com/nodejs/undici/issues/1116) - confirms Node's `fetch()` wraps a DNS resolution failure (e.g. `getaddrinfo ENOTFOUND`) in a top-level `TypeError: fetch failed`.

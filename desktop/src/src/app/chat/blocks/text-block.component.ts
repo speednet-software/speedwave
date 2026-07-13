@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { marked } from 'marked';
+import { parseMarkdownSync } from '../../shared/markdown';
 
 /**
  * Renders markdown text as HTML with an optional streaming caret.
@@ -34,11 +35,5 @@ export class TextBlockComponent {
   readonly streaming = input(false);
 
   /** Returns unsanitized HTML from `marked`. Safe only when bound via `[innerHTML]` — see class doc. */
-  readonly rendered = computed(() => {
-    const result = marked.parse(this.content(), { async: false });
-    if (typeof result !== 'string') {
-      throw new Error('marked.parse returned a Promise; async option must remain false');
-    }
-    return result;
-  });
+  readonly rendered = computed(() => parseMarkdownSync(marked, this.content()));
 }

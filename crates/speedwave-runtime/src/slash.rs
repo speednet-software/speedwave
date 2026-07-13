@@ -623,7 +623,11 @@ fn claude_container_name(project: &str) -> String {
 // Tests
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;

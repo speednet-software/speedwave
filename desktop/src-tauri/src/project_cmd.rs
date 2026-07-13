@@ -220,10 +220,8 @@ fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
     Some((stable_id, dir))
 }
 
-/// Builds the JSON payload for the `project_switch_failed` Tauri event.
-///
-/// Emits structured CloudStorage TCC fields if the error is prefix-encoded,
-/// else generic `project` + `error`.
+/// Builds the JSON payload for the `project_switch_failed` Tauri event. Emits structured
+/// CloudStorage TCC fields if the error is prefix-encoded, else generic `project` + `error`.
 pub(crate) fn compute_project_switch_failure_payload(
     previous: Option<&str>,
     full_error: &str,
@@ -278,12 +276,14 @@ pub(crate) fn rollback_and_emit_failed(
     full_error
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unwrap/expect are fine in test assertions"
+)]
 mod tests {
     use super::*;
     use config::{ProjectUserEntry, SpeedwaveUserConfig};
@@ -309,6 +309,7 @@ mod tests {
             active_project: Some("alpha".to_string()),
             selected_ide: None,
             ui: None,
+            telemetry: None,
         }
     }
 
@@ -333,10 +334,8 @@ mod tests {
         );
     }
 
-    /// Structural: switch_project's closure must check for a missing LLM
-    /// provider BEFORE building images / rendering compose — otherwise
-    /// render_compose bails and teardown_only may run against a stale or
-    /// missing compose.yml. Mirrors add_project's same pre-check.
+    /// Structural: switch_project must check for a missing LLM provider before render, else
+    /// render_compose bails and teardown_only runs against a stale compose.yml.
     #[test]
     fn switch_checks_no_provider_before_render() {
         let source = include_str!("project_cmd.rs");
@@ -357,9 +356,8 @@ mod tests {
         );
     }
 
-    /// Structural: host workers must eager-start BEFORE compose render, or the
-    /// rendered WORKER_*_URLs are dead and the watchdog later force-recreates
-    /// every container (killing the fresh chat session). Mirrors add_project.
+    /// Structural: host workers must eager-start BEFORE compose render, else rendered WORKER_*_URLs
+    /// are dead and the watchdog force-recreates every container, killing the fresh chat session.
     #[test]
     fn switch_eager_starts_host_workers_before_render() {
         let source = include_str!("project_cmd.rs");
@@ -488,6 +486,7 @@ mod tests {
             active_project: None,
             selected_ide: None,
             ui: None,
+            telemetry: None,
         };
 
         let result = apply_switch_project(&mut cfg, "only");

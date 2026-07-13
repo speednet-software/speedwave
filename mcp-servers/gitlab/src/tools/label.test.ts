@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createLabelTools } from './label-tools.js';
+import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -202,15 +203,7 @@ describe('label-tools', () => {
       const listLabelsTool = tools.find((t) => t.tool.name === 'listLabels');
       const result = await listLabelsTool!.handler({ project_id: 1 });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
 
     it('returns error for 404 not found', async () => {
@@ -221,10 +214,7 @@ describe('label-tools', () => {
       const listLabelsTool = tools.find((t) => t.tool.name === 'listLabels');
       const result = await listLabelsTool!.handler({ project_id: 999 });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('returns error for network timeout', async () => {
@@ -501,15 +491,7 @@ describe('label-tools', () => {
         color: '#FF0000',
       });
 
-      expect(result).toEqual({
-        content: [
-          {
-            type: 'text',
-            text: 'Error: Permission denied. Your GitLab token may not have sufficient permissions.',
-          },
-        ],
-        isError: true,
-      });
+      expectPermissionTeachingError(result);
     });
 
     it('returns error for 404 project not found', async () => {
@@ -524,10 +506,7 @@ describe('label-tools', () => {
         color: '#FF0000',
       });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('returns error for network timeout', async () => {

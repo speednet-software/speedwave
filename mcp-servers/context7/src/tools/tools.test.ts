@@ -3,10 +3,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 import { createResolveLibraryIdTool, resolveLibraryIdTool } from './resolve_library_id.js';
 import { createQueryDocsTool, queryDocsTool } from './query_docs.js';
 import { Context7Client, Context7Error } from '../client.js';
-import { DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from '../consts.js';
+import { DEFAULT_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS, MAX_SEARCH_RESULTS } from '../consts.js';
 
 /** Build a stub client whose two API methods are vitest mocks. */
 function makeStubClient(): Context7Client & {
@@ -30,23 +31,51 @@ describe('resolveLibraryId metadata', () => {
     expect(resolveLibraryIdTool.annotations?.readOnlyHint).toBe(true);
     expect(resolveLibraryIdTool.inputExamples?.length).toBeGreaterThan(0);
   });
+
+  it('uses the prefixed defer-loading meta key', () => {
+    expect(resolveLibraryIdTool._meta?.[META_KEYS.DEFER_LOADING]).toBe(false);
+    expect(resolveLibraryIdTool._meta).not.toHaveProperty('deferLoading');
+  });
+
+  it('documents the search-result cap in the description', () => {
+    expect(resolveLibraryIdTool.description).toContain(String(MAX_SEARCH_RESULTS));
+  });
+
+  it('declares benchmarkScore in the output schema', () => {
+    const matches = (
+      resolveLibraryIdTool.outputSchema.properties as Record<
+        string,
+        { items: { properties: unknown } }
+      >
+    ).matches;
+    expect(matches.items.properties as Record<string, unknown>).toHaveProperty('benchmarkScore');
+  });
 });
 
 describe('resolveLibraryId handler', () => {
-  it('rejects missing libraryName', async () => {
+  it('rejects missing libraryName with a teaching error', async () => {
     const client = makeStubClient();
     const { handler } = createResolveLibraryIdTool(client);
     const result = await handler({ query: 'q' });
     expect(result.isError).toBe(true);
-    expect(JSON.stringify(result)).toContain('libraryName');
+    const text = result.content[0].text;
+    expect(text).toContain('libraryName');
+    expect(text).toContain('undefined');
   });
 
-  it('rejects missing query', async () => {
+  it('rejects missing query with a teaching error', async () => {
     const client = makeStubClient();
     const { handler } = createResolveLibraryIdTool(client);
     const result = await handler({ libraryName: 'react' });
     expect(result.isError).toBe(true);
-    expect(JSON.stringify(result)).toContain('query');
+    expect(result.content[0].text).toContain('query');
+  });
+
+  it('rejects empty-string libraryName', async () => {
+    const client = makeStubClient();
+    const { handler } = createResolveLibraryIdTool(client);
+    const result = await handler({ libraryName: '', query: 'q' });
+    expect(result.isError).toBe(true);
   });
 
   it('returns formatted matches on success', async () => {
@@ -58,6 +87,7 @@ describe('resolveLibraryId handler', () => {
           title: 'React',
           description: 'UI library',
           trustScore: 9.2,
+          benchmarkScore: 87,
           totalSnippets: 3000,
           versions: ['v18', 'v19'],
         },
@@ -70,6 +100,7 @@ describe('resolveLibraryId handler', () => {
     const body = JSON.parse(result.content[0].text);
     expect(body.tier).toBe('anonymous');
     expect(body.matches[0].id).toBe('/facebook/react');
+    expect(body.matches[0].benchmarkScore).toBe(87);
   });
 
   it('returns helpful text on empty results', async () => {
@@ -122,14 +153,21 @@ describe('queryDocs metadata', () => {
     expect(queryDocsTool.inputSchema.required).toEqual(['libraryId', 'query']);
     expect(queryDocsTool.annotations?.readOnlyHint).toBe(true);
   });
+
+  it('uses the prefixed defer-loading meta key', () => {
+    expect(queryDocsTool._meta?.[META_KEYS.DEFER_LOADING]).toBe(false);
+    expect(queryDocsTool._meta).not.toHaveProperty('deferLoading');
+  });
 });
 
 describe('queryDocs handler', () => {
-  it('rejects missing libraryId', async () => {
+  it('rejects missing libraryId with a teaching error naming resolveLibraryId', async () => {
     const client = makeStubClient();
     const { handler } = createQueryDocsTool(client);
     const result = await handler({ query: 'q' });
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('libraryId');
+    expect(result.content[0].text).toContain('resolveLibraryId');
   });
 
   it('rejects missing query', async () => {
@@ -137,6 +175,7 @@ describe('queryDocs handler', () => {
     const { handler } = createQueryDocsTool(client);
     const result = await handler({ libraryId: '/x/y' });
     expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('query');
   });
 
   it('uses DEFAULT_OUTPUT_TOKENS when tokens omitted', async () => {

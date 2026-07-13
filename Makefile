@@ -64,7 +64,7 @@ guard-not-prod-data-dir:
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
-        check-clippy check-desktop-clippy check-angular check-mcp check-fmt \
+        check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
         audit audit-rust audit-mcp audit-desktop \
@@ -210,7 +210,7 @@ test: guard-not-prod-data-dir
 	@"$(MAKE)" -j$(TEST_LANES_JOBS) test-run-lanes
 	@echo "\n✅ All tests passed"
 
-check: check-clippy check-desktop-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
+check: check-clippy check-desktop-clippy check-proxy-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
 	@echo "\n✅ All checks passed"
 
 clean:
@@ -398,7 +398,8 @@ test-desktop-build-run:
 	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
 	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats
+	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+	  _tests/desktop/bundle-native-assets.bats
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run:
@@ -568,7 +569,7 @@ test-entrypoint:
 
 test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/ci/validate-pr-title-main.bats
+	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -576,7 +577,8 @@ test-desktop-build: build-angular build-mcp
 	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
 	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats
+	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+	  _tests/desktop/bundle-native-assets.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
@@ -714,6 +716,10 @@ check-desktop-clippy: build-angular build-mcp
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
 	@echo "✅ Desktop clippy: 0 warnings"
 
+check-proxy-clippy:
+	cd containers/proxy && cargo clippy --all-targets --locked -- -D warnings
+	@echo "✅ Proxy clippy: 0 warnings"
+
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
@@ -729,9 +735,14 @@ check-angular:
 	bats _tests/desktop/desktop-build.bats
 	@echo "✅ Angular production build + desktop path verification OK"
 
+# Shared by check-fmt and fmt so the two can't drift.
+PRETTIER_GLOBS := 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+
 check-fmt:
 	cargo fmt --all -- --check
-	$(NPX) prettier --check 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+	cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
+	cargo fmt --manifest-path containers/proxy/Cargo.toml --all -- --check
+	$(NPX) prettier --check $(PRETTIER_GLOBS)
 	@echo "✅ Format check passed"
 
 check-mcp-lint:
@@ -775,7 +786,9 @@ check-all: check test coverage audit
 
 fmt:
 	cargo fmt --all
-	$(NPX) prettier --write 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
+	cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all
+	cargo fmt --manifest-path containers/proxy/Cargo.toml --all
+	$(NPX) prettier --write $(PRETTIER_GLOBS)
 	@echo "✅ Formatted"
 
 lint:

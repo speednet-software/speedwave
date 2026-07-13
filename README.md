@@ -1,52 +1,87 @@
 # Speedwave
 
-**Security-first AI platform that connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with your external services — without exposing a single credential to the AI.**
+**A safer way to use AI coding assistants in regulated software delivery.**
 
-Speedwave wraps Claude Code in hardened, token-free containers and routes all service access through isolated MCP workers. Each worker sees only its own credentials, the AI sees none. Ships as a single installable app (.dmg / .exe) — no Docker Desktop required.
+Speedwave helps engineering teams use AI coding assistants such as [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or local LLMs inside controlled, auditable development workflows.
 
-## Security Model
+It is designed for organisations that want the speed of AI-assisted development without unmanaged access to source code, credentials, sensitive data or internal tools.
 
-Speedwave treats security as a non-negotiable architectural constraint, not an add-on.
+## Why Speedwave exists
 
-| Layer                          | What it does                                                                             |
-| ------------------------------ | ---------------------------------------------------------------------------------------- |
-| **Token-free AI container**    | Claude runs with zero credentials — it cannot access any service directly                |
-| **Per-worker token isolation** | Each MCP worker mounts only its own service credentials (read-only)                      |
-| **OWASP container hardening**  | `cap_drop: ALL`, `no-new-privileges`, read-only filesystem, restricted tmpfs             |
-| **Kernel-level isolation**     | Lima VM (macOS), WSL2 (Windows)                                                          |
-| **Zero-token hub**             | The MCP Hub routes requests but holds no credentials — compromise exposes nothing        |
-| **Network isolation**          | Per-project container networks prevent cross-project access                              |
-| **PII tokenization**           | Sensitive data is replaced with opaque tokens before reaching the AI model               |
-| **Sandbox hardening**          | Code execution sandbox with pattern denylist, restricted context, and execution timeouts |
-| **SSRF protection**            | Allowlist-based URL validation with redirect blocking on all internal fetches            |
+Developers are already using AI coding assistants to move faster. In regulated engineering environments, unmanaged AI adoption creates new risks:
 
-Even if an attacker escapes the sandbox, they land in a container with no tokens, no capabilities, and a read-only filesystem. **Defense in depth at every layer.**
+- sensitive data in prompts
+- exposed credentials
+- uncontrolled access to repositories and tools
+- no visibility into AI-assisted work
+- no audit evidence
+- shadow AI usage across teams
 
-→ [Full security model](docs/architecture/security.md) · [Security policy](SECURITY.md)
+Speedwave gives teams a controlled way to adopt AI coding assistants without blocking developers or relying on informal usage policies.
 
-## MCP Hub — Smart Tool Discovery
+## What Speedwave does
 
-Traditional MCP setups expose every tool directly to the AI, consuming context window with dozens of tool definitions. Speedwave takes a different approach.
+Speedwave adds a security and governance layer around AI-assisted development. It helps teams:
 
-The MCP Hub is the **only** MCP server Claude sees, and it exposes just **two tools**:
+- run AI coding assistants inside controlled project environments
+- limit what AI can access
+- connect development tools through approved integrations
+- protect credentials and sensitive data
+- log AI-assisted activity for review
+- support safer rollout across regulated engineering teams
 
-- **`search_tools`** — Claude describes what it needs; the Hub discovers matching tools across all enabled integrations and returns only the relevant ones
-- **`execute_code`** — Claude writes JavaScript that calls the discovered tools; the Hub routes execution to the appropriate worker
+## Who it is for
 
-This means Claude's context window stays clean regardless of how many integrations are enabled. Ten services with 50+ tools each? Claude still sees just two. The Hub handles discovery, routing, and — critically — **PII tokenization**: sensitive data from service responses is replaced with opaque tokens before reaching the model.
+Speedwave is built for:
 
-→ [Integrations & Hub architecture](docs/guides/integrations.md)
+- developers who want to use AI coding assistants safely
+- engineering leaders who want to scale AI adoption without shadow AI
+- security teams that need clearer control boundaries
+- governance and compliance teams that need visibility and audit evidence
 
-## Key Features
+## What Speedwave is not
 
-- **Two interfaces** — Desktop app (chat UI with project management) and CLI (`speedwave` terminal command)
-- **Built-in integrations** — Slack, SharePoint, GitLab, GitHub, Atlassian, Redmine, Playwright, Context7, Office documents (Word/Excel/PowerPoint/PDF), plus Mail, Calendar, Reminders, Notes via OS integrations
-- **Plugin system** — extend with custom MCP services via Ed25519-signed plugins
-- **Cross-platform** — macOS and Windows with platform-native OS integrations
-- **Zero-install dependencies** — Lima, nerdctl, and containerd are bundled; no system-wide Docker or container runtime needed
-- **IDE bridge** — connects Claude Code with your editor for seamless development
+Speedwave is not another AI coding assistant. It does not replace Claude Code or local LLMs. It provides a controlled environment around AI coding tools so organisations can adopt them more safely.
+
+Speedwave is also not a complete compliance programme by itself. It provides technical controls, visibility and evidence that can support governance and audit workflows.
+
+## Core principles
+
+- **Keep developers moving.** AI should improve delivery speed, not create a parallel approval burden.
+- **Keep control boundaries clear.** AI should only access what it is allowed to access.
+- **Keep credentials protected.** Assistants and models should not receive broad or unnecessary access to secrets.
+- **Keep sensitive data safer.** Teams should reduce the risk of sensitive information being exposed in prompts or tool calls.
+- **Keep activity reviewable.** AI-assisted work should leave evidence that teams can inspect when needed.
+
+## Technical overview
+
+Under the hood, Speedwave uses isolated environments, controlled tool access, credential separation, sensitive-data protection and audit logging to reduce the risks of AI-assisted development.
+
+Key capabilities include:
+
+- hardened local runtime
+- token-free assistant container
+- scoped MCP gateway
+- isolated MCP workers
+- credential isolation
+- PII tokenisation
+- local LLM support
+- audit logging
+- SIEM / OTEL-ready observability
+- prompt-injection-aware design
+
+## Quick start
+
+1. Download the latest release for your platform (macOS `.dmg`, Windows `.exe`) from [GitHub Releases](https://github.com/speednet-software/speedwave/releases).
+2. Install and launch Speedwave, then complete the setup wizard (it provisions the bundled container runtime: Lima on macOS, WSL2 on Windows).
+3. Add a project and enable the integrations your team has approved.
+4. Work in the Desktop chat UI, or run `speedwave` in a terminal to start a CLI session.
+
+Full installation guide and first-session walkthrough: [speedwave.dev/docs](https://speedwave.dev/docs).
 
 ## Architecture
+
+The assistant runs in a hardened container inside a VM (Lima on macOS, WSL2 on Windows). It holds no credentials: all service access goes through the MCP Hub to isolated per-integration workers, and all model traffic goes through a per-project LLM proxy.
 
 ```mermaid
 graph TB
@@ -59,6 +94,7 @@ graph TB
     subgraph VM[" Lima VM / WSL2 "]
         CLAUDE[Claude Code]
         HUB[MCP Hub]
+        PROXY[LLM proxy]
         subgraph Workers[" Workers "]
             direction LR
             SLACK[Slack] ~~~ GITLAB[GitLab] ~~~ GITHUB[GitHub] ~~~ ATLASSIAN[Atlassian] ~~~ SP[SharePoint] ~~~ REDMINE[Redmine]
@@ -67,60 +103,50 @@ graph TB
 
     APP & CLI --> CLAUDE
     CLAUDE -- "MCP (2 tools)" --> HUB
+    CLAUDE -- "LLM traffic" --> PROXY
     CLAUDE -. "WebSocket" .-> IDE
     HUB --> Workers
     HUB -- "HTTP" --> MCP_OS
 ```
 
-| Component       | Role                                                                                    |
-| --------------- | --------------------------------------------------------------------------------------- |
-| **Claude Code** | Hardened container — zero tokens, zero credentials, read-only filesystem                |
-| **MCP Hub**     | Single entry point — exposes only `search_tools` + `execute_code`, tokenizes PII        |
-| **Workers**     | Each mounts only its own service credentials (read-only), per-project network isolation |
-| **mcp-os**      | Host process for native OS integrations (Mail, Calendar, Reminders, Notes)              |
-| **IDE Bridge**  | WebSocket link between Claude Code in the container and your editor on the host         |
+| Component       | Role                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Claude Code** | Hardened container: zero tokens, zero credentials, read-only filesystem                                       |
+| **MCP Hub**     | The only MCP server the assistant sees: exposes `search_tools` + `execute_code`, tokenizes PII                |
+| **LLM proxy**   | Per-project forwarder for model traffic (Anthropic passthrough or approved local providers), records usage    |
+| **Workers**     | One container per integration; each mounts only its own service credentials (read-only), per-project networks |
+| **mcp-os**      | Host process for native OS integrations (Mail, Calendar, Reminders, Notes)                                    |
+| **IDE Bridge**  | WebSocket link between the assistant container and your editor on the host                                    |
 
-→ [Architecture overview](docs/architecture/README.md) · [Container topology](docs/architecture/containers.md) · [Platform matrix](docs/architecture/platform-matrix.md)
+Model usage and cost are logged per project, diagnostics are collectable for review, and telemetry can be exported via OTLP to your own collector, including organisation-enforced configuration via MDM policy.
 
-## Quick Start
+The full architecture series is in the "Under the Hood" section of the [documentation](https://speedwave.dev/docs).
 
-1. Download the latest release for your platform from [GitHub Releases](https://github.com/speednet-software/speedwave/releases)
-2. Install the application
-3. Launch Speedwave and follow the setup wizard
-4. Configure your integrations and start working
+## Security model
 
-→ [Getting started guide](docs/getting-started/README.md) · [Configuration reference](docs/getting-started/configuration.md)
+Speedwave is designed to limit what AI can see, access and do. It focuses on:
 
-## Platform Support
+- reducing unnecessary model context exposure
+- keeping credentials outside the assistant environment
+- routing tool usage through controlled integrations
+- protecting sensitive values before model exposure
+- logging AI-assisted activity for review
 
-| Platform | VM / Runtime                | Installer | OS Integrations       |
-| -------- | --------------------------- | --------- | --------------------- |
-| macOS    | Lima + Apple Virtualization | `.dmg`    | EventKit, AppleScript |
-| Windows  | WSL2 + Hyper-V              | `.exe`    | WinRT, MAPI (Outlook) |
+## Limitations
 
-→ [Platform details](docs/architecture/platform-matrix.md)
+Speedwave does not replace secure development practices, code review, access management, secrets management or organisational AI policies.
+
+It helps create safer boundaries and evidence around AI-assisted development, but it should be deployed as part of a broader engineering, security and governance model.
 
 ## Documentation
 
-| Topic                  | Link                                                                             |
-| ---------------------- | -------------------------------------------------------------------------------- |
-| Documentation index    | [docs/](docs/README.md)                                                          |
-| Getting started        | [docs/getting-started/](docs/getting-started/README.md)                          |
-| Architecture           | [docs/architecture/](docs/architecture/README.md)                                |
-| Security model         | [docs/architecture/security.md](docs/architecture/security.md)                   |
-| CLI guide              | [docs/guides/cli.md](docs/guides/cli.md)                                         |
-| Desktop guide          | [docs/guides/desktop.md](docs/guides/desktop.md)                                 |
-| Integrations & plugins | [docs/guides/integrations.md](docs/guides/integrations.md)                       |
-| IDE bridge             | [docs/guides/ide-bridge.md](docs/guides/ide-bridge.md)                           |
-| Development setup      | [docs/contributing/development-setup.md](docs/contributing/development-setup.md) |
-| Testing strategy       | [docs/contributing/testing.md](docs/contributing/testing.md)                     |
-| Architecture decisions | [docs/adr/](docs/adr/README.md)                                                  |
+- User and developer documentation: [speedwave.dev/docs](https://speedwave.dev/docs)
+- Architectural decisions: [docs/adr/](docs/adr/README.md)
+- Contributor working rules: [.claude/rules/](.claude/rules/)
 
 ## Contributing
 
-We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on bug reports, feature requests, development setup, and the PR process.
-
-Please review our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, feature requests, development setup, and the PR process. Please review the [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
 ## Security
 
@@ -128,4 +154,4 @@ If you discover a vulnerability, **do not open a public issue**. See [SECURITY.m
 
 ## License
 
-[Apache License 2.0](LICENSE)
+Speedwave core is available under the [Apache 2.0 license](LICENSE).

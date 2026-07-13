@@ -16,8 +16,7 @@ public enum PermissionStatus: String {
     case targetNotRunning // AE-only: target app (Mail/Notes) not running, not a TCC issue
 }
 
-/// Internal status produced by gates. EventKit gates map EKAuthorizationStatus →
-/// RawAuthorizationStatus; AppleEvents gates map OSStatus → RawAuthorizationStatus.
+/// Internal status produced by gates (EventKit gates map EKAuthorizationStatus, AppleEvents gates map OSStatus).
 /// `mapRawToPermissionStatus` projects this onto the public `PermissionStatus`.
 public enum RawAuthorizationStatus: Equatable {
     case granted
@@ -36,9 +35,8 @@ public enum PermissionEntity: String {
     case notes
 }
 
-/// SSOT: parent bundle identifier literal. Must match `desktop/src-tauri/tauri.conf.json::identifier`.
-/// A bats test (`bundle ID in tauri.conf.json matches Swift literal`) guards drift.
-/// Per-CLI binaries embed `pl.speedwave.desktop.<entity>` via `subBundleIdentifier(for:)`.
+/// SSOT: parent bundle identifier literal. Must match `desktop/src-tauri/tauri.conf.json::identifier`
+/// (drift-guarded by a bats test). Per-CLI binaries embed `pl.speedwave.desktop.<entity>` via `subBundleIdentifier(for:)`.
 public let speedwaveBundleIdentifier: String = "pl.speedwave.desktop"
 
 /// Per-entity sub-identifier used as `CFBundleIdentifier` of each CLI binary's embedded
@@ -220,9 +218,8 @@ public func performCheckPermission(gate: PermissionGate, entity: PermissionEntit
     return finalizeResult(status: final, entity: entity, gate: gate, requestError: requestError)
 }
 
-/// Builds the final JSON response, optionally running `gate.verifyDataAccess()` when status
-/// is `.granted` (preserves the Mail/Notes data-access invariant from v1) and downgrading
-/// to `.silentReject` when data access fails despite TCC granting permission.
+/// Builds the final JSON response, optionally running `gate.verifyDataAccess()` when status is `.granted`
+/// (Mail/Notes data-access invariant), downgrading to `.silentReject` when data access fails despite TCC granting.
 private func finalizeResult(
     status: PermissionStatus,
     entity: PermissionEntity,

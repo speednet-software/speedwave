@@ -16,7 +16,7 @@ The defect was structural — `verify_plugin_signature` was called from exactly 
 
 `~/.speedwave/plugins/<slug>/` is writable by the user. A local attacker (npm postinstall, browser RCE, malware running as the user) could either:
 
-1. **Drop a fresh directory** with a forged `plugin.json` (and no `SIGNATURE`), and Speedwave would build its `Containerfile` (`RUN <arbitrary>` runs at build time) and bind-mount its `claude-resources/hooks/` into the claude container (executed on every Claude tool call), or
+1. **Drop a fresh directory** with a forged `plugin.json` (and no `SIGNATURE`), and Speedwave would build its `Containerfile` (`RUN <arbitrary>` runs at build time) and bind-mount its `claude-resources/hooks/` into the claude container (executed on every Claude tool call — at the time of writing this was believed-current behavior; hooks in fact only started executing with [ADR-078](ADR-078-claude-hook-registration.md), which makes this verification invariant load-bearing for the hook surface), or
 2. **Modify a legitimately-signed plugin** post-install. The signature was never reread, so any later change to the tree was invisible — including swapping the `Containerfile` or replacing a skill with attacker-supplied content.
 
 The signing system was therefore an install-time gate, not a runtime integrity invariant. The fix is to treat the signature as the latter: every read of the tree must observe a state that matches the signature, and any mutation must invalidate the verdict.
@@ -71,7 +71,7 @@ Per-plugin mutable state lives at `~/.speedwave/plugin-state/<slug>/`, not under
 
 ### Hard-fail at startup with explicit recovery
 
-The Desktop `.setup()` callback runs `audit_all` and, on failure, shows a Tauri 2 dialog with every slug+reason and the CLI commands that fix them, then exits via `show_audit_failure_dialog_and_exit(...) -> !`. On macOS and Windows, `tauri-plugin-dialog`'s `blocking_show()` renders a native dialog directly from inside `setup()`. The OS-level dialog runs independently of the Tauri event loop, so the user sees the message synchronously.
+The Desktop `.setup()` callback runs `audit_all` and, on failure, shows a Tauri 2 dialog with every slug+reason and the CLI commands that fix them, then exits via `show_audit_failure_dialog_and_exit(...) -> !`. On macOS and Windows, `tauri-plugin-dialog`'s `blocking_show()` renders a native dialog directly from inside `setup()`. The OS-level dialog runs independently of the Tauri event loop, so the user sees the message synchronously.[^10]
 
 The CLI runs the same audit _after_ Help and SelfUpdate (which exit before reaching this point) and _before_ any action that touches the runtime. Recovery actions (`Init`, `PluginInstall`, `PluginList`, `PluginRemove`) skip the audit so a user with a bad plugin can list status, install a fresh signed plugin, or remove the broken one even when another plugin is failing. The skip list is an explicit allow-list, so any future `CliAction` variant defaults to gated.
 
@@ -87,7 +87,7 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 
 ### Manifest validation
 
-`consts::RESERVED_ENV_KEYS` is the SSOT for env keys plugins cannot inject — `PORT` (Speedwave-reserved), dynamic-linker hijacks (`LD_*` on Linux, `DYLD_*` on macOS), language-runtime hijacks (`NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`), and shell-environment hijacks (`PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is exact (not glob — `LD_*` above is shorthand for the explicit entries `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` and `DYLD_*` for `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FORCE_FLAT_NAMESPACE`); see `consts.rs` for the authoritative set). Comparison is case-insensitive.
+`consts::RESERVED_ENV_KEYS` is the SSOT for env keys plugins cannot inject — `PORT` (Speedwave-reserved), dynamic-linker hijacks (`LD_*` on Linux[^5], `DYLD_*` on macOS[^6]), language-runtime hijacks (`NODE_OPTIONS`[^7], `PYTHONPATH`, `PYTHONSTARTUP`[^8]), and shell-environment hijacks (`PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`). The list is exact (not glob — `LD_*` above is shorthand for the explicit entries `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` and `DYLD_*` for `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FORCE_FLAT_NAMESPACE`); see `consts.rs` for the authoritative set). Comparison is case-insensitive.
 
 `validate_manifest` rejects `mem_limit > PLUGIN_MEM_LIMIT_MAX_MIB` (16 384 MiB), `cpu_limit > PLUGIN_CPU_LIMIT_MAX` (4.0 cores), `token_mount: read_write` for any plugin (ADR-009 reserves it for built-in services), and slugs that produce a compose name in `BUILT_IN_SERVICES` (`hub`, `claude`, etc.).
 
@@ -107,7 +107,7 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 
 ### Neutral
 
-- The `validate_manifest` ruleset got stricter, and the `mem_limit` cap was raised from the planned 8 192 MiB to 16 384 MiB during implementation. A legitimate memory-heavy plugin requests more than 8 GiB, so an 8 GiB cap would have rejected it without giving operators a way to opt in. 16 GiB is the smallest cap that admits such a plugin while still rejecting the manifestly-bad values the cap is there to catch (`mem_limit: 999g`, etc.). The cap does not weaken the threat model — the host VM (Lima default 4 GiB on macOS, configurable) still imposes the real ceiling at runtime; the manifest cap exists to surface absurd values at install time, not to be the resource-management primitive. Future plugins that need more than 16 GiB must either prove the case in a follow-up ADR or be a built-in service.
+- The `validate_manifest` ruleset got stricter, and the `mem_limit` cap was raised from the planned 8 192 MiB to 16 384 MiB during implementation. A legitimate memory-heavy plugin requests more than 8 GiB, so an 8 GiB cap would have rejected it without giving operators a way to opt in. 16 GiB is the smallest cap that admits such a plugin while still rejecting the manifestly-bad values the cap is there to catch (`mem_limit: 999g`, etc.). The cap does not weaken the threat model — the host VM (Lima default 4 GiB on macOS, configurable)[^9] still imposes the real ceiling at runtime; the manifest cap exists to surface absurd values at install time, not to be the resource-management primitive. Future plugins that need more than 16 GiB must either prove the case in a follow-up ADR or be a built-in service.
 
 ## Alternatives considered
 
@@ -126,3 +126,15 @@ Tauri commands that mutate plugin state (`set_plugin_enabled` for enable, `save_
 [^3]: The Rust Reference, "Conditional compilation": `debug_assertions` is `true` for the dev profile and `false` for the release profile, so `#[cfg(debug_assertions)]` blocks are not compiled into release binaries. <https://doc.rust-lang.org/reference/conditional-compilation.html#debug_assertions>
 
 [^4]: POSIX `utimensat(2)` allows any file owner to set arbitrary atime/mtime. <https://pubs.opengroup.org/onlinepubs/9699919799/functions/utimensat.html>
+
+[^5]: Linux `ld.so(8)`: `LD_PRELOAD` specifies additional shared libraries to load before all others, letting a preloaded library override symbols in the standard libraries. <https://man7.org/linux/man-pages/man8/ld.so.8.html>
+
+[^6]: Apple's "Allow DYLD environment variables" entitlement documentation: an app without this entitlement has `DYLD_*` variables (e.g. `DYLD_INSERT_LIBRARIES`) stripped by dyld, because they can be used to inject code into the process. <https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-dyld-environment-variables>
+
+[^7]: Node.js documentation: `NODE_OPTIONS` is a space-separated list of command-line options applied to every Node.js process that inherits the environment. <https://nodejs.org/api/cli.html>
+
+[^8]: Python documentation: `PYTHONPATH` and `PYTHONSTARTUP` are environment variables that respectively augment the module search path and name a script executed on interactive-interpreter startup. <https://docs.python.org/3/using/cmdline.html#envvar-PYTHONPATH>
+
+[^9]: Lima configuration reference: the built-in default VM memory is `min("4GiB", half of host memory)`, overridable per instance. <https://lima-vm.io/docs/config/>
+
+[^10]: `tauri-plugin-dialog` `MessageDialogBuilder::blocking_show` documentation: a blocking operation that shows a message dialog and returns only after the user responds. <https://docs.rs/tauri-plugin-dialog/latest/tauri_plugin_dialog/struct.MessageDialogBuilder.html>

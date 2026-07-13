@@ -47,3 +47,20 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "deny"
+unimplemented = "deny"
+wildcard_imports = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_docs = "warn"

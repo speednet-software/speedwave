@@ -13,6 +13,7 @@ import { IntegrationStatusEntry } from '../../models/integration';
 import { SaveCredentialsEvent } from '../service-card/service-card.component';
 import { TauriService } from '../../services/tauri.service';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
+import { ToggleComponent } from '../../shared/toggle.component';
 
 /** A single Redmine enumeration entry (project, status, tracker, etc.). */
 export interface RedmineEnumEntry {
@@ -119,7 +120,7 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
 /** Wizard-based configuration component for the Redmine integration. */
 @Component({
   selector: 'app-redmine-config',
-  imports: [CommonModule, SpinIconComponent],
+  imports: [CommonModule, SpinIconComponent, ToggleComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -150,27 +151,14 @@ type WizardState = 'credentials' | 'mappings' | 'configured';
           </span>
         </button>
         <div class="flex items-center gap-3">
-          <label
-            class="relative inline-block w-[44px] h-[24px]"
-            data-testid="toggle"
-            [attr.data-disabled]="!svc().configured"
-            [class.opacity-40]="!svc().configured"
-            [class.cursor-not-allowed]="!svc().configured"
-            [title]="svc().configured ? '' : 'Configure credentials to enable'"
-          >
-            <input
-              type="checkbox"
-              class="peer sr-only"
-              [checked]="svc().enabled"
-              [disabled]="!svc().configured"
-              (change)="onToggle($event)"
-              [attr.data-testid]="'integrations-toggle-' + svc().service"
-              [class.cursor-not-allowed]="!svc().configured"
-            />
-            <span
-              class="absolute inset-0 bg-sw-slider rounded-full cursor-pointer transition-all duration-300 peer-checked:bg-sw-accent before:absolute before:content-[''] before:h-[18px] before:w-[18px] before:left-[3px] before:bottom-[3px] before:bg-white before:rounded-full before:transition-all before:duration-300 peer-checked:before:translate-x-[20px]"
-            ></span>
-          </label>
+          <app-toggle
+            [checked]="svc().enabled"
+            [disabled]="!svc().configured"
+            [testId]="'integrations-toggle-' + svc().service"
+            [ariaLabel]="'Enable ' + svc().service"
+            disabledTitle="Configure credentials to enable"
+            (changed)="onToggle($event)"
+          />
         </div>
       </div>
       <p class="px-5 pb-3 text-sw-text-faint text-[13px] m-0" data-testid="card-description">
@@ -454,9 +442,8 @@ export class RedmineConfigComponent implements OnDestroy {
   }
 
   /**
-   * Extracts the input value from a DOM event.
+   * Extracts the current value from a DOM input event.
    * @param event - the DOM input event
-   * @returns the current input element value
    */
   asInputValue(event: Event): string {
     return (event.target as HTMLInputElement).value;
@@ -536,8 +523,8 @@ export class RedmineConfigComponent implements OnDestroy {
 
   /**
    * Native `<select>` handler for a mapping picker.
-   * @param key - The mapping key being edited.
-   * @param event - The native `change` event from the mapping `<select>`.
+   * @param key - the mapping key being changed
+   * @param event - the native `change` event from the mapping `<select>`
    */
   onMappingChange(key: string, event: Event): void {
     const raw = (event.target as HTMLSelectElement).value;

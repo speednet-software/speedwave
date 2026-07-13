@@ -168,18 +168,17 @@ describe('PluginDetailComponent', () => {
   }
 
   /**
-   * setup() variant whose get_plugins returns a plugin with `instructions`.
-   * @param instructions - Markdown to put on the plugin's `instructions` field
-   * @param verificationStatus - wire `verification_status` (defaults to 'verified')
+   * setup() variant whose get_plugins returns MOCK_PLUGINS with `patch`
+   * shallow-merged into the first entry.
+   * @param patch - fields to override on the plugin entry (e.g. `{ instructions, verification_status }`)
    * @returns the component + fixture, ready for `initAndDetect`
    */
-  function setupWithInstructions(instructions: string, verificationStatus = 'verified') {
+  function setupWithPlugin(patch: Record<string, unknown>) {
     const ctx = setup();
     mockTauri.invokeHandler = (cmd: string) => {
       if (cmd === 'get_plugins') {
         const resp = JSON.parse(JSON.stringify(MOCK_PLUGINS));
-        resp.plugins[0].instructions = instructions;
-        resp.plugins[0].verification_status = verificationStatus;
+        Object.assign(resp.plugins[0], patch);
         return Promise.resolve(resp);
       }
       return defaultInvokeHandler(cmd);
@@ -299,7 +298,9 @@ describe('PluginDetailComponent', () => {
   });
 
   it('renders manifest instructions as Markdown on the dashboard', async () => {
-    const { component, fixture } = setupWithInstructions('## Setup\n\nGenerate a **token** first.');
+    const { component, fixture } = setupWithPlugin({
+      instructions: '## Setup\n\nGenerate a **token** first.',
+    });
     await initAndDetect(component, fixture);
 
     const el = fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]');
@@ -312,7 +313,7 @@ describe('PluginDetailComponent', () => {
   it('keeps the instructions collapsed by default for a configured plugin', async () => {
     // Default MOCK_PLUGINS has `configured: true`, so the disclosure is closed
     // — we don't shout setup steps at someone who's already past setup.
-    const { component, fixture } = setupWithInstructions('## Setup\n\nDo the thing.');
+    const { component, fixture } = setupWithPlugin({ instructions: '## Setup\n\nDo the thing.' });
     await initAndDetect(component, fixture);
 
     const details = fixture.nativeElement.querySelector(
@@ -369,10 +370,10 @@ describe('PluginDetailComponent', () => {
   it('does NOT render instructions for an unverified plugin (XSS trust boundary)', async () => {
     // Defence-in-depth: even if the backend (buggily) shipped instructions for
     // an unverified plugin, the template guard must withhold the [innerHTML].
-    const { component, fixture } = setupWithInstructions(
-      '## Evil\n\n<img src=x onerror=alert(1)>',
-      'signature_invalid'
-    );
+    const { component, fixture } = setupWithPlugin({
+      instructions: '## Evil\n\n<img src=x onerror=alert(1)>',
+      verification_status: 'signature_invalid',
+    });
     await initAndDetect(component, fixture);
     expect(fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]')).toBeNull();
     expect(
@@ -381,13 +382,11 @@ describe('PluginDetailComponent', () => {
   });
 
   it('escapes quotes in markdown link href and title (no attribute breakout)', async () => {
-    // A manifest author writing `[x](url "It's a \"quote\"")` should not produce
-    // structurally malformed HTML where the embedded `"` breaks out of the
-    // attribute. esc() collapses `"` → &quot; and `&` → &amp; before
-    // interpolating into the template literal.
-    const { component, fixture } = setupWithInstructions(
-      '[click](http://example.com/?a="b"&c=d "It\'s a \\"quote\\"")'
-    );
+    // A manifest author writing `[x](url "It's a \"quote\"")` should not break the attribute.
+    // esc() collapses `"` → &quot; and `&` → &amp; before interpolating into the template literal.
+    const { component, fixture } = setupWithPlugin({
+      instructions: '[click](http://example.com/?a="b"&c=d "It\'s a \\"quote\\"")',
+    });
     await initAndDetect(component, fixture);
     const link = fixture.nativeElement.querySelector(
       '[data-testid="plugin-instructions"] a'
@@ -403,9 +402,9 @@ describe('PluginDetailComponent', () => {
   it('opens markdown links in a new tab with rel="noopener noreferrer"', async () => {
     // Otherwise a click inside the Tauri webview would navigate the SPA away
     // (state loss) and leak `window.opener` to the linked page.
-    const { component, fixture } = setupWithInstructions(
-      '## Docs\n\nSee [the spec](https://example.com/spec) for details.'
-    );
+    const { component, fixture } = setupWithPlugin({
+      instructions: '## Docs\n\nSee [the spec](https://example.com/spec) for details.',
+    });
     await initAndDetect(component, fixture);
     const link = fixture.nativeElement.querySelector(
       '[data-testid="plugin-instructions"] a'
@@ -418,26 +417,22 @@ describe('PluginDetailComponent', () => {
   });
 
   it('sanitises malicious markdown on the verified path (Angular DomSanitizer)', async () => {
-    // The unverified-path test above exercises the @if gate, which short-
-    // circuits before marked.parse() runs. This one exercises the verified
-    // path so the sanitizer actually applies: <script>, <img onerror>, and
-    // javascript: link must not produce live HTML that could execute.
-    const { component, fixture } = setupWithInstructions(
-      '## Setup\n\n' +
+    // The unverified-path test above short-circuits before marked.parse() runs; this exercises
+    // the verified path so the sanitizer actually applies to <script>, <img onerror>, javascript:.
+    const { component, fixture } = setupWithPlugin({
+      instructions:
+        '## Setup\n\n' +
         '<script>window.__pwned=true</script>\n\n' +
         '<img src=x onerror="window.__pwned=true">\n\n' +
-        '[click](javascript:alert(1))'
-    );
+        '[click](javascript:alert(1))',
+    });
     await initAndDetect(component, fixture);
 
     const el = fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]');
     expect(el).not.toBeNull();
     const html = el.innerHTML.toLowerCase();
-    // Angular's DomSanitizer:
-    //   - strips <script> entirely,
-    //   - drops on* event-handler attributes (onerror, onclick, …),
-    //   - rewrites `javascript:` URLs to `unsafe:javascript:` so the browser
-    //     refuses to navigate (the literal string survives but is inert).
+    // Angular's DomSanitizer strips <script>, drops on* handler attributes, and rewrites
+    // `javascript:` URLs to `unsafe:javascript:` (literal string survives but is inert).
     expect(html).not.toContain('<script');
     expect(html).not.toContain('onerror');
     expect(html).not.toMatch(/href="javascript:/);
@@ -598,6 +593,10 @@ describe('PluginDetailComponent', () => {
         fixture.nativeElement.querySelector('[data-testid="tab-tools"]'),
         'tools tab should be removed'
       ).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="tab-changelog"]'),
+        'changelog tab is hidden when the package ships no changelog'
+      ).toBeNull();
     });
 
     it('selecting the settings tab swaps the active panel', async () => {
@@ -642,6 +641,115 @@ describe('PluginDetailComponent', () => {
       );
       // Hold a direct reference; project-ready listener can replace this.plugin.
       expect(target.enabled).toBe(!before);
+    });
+  });
+
+  describe('changelog tab', () => {
+    it('shows the changelog tab and renders CHANGELOG.md as Markdown', async () => {
+      const { component, fixture } = setupWithPlugin({
+        changelog: '# Changelog\n\n## 1.2.0 (2026-07-06)\n\n- Added **bulk** export\n',
+      });
+      await initAndDetect(component, fixture);
+
+      const tab = fixture.nativeElement.querySelector('[data-testid="tab-changelog"]');
+      expect(tab).not.toBeNull();
+      tab.click();
+      fixture.detectChanges();
+
+      expect(component.activeTab).toBe('changelog');
+      const el = fixture.nativeElement.querySelector('[data-testid="plugin-changelog"]');
+      expect(el).not.toBeNull();
+      expect(el.querySelector('h2')?.textContent).toContain('1.2.0');
+      expect(el.querySelector('strong')?.textContent).toBe('bulk');
+      // Dashboard panel is swapped out while the changelog panel is active.
+      expect(fixture.nativeElement.querySelector('[data-testid="dashboard-content"]')).toBeNull();
+    });
+
+    it('opens changelog links in a new tab with rel="noopener noreferrer"', async () => {
+      const { component, fixture } = setupWithPlugin({
+        changelog: '## 1.0.0\n\nSee [the release](https://example.com/rel) notes.',
+      });
+      await initAndDetect(component, fixture);
+      component.selectTab('changelog');
+      fixture.detectChanges();
+
+      const link = fixture.nativeElement.querySelector(
+        '[data-testid="plugin-changelog"] a'
+      ) as HTMLAnchorElement;
+      expect(link).not.toBeNull();
+      expect(link.getAttribute('target')).toBe('_blank');
+      const rel = link.getAttribute('rel') ?? '';
+      expect(rel).toContain('noopener');
+      expect(rel).toContain('noreferrer');
+    });
+
+    it('sanitises malicious changelog markdown (Angular DomSanitizer)', async () => {
+      const { component, fixture } = setupWithPlugin({
+        changelog:
+          '## 1.0.0\n\n<script>window.__pwned_cl=true</script>\n\n<img src=x onerror="window.__pwned_cl=true">',
+      });
+      await initAndDetect(component, fixture);
+      component.selectTab('changelog');
+      fixture.detectChanges();
+
+      const el = fixture.nativeElement.querySelector('[data-testid="plugin-changelog"]');
+      expect(el).not.toBeNull();
+      const html = el.innerHTML.toLowerCase();
+      expect(html).not.toContain('<script');
+      expect(html).not.toContain('onerror');
+      expect(
+        (window as unknown as { __pwned_cl?: boolean }).__pwned_cl,
+        'sanitiser must prevent inline-script execution'
+      ).not.toBe(true);
+    });
+
+    it('shows the fallback message when the changelog tab is active without content', async () => {
+      // Only reachable programmatically — the tab button is hidden without content.
+      const { component, fixture } = setup();
+      await initAndDetect(component, fixture);
+      component.selectTab('changelog');
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('[data-testid="plugin-changelog"]')).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="no-changelog-msg"]')
+      ).not.toBeNull();
+    });
+
+    it('does NOT show the changelog tab or content for an unverified plugin (XSS trust boundary)', async () => {
+      // Defence-in-depth mirroring the instructions gate: withhold [innerHTML] even if the
+      // backend (buggily) shipped a changelog for an unverified plugin.
+      const { component, fixture } = setupWithPlugin({
+        changelog: '## Evil\n\n<img src=x onerror=alert(1)>',
+        verification_status: 'signature_invalid',
+      });
+      await initAndDetect(component, fixture);
+
+      expect(fixture.nativeElement.querySelector('[data-testid="tab-changelog"]')).toBeNull();
+      component.selectTab('changelog');
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="plugin-changelog"]')).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="no-changelog-msg"]')
+      ).not.toBeNull();
+    });
+
+    it('resets to the dashboard tab when a reload drops the changelog', async () => {
+      const { component, fixture } = setupWithPlugin({ changelog: '## 1.2.0\n- stuff' });
+      await initAndDetect(component, fixture);
+      component.selectTab('changelog');
+      fixture.detectChanges();
+
+      // Next reload (post-mutation refresh) returns the plugin without a changelog.
+      mockTauri.invokeHandler = (cmd: string) => defaultInvokeHandler(cmd);
+      await component.onSaveSettings({ currency: 'USD' });
+      fixture.detectChanges();
+
+      expect(component.activeTab).toBe('dashboard');
+      expect(fixture.nativeElement.querySelector('[data-testid="tab-changelog"]')).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="dashboard-content"]')
+      ).not.toBeNull();
     });
   });
 
@@ -945,14 +1053,9 @@ describe('PluginDetailComponent', () => {
     });
   });
 
-  // ───────────────────────────────────────────────────────────────────────
-  // Credentials in Settings tab
-  // ───────────────────────────────────────────────────────────────────────
+  // ── Credentials in Settings tab ───────────────────────────────────────────────────────────────
   describe('credentials section in Settings tab', () => {
-    /**
-     * Mock plugin entry with two auth_fields — one required PAT, one
-     * optional OAuth token. Mirrors a host-bridged plugin manifest shape.
-     */
+    /** Mock plugin entry with two auth_fields (required PAT, optional OAuth token); mirrors a host-bridged plugin manifest shape. */
     const PLUGIN_WITH_AUTH = {
       plugins: [
         {

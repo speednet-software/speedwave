@@ -5,14 +5,14 @@
 
 ## Decision
 
-Retry uses Claude Code's first-class `--resume-session-at <uuid>` flag instead of editing the session JSONL ourselves. The backend spawns `claude --resume <session_id> --resume-session-at <user_uuid>` with the usual `--output-format stream-json`; Claude Code rewinds its own session trace to that user-message UUID and regenerates. Speedwave never opens, truncates, or writes the session file.
+Retry uses Claude Code's first-class `--resume-session-at <uuid>` flag instead of editing the session JSONL ourselves. The backend spawns `claude --resume <session_id> --resume-session-at <user_uuid>` with the usual `--output-format stream-json`[^1]; Claude Code rewinds its own session trace to that user-message UUID and regenerates. Speedwave never opens, truncates, or writes the session file.
 
 The flow is frontend-driven. The frontend (which owns the conversation state-tree today) resolves the retry anchor — the current `session_id` and the UUID of the user prompt to rewind to — optimistically trims the old assistant entry, stamps `edited_at` on the user entry, and invokes the `retry_last_turn` Tauri command with both IDs. The backend validates them, stops the live session (kills the child, drains reader threads), then starts a new one with the resume flags. On backend failure the frontend reverts the optimistic changes and surfaces an error block.
 
 ## Why
 
 - **Correctness is Claude Code's job.** Trim-and-continue is internal to its session format; when Anthropic fixes an edge case in `--resume-session-at`, Speedwave inherits the fix with no mirror change.
-- **No file-mutation attack surface.** The session JSONL is a private Claude Code contract. Editing it directly would race Claude Code's own writes, depend on an undocumented lock protocol (the file may be held exclusively on Windows), and break silently on any format change between Claude Code releases.
+- **No file-mutation attack surface.** The session JSONL is a private Claude Code contract. Editing it directly would race Claude Code's own writes, depend on an undocumented lock protocol (the file may be held exclusively on Windows, a default file-sharing behavior for processes that do not explicitly opt into shared access[^2]), and break silently on any format change between Claude Code releases.
 - **UUIDs are the only retry address Claude Code accepts.** `--resume-session-at` keys off the UUIDs in the session trace; Speedwave's internal entry indices (ADR-044) are unknown to Claude Code. The two ID systems address different layers — indices for the UI state-tree, UUIDs for the session trace.
 - **Composes with the streaming stack** (the `chat_stream` chunk pipeline plus the ADR-045 queue; the ADR-042/043/044 patch transport it originally composed with was later retired): the resumed turn flows through the normal stream pipeline and ends with a normal `Result` event.
 
@@ -41,5 +41,11 @@ The flow is frontend-driven. The frontend (which owns the conversation state-tre
 
 ## References
 
-- Anthropic Claude Code CLI reference documents `--resume`, `--session-id`, `--fork-session`, `--no-session-persistence`, and `--output-format stream-json`: https://code.claude.com/docs/en/cli-reference — `--resume-session-at` is observed on the CLI surface and used by `build_claude_args` in `desktop/src-tauri/src/chat.rs`, but is not listed in that public reference (tracked as the CLI-surface dependency under Known limitations).
-- BloopAI/vibe-kanban uses the same `--resume-session-at` trim-and-continue mechanism in its Claude Code executor: https://github.com/BloopAI/vibe-kanban
+- Anthropic Claude Code CLI reference documents `--resume`, `--session-id`, `--fork-session`, `--no-session-persistence`, and `--output-format stream-json`[^1] — `--resume-session-at` is observed on the CLI surface and used by `build_claude_args` in `desktop/src-tauri/src/chat.rs`, but is not listed in that public reference (tracked as the CLI-surface dependency under Known limitations).
+- BloopAI/vibe-kanban uses the same `--resume-session-at` trim-and-continue mechanism in its Claude Code executor[^3].
+
+[^1]: Anthropic Claude Code CLI reference: https://code.claude.com/docs/en/cli-reference
+
+[^2]: Microsoft Learn, "Creating and Opening Files" (Win32 apps): an open file with a zero `dwShareMode` cannot be shared and cannot be reopened until its handle is closed, i.e. exclusive access by default: https://learn.microsoft.com/en-us/windows/win32/fileio/creating-and-opening-files
+
+[^3]: BloopAI/vibe-kanban repository (Claude Code executor uses `--resume-session-at`): https://github.com/BloopAI/vibe-kanban

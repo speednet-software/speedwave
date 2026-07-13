@@ -15,7 +15,7 @@ The CLI binary is placed on PATH using **user-scope mechanisms only** — no pri
 
 ## How it works
 
-- **macOS** — the binary is copied to `~/.local/bin/speedwave` (the XDG standard location for user executables[^2], not on the default macOS PATH built by `/usr/libexec/path_helper`). `detect_shell` reads `$SHELL`, and an `export PATH="$HOME/.local/bin:$PATH"` line is appended to the right shell config file. The append is idempotent — files already containing `.local/bin` are skipped.
+- **macOS** — the binary is copied to `~/.local/bin/speedwave` (the XDG standard location for user executables[^2], not on the default macOS PATH built by `/usr/libexec/path_helper`[^8]). `detect_shell` reads `$SHELL`, and an `export PATH="$HOME/.local/bin:$PATH"` line is appended to the right shell config file. The append is idempotent — files already containing `.local/bin` are skipped.
 - **Windows** — the binary is copied to `~/.speedwave/bin/speedwave.exe`, that directory is added to `HKCU\Environment\Path` via PowerShell's `[Environment]::SetEnvironmentVariable('Path', …, 'User')` (per-user registry, no UAC)[^4], and a `WM_SETTINGCHANGE`[^5] broadcast (via `SendMessageTimeoutW` with `HWND_BROADCAST`[^6]) tells running shells to pick up the new PATH without a restart.
 
 ### Shell config file selection (Unix)
@@ -30,7 +30,7 @@ The CLI binary is placed on PATH using **user-scope mechanisms only** — no pri
 
 When `$SHELL` is _empty_ (common when the Desktop app launches from Dock/Finder under launchd, which may not propagate `$SHELL`), detection falls back to `Zsh` on macOS — zsh has been the macOS default since Catalina[^3].
 
-**`$SHELL` limitation:** `$SHELL` reflects the login shell from `/etc/passwd`, not necessarily the interactively-used shell. This is the convention shared by Homebrew, rustup, and nvm; a user whose login shell is bash but who launches fish in their terminal profile won't get fish config updated — a known, ecosystem-wide trade-off.
+**`$SHELL` limitation:** `$SHELL` reflects the login shell from `/etc/passwd`[^9], not necessarily the interactively-used shell. This is the convention shared by Homebrew, rustup, and nvm; a user whose login shell is bash but who launches fish in their terminal profile won't get fish config updated — a known, ecosystem-wide trade-off.
 
 ## Where it lives in code
 
@@ -47,16 +47,20 @@ When `$SHELL` is _empty_ (common when the Desktop app launches from Dock/Finder 
 
 ---
 
-[^1]: [OWASP — Principle of Least Privilege](https://owasp.org/www-community/controls/Least_Privilege_Principle)
+[^1]: [OWASP - Principle of Least Privilege](https://owasp.org/www-community/controls/Least_Privilege_Principle)
 
-[^2]: [XDG Base Directory Specification — `~/.local/bin` for user executables](https://specifications.freedesktop.org/basedir/latest/)
+[^2]: [XDG Base Directory Specification - `~/.local/bin` for user executables](https://specifications.freedesktop.org/basedir/latest/)
 
-[^3]: [Apple Support — Use zsh as the default shell on your Mac (since Catalina)](https://support.apple.com/en-us/102360)
+[^3]: [Apple Support - Use zsh as the default shell on your Mac (since Catalina)](https://support.apple.com/en-us/102360)
 
-[^4]: [.NET `Environment.SetEnvironmentVariable` — user-scope registry](https://learn.microsoft.com/en-us/dotnet/api/system.environment.setenvironmentvariable)
+[^4]: [.NET `Environment.SetEnvironmentVariable` - user-scope registry](https://learn.microsoft.com/en-us/dotnet/api/system.environment.setenvironmentvariable)
 
-[^5]: [Win32 `WM_SETTINGCHANGE` — broadcast environment changes](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange)
+[^5]: [Win32 `WM_SETTINGCHANGE` - broadcast environment changes](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange)
 
-[^6]: [Win32 `SendMessageTimeoutW` — `HWND_BROADCAST`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)
+[^6]: [Win32 `SendMessageTimeoutW` - `HWND_BROADCAST`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)
 
-[^7]: [Apple — SIP file system protections (`/usr/local` exempt)](https://developer.apple.com/library/archive/documentation/Security/Conceptual/System_Integrity_Protection_Guide/FileSystemProtections/FileSystemProtections.html)
+[^7]: [Apple - SIP file system protections (`/usr/local` exempt)](https://developer.apple.com/library/archive/documentation/Security/Conceptual/System_Integrity_Protection_Guide/FileSystemProtections/FileSystemProtections.html)
+
+[^8]: [Apple `path_helper(8)` man page - constructs `PATH` from `/etc/paths` and `/etc/paths.d`](https://keith.github.io/xcode-man-pages/path_helper.8.html)
+
+[^9]: [`passwd(5)` man page - the shell field sets the `SHELL` environment variable](https://man7.org/linux/man-pages/man5/passwd.5.html)

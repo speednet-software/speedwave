@@ -1,10 +1,6 @@
 /**
- * Microsoft Identity v2 token endpoint client.
- *
- * Performs `grant_type=refresh_token` POST against
- * `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token` and parses
- * the public-client response. No `client_secret` — device-code flow per
- * ADR-060.
+ * Microsoft Identity v2 token endpoint client: `grant_type=refresh_token` POST against
+ * `.../oauth2/v2.0/token`, public-client response (no `client_secret` — device-code flow, ADR-060).
  */
 
 import { TIMEOUTS } from '@speedwave/mcp-shared';
@@ -47,8 +43,8 @@ export function redactErrorDescription(raw: string): string {
 }
 
 /**
- * Refresh an access token. Returns `{ ok: true, value }` on success or
- * `{ ok: false, error }` for any failure (HTTP, parse, scope mismatch).
+ * Refresh an access token; `{ ok: true, value }` on success, `{ ok: false, error }` on any
+ * failure (HTTP, parse, scope mismatch).
  * @param req - the refresh request
  */
 export async function refreshMicrosoftToken(

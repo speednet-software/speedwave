@@ -15,6 +15,7 @@ use super::{container_user, resolve_tokens_dir_in};
 pub struct SecurityExpectedPaths {
     project_engine_path: String,
     tokens_engine_dir: String,
+    telemetry_locked: bool,
 }
 
 impl SecurityExpectedPaths {
@@ -34,6 +35,7 @@ impl SecurityExpectedPaths {
         Ok(Self {
             project_engine_path: to_engine_path(std::path::Path::new(project_dir))?,
             tokens_engine_dir: to_engine_path(&tokens_dir)?,
+            telemetry_locked: false,
         })
     }
 
@@ -42,7 +44,15 @@ impl SecurityExpectedPaths {
         Self {
             project_engine_path: project_engine_path.to_string(),
             tokens_engine_dir: tokens_engine_dir.to_string(),
+            telemetry_locked: false,
         }
+    }
+
+    /// Marks that the resolved telemetry policy locks a field — `SecurityCheck::run`
+    /// then REQUIRES the managed-settings.json mount, not merely validates it if present.
+    pub fn with_telemetry_locked(mut self, locked: bool) -> Self {
+        self.telemetry_locked = locked;
+        self
     }
 }
 
@@ -240,6 +250,35 @@ pub enum SecurityRule {
     #[strum(props(description = "Slack has /workspace mount"))]
     SlackMissingWorkspaceMount,
 
+    /// Atlassian volumes use short-form only.
+    #[strum(to_string = "ATLASSIAN_VOLUME_LONG_FORM")]
+    #[strum(props(description = "Atlassian volumes use short-form only"))]
+    AtlassianVolumeLongForm,
+    /// Atlassian token path matches expected.
+    #[strum(to_string = "ATLASSIAN_TOKEN_PATH_MISMATCH")]
+    #[strum(props(description = "Atlassian token path matches expected"))]
+    AtlassianTokenPathMismatch,
+    /// Atlassian workspace path matches expected.
+    #[strum(to_string = "ATLASSIAN_WORKSPACE_PATH_MISMATCH")]
+    #[strum(props(description = "Atlassian workspace path matches expected"))]
+    AtlassianWorkspacePathMismatch,
+    /// Atlassian workspace mount mode is `:ro`.
+    #[strum(to_string = "ATLASSIAN_WORKSPACE_MOUNT_MODE")]
+    #[strum(props(description = "Atlassian workspace mount mode is :ro"))]
+    AtlassianWorkspaceMountMode,
+    /// Atlassian has no extra volumes.
+    #[strum(to_string = "ATLASSIAN_NO_EXTRA_VOLUMES")]
+    #[strum(props(description = "Atlassian has no extra volumes"))]
+    AtlassianNoExtraVolumes,
+    /// Atlassian has a `/tokens` mount.
+    #[strum(to_string = "ATLASSIAN_MISSING_TOKENS_MOUNT")]
+    #[strum(props(description = "Atlassian has /tokens mount"))]
+    AtlassianMissingTokensMount,
+    /// Atlassian has a `/workspace` mount.
+    #[strum(to_string = "ATLASSIAN_MISSING_WORKSPACE_MOUNT")]
+    #[strum(props(description = "Atlassian has /workspace mount"))]
+    AtlassianMissingWorkspaceMount,
+
     /// Speedwave proxy mounts exactly config:ro + tokens:ro + usage:rw and no
     /// host network (ADR-073 — it is a worker-class token holder).
     #[strum(to_string = "PROXY_VOLUMES")]
@@ -247,6 +286,14 @@ pub enum SecurityRule {
         description = "Speedwave proxy mounts are config:ro, tokens:ro, usage:rw only"
     ))]
     SpeedwaveProxyVolumes,
+
+    /// The native managed-settings.json mount on claude is :ro from the
+    /// per-project managed dir at the exact `/etc/claude-code/` target (MDM telemetry).
+    #[strum(to_string = "MANAGED_SETTINGS_MOUNT")]
+    #[strum(props(
+        description = "claude managed-settings.json mount is :ro from the managed dir at the exact path"
+    ))]
+    ManagedSettingsMount,
 
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
@@ -282,6 +329,21 @@ impl SecurityRule {
                 | Self::SlackNoExtraVolumes
                 | Self::SlackMissingTokensMount
                 | Self::SlackMissingWorkspaceMount
+        )
+    }
+
+    /// Returns `true` for Atlassian-specific rules. The workspace mount is :ro here (unlike
+    /// SharePoint/Slack's :rw) — addAttachment only reads a file, never writes.
+    pub fn is_atlassian(self) -> bool {
+        matches!(
+            self,
+            Self::AtlassianVolumeLongForm
+                | Self::AtlassianTokenPathMismatch
+                | Self::AtlassianWorkspacePathMismatch
+                | Self::AtlassianWorkspaceMountMode
+                | Self::AtlassianNoExtraVolumes
+                | Self::AtlassianMissingTokensMount
+                | Self::AtlassianMissingWorkspaceMount
         )
     }
 
@@ -392,8 +454,16 @@ impl SecurityCheck {
             // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
+            Self::check_builtin_atlassian_volumes(&doc, expected_paths),
             // proxy mount profile (ADR-073)
             Self::check_proxy_volumes(&doc, expected_paths),
+            // MDM telemetry managed-settings mount profile
+            Self::check_claude_managed_settings(
+                &doc,
+                data_dir,
+                project,
+                expected_paths.telemetry_locked,
+            ),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -901,6 +971,7 @@ impl SecurityCheck {
                 expected_tokens_path: format!("{}/{}", expected_paths.tokens_engine_dir(), sid),
                 expected_workspace_path: expected_paths.project_engine_path(),
                 expected_token_mode,
+                expected_workspace_mode: "rw",
                 extra_allowed_ro_targets: &extra_allowed,
                 rules: VolumeCheckRules::PLUGIN,
             };
@@ -1012,6 +1083,84 @@ impl SecurityCheck {
         violations
     }
 
+    /// When present, the managed-settings mount must be `:ro` at the exact target
+    /// and sourced from `<data_dir>/claude-managed/<project>/` (ADR-076). When
+    /// `telemetry_locked` is true the mount is REQUIRED, not merely validated if present.
+    fn check_claude_managed_settings(
+        doc: &serde_yaml_ng::Value,
+        data_dir: &std::path::Path,
+        project: &str,
+        telemetry_locked: bool,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
+            return violations;
+        };
+        let vols = claude
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        let target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
+        // A path-resolution failure must fail closed: never let an unverifiable
+        // mount source pass through as if the mount were merely absent.
+        let expected_source = match to_engine_path(&crate::claude_managed::managed_settings_path(
+            data_dir, project,
+        )) {
+            Ok(p) => p,
+            Err(e) => {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ManagedSettingsMount,
+                    message: format!("cannot resolve expected managed-settings source: {e}"),
+                    remediation:
+                        "Ensure the data directory path is resolvable by the container engine.",
+                });
+                return violations;
+            }
+        };
+        let mut found = false;
+        for vol in &vols {
+            let Some(s) = vol.as_str() else { continue };
+            if let Some((host, mode)) = extract_volume_for_target(s, &target) {
+                found = true;
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ManagedSettingsMount,
+                        message: "managed-settings.json mount must be :ro".into(),
+                        remediation: "The MDM managed-settings mount must be read-only.",
+                    });
+                }
+                if host != expected_source {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ManagedSettingsMount,
+                        message: format!(
+                            "managed-settings source '{host}' != expected '{expected_source}'"
+                        ),
+                        remediation:
+                            "managed-settings must come from <data_dir>/claude-managed/<project>/.",
+                    });
+                }
+            }
+        }
+        if !found && telemetry_locked {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ManagedSettingsMount,
+                message:
+                    "MDM policy locks telemetry but the managed-settings.json mount is missing"
+                        .into(),
+                remediation: "Re-render compose so the managed-settings.json mount is applied.",
+            });
+        }
+        violations
+    }
+
     /// Validates volumes for built-in mcp-sharepoint service (not a plugin).
     fn check_builtin_sharepoint_volumes(
         doc: &serde_yaml_ng::Value,
@@ -1021,6 +1170,7 @@ impl SecurityCheck {
             doc,
             expected_paths,
             "sharepoint",
+            "rw",
             VolumeCheckRules::SHAREPOINT,
         )
     }
@@ -1035,16 +1185,33 @@ impl SecurityCheck {
             doc,
             expected_paths,
             "slack",
+            "rw",
             VolumeCheckRules::SLACK,
         )
     }
 
+    /// Validates volumes for built-in mcp-atlassian (not a plugin). Unlike SharePoint/Slack,
+    /// the workspace mount is :ro — addAttachment only reads the file, to attach it.
+    fn check_builtin_atlassian_volumes(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        Self::check_builtin_workspace_worker_volumes(
+            doc,
+            expected_paths,
+            "atlassian",
+            "ro",
+            VolumeCheckRules::ATLASSIAN,
+        )
+    }
+
     /// Shared check for built-in workspace workers (ADR-060): /tokens:ro,
-    /// /workspace:rw, per-service oauth bearer allowed, nothing else.
+    /// /workspace at the given mode, per-service oauth bearer allowed, nothing else.
     fn check_builtin_workspace_worker_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
         service_id: &str,
+        expected_workspace_mode: &str,
         rules: VolumeCheckRules,
     ) -> Vec<SecurityViolation> {
         let services = match get_services(doc) {
@@ -1064,6 +1231,7 @@ impl SecurityCheck {
             expected_tokens_path: format!("{}/{service_id}", expected_paths.tokens_engine_dir()),
             expected_workspace_path: expected_paths.project_engine_path(),
             expected_token_mode: "ro",
+            expected_workspace_mode,
             extra_allowed_ro_targets: &extra_allowed,
             rules,
         };
@@ -1247,6 +1415,7 @@ struct VolumeCheckRules {
     workspace_path_mismatch: SecurityRule,
     workspace_mount_mode: SecurityRule,
     workspace_mount_mode_msg: &'static str,
+    workspace_mount_mode_rem: &'static str,
     no_extra_volumes: SecurityRule,
     no_extra_volumes_msg_prefix: &'static str,
     no_extra_volumes_rem: &'static str,
@@ -1272,6 +1441,7 @@ impl VolumeCheckRules {
         workspace_path_mismatch: SecurityRule::PluginWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::PluginWorkspaceMountMode,
         workspace_mount_mode_msg: "Workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::PluginNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Plugin service has unauthorized volume mount:",
         no_extra_volumes_rem: "Plugin services may only mount /tokens and /workspace.",
@@ -1299,6 +1469,7 @@ impl VolumeCheckRules {
         workspace_path_mismatch: SecurityRule::SharepointWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SharepointWorkspaceMountMode,
         workspace_mount_mode_msg: "SharePoint workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the SharePoint workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::SharepointNoExtraVolumes,
         no_extra_volumes_msg_prefix: "SharePoint service has unauthorized volume mount:",
         no_extra_volumes_rem:
@@ -1326,6 +1497,7 @@ impl VolumeCheckRules {
         workspace_path_mismatch: SecurityRule::SlackWorkspacePathMismatch,
         workspace_mount_mode: SecurityRule::SlackWorkspaceMountMode,
         workspace_mount_mode_msg: "Slack workspace mount must be :rw",
+        workspace_mount_mode_rem: "Change the Slack workspace volume mount to :rw.",
         no_extra_volumes: SecurityRule::SlackNoExtraVolumes,
         no_extra_volumes_msg_prefix: "Slack service has unauthorized volume mount:",
         no_extra_volumes_rem:
@@ -1337,6 +1509,36 @@ impl VolumeCheckRules {
         missing_workspace_msg: "Slack service is missing required /workspace mount",
         missing_workspace_rem: "Slack must mount /workspace:rw (ADR-071 file downloads).",
     };
+
+    const ATLASSIAN: Self = Self {
+        volume_long_form: SecurityRule::AtlassianVolumeLongForm,
+        volume_long_form_msg: "Atlassian volume uses long-form YAML mapping",
+        volume_long_form_rem: "Use short-form volume strings.",
+        token_path_mismatch: SecurityRule::AtlassianTokenPathMismatch,
+        token_path_mismatch_rem:
+            "Atlassian token mount must use the project-specific tokens directory.",
+        // `/tokens:ro` is the universal rule — reuse the generic mode variant
+        // (same convention as SHAREPOINT/SLACK above).
+        token_mount_mode: SecurityRule::PluginTokenMountMode,
+        token_mount_mode_msg: "Atlassian token mount must be :ro",
+        token_mount_mode_rem:
+            "Atlassian uses a static API token; /tokens must be :ro like every other worker.",
+        workspace_path_mismatch: SecurityRule::AtlassianWorkspacePathMismatch,
+        workspace_mount_mode: SecurityRule::AtlassianWorkspaceMountMode,
+        workspace_mount_mode_msg: "Atlassian workspace mount must be :ro",
+        workspace_mount_mode_rem: "addAttachment only reads files from the workspace; \
+             change the workspace volume mount to :ro.",
+        no_extra_volumes: SecurityRule::AtlassianNoExtraVolumes,
+        no_extra_volumes_msg_prefix: "Atlassian service has unauthorized volume mount:",
+        no_extra_volumes_rem:
+            "Atlassian may mount /tokens, /workspace, and the per-service oauth bearer.",
+        missing_tokens: SecurityRule::AtlassianMissingTokensMount,
+        missing_tokens_msg: "Atlassian service is missing required /tokens mount",
+        missing_tokens_rem: "Atlassian must mount /tokens:ro.",
+        missing_workspace: SecurityRule::AtlassianMissingWorkspaceMount,
+        missing_workspace_msg: "Atlassian service is missing required /workspace mount",
+        missing_workspace_rem: "Atlassian must mount /workspace:ro (needed for addAttachment).",
+    };
 }
 
 /// Parameters for shared volume mount validation.
@@ -1346,6 +1548,8 @@ struct VolumeCheckParams<'a> {
     expected_workspace_path: &'a str,
     /// Expected token mount mode: "ro" or "rw"
     expected_token_mode: &'a str,
+    /// Expected workspace mount mode: "ro" or "rw"
+    expected_workspace_mode: &'a str,
     /// Additional read-only mount targets permitted on this service (ADR-060 OAuth
     /// bearer). Each entry is matched as an exact `target`; the mount must be `:ro`.
     extra_allowed_ro_targets: &'a [String],
@@ -1415,12 +1619,12 @@ fn validate_service_volume_mounts(
                         remediation: "Workspace mount must use the project directory.",
                     });
                 }
-                if mode.as_deref() != Some("rw") {
+                if mode.as_deref() != Some(params.expected_workspace_mode) {
                     violations.push(SecurityViolation {
                         container: params.container_name.to_string(),
                         rule: params.rules.workspace_mount_mode,
                         message: params.rules.workspace_mount_mode_msg.to_string(),
-                        remediation: "Change the workspace volume mount to :rw.",
+                        remediation: params.rules.workspace_mount_mode_rem,
                     });
                 }
             } else if let Some(extra) = params
@@ -1498,7 +1702,10 @@ pub(crate) fn get_services(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(
+        clippy::unwrap_used,
+        reason = "test-only module: unwraps assert setup succeeded"
+    )]
     use super::*;
 
     #[test]
@@ -1506,6 +1713,170 @@ mod tests {
         assert_eq!(
             SecurityRule::SpeedwaveProxyVolumes.to_string(),
             "PROXY_VOLUMES",
+        );
+    }
+
+    #[test]
+    fn managed_settings_mount_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::ManagedSettingsMount.to_string(),
+            "MANAGED_SETTINGS_MOUNT",
+        );
+    }
+
+    /// Builds a compose doc whose claude service carries a single given volume.
+    fn claude_doc_with_volume(mount: &str) -> serde_yaml_ng::Value {
+        let yaml = format!("services:\n  claude:\n    volumes:\n      - {mount}\n");
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    fn managed_source(data_dir: &std::path::Path, project: &str) -> String {
+        to_engine_path(&crate::claude_managed::managed_settings_path(
+            data_dir, project,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn managed_settings_ro_at_exact_path_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!(
+            "{}:/etc/claude-code/managed-settings.json:ro",
+            managed_source(data_dir, "p")
+        );
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(v.is_empty(), "correct mount must pass, got: {v:?}");
+    }
+
+    #[test]
+    fn managed_settings_rw_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!(
+            "{}:/etc/claude-code/managed-settings.json:rw",
+            managed_source(data_dir, "p")
+        );
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            ":rw managed-settings mount must fail"
+        );
+    }
+
+    #[test]
+    fn managed_settings_wrong_source_fails() {
+        let data_dir = std::path::Path::new("/data");
+        // Sourced from the user-editable claude-home instead of claude-managed.
+        let bad = to_engine_path(
+            &data_dir
+                .join("claude-home")
+                .join("p")
+                .join("managed-settings.json"),
+        )
+        .unwrap();
+        let mount = format!("{bad}:/etc/claude-code/managed-settings.json:ro");
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "source outside claude-managed must fail"
+        );
+    }
+
+    #[test]
+    fn managed_settings_absent_is_ok_when_not_locked() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(
+            v.is_empty(),
+            "no managed-settings mount = no violation when policy doesn't lock"
+        );
+    }
+
+    #[test]
+    fn managed_settings_absent_fails_when_locked() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "MDM-locked telemetry with no mount must fail"
+        );
+    }
+
+    #[test]
+    fn managed_settings_no_volumes_key_fails_when_locked() {
+        // The claude service has no `volumes:` block at all, not merely an unrelated mount.
+        let data_dir = std::path::Path::new("/data");
+        let doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "MDM-locked telemetry with no volumes key at all must fail, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn managed_settings_present_and_locked_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!(
+            "{}:/etc/claude-code/managed-settings.json:ro",
+            managed_source(data_dir, "p")
+        );
+        let doc = claude_doc_with_volume(&mount);
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", true);
+        assert!(
+            v.is_empty(),
+            "correct mount under lock must pass, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn run_requires_managed_settings_mount_when_expected_paths_lock_telemetry() {
+        let doc = "services:\n  claude:\n    volumes: []\n";
+        let data_dir = std::path::Path::new("/data");
+        let expected = SecurityExpectedPaths::from_raw("/p", "/t").with_telemetry_locked(true);
+        let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, data_dir);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "SecurityCheck::run must require the mount when SecurityExpectedPaths locks telemetry, \
+             got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn run_does_not_require_managed_settings_mount_by_default() {
+        let doc = "services:\n  claude:\n    volumes: []\n";
+        let data_dir = std::path::Path::new("/data");
+        let expected = SecurityExpectedPaths::from_raw("/p", "/t");
+        let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, data_dir);
+        assert!(
+            !v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "an unlocked policy must not require the mount, got: {v:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn managed_settings_unresolvable_source_fails_closed() {
+        // A network UNC data_dir makes `to_engine_path` return `Err` on Windows —
+        // must fail closed (an empty violation list would fail-open).
+        let data_dir = std::path::Path::new(r"\\fileserver\share");
+        let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
+        let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
+            "an unresolvable expected source must fail closed, got: {v:?}"
         );
     }
 }

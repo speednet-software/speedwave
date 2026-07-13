@@ -13,7 +13,7 @@ import os
 import sys
 import traceback
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 
 def atomic_save(dest: str, write_fn: Callable[[str], None]) -> None:
@@ -42,7 +42,7 @@ def ok(**fields: Any) -> None:
     raise SystemExit(0)
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     """Print a failure JSON object to stdout, the message to stderr, and exit 1."""
     sys.stdout.write(json.dumps({"ok": False, "error": message}))
     sys.stdout.flush()
@@ -60,4 +60,10 @@ def main(fn: Callable[[list[str]], None]) -> None:
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — top-level guard turns anything into a structured failure
-        fail(f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+        sys.stderr.write(traceback.format_exc())
+        fail(
+            f"internal error ({type(exc).__name__}): {exc} -- likely a DSL reference "
+            "(sheet/slide name, cell range, form field) that does not exist in the target "
+            "file, or a file that is not the format it claims to be; re-check the spec/ops "
+            "against the file's actual contents"
+        )

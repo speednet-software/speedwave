@@ -26,15 +26,15 @@ import { PluginSettingsFormComponent } from '../plugin-settings-form/plugin-sett
 import { PluginCredentialsFormComponent } from '../plugin-credentials-form/plugin-credentials-form.component';
 import { ProjectPillComponent } from '../../project-switcher/project-pill.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
+import { parseMarkdownSync } from '../../shared/markdown';
 import { BridgeConnectionComponent } from '../bridge-connection/bridge-connection.component';
 
 /** Tabs available in the plugin-detail view. */
-export type PluginDetailTab = 'dashboard' | 'settings' | 'logs';
+export type PluginDetailTab = 'dashboard' | 'settings' | 'changelog' | 'logs';
 
 /** Shown when a mutation is attempted with no active project / loaded plugin. */
 const NO_ACTIVE_PROJECT_MSG = 'No active project — open or create a project first.';
 
-/** Scoped `marked` for the Dashboard `instructions` block; forces `<a>` to open in a new tab with `rel="noopener noreferrer"`. */
 /**
  * Escape a string for interpolation into an HTML attribute value.
  * @param s the string to escape
@@ -44,7 +44,8 @@ function escAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
-const instructionsMarked = new Marked({
+/** Scoped `marked` for the `instructions` and `changelog` blocks; forces `<a>` to open in a new tab with `rel="noopener noreferrer"`. */
+const pluginMarked = new Marked({
   renderer: {
     link({ href, title, text }) {
       const titleAttr = title ? ` title="${escAttr(title)}"` : '';
@@ -53,7 +54,7 @@ const instructionsMarked = new Marked({
   },
 });
 
-/** Detail page for a single plugin with Dashboard / Settings / Logs tabs. */
+/** Detail page for a single plugin with Dashboard / Settings / Changelog / Logs tabs. */
 @Component({
   selector: 'app-plugin-detail',
   imports: [
@@ -150,47 +151,20 @@ const instructionsMarked = new Marked({
             role="tablist"
             data-testid="tab-bar"
           >
-            <button
-              type="button"
-              role="tab"
-              class="px-1 pb-2"
-              [class.border-b-2]="true"
-              [style.borderBottomColor]="
-                activeTab === 'dashboard' ? 'var(--accent)' : 'transparent'
-              "
-              [style.color]="activeTab === 'dashboard' ? 'var(--ink)' : 'var(--ink-mute)'"
-              [attr.aria-selected]="activeTab === 'dashboard'"
-              data-testid="tab-dashboard"
-              (click)="selectTab('dashboard')"
-            >
-              dashboard
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class="px-1 pb-2"
-              [class.border-b-2]="true"
-              [style.borderBottomColor]="activeTab === 'settings' ? 'var(--accent)' : 'transparent'"
-              [style.color]="activeTab === 'settings' ? 'var(--ink)' : 'var(--ink-mute)'"
-              [attr.aria-selected]="activeTab === 'settings'"
-              data-testid="tab-settings"
-              (click)="selectTab('settings')"
-            >
-              settings
-            </button>
-            <button
-              type="button"
-              role="tab"
-              class="px-1 pb-2"
-              [class.border-b-2]="true"
-              [style.borderBottomColor]="activeTab === 'logs' ? 'var(--accent)' : 'transparent'"
-              [style.color]="activeTab === 'logs' ? 'var(--ink)' : 'var(--ink-mute)'"
-              [attr.aria-selected]="activeTab === 'logs'"
-              data-testid="tab-logs"
-              (click)="selectTab('logs')"
-            >
-              logs
-            </button>
+            @for (tab of visibleTabs(); track tab) {
+              <button
+                type="button"
+                role="tab"
+                class="border-b-2 px-1 pb-2"
+                [style.borderBottomColor]="activeTab === tab ? 'var(--accent)' : 'transparent'"
+                [style.color]="activeTab === tab ? 'var(--ink)' : 'var(--ink-mute)'"
+                [attr.aria-selected]="activeTab === tab"
+                [attr.data-testid]="'tab-' + tab"
+                (click)="selectTab(tab)"
+              >
+                {{ tab }}
+              </button>
+            }
           </div>
 
           @if (activeTab === 'dashboard') {
@@ -428,6 +402,22 @@ const instructionsMarked = new Marked({
             </div>
           }
 
+          @if (activeTab === 'changelog') {
+            <div data-testid="changelog-content">
+              @if (changelogAvailable()) {
+                <div
+                  class="prose-sw text-[13px] leading-relaxed"
+                  data-testid="plugin-changelog"
+                  [innerHTML]="renderedChangelog()"
+                ></div>
+              } @else {
+                <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="no-changelog-msg">
+                  No changelog available.
+                </p>
+              }
+            </div>
+          }
+
           @if (activeTab === 'logs') {
             <div data-testid="logs-content">
               <p class="mono text-[12px] text-[var(--ink-mute)]" data-testid="logs-link-hint">
@@ -513,13 +503,40 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     const src = this.plugin?.instructions ?? '';
     if (!src) return '';
     if (this.instructionsCache?.src !== src) {
-      const html = instructionsMarked.parse(src, { async: false });
-      if (typeof html !== 'string') {
-        throw new Error('marked.parse returned a Promise; async option must remain false');
-      }
-      this.instructionsCache = { src, html };
+      this.instructionsCache = { src, html: parseMarkdownSync(pluginMarked, src) };
     }
     return this.instructionsCache.html;
+  }
+
+  /** Memo for {@link renderedChangelog} keyed on the raw Markdown source. */
+  private changelogCache: { src: string; html: string } | null = null;
+
+  /**
+   * Renders the package's `CHANGELOG.md` Markdown, memoised on the source string.
+   * @returns HTML string (sanitised at bind time), or `''`
+   */
+  renderedChangelog(): string {
+    const src = this.plugin?.changelog ?? '';
+    if (!src) return '';
+    if (this.changelogCache?.src !== src) {
+      this.changelogCache = { src, html: parseMarkdownSync(pluginMarked, src) };
+    }
+    return this.changelogCache.html;
+  }
+
+  /** True when a verified plugin shipped a changelog — the trust gate for its `[innerHTML]` surface. */
+  changelogAvailable(): boolean {
+    return !!this.plugin?.changelog && this.plugin.verification_status === 'verified';
+  }
+
+  /** Tabs in display order; `changelog` appears only when {@link changelogAvailable}. */
+  visibleTabs(): PluginDetailTab[] {
+    const tabs: PluginDetailTab[] = ['dashboard', 'settings'];
+    if (this.changelogAvailable()) {
+      tabs.push('changelog');
+    }
+    tabs.push('logs');
+    return tabs;
   }
 
   /** Loads plugin data, settings, and integration status from the backend. */
@@ -588,11 +605,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /**
-   * Confirms the uninstall and invokes `remove_plugin`. On success, signals
-   * the project banner to restart and navigates back to the plugins list —
-   * the current page would be a 404 since the plugin no longer exists.
-   */
+  /** Confirms uninstall, invokes `remove_plugin`; on success requests a restart and navigates back (current page would 404). */
   async onConfirmUninstall(): Promise<void> {
     if (!this.plugin || this.removing) return;
     this.removing = true;
@@ -676,9 +689,7 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
     }
     this.success = successMsg;
     this.projectState.requestRestart();
-    // Refresh state (e.g. configured badge). `loadPlugin` swallows its error
-    // into `this.error`; downgrade to a caveat on the success line + log
-    // so a stale view is signalled rather than hidden under the success msg.
+    // Refresh state (e.g. configured badge); `loadPlugin` errors downgrade to a caveat on the success line + log, not a silent stale view.
     await this.loadPlugin(slug);
     if (this.error) {
       this.log.warn(`plugin reload after mutation failed: ${this.error}`);
@@ -862,6 +873,11 @@ export class PluginDetailComponent implements OnInit, OnDestroy {
         project: this.activeProject,
       });
       this.plugin = response.plugins.find((p) => p.slug === slug) ?? null;
+      // A reload can drop the changelog (update, verification change) — don't
+      // strand the user on a tab whose button just disappeared.
+      if (this.activeTab === 'changelog' && !this.changelogAvailable()) {
+        this.activeTab = 'dashboard';
+      }
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : String(e);
     }

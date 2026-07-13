@@ -1,11 +1,11 @@
-//! Speedwave runtime — SSOT for all Lima/WSL2/nerdctl container orchestration,
-//! compose rendering, resource budgeting, and host-side process management.
-//! The CLI and Desktop both depend on this crate.
+//! Speedwave runtime — SSOT for all Lima/WSL2/nerdctl container orchestration, compose rendering,
+//! resource budgeting, and host-side process management. The CLI and Desktop depend on this crate.
 
 pub mod binary;
 pub mod build;
 pub mod bundle;
 pub mod claude_home;
+pub mod claude_managed;
 pub mod cloudstorage;
 pub mod compose;
 pub mod config;
@@ -21,6 +21,7 @@ pub mod legacy_token_cleanup;
 pub mod log_file;
 pub mod log_sanitizer;
 pub mod log_ts;
+pub mod managed_config;
 pub mod mcp_os_process;
 pub mod oauth_persist;
 pub mod oauth_process;
@@ -29,6 +30,7 @@ pub mod os_prereqs;
 pub mod pkce;
 pub mod plugin;
 pub mod project;
+pub mod prompts;
 pub mod provision;
 pub mod resources;
 pub mod runtime;
@@ -36,9 +38,9 @@ pub mod session;
 pub mod signing;
 pub mod slash;
 pub mod stream;
-/// Host-side meeting transcription (audio capture, Whisper, model catalogue) —
-/// gated behind the `audio-transcription` feature so the CLI (which never
-/// enables it) stays lean. See `docs/adr/ADR-056-*`.
+pub mod telemetry_env;
+/// Host-side meeting transcription (audio capture, Whisper, model catalogue) — gated behind the
+/// `audio-transcription` feature so the CLI (which never enables it) stays lean. See ADR-056.
 #[cfg(feature = "audio-transcription")]
 pub mod transcription;
 pub mod tz;

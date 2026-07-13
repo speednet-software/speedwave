@@ -76,6 +76,12 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             "${1}***REDACTED***",
         ),
+        // OTLP collector auth headers: OTEL_EXPORTER_OTLP_HEADERS=<value> carries a
+        // Bearer/Basic/api-key (the generic rule above misses this key name).
+        (
+            r"(OTEL_EXPORTER_OTLP_HEADERS=)[^\r\n]+",
+            "${1}***REDACTED***",
+        ),
     ];
 
     definitions
@@ -128,14 +134,13 @@ pub fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     // ── Guard tests — ensure no rules are silently dropped ────────────────
 
     /// Expected number of compiled rules; a mismatch flags a silently dropped rule.
-    const EXPECTED_RULE_COUNT: usize = 23;
+    const EXPECTED_RULE_COUNT: usize = 24;
 
     #[test]
     fn test_rules_count() {
@@ -177,6 +182,7 @@ mod tests {
             r"(?i)([?&](?:api_key|apikey|key|token|secret|password|access_token|[a-z0-9_]*_token)=)[^&\s]+",
             r"(?i)(X-Redmine-API-Key:\s*)\S+",
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
+            r"(OTEL_EXPORTER_OTLP_HEADERS=)[^\r\n]+",
         ];
 
         assert_eq!(
@@ -1272,5 +1278,35 @@ mod tests {
     fn does_not_redact_cookie_word_in_prose() {
         let out = sanitize("eating a cookie now");
         assert_eq!(out, "eating a cookie now");
+    }
+
+    #[test]
+    fn redacts_otel_headers_regardless_of_scheme() {
+        for v in [
+            "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer sk-secretval",
+            "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic dXNlcjpwYXNz",
+            "OTEL_EXPORTER_OTLP_HEADERS=x-api-key=abc123val",
+            "- OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=hcaik_deadbeef",
+        ] {
+            let out = sanitize(v);
+            assert!(out.contains("***REDACTED***"), "not redacted: {v}");
+            assert!(
+                !out.contains("dXNlcjpwYXNz")
+                    && !out.contains("abc123val")
+                    && !out.contains("hcaik_deadbeef")
+                    && !out.contains("secretval"),
+                "leaked: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_redact_non_secret_otel_vars() {
+        let s = "OTEL_EXPORTER_OTLP_ENDPOINT=https://collector:4318";
+        assert_eq!(
+            sanitize(s),
+            s,
+            "endpoint is not a secret and must pass through"
+        );
     }
 }

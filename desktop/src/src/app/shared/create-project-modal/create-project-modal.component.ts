@@ -22,9 +22,8 @@ export interface CreatedProject {
 }
 
 /**
- * Modal dialog for creating a new Speedwave project. Opens the OS folder
- * picker, derives a default project name from the dir basename (editable),
- * and invokes the configured command on the Rust backend on submit.
+ * Modal dialog for creating a new Speedwave project: opens the OS folder picker, derives an editable
+ * default project name from the dir basename, and invokes the configured command on submit.
  */
 @Component({
   selector: 'app-create-project-modal',
@@ -313,8 +312,8 @@ function basename(path: string): string {
 }
 
 /**
- * Converts a directory basename into a Speedwave-friendly project slug:
- * lowercase, alphanumerics + hyphens only, collapsed runs, trimmed edges.
+ * Converts a directory basename into a Speedwave-friendly project slug: lowercase, alphanumerics +
+ * hyphens only, collapsed runs, trimmed edges.
  * @param input - Directory basename to slugify.
  */
 function slugify(input: string): string {

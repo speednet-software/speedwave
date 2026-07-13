@@ -3,12 +3,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { ProjectPillComponent } from '../project-switcher/project-pill.component';
 import { LlmUsageComponent } from '../settings/llm-usage/llm-usage.component';
 
-/**
- * LLM usage page (ADR-073) — its own nav-rail entry (chart icon). Hosts the
- * per-day/per-model aggregate from the proxy's usage log for the active
- * project. Lives outside Settings so configuration and statistics stay
- * separate surfaces.
- */
+/** LLM usage page (ADR-073) — its own nav-rail entry (chart icon). Hosts the per-day/per-model aggregate from the proxy's usage log for the active project, outside Settings. */
 @Component({
   selector: 'app-usage-view',
   imports: [ProjectPillComponent, LlmUsageComponent],

@@ -395,10 +395,7 @@ describe('SessionManager', () => {
       // Advance another 31 seconds (id1: 61s total=expired, id2: 31s total=active)
       vi.advanceTimersByTime(31000);
 
-      // Trigger cleanup interval at 61s total
-      // This runs cleanup immediately at the 61s mark
-      // id1 has been idle for 61s (expired)
-      // id2 has been idle for 31s (active)
+      // Trigger cleanup interval at 61s total: id1 idle 61s (expired), id2 idle 31s (active)
 
       // Since cleanup happens at intervals, let's verify state before accessing
       expect(manager.getActiveSessionCount()).toBe(2); // Both still in map
@@ -666,9 +663,7 @@ describe('SessionManager', () => {
 
       expect(manager.getActiveSessionCount()).toBe(3);
 
-      // Client 1 stays active
-      // Client 2 expires
-      // Client 3 stays active
+      // Client 1 and 3 stay active; client 2 expires
 
       vi.advanceTimersByTime(30000);
       manager.getSession(sessionIds[0]); // Client 1 access

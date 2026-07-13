@@ -11,14 +11,16 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const listJournalsTool: Tool = {
   name: 'listJournals',
   description: 'List all journals (comments/updates) for an issue',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'journals', 'history', 'comments', 'audit', 'changelog'],
   example: `const journals = await redmine.listJournals({ issue_id: 12345 })`,
   inputSchema: {
@@ -77,16 +79,20 @@ const listJournalsTool: Tool = {
 
 const updateJournalTool: Tool = {
   name: 'updateJournal',
-  description: 'Update an existing journal entry',
+  description:
+    "Update an existing journal entry. Redmine typically restricts editing to the original comment author or an admin; a 403 here usually means the current user isn't the author.",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'journal', 'update', 'comment', 'edit', 'modify'],
   example: `await redmine.updateJournal({ issue_id: 12345, journal_id: 67890, notes: "Updated comment with more details" })`,
   inputSchema: {
     type: 'object',
     properties: {
       issue_id: { type: 'number', description: 'Issue ID' },
-      journal_id: { type: 'number', description: 'Journal ID' },
+      journal_id: {
+        type: 'number',
+        description: 'Journal ID — obtained from listJournals(issue_id); look for journals[].id',
+      },
       notes: { type: 'string', description: 'Updated notes' },
     },
     required: ['issue_id', 'journal_id', 'notes'],
@@ -126,14 +132,18 @@ const deleteJournalTool: Tool = {
   name: 'deleteJournal',
   description: 'Delete a journal entry',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'journal', 'delete', 'remove', 'comment'],
   example: `await redmine.deleteJournal({ issue_id: 12345, journal_id: 67890 })`,
   inputSchema: {
     type: 'object',
     properties: {
       issue_id: { type: 'number', description: 'Issue ID' },
-      journal_id: { type: 'number', description: 'Journal ID to delete' },
+      journal_id: {
+        type: 'number',
+        description:
+          'Journal ID to delete — obtained from listJournals(issue_id); look for journals[].id',
+      },
     },
     required: ['issue_id', 'journal_id'],
   },
@@ -176,41 +186,35 @@ export function createJournalTools(client: RedmineClient | null): ToolDefinition
     {
       tool: listJournalsTool,
       handler: async (params) => {
-        try {
-          const { issue_id } = params as { issue_id: number };
+        const { issue_id } = params as { issue_id: number };
+        return withRedmineErrors({ issue_id }, async () => {
           const result = await client.listJournals(issue_id);
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
     {
       tool: updateJournalTool,
       handler: async (params) => {
-        try {
-          const { issue_id, journal_id, notes } = params as {
-            issue_id: number;
-            journal_id: number;
-            notes: string;
-          };
+        const { issue_id, journal_id, notes } = params as {
+          issue_id: number;
+          journal_id: number;
+          notes: string;
+        };
+        return withRedmineErrors({ issue_id, journal_id }, async () => {
           await client.updateJournal(issue_id, journal_id, notes);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
     {
       tool: deleteJournalTool,
       handler: async (params) => {
-        try {
-          const { issue_id, journal_id } = params as { issue_id: number; journal_id: number };
+        const { issue_id, journal_id } = params as { issue_id: number; journal_id: number };
+        return withRedmineErrors({ issue_id, journal_id }, async () => {
           await client.deleteJournal(issue_id, journal_id);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
   ];

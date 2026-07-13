@@ -1,15 +1,6 @@
 /**
- * Tool Registry - Dynamic Discovery
- * @module tool-registry
- *
- * Central registry of tool metadata fetched from workers.
- * Workers are the SSOT for ALL tool metadata (contract + policy via _meta).
- *
- * Lifecycle:
- * 1. At startup, initializeRegistry() populates the registry from workers
- * 2. If a worker is unavailable, its service has an empty registry entry
- * 3. Background refresh periodically updates tools from workers
- * 4. All consumers (search-tools, executor, handlers) use the same API
+ * Tool Registry - Dynamic Discovery. Workers are the SSOT for tool metadata (contract + policy).
+ * Startup populates from workers, unavailable workers get an empty entry, refresh keeps it current.
  */
 
 import { ToolMetadata, TimeoutClass } from './hub-types.js';
@@ -26,13 +17,10 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Mutable Tool Registry
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Mutable Tool Registry ────────────────────────────────────────────────────────────────────────
 
 /**
- * Mutable registry of all tool metadata by service.
- * Populated by initializeRegistry() and refreshed periodically.
+ * Mutable registry of all tool metadata by service, populated/refreshed by initializeRegistry().
  * Consumers should access via exported functions, not directly.
  */
 const _registry: Record<string, Record<string, ToolMetadata>> = {};
@@ -47,10 +35,7 @@ let _initialized = false;
  */
 let _refreshInterval: ReturnType<typeof setInterval> | null = null;
 
-/**
- * Read-only view of the registry for consumers.
- * Returns the current snapshot. Keys and values may change after refresh.
- */
+/** Read-only view of the registry for consumers; keys and values may change after refresh. */
 export function getRegistry(): Readonly<Record<string, Readonly<Record<string, ToolMetadata>>>> {
   return _registry;
 }
@@ -68,9 +53,7 @@ export const TOOL_REGISTRY: Readonly<Record<string, Readonly<Record<string, Tool
  */
 export let SERVICE_NAMES: readonly string[] = [];
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Initialization
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Initialization ───────────────────────────────────────────────────────────────────────────────
 
 /**
  * Retry schedule for cold-start workers (SharePoint OAuth can take 5–15s).
@@ -79,8 +62,7 @@ export let SERVICE_NAMES: readonly string[] = [];
 let discoveryRetryDelays: readonly number[] = DISCOVERY_RETRY_DELAYS_MS;
 
 /**
- * Test-only hook: swap the discovery retry schedule so unit tests don't sleep
- * for up to 7 s. Keep the production value intact otherwise.
+ * Test-only: swap retry schedule so tests don't sleep 7s (`[]` disables retries).
  * @param delaysMs - Array of delays in ms; `[]` disables retries entirely.
  * @internal
  */
@@ -89,9 +71,8 @@ export function _setDiscoveryRetryDelaysForTesting(delaysMs: readonly number[]):
 }
 
 /**
- * Discover tools for a single service with retry + backoff.
- * Only retries when discovery returned zero tools — a non-empty registry
- * is considered authoritative even if it is smaller than expected.
+ * Discover tools for a single service with retry + backoff. Only retries on zero tools —
+ * a non-empty registry is authoritative even if smaller than expected.
  * @param service - Service name to discover
  */
 async function discoverWithStartupRetry(service: string): Promise<Record<string, ToolMetadata>> {
@@ -149,8 +130,7 @@ export async function initializeRegistry(): Promise<void> {
 }
 
 /**
- * Refresh tools for a specific service from its worker.
- * Called by background refresh or on-demand.
+ * Refresh tools for a service from its worker; called by background refresh or on-demand.
  * @param service - Service name to refresh
  */
 export async function refreshServiceTools(service: string): Promise<void> {
@@ -318,9 +298,7 @@ export function _setServiceNamesForTesting(names: string[]): void {
   SERVICE_NAMES = names;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Registry Accessors (same API as before)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Registry Accessors (same API as before) ──────────────────────────────────────────────────────
 
 /**
  * Get tool metadata for a specific service and method
@@ -340,9 +318,7 @@ export function getServiceMethods(service: string): string[] {
   return tools ? Object.keys(tools) : [];
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Timeout Detection (SSOT - based on tool policy)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Timeout Detection (SSOT - based on tool policy) ──────────────────────────────────────────────
 
 /**
  * Cached result for getLongTimeoutTools().
@@ -418,9 +394,7 @@ export function getExecutionTimeout(
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Service Filtering (ENABLED_SERVICES / DISABLED_OS_SERVICES)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Service Filtering (ENABLED_SERVICES / DISABLED_OS_SERVICES) ──────────────────────────────────
 
 let _enabledServicesCache: Set<string> | null = null;
 
@@ -477,9 +451,7 @@ export function resetServiceCaches(): void {
   _disabledOsCategoriesCache = null;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Bridge Generation
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Bridge Generation ────────────────────────────────────────────────────────────────────────────
 
 /**
  * Options for callWorker function
@@ -519,12 +491,8 @@ export function buildServiceBridge(
 
   for (const methodName of Object.keys(tools)) {
     const metadata = tools[methodName];
-    // The JS bridge surface uses `methodName` (camelCase, e.g. `browserNavigate`)
-    // but the actual `tools/call` request must carry the worker's own tool
-    // name (often snake_case, e.g. `browser_navigate` for `@playwright/mcp`).
-    // Fall back to `methodName` for legacy metadata that was built without
-    // `workerToolName` — covers all in-house workers whose tool names
-    // already match the camelCase convention.
+    // Bridge surface uses camelCase `methodName`; `tools/call` needs the worker's own tool name
+    // (e.g. snake_case for @playwright/mcp), falling back to `methodName` for legacy metadata.
     const workerToolName = metadata.workerToolName ?? methodName;
     bridge[methodName] = (params?: Record<string, unknown>) => {
       const perToolTimeout = metadata.timeoutMs;
@@ -538,9 +506,7 @@ export function buildServiceBridge(
   return bridge;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Executor Wrapper Generation
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Executor Wrapper Generation ──────────────────────────────────────────────────────────────────
 
 /**
  * Function type for wrapping tool calls with audit logging.
@@ -615,9 +581,7 @@ export function buildExecutorWrappers(
   return wrappers;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Validation
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Validation ───────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Validate that all tools in registry have required fields.

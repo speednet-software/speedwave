@@ -36,7 +36,7 @@ const SERVICE_DOT_COLOURS: readonly string[] = [
 ];
 
 /**
- * Returns the deterministic dot colour for a service row.
+ * Returns the deterministic dot colour for a service row (index into the palette, unless unconfigured/disabled).
  * @param svc - the integration status entry
  * @param index - the row index in the rendered list
  */
@@ -333,7 +333,7 @@ function dotColourFor(svc: IntegrationStatusEntry, index: number): string {
   },
 })
 export class IntegrationsComponent implements OnInit, OnDestroy {
-  private static readonly BETA_ONLY_SERVICES = new Set(['office', 'github', 'atlassian', 'slack']);
+  private static readonly BETA_ONLY_SERVICES = new Set(['office']);
 
   /** List of container-based MCP service integrations. */
   services: IntegrationStatusEntry[] = [];
@@ -492,15 +492,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Runs OS validation once per project per session (cached as a static
-   * promise). Re-entering the view does not re-spawn 4 CLIs. Returns the
-   * cached promise so tests can await; production fires-and-forgets.
-   *
-   * NOTE: a stale entry persists for the lifetime of the app session. If the
-   * user changes a permission in System Settings mid-session and revisits
-   * /integrations, the banner will not refresh until next launch. Acceptable
-   * trade-off: the cost of re-spawning 4 native CLIs on every navigation
-   * (1.4s + Mail.app re-launch attempts) is much worse than this edge case.
+   * Runs OS validation once per project per session (cached as a static promise); re-entering the view does not re-spawn 4 CLIs.
+   * A stale entry persists for the app session — a mid-session permission change won't refresh the banner until next launch (accepted trade-off).
    */
   runInitialOsValidation(): Promise<void> {
     if (!this.activeProject) return Promise.resolve();
@@ -516,11 +509,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     return inflight;
   }
 
-  /**
-   * Spawns 4 native CLIs to verify that every OS integration enabled in
-   * config still has macOS TCC permission; auto-disables those that don't
-   * and populates `osIntegrationsAutoDisabled` so the banner can render.
-   */
+  /** Spawns 4 native CLIs to verify every enabled OS integration still has macOS TCC permission; auto-disables those that don't and populates `osIntegrationsAutoDisabled`. */
   async validateOsIntegrations(): Promise<void> {
     if (!this.activeProject) {
       this.logger.debug('[integrations] validateOsIntegrations skipped — no active project');
@@ -532,9 +521,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         'validate_os_integrations_on_startup',
         { project: this.activeProject }
       );
-      // Defensive: the Tauri command can return undefined in tests where the
-      // mock handler doesn't recognise the command name; coerce to [] so the
-      // template can safely call .length without an undefined-property error.
+      // Defensive: the Tauri command can return undefined in tests where the mock handler
+      // doesn't recognise the command name; coerce to [] so .length is always safe.
       this.osIntegrationsAutoDisabled = Array.isArray(result) ? result : [];
       if (this.osIntegrationsAutoDisabled.length === 0) {
         this.logger.info('[integrations] validateOsIntegrations done — no auto-disabled services');
@@ -572,7 +560,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058, ADR-071).
+      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
       const betaOn = this.betaEnabled();
       this.services = response.services.filter(
         (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
@@ -694,9 +682,8 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Auto-enables a service if it became configured but is not yet enabled.
-   * Shared by handleSaveCredentials and OAuth success handler.
-   * @param service - the service identifier to check and auto-enable
+   * Auto-enables a service if it became configured but is not yet enabled; shared by handleSaveCredentials and the OAuth success handler.
+   * @param service - the integration to check and possibly enable
    */
   private async autoEnableIfConfigured(service: string): Promise<void> {
     const updated = this.services.find((s) => s.service === service);

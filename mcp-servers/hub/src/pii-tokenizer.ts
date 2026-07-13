@@ -81,9 +81,8 @@ const PII_VALIDATORS: Partial<Record<PIIType, (value: string) => boolean>> = {
 };
 
 /**
- * PESEL checksum validation
+ * PESEL checksum validation.
  * @param pesel - PESEL number to validate
- * @returns True if valid, false otherwise
  */
 function validatePESEL(pesel: string): boolean {
   /* c8 ignore next — PESEL regex /\b\d{11}\b/ always matches exactly 11 digits */
@@ -98,9 +97,8 @@ function validatePESEL(pesel: string): boolean {
 }
 
 /**
- * NIP checksum validation
+ * NIP checksum validation.
  * @param nip - NIP number to validate
- * @returns True if valid, false otherwise
  */
 function validateNIP(nip: string): boolean {
   /* c8 ignore next — NIP regex /\b\d{10}\b/ always matches exactly 10 digits */
@@ -115,9 +113,8 @@ function validateNIP(nip: string): boolean {
 }
 
 /**
- * Luhn algorithm for credit card validation
+ * Luhn algorithm for credit card validation.
  * @param number - Card number to validate
- * @returns True if valid, false otherwise
  */
 function validateLuhn(number: string): boolean {
   const digits = number.replace(/\D/g, '');
@@ -141,9 +138,8 @@ function validateLuhn(number: string): boolean {
 }
 
 /**
- * IBAN validation (mod 97 check)
+ * IBAN validation (mod 97 check).
  * @param iban - IBAN to validate
- * @returns True if valid, false otherwise
  */
 function validateIBAN(iban: string): boolean {
   const cleaned = iban.replace(/\s/g, '').toUpperCase();
@@ -173,10 +169,9 @@ function validateIBAN(iban: string): boolean {
 }
 
 /**
- * Create a new PII context for an execution
+ * Create a new PII context for an execution.
  * @param maxTokens - Maximum number of tokens to allow (default: 1000)
  * @param ttlMs - Time-to-live for tokens in milliseconds (default: 30 minutes)
- * @returns New PII context
  */
 export function createPIIContext(maxTokens = 1000, ttlMs = 30 * 60 * 1000): PIIContext {
   return {
@@ -189,9 +184,8 @@ export function createPIIContext(maxTokens = 1000, ttlMs = 30 * 60 * 1000): PIIC
 }
 
 /**
- * Generate a token for a PII value
+ * Generate a token for a PII value.
  * @param type - Type of PII to generate token for
- * @returns Generated token string
  */
 function generateToken(type: PIIType): string {
   const randomPart = crypto.randomBytes(4).toString('hex').toUpperCase();
@@ -204,9 +198,8 @@ function generateToken(type: PIIType): string {
 const AUTHOR_SEGMENT = /(^|[^a-z])authors?(?=[^a-z]|$)/g;
 
 /**
- * Check if a key name indicates a sensitive field
+ * Check if a key name indicates a sensitive field.
  * @param key - Object key name to check
- * @returns True if the key indicates sensitive data
  */
 function isSensitiveKey(key: string): boolean {
   // camelCase → snake_case first, so the segment carve-out sees `co_author`.
@@ -218,10 +211,9 @@ function isSensitiveKey(key: string): boolean {
 }
 
 /**
- * Tokenize a sensitive field value
+ * Tokenize a sensitive field value; returns the original value if the token limit is reached.
  * @param value - The sensitive value to tokenize
  * @param context - PII context for this execution
- * @returns Token string or original value if limit reached
  */
 function tokenizeSensitiveValue(value: string, context: PIIContext): string {
   const cacheKey = `${PIIType.SENSITIVE_FIELD}:${value}`;
@@ -261,7 +253,6 @@ function tokenizeSensitiveValue(value: string, context: PIIContext): string {
  * Recursively tokenize PII in data by value patterns and key names.
  * @param data - Data to tokenize
  * @param context - PII context for this execution
- * @returns Tokenized data
  */
 export function tokenizePII(data: unknown, context: PIIContext): unknown {
   if (data === null || data === undefined) {
@@ -298,7 +289,6 @@ export function tokenizePII(data: unknown, context: PIIContext): unknown {
  * Tokenize PII in a string.
  * @param text - String to tokenize
  * @param context - PII context for this execution
- * @returns Tokenized string
  */
 function tokenizeString(text: string, context: PIIContext): string {
   let result = text;
@@ -367,11 +357,9 @@ function tokenizeString(text: string, context: PIIContext): string {
 }
 
 /**
- * Detokenize PII in data
- * Resolves tokens back to real values for MCP calls
+ * Detokenize PII in data; resolves tokens back to real values for MCP calls.
  * @param data - Data containing tokens
  * @param context - PII context with token mappings
- * @returns Detokenized data
  */
 export function detokenizePII(data: unknown, context: PIIContext): unknown {
   if (data === null || data === undefined) {
@@ -401,7 +389,6 @@ export function detokenizePII(data: unknown, context: PIIContext): unknown {
  * Detokenize PII in a string using reverse-order replacement.
  * @param text - String containing tokens
  * @param context - PII context with token mappings
- * @returns Detokenized string
  */
 function detokenizeString(text: string, context: PIIContext): string {
   // Match token pattern [TYPE:TOKEN_xxx]
@@ -437,10 +424,8 @@ function detokenizeString(text: string, context: PIIContext): string {
 }
 
 /**
- * Clean up expired tokens
- * Removes from both tokens and valueToToken maps
+ * Clean up expired tokens; removes from both tokens and valueToToken maps.
  * @param context - PII context to clean up
- * @returns Number of tokens removed
  */
 export function cleanupExpiredTokens(context: PIIContext): number {
   const now = Date.now();
@@ -461,9 +446,8 @@ export function cleanupExpiredTokens(context: PIIContext): number {
 }
 
 /**
- * Get token statistics
+ * Get token statistics: total count and breakdown by type.
  * @param context - PII context to get statistics for
- * @returns Token statistics including total count and breakdown by type
  */
 export function getTokenStats(context: PIIContext): {
   total: number;

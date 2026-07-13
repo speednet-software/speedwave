@@ -9,7 +9,7 @@ Each supported platform makes its container runtime available without manual use
 
 ## Why
 
-- macOS GUI apps launched from Finder/Spotlight do not inherit the shell PATH, so a Homebrew-installed `limactl` would be invisible. Bundling Lima inside the `.app` and isolating its VM under `~/.speedwave/lima` (via `LIMA_HOME`) avoids PATH hacks and conflicts with any user-installed Lima.
+- macOS GUI apps launched from Finder/Spotlight do not inherit the shell PATH, so a Homebrew-installed `limactl` would be invisible.[^1] Bundling Lima inside the `.app` and isolating its VM under `~/.speedwave/lima` (via `LIMA_HOME`[^2]) avoids PATH hacks and conflicts with any user-installed Lima.
 - Auto-provisioning WSL2 with a named, isolated distribution keeps Speedwave out of the way of any WSL distros the user already runs.
 - Offline / air-gapped installs work: the Windows installer bundles the nerdctl-full tarball and the Ubuntu rootfs, and the Setup Wizard prefers bundled files before any network download.
 - A clean macOS install has no `node` in PATH, which would break the host-side MCP workers; bundling the pinned `node` binary keeps the zero-dependency promise.
@@ -30,8 +30,16 @@ Each supported platform makes its container runtime available without manual use
 - **CLI as a standalone tool with its own bundled Lima** — would duplicate setup logic, complicate self-update (two bundles), and break the "CLI = thin client" principle from ADR-005.
 - **Auto-download Lima on first launch** — requires post-install internet, fails in restricted/corporate networks, and risks a silently broken first run.
 - **CLI with its own `speedwave setup` command** — would duplicate the Desktop Setup Wizard. Per YAGNI, the CLI delegates all setup to Desktop.
-- **Podman as a package dependency / Flatpak packaging** — both were tied to the dropped Linux host path (ADR-059). Podman added a second runtime to maintain alongside nerdctl; Flatpak's sandbox conflicts with rootless container management (containerd needs direct cgroup/namespace/storage access). Retained here only as historical rationale.
+- **Podman as a package dependency / Flatpak packaging** — both were tied to the dropped Linux host path (ADR-059). Podman added a second runtime to maintain alongside nerdctl; Flatpak's sandbox conflicts with rootless container management (containerd needs direct cgroup/namespace/storage access) (unverified). Retained here only as historical rationale.
 
 ## License compliance
 
-Lima (Apache 2.0) and Node.js (MIT) both permit bundling and redistribution; their license texts ship under `THIRD-PARTY-LICENSES/` in the release artifacts.
+Lima (Apache 2.0)[^3] and Node.js (MIT)[^4] both permit bundling and redistribution; their license texts ship under `THIRD-PARTY-LICENSES/` in the release artifacts.
+
+[^1]: [Setting PATH and other environment variables for GUI apps launched from Finder](https://developer.apple.com/forums/thread/74371) - Apple DTS engineer confirms GUI apps do not inherit shell-configured PATH and get their environment from `launchd`.
+
+[^2]: [Lima docs: Environment Variables - `LIMA_HOME`](https://lima-vm.io/docs/config/environment-variables/) - specifies the Lima home directory (defaults to `~/.lima`).
+
+[^3]: [lima-vm/lima LICENSE](https://github.com/lima-vm/lima/blob/master/LICENSE) - Apache License, Version 2.0.
+
+[^4]: [nodejs/node LICENSE](https://raw.githubusercontent.com/nodejs/node/main/LICENSE) and [Node.js README](https://github.com/nodejs/node) - "Node.js is licensed under the MIT License."

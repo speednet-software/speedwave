@@ -1,23 +1,14 @@
 /**
- * Shared tool-handler wrappers — SSOT for the two `withValidation` families that
- * were duplicated across six workers' `tools/validation.ts`:
- *
- * - Family A ({@link withResultValidation}): param-shape-guard + `ToolResult`
- *   formatting. Used by slack / sharepoint / os, which return a `{ success,
- *   data?, error? }` {@link ToolResult} from each handler.
- * - Family B ({@link withClientValidation}): null-client-gate + error mapping.
- *   Used by github / gitlab / atlassian, whose handlers take a non-null client
- *   and throw on failure.
- * @module shared/tool-validation
+ * Shared tool-handler wrappers, SSOT for the two `withValidation` families duplicated across six
+ * workers: Family A ({@link withResultValidation}) and Family B ({@link withClientValidation}).
  */
 
 import type { ToolsCallResult } from './types.js';
 import { errorResult } from './server.js';
 import { notConfiguredMessage } from './errors.js';
+import { missingParamResult } from './teaching-errors.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Family A — param-shape guard + ToolResult formatting (slack / sharepoint / os)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Family A — param-shape guard + ToolResult formatting (slack / sharepoint / os) ──
 
 /** Standardized result returned by Family-A tool handlers. */
 export interface ToolResult {
@@ -38,7 +29,7 @@ function isParamObject(params: unknown): params is Record<string, unknown> {
 }
 
 /**
- * Format a {@link ToolResult} into an MCP {@link ToolsCallResult}.
+ * Format a {@link ToolResult} into a {@link ToolsCallResult}; `indent` 0 skips pretty-print.
  * @param result - Handler result.
  * @param indent - `JSON.stringify` indent (slack/os use 2, sharepoint uses 0).
  */
@@ -49,16 +40,33 @@ function formatResult(result: ToolResult, indent: number): ToolsCallResult {
   return result.success ? { content } : { content, isError: true };
 }
 
+/** Optional behavior for {@link withResultValidation}. */
+export interface ResultValidationOptions {
+  /** Param names that must be present; a missing one short-circuits to a teaching error. */
+  required?: readonly string[];
+  /** Tool name folded into the missing-param teaching message. */
+  toolName?: string;
+}
+
 /**
- * Wrap a {@link ToolResult}-returning handler with a param-shape guard and
- * uniform error formatting.
- * @template T - The handler's parsed params type.
+ * True iff a required param value counts as missing (absent, null, or empty string).
+ * @param value - The param value to test.
+ */
+function isMissingRequired(value: unknown): boolean {
+  return value === undefined || value === null || value === '';
+}
+
+/**
+ * Wrap a {@link ToolResult}-returning handler with a param-shape guard, optional
+ * `required`-param enforcement (via `options.required`), and uniform error formatting.
  * @param handler - Handler returning a {@link ToolResult} (sync or async).
  * @param indent - `JSON.stringify` indent for the formatted payload (default 2).
+ * @param options - Optional required-param list and tool name for teaching errors.
  */
 export function withResultValidation<T>(
   handler: (params: T) => ToolResult | Promise<ToolResult>,
-  indent = 2
+  indent = 2,
+  options?: ResultValidationOptions
 ): (params: Record<string, unknown>) => Promise<ToolsCallResult> {
   return async (params: Record<string, unknown>) => {
     if (!isParamObject(params)) {
@@ -69,6 +77,15 @@ export function withResultValidation<T>(
         },
         indent
       );
+    }
+    for (const name of options?.required ?? []) {
+      if (isMissingRequired(params[name])) {
+        const suffix = options?.toolName ? ` for ${options.toolName}.` : '.';
+        return formatResult(
+          missingParamResult(name, params[name], `Provide ${name}${suffix}`),
+          indent
+        );
+      }
     }
     try {
       const result = await handler(params as T);
@@ -88,9 +105,7 @@ export function withResultValidation<T>(
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Family B — null-client gate + error mapping (github / gitlab / atlassian)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Family B — null-client gate + error mapping (github / gitlab / atlassian) ──
 
 /** Options for {@link withClientValidation}. */
 export interface ClientValidationOptions {
@@ -103,11 +118,8 @@ export interface ClientValidationOptions {
 }
 
 /**
- * Wrap a tool handler that requires a non-null client: short-circuits to a
- * "not configured" {@link errorResult} when the client is absent, and turns any
- * thrown error into a sanitized {@link errorResult} via `formatError`.
- * @template C - Client type.
- * @template T - The handler's parsed params type.
+ * Wrap a tool handler that requires a non-null client: short-circuits to a "not configured"
+ * {@link errorResult} when absent, and turns a thrown error into a sanitized one via `formatError`.
  * @param client - The client, or `null` when the service is unconfigured.
  * @param handler - Handler invoked only when `client` is non-null.
  * @param opts - Service name, error formatter, optional unexpected-error hook.

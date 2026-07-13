@@ -9,7 +9,7 @@ Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token i
 - **Token Source**: `/tokens/{site_url,email,api_token}` required, `/tokens/{jira_project_keys,confluence_space_keys}` optional (read-only mount)
 - **Auth**: `MCP_ATLASSIAN_AUTH_TOKEN` (Bearer token enforced on every request)
 - **Atlassian auth**: Basic — `Authorization: Basic base64(email:api_token)` ([API token](https://id.atlassian.com/manage-profile/security/api-tokens))
-- **Client**: thin `axios` HTTP client (no external Atlassian SDK — see `docs/guides/integrations.md` for the rationale)
+- **Client**: thin `axios` HTTP client (no external Atlassian SDK)
 - **APIs**: Jira Cloud REST v3 + Agile 1.0; Confluence Cloud REST v2 (spaces, pages, comments, label reads, attachments) + v1 (CQL search and bulk label-add — no v2 equivalent for those)
 - **Scope**: Atlassian Cloud only (`*.atlassian.net`; no Data Center/Server)
 
@@ -31,15 +31,15 @@ Isolated Jira & Confluence (Atlassian Cloud) MCP server with per-service token i
 
 ## Tools (33 total)
 
-| Domain                 | Count | Tools                                                                                            |
-| ---------------------- | ----- | ------------------------------------------------------------------------------------------------ |
-| Jira — issues          | 8     | searchIssues (JQL), getIssue, createIssue, updateIssue, getTransitions, transitionIssue, assignIssue, getMyself |
-| Jira — comments         | 3     | addComment, getComments, addWorklog                                                              |
-| Jira — projects         | 3     | listProjects, getProject, listIssueTypes                                                         |
-| Jira — Agile            | 6     | listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint          |
-| Confluence — spaces     | 2     | listSpaces, getSpace                                                                             |
-| Confluence — pages      | 6     | searchPages (CQL), getPage, getPageByTitle, createPage, updatePage, getPageChildren              |
-| Confluence — content    | 5     | addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments                  |
+| Domain               | Count | Tools                                                                                                           |
+| -------------------- | ----- | --------------------------------------------------------------------------------------------------------------- |
+| Jira — issues        | 8     | searchIssues (JQL), getIssue, createIssue, updateIssue, getTransitions, transitionIssue, assignIssue, getMyself |
+| Jira — comments      | 3     | addComment, getComments, addWorklog                                                                             |
+| Jira — projects      | 3     | listProjects, getProject, listIssueTypes                                                                        |
+| Jira — Agile         | 6     | listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint                         |
+| Confluence — spaces  | 2     | listSpaces, getSpace                                                                                            |
+| Confluence — pages   | 6     | searchPages (CQL), getPage, getPageByTitle, createPage, updatePage, getPageChildren                             |
+| Confluence — content | 5     | addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments                                  |
 
 Jira write payloads (`description`, comment bodies) accept plain `bodyText` (converted to a minimal Atlassian Document Format document) or a raw `bodyAdf` object. Confluence page bodies accept `bodyText` or raw `bodyStorage` (storage representation); `updatePage` fetches the current version automatically.
 

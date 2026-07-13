@@ -33,11 +33,13 @@ make setup-dev
 
 ### Running Tests
 
+The required CI checks on every PR to `dev`/`main` (macOS + Windows) are the test and quality gate; the commands below are optional for a local pass. The pre-push hook runs only `make check-fmt` (fast format check, no builds/tests).
+
 ```bash
-# Run all tests (Rust + MCP)
+# Run all tests (Rust + MCP) — optional locally; CI runs it
 make test
 
-# Run linting, clippy, type-check, and formatting
+# Run linting, clippy, type-check, and formatting — optional locally; CI runs it
 make check
 
 # Full quality gate (check + test + coverage + audit)
@@ -48,8 +50,8 @@ make check-all
 
 1. Fork the repository and create a feature branch from `dev`
 2. Make your changes
-3. Ensure all tests pass: `make test`
-4. Ensure code quality checks pass: `make check`
+3. Add tests for your change and run the affected targets locally (e.g. `make test-rust`); the full suite runs in CI across macOS and Windows
+4. `make check` is available for a thorough local lint/format pass, but the required CI checks are the merge gate
 5. Commit your changes using [Conventional Commits](#commit-conventions)
 6. Push to your fork and submit a Pull Request
 
