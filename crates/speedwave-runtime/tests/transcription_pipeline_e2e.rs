@@ -99,6 +99,7 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
         transcriber: Box::new(transcriber),
         transcribe_opts: TranscribeOptions::for_language(Language::En),
         stop: StopSignal::new(),
+        time_base: std::time::Duration::ZERO,
     });
     driver.run(&audio_wav).expect("live driver run");
     assert!(audio_wav.is_file(), "live pass must write audio.wav");
@@ -109,7 +110,7 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     run_finalize(FinalizeConfig {
         id,
         store: store.clone(),
-        audio_path: audio_wav,
+        audio_paths: vec![audio_wav],
         transcriber: Box::new(finalize_transcriber),
         transcribe_opts: TranscribeOptions::for_language(Language::En),
     })

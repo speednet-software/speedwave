@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SessionListComponent } from './session-list.component';
 import { TranscriptionService } from '../../services/transcription.service';
@@ -28,6 +29,8 @@ describe('SessionListComponent', () => {
   let svc: {
     list: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
+    resumeRecording: ReturnType<typeof vi.fn>;
+    recordingSessionId: WritableSignal<string | null>;
   };
 
   beforeEach(async () => {
@@ -37,6 +40,8 @@ describe('SessionListComponent', () => {
         session('b', '2026-05-12T00:00:00Z', false),
       ]),
       delete: vi.fn(async () => undefined),
+      resumeRecording: vi.fn(async () => undefined),
+      recordingSessionId: signal<string | null>(null),
     };
     await TestBed.configureTestingModule({
       imports: [SessionListComponent],
@@ -68,6 +73,46 @@ describe('SessionListComponent', () => {
     expect(svc.delete).toHaveBeenCalledWith('a');
     expect(component.selectedId()).toBeNull();
     expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
+  });
+
+  it('resumes a done session, selects it, and emits opened', async () => {
+    await component.ngOnInit();
+    const spy = vi.fn();
+    component.opened.subscribe(spy);
+    const s = component.sessions()[0];
+    await component.resume(s);
+    expect(svc.resumeRecording).toHaveBeenCalledWith(s.id);
+    expect(component.selectedId()).toBe(s.id);
+    expect(spy).toHaveBeenCalledWith(s);
+    expect(svc.list).toHaveBeenCalledTimes(2); // refreshed
+  });
+
+  it('surfaces a resume failure without selecting the session', async () => {
+    await component.ngOnInit();
+    svc.resumeRecording.mockRejectedValueOnce(new Error('capture busy'));
+    const errSpy = vi.fn();
+    component.errorOccurred.subscribe(errSpy);
+    await component.resume(component.sessions()[0]);
+    expect(component.error()).toBe('capture busy');
+    expect(errSpy).toHaveBeenCalledWith('capture busy');
+    expect(component.selectedId()).toBeNull();
+  });
+
+  it('shows a resume button only on done rows and only while nothing records', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="resume-b"]')).not.toBeNull();
+    // A recording in flight hides every resume button.
+    svc.recordingSessionId.set('b');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="resume-b"]')).toBeNull();
+    // A non-done session offers no resume.
+    svc.recordingSessionId.set(null);
+    component.sessions.set([
+      { ...session('c', '2026-05-13T00:00:00Z', true), status: { state: 'failed', reason: 'x' } },
+    ]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="resume-c"]')).toBeNull();
   });
 
   it('surfaces a backend error', async () => {

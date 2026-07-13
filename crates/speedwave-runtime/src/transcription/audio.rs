@@ -360,6 +360,18 @@ pub fn parse_wav_to_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), Ca
     Ok((out, spec.sample_rate))
 }
 
+/// Duration of a WAV file from its header (`None` when unreadable).
+pub fn wav_duration(path: &Path) -> Option<Duration> {
+    let reader = hound::WavReader::open(path).ok()?;
+    let spec = reader.spec();
+    if spec.sample_rate == 0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(
+        reader.duration() as f64 / spec.sample_rate as f64,
+    ))
+}
+
 /// File-backed dev path: parse + resample to 16 kHz.
 fn read_wav_as_mono_16k(path: &Path) -> Result<Vec<f32>, CaptureError> {
     let (mono, rate) = parse_wav_to_mono_f32(path)?;

@@ -63,6 +63,10 @@ pub struct TranscriptSession {
     pub final_segments: Option<Vec<Segment>>,
     /// On-disk audio file (`None` if missing/never recorded).
     pub audio_path: Option<PathBuf>,
+    /// Audio files recorded by later resumes (`audio-2.wav`, …), in order,
+    /// after `audio_path` (ADR-056 Amendment 10). Empty on never-resumed sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_parts: Vec<PathBuf>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
     /// Last event seq emitted for this session — for snapshot+stream resume.
@@ -96,10 +100,20 @@ impl TranscriptSession {
             live_segments: Vec::new(),
             final_segments: None,
             audio_path: Some(audio_path),
+            audio_parts: Vec::new(),
             models_used: ModelsUsed::default(),
             last_seq: 0,
             live_draft: String::new(),
         }
+    }
+
+    /// Every audio part in recording order: `audio_path` then `audio_parts`.
+    pub fn all_audio_parts(&self) -> Vec<PathBuf> {
+        self.audio_path
+            .iter()
+            .chain(self.audio_parts.iter())
+            .cloned()
+            .collect()
     }
 
     /// `final_segments` if the offline pass ran, else `live_segments`.

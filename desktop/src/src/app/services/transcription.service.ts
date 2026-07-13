@@ -136,6 +136,31 @@ export class TranscriptionService {
   }
 
   /**
+   * Resumes a finished recording: a new part appends to the same transcript.
+   * @param sessionId - the Done session to reopen.
+   */
+  async resumeRecording(sessionId: string): Promise<StartAck> {
+    const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId });
+    this.activateSnapshot(ack.snapshot);
+    try {
+      await this.attachListener(ack.event_name);
+    } catch (e) {
+      // The backend capture already runs; stop it rather than orphan it.
+      try {
+        await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
+        this.recordingSessionIdSignal.set(null);
+      } catch {
+        this.recordingSessionIdSignal.set(ack.session_id);
+      }
+      throw e;
+    }
+    this.recordingSessionIdSignal.set(ack.session_id);
+    this.recordingSourceSignal.set(ack.snapshot.audio_source.source);
+    this.recordingLanguageSignal.set(ack.snapshot.language);
+    return ack;
+  }
+
+  /**
    * Signals the driver to stop and transition to the offline pass.
    * @param sessionId - the recording to stop.
    */

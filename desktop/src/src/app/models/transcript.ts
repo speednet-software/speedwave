@@ -70,6 +70,8 @@ export interface TranscriptSession {
   live_segments: Segment[];
   final_segments: Segment[] | null;
   audio_path: string | null;
+  /** Extra audio parts recorded by resumes (absent on never-resumed sessions). */
+  audio_parts?: string[];
   models_used: ModelsUsed;
   last_seq: number;
 }

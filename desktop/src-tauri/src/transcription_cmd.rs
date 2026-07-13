@@ -202,17 +202,35 @@ pub async fn start_transcription(
         .map_err(|e| format!("drivers lock poisoned: {e}"))?
         .insert(session_id, stop.clone());
 
-    let stop_for_cleanup = stop.clone();
-    let driver = TranscriptDriver::new(DriverConfig {
-        id: session_id,
-        store: store_arc.clone(),
-        audio: stream,
-        transcriber: Box::new(transcriber),
-        transcribe_opts: TranscribeOptions::for_language(lang),
-        stop,
-    });
+    spawn_driver(
+        DriverConfig {
+            id: session_id,
+            store: store_arc.clone(),
+            audio: stream,
+            transcriber: Box::new(transcriber),
+            transcribe_opts: TranscribeOptions::for_language(lang),
+            stop,
+            time_base: std::time::Duration::ZERO,
+        },
+        audio_wav,
+        drivers.inner().clone(),
+    );
+
+    let snapshot = store.get(session_id).map_err(|e| e.to_string())?;
+    Ok(StartAck {
+        session_id,
+        event_name: transcript_event_name(session_id),
+        snapshot,
+    })
+}
+
+/// Runs a built driver on a blocking task; cleans up the stop-signal registry
+/// and wakes `await_finished()` waiters when it winds down.
+fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: DriversHandle) {
+    let session_id = cfg.id;
+    let stop_for_cleanup = cfg.stop.clone();
+    let driver = TranscriptDriver::new(cfg);
     // The driver loop blocks on `next_chunk` — run it on a blocking task.
-    let drivers_for_cleanup = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
             // Log only the id's first chunk — CodeQL flags any "session_id"-looking variable;
@@ -222,18 +240,106 @@ pub async fn start_transcription(
                 short_id(session_id)
             );
         }
-        // Drop the stop-signal entry once the driver has wound down, then
-        // wake anyone waiting on `await_finished()` (e.g. `stop_transcription`).
-        if let Ok(mut g) = drivers_for_cleanup.lock() {
+        if let Ok(mut g) = drivers.lock() {
             g.remove(&session_id);
         }
         stop_for_cleanup.signal_finished();
     });
+}
 
-    let snapshot = store.get(session_id).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn resume_transcription(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
+    forwarders: tauri::State<'_, ForwardersHandle>,
+    app: AppHandle,
+) -> Result<StartAck, String> {
+    let id = parse_transcript_id(&session_id)?;
+    let session = store.get(id).map_err(|e| e.to_string())?;
+    if !matches!(session.status, TranscriptStatus::Done) {
+        return Err("only a finished recording can be resumed".to_string());
+    }
+    let lang = session.language;
+    let audio_source = session.audio_source.source.clone();
+
+    let capture = transcription::detect_audio_capture();
+    validate_source_against_caps(&audio_source, &capture.capabilities())?;
+
+    let store_arc = store.inner().clone();
+    let models_arc = models.inner().clone();
+    let recommended = transcription::best_model_for_this_build().key.to_string();
+    let live_key: String = {
+        let m = models_arc.clone();
+        tokio::task::spawn_blocking(move || pick_live_model(&m, &recommended))
+            .await
+            .map_err(|e| format!("model pick task panicked: {e}"))??
+    };
+    let transcriber = {
+        let key = live_key;
+        let m = models_arc.clone();
+        tokio::task::spawn_blocking(move || {
+            let path = m.ensure_model(&key, &mut |_| {})?;
+            Ok::<_, speedwave_runtime::transcription::ModelStoreError>(
+                WhisperCppTranscriber::load(&path, key).map(|mut t| {
+                    attach_vad(&mut t, &m);
+                    t
+                }),
+            )
+        })
+        .await
+        .map_err(|e| format!("transcriber load task panicked: {e}"))?
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+    };
+
+    // The new part records past the earlier ones on the session timeline.
+    let time_base: std::time::Duration = session
+        .all_audio_parts()
+        .iter()
+        .filter_map(|p| speedwave_runtime::transcription::wav_duration(p))
+        .sum();
+    let part_no = 2 + session.audio_parts.len();
+    let next_part = store.session_dir(id).join(format!("audio-{part_no}.wav"));
+
+    store
+        .resume(id, next_part.clone())
+        .map_err(|e| e.to_string())?;
+    let stream = capture.start(audio_source).map_err(|e| {
+        let _ = store.set_status(
+            id,
+            TranscriptStatus::Failed {
+                reason: e.to_string(),
+            },
+        );
+        e.to_string()
+    })?;
+
+    spawn_event_forwarder(app, store_arc.clone(), forwarders.inner().clone(), id);
+    let stop = StopSignal::new();
+    drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .insert(id, stop.clone());
+    spawn_driver(
+        DriverConfig {
+            id,
+            store: store_arc,
+            audio: stream,
+            transcriber: Box::new(transcriber),
+            transcribe_opts: TranscribeOptions::for_language(lang),
+            stop,
+            time_base,
+        },
+        next_part,
+        drivers.inner().clone(),
+    );
+
+    let snapshot = store.get(id).map_err(|e| e.to_string())?;
     Ok(StartAck {
-        session_id,
-        event_name: transcript_event_name(session_id),
+        session_id: id,
+        event_name: transcript_event_name(id),
         snapshot,
     })
 }
@@ -272,8 +378,11 @@ pub async fn stop_transcription(
     // live model) and mark Done; on failure the live transcript stays.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
-    let session_dir = store.session_dir(id);
-    let audio_wav = session_dir.join("audio.wav");
+    // Every recorded part goes through the offline pass (resumed sessions have several).
+    let audio_paths = store
+        .get(id)
+        .map(|s| s.all_audio_parts())
+        .unwrap_or_else(|_| vec![store.session_dir(id).join("audio.wav")]);
     tokio::task::spawn_blocking(move || {
         // Pick the offline model: `large-v3` if present, else fall back to any
         // downloaded Whisper model (the live one is guaranteed present).
@@ -317,7 +426,7 @@ pub async fn stop_transcription(
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
-            audio_path: audio_wav,
+            audio_paths,
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
         };

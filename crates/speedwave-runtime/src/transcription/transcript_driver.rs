@@ -96,6 +96,9 @@ pub struct DriverConfig {
     pub transcribe_opts: TranscribeOptions,
     /// Shared stop flag.
     pub stop: StopSignal,
+    /// Offset added to committed segment times — the total duration of earlier
+    /// audio parts when resuming a session (`ZERO` for a fresh recording).
+    pub time_base: Duration,
 }
 
 /// Per-channel decode/commit state: one lane for mono captures, two (system +
@@ -133,6 +136,8 @@ pub struct TranscriptDriver {
     stop: StopSignal,
     /// Per-channel state; sized from the first chunk (1 = mono, 2 = system+mic).
     lanes: Vec<Lane>,
+    /// Committed-segment time offset (earlier parts' duration on resume).
+    time_base: Duration,
     last_decode_at: f32,
     /// Last logged "PCM is big" threshold (in seconds), so we warn once per
     /// step instead of every chunk.
@@ -152,6 +157,7 @@ impl TranscriptDriver {
             transcribe_opts: cfg.transcribe_opts,
             stop: cfg.stop,
             lanes: Vec::new(),
+            time_base: cfg.time_base,
             last_decode_at: 0.0,
             next_pcm_warn_at: PCM_WARN_STEP_SECS,
             last_draft: String::new(),
@@ -295,8 +301,13 @@ impl TranscriptDriver {
                 drafts.push(draft);
             }
         }
-        // Cross-lane commits interleave chronologically within the cycle.
+        // Cross-lane commits interleave chronologically within the cycle; on a
+        // resumed session times shift past the earlier parts.
         batch.sort_by_key(|s| s.start);
+        for s in &mut batch {
+            s.start += self.time_base;
+            s.end += self.time_base;
+        }
         let draft = drafts.join("\n");
         if !batch.is_empty() {
             self.store
@@ -429,9 +440,9 @@ pub struct FinalizeConfig {
     pub id: Uuid,
     /// The session store.
     pub store: Arc<TranscriptStore>,
-    /// Recorded audio (`<session_dir>/audio.wav`). `run_finalize` returns
-    /// `Failed` if it's missing.
-    pub audio_path: std::path::PathBuf,
+    /// Recorded audio parts in order (`audio.wav`, then `audio-N.wav` from
+    /// resumes). `run_finalize` fails when none carries samples.
+    pub audio_paths: Vec<std::path::PathBuf>,
     /// Higher-quality transcriber (e.g. `large-v3`).
     pub transcriber: Box<dyn Transcriber>,
     /// Forced language + word-timestamps toggle.
@@ -452,7 +463,7 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let FinalizeConfig {
         id,
         store,
-        audio_path,
+        audio_paths,
         mut transcriber,
         transcribe_opts,
     } = cfg;
@@ -474,47 +485,77 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         "no audio was captured — check that audio was playing and that microphone / \
          system-audio recording permission is granted";
 
-    // 1) Load the recorded audio (one lane per WAV channel; stereo = system+mic).
-    if !audio_path.exists() {
+    // 1) Load every recorded part (one lane per WAV channel; stereo = system+mic).
+    // A part that never got audio has no file (the WAV is created lazily) — skipped;
+    // failing the whole pass over one empty resume would discard the good parts.
+    struct PartLanes {
+        channels: Vec<Vec<f32>>,
+        part_base: Duration,
+    }
+    let mut parts: Vec<PartLanes> = Vec::new();
+    let mut part_base = Duration::ZERO;
+    for path in &audio_paths {
+        if !path.exists() {
+            continue;
+        }
+        let channels = match super::audio::parse_wav_to_channels_f32(path) {
+            Ok((chs, _rate)) if chs.iter().any(|c| !c.is_empty()) => chs,
+            Ok(_) => continue,
+            // A 0-byte / truncated WAV fails the hound header read — same cause.
+            Err(_) if wav_has_no_samples(path) => continue,
+            Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
+        };
+        let secs = channels.iter().map(Vec::len).max().unwrap_or(0) as f64 / 16_000.0;
+        parts.push(PartLanes {
+            channels,
+            part_base,
+        });
+        part_base += Duration::from_secs_f64(secs);
+    }
+    if parts.is_empty() {
         return Err(fail(&store, NO_AUDIO.to_string()));
     }
-    let channels = match super::audio::parse_wav_to_channels_f32(&audio_path) {
-        Ok((chs, _rate)) if chs.iter().any(|c| !c.is_empty()) => chs,
-        Ok(_) => return Err(fail(&store, NO_AUDIO.to_string())),
-        // A 0-byte / truncated WAV fails the hound header read — same cause.
-        Err(_) if wav_has_no_samples(&audio_path) => {
-            return Err(fail(&store, NO_AUDIO.to_string()))
-        }
-        Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
-    };
-    let lanes: Vec<(Option<TranscriptSource>, &[f32])> = match channels.as_slice() {
-        [sys, mic] => vec![
-            (Some(TranscriptSource::System), sys.as_slice()),
-            (Some(TranscriptSource::Mic), mic.as_slice()),
-        ],
-        chs => chs.iter().map(|c| (None, c.as_slice())).collect(),
-    };
 
-    // 2) + 3) Transcribe each lane in ~30 s windows with overlap, stitching + emitting
-    //    per-window progress (fills the 5%..60% band); lanes merge by start time.
+    // 2) + 3) Transcribe each part's lanes in ~30 s windows with overlap, stitching +
+    //    emitting per-window progress (fills the 5%..60% band); merged by start time.
     let _ = store.finalize_progress(id, 0.05);
+    let total_samples: usize = parts
+        .iter()
+        .flat_map(|p| p.channels.iter().map(Vec::len))
+        .sum();
     let mut final_segs: Vec<Segment> = Vec::new();
-    let lane_count = lanes.len() as f32;
-    for (lane_idx, (source, pcm)) in lanes.into_iter().enumerate() {
-        let base = lane_idx as f32 / lane_count;
-        let segs = match transcribe_chunked(
-            transcriber.as_mut(),
-            pcm,
-            &transcribe_opts,
-            source,
-            |frac| {
-                let _ = store.finalize_progress(id, 0.05 + 0.55 * (base + frac / lane_count));
-            },
-        ) {
-            Ok(s) => s,
-            Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
+    let mut done_samples = 0usize;
+    for part in &parts {
+        let lanes: Vec<(Option<TranscriptSource>, &[f32])> = match part.channels.as_slice() {
+            [sys, mic] => vec![
+                (Some(TranscriptSource::System), sys.as_slice()),
+                (Some(TranscriptSource::Mic), mic.as_slice()),
+            ],
+            chs => chs.iter().map(|c| (None, c.as_slice())).collect(),
         };
-        final_segs.extend(segs);
+        for (source, pcm) in lanes {
+            let lane_share = pcm.len() as f32 / total_samples.max(1) as f32;
+            let done_frac = done_samples as f32 / total_samples.max(1) as f32;
+            let segs = match transcribe_chunked(
+                transcriber.as_mut(),
+                pcm,
+                &transcribe_opts,
+                source,
+                |frac| {
+                    let _ =
+                        store.finalize_progress(id, 0.05 + 0.55 * (done_frac + frac * lane_share));
+                },
+            ) {
+                Ok(s) => s,
+                Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
+            };
+            final_segs.extend(segs.into_iter().map(|mut s| {
+                s.start += part.part_base;
+                s.end += part.part_base;
+                s
+            }));
+            done_samples += pcm.len();
+        }
     }
     final_segs.sort_by_key(|s| s.start);
     let _ = store.finalize_progress(id, 0.9);
@@ -736,6 +777,7 @@ mod tests {
             }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -812,6 +854,7 @@ mod tests {
             }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -849,6 +892,95 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_part_commits_segments_shifted_past_the_earlier_parts() {
+        let (_fixture_guard, fixture) = make_fixture_wav(12.0);
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+
+        // Resume base: 100 s of earlier parts already on the timeline.
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: stream_from(&fixture),
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "s{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::from_secs(100),
+        });
+        let out_wav = store.session_dir(id).join("audio-2.wav");
+        driver.run(&out_wav).unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert!(!snap.live_segments.is_empty());
+        // Every committed segment sits past the 100 s base, never inside part 1.
+        assert!(snap
+            .live_segments
+            .iter()
+            .all(|s| s.start >= Duration::from_secs(100)));
+        assert!(snap
+            .live_segments
+            .iter()
+            .all(|s| s.end <= Duration::from_secs(113)));
+    }
+
+    #[test]
+    fn run_finalize_stitches_multiple_parts_on_one_timeline() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+
+        // Part 1: 4 s mono; part 2: 2 s mono; a missing part in between is skipped.
+        let (_g1, part1) = make_fixture_wav(4.0);
+        let (_g2, part2) = make_fixture_wav(2.0);
+        run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_paths: vec![part1, store_dir.path().join("never-recorded.wav"), part2],
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "f{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        let finals = snap.final_segments.unwrap();
+        // 2 segments from part 1 + 1 from part 2, on one continuous timeline.
+        assert_eq!(finals.len(), 3);
+        assert!(finals.windows(2).all(|w| w[0].start <= w[1].start));
+        // Part 2's segment starts at the 4 s boundary, not at zero.
+        assert!(finals[2].start >= Duration::from_secs(4));
+        assert!(finals[2].end <= Duration::from_secs(7));
+    }
+
+    #[test]
+    fn run_finalize_fails_with_no_audio_when_no_part_exists() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_paths: vec![store_dir.path().join("missing.wav")],
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("no audio was captured"));
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
+    }
+
+    #[test]
     fn run_finalize_on_a_stereo_wav_tags_channels_and_merges_by_time() {
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
@@ -879,7 +1011,7 @@ mod tests {
         run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: wav,
+            audio_paths: vec![wav],
             transcriber: Box::new(MockTranscriber {
                 seg_secs: 2.0,
                 text_template: "f{n}".to_string(),
@@ -921,6 +1053,7 @@ mod tests {
             }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         driver
             .run(&store.session_dir(id).join("audio.wav"))
@@ -964,6 +1097,7 @@ mod tests {
             }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1047,6 +1181,7 @@ mod tests {
             transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1096,6 +1231,7 @@ mod tests {
             transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1218,6 +1354,7 @@ mod tests {
             transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1291,6 +1428,7 @@ mod tests {
             transcriber: Box::new(ScriptedTranscriber { script, call: 0 }),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1334,6 +1472,7 @@ mod tests {
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop,
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1373,6 +1512,7 @@ mod tests {
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         let err = driver.run(&out_wav).unwrap_err();
@@ -1422,6 +1562,7 @@ mod tests {
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         let err = driver.run(&out_wav).unwrap_err();
@@ -1496,6 +1637,7 @@ mod tests {
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: StopSignal::new(),
+            time_base: Duration::ZERO,
         });
         let out_wav = store.session_dir(id).join("audio.wav");
         driver.run(&out_wav).unwrap();
@@ -1577,7 +1719,7 @@ mod tests {
         run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: wav,
+            audio_paths: vec![wav],
             transcriber: Box::new(MockTranscriber {
                 seg_secs: 4.0,
                 text_template: "f{n}".to_string(),
@@ -1607,7 +1749,7 @@ mod tests {
         let err = run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: store.session_dir(id).join("audio.wav"),
+            audio_paths: vec![store.session_dir(id).join("audio.wav")],
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
@@ -1631,7 +1773,7 @@ mod tests {
         let err = run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: wav,
+            audio_paths: vec![wav],
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
@@ -1658,7 +1800,7 @@ mod tests {
         let err = run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: wav,
+            audio_paths: vec![wav],
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
@@ -1719,7 +1861,7 @@ mod tests {
         let err = run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: wav,
+            audio_paths: vec![wav],
             transcriber: Box::new(FailingTranscriber),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
@@ -1759,7 +1901,7 @@ mod tests {
         let err = run_finalize(FinalizeConfig {
             id,
             store: store.clone(),
-            audio_path: wav,
+            audio_paths: vec![wav],
             transcriber: Box::new(MockTranscriber::new()),
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
         })
