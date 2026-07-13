@@ -74,6 +74,12 @@ pub const OAUTH_LOG_FILE: &str = "audit.log";
 /// Mode for the per-project oauth state directory (owner-only).
 pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
 
+/// PII audit JSONL filenames under `audit::audit_dir_in()` — SSOT for the
+/// proxy/hub writers (F3/F4) and the diagnostics registry.
+pub const AUDIT_PROXY_FILE: &str = "audit-proxy.jsonl";
+/// PII audit JSONL filename for the mcp-hub writer. See [`AUDIT_PROXY_FILE`].
+pub const AUDIT_HUB_FILE: &str = "audit-hub.jsonl";
+
 /// Log filename for the Claude session output.
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 /// Path to the Claude Code binary inside the container.
@@ -1372,6 +1378,13 @@ mod tests {
             !MCP_OS_LOG_FILE.is_empty(),
             "MCP_OS_LOG_FILE must not be empty"
         );
+    }
+
+    #[test]
+    fn test_audit_file_names_are_non_empty_and_distinct() {
+        assert!(!AUDIT_PROXY_FILE.is_empty());
+        assert!(!AUDIT_HUB_FILE.is_empty());
+        assert_ne!(AUDIT_PROXY_FILE, AUDIT_HUB_FILE);
     }
 
     #[test]

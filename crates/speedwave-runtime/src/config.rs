@@ -1417,7 +1417,7 @@ pub(crate) fn resolve_project_config_in_with_load(
                 managed_pii_policy.as_ref(),
             )
         }
-        Err(_) => {
+        Err(e) => {
             let (mut claude, integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
@@ -1437,6 +1437,11 @@ pub(crate) fn resolve_project_config_in_with_load(
                 .env
                 .extend(crate::telemetry_env::telemetry_env_map(&disabled));
             claude.telemetry = disabled;
+            // Opposite fail-closed direction: an unreadable managed-config might
+            // hide a forced PII policy — never silently resolve as if none applies.
+            claude.pii_policy = Err(format!(
+                "cannot resolve PII policy: organization policy configuration is unreadable: {e}"
+            ));
             (claude, integrations)
         }
     }
@@ -3123,6 +3128,38 @@ mod tests {
             !resolved.telemetry.enabled
                 && !resolved.env.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"),
             "telemetry must fail closed (disabled, no OTEL env) when the MDM policy cannot be read"
+        );
+    }
+
+    #[test]
+    fn mdm_load_error_fails_closed_pii_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let resolved = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Err(anyhow::anyhow!("managed config /x is invalid: boom")),
+        )
+        .0;
+        assert!(
+            resolved.pii_policy.is_err(),
+            "an unreadable managed-config must fail closed the PII policy, not silently \
+             resolve as if no organization policy applies"
         );
     }
 

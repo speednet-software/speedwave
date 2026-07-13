@@ -59,6 +59,8 @@ services:
       # Not read by the proxy — forces container recreation on config-up
       # when the rendered config or a provider key changed.
       - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
+      - POLICY_FILE=/policy/policy.json
+      - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:
@@ -73,6 +75,8 @@ services:
       - ${PROXY_CONFIG_DIR}:/config:ro
       - ${TOKENS_DIR}/llm:/tokens:ro
       - ${PROXY_USAGE_DIR}:/usage:rw
+      - ${POLICY_CONFIG_DIR}:/policy:ro
+      - ${AUDIT_DIR}:/audit:rw
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -94,9 +98,10 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
     # Resolved PII policy: always rendered + mounted read-only; the hub
-    # fail-closes on an invalid file.
+    # fail-closes on an invalid file. Audit dir is the hub's only :rw mount.
     volumes:
       - ${POLICY_CONFIG_DIR}:/policy:ro
+      - ${AUDIT_DIR}:/audit:rw
     environment:
       - PORT=${PORT_HUB}
       - POLICY_FILE=/policy/policy.json

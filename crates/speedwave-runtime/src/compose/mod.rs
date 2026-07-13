@@ -343,10 +343,8 @@ pub fn render_compose_in(
         &proxy::proxy_state_digest_in(data_dir, project_name),
     );
 
-    // Resolved PII policy: always written + mounted :ro into mcp-hub — absence
-    // would silently degrade the hub to its compiled-in default policy. Unlike
-    // telemetry (global, boot-check-only), a broken per-project policy also
-    // hard-fails the render itself: the boot check only covers the active project.
+    // Resolved PII policy: always written + mounted :ro into mcp-hub and proxy —
+    // absence would silently degrade both to unfiltered passthrough.
     let pii_policy = resolved_config
         .pii_policy
         .as_ref()
@@ -359,6 +357,12 @@ pub fn render_compose_in(
         "${POLICY_CONFIG_DIGEST}",
         &crate::pii_policy::policy_state_digest_in(data_dir, project_name),
     );
+
+    // PII audit directory: mounted :rw into proxy and mcp-hub. Writers land in
+    // F3/F4 — this render only owns the directory and the mount.
+    let audit_dir = crate::audit::audit_dir_in(data_dir, project_name);
+    crate::fs_perms::ensure_owner_only_dir(&audit_dir)?;
+    yaml = yaml.replace("${AUDIT_DIR}", &to_engine_path(&audit_dir)?);
 
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
@@ -1224,7 +1228,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 49;
+    const SECURITY_RULE_COUNT: usize = 51;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1950,17 +1954,23 @@ mod tests {
         )
     }
 
-    /// Adds the canonical mcp-hub policy mount + pinned POLICY_FILE env that
-    /// `check_hub_policy_mount` requires unconditionally; fixtures predate them.
-    fn with_hub_policy_mount(yaml: &str, data_dir: &Path, project: &str) -> String {
+    /// Adds the mcp-hub policy mount + pinned POLICY_FILE env + audit mount that
+    /// `check_hub_policy_mount`/`check_audit_mount` require unconditionally; fixtures predate them.
+    fn with_hub_policy_and_audit_mounts(yaml: &str, data_dir: &Path, project: &str) -> String {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
-        let dir = crate::pii_policy::policy_config_dir_in(data_dir, project);
+        let policy_dir = crate::pii_policy::policy_config_dir_in(data_dir, project);
         add_hub_volume(
             &mut doc,
-            &format!("{}:/policy:ro", to_engine_path(&dir).unwrap()),
+            &format!("{}:/policy:ro", to_engine_path(&policy_dir).unwrap()),
         )
         .unwrap();
         inject_env_into(&mut doc, "mcp-hub", "POLICY_FILE", "/policy/policy.json");
+        let audit_dir = crate::audit::audit_dir_in(data_dir, project);
+        add_hub_volume(
+            &mut doc,
+            &format!("{}:/audit:rw", to_engine_path(&audit_dir).unwrap()),
+        )
+        .unwrap();
         serde_yaml_ng::to_string(&doc).unwrap()
     }
 
@@ -2097,7 +2107,7 @@ networks:
     #[test]
     fn test_security_check_valid_compose() {
         let tmp = tempfile::tempdir().unwrap();
-        let yaml = with_hub_policy_mount(&valid_compose_yaml(), tmp.path(), "test");
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -7908,7 +7918,7 @@ services:
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
         let tmp = tempfile::tempdir().unwrap();
-        let yaml = with_hub_policy_mount(&valid_compose_yaml(), tmp.path(), "test");
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let filtered =
             apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
         let violations = SecurityCheck::run_with_data_dir(
@@ -10199,7 +10209,7 @@ networks:
             apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
 
         let data_tmp = tempfile::tempdir().unwrap();
-        let result = with_hub_policy_mount(&result, data_tmp.path(), "test");
+        let result = with_hub_policy_and_audit_mounts(&result, data_tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &result,
             "test",
@@ -10850,7 +10860,7 @@ services:
         std::fs::create_dir_all(&secrets_dir).unwrap();
         std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let yaml = with_hub_policy_mount(&valid_compose_yaml(), data_dir, "test");
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
         let violations =
             SecurityCheck::run_with_data_dir(&yaml, "test", &[], &test_expected_paths(), data_dir);
         assert!(

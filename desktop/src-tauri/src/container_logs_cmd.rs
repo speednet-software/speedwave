@@ -156,6 +156,10 @@ pub(crate) struct LogSources {
     pub claude: String,
     /// Lima VM serial log (macOS only; empty elsewhere).
     pub lima: String,
+    /// PII audit JSONL written by the proxy's scanner (F4).
+    pub audit_proxy: String,
+    /// PII audit JSONL written by the hub's scanner (F3).
+    pub audit_hub: String,
 }
 
 /// Concatenates the per-source log buffers into one newline-separated string in deterministic
@@ -166,9 +170,13 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
     let claude = prefix_lines("claude", &sources.claude, None);
     let lima = prefix_lines("lima", &sources.lima, None);
+    let audit_proxy = prefix_lines("audit-proxy", &sources.audit_proxy, None);
+    let audit_hub = prefix_lines("audit-hub", &sources.audit_hub, None);
 
     // Defence-in-depth sanitizer pass over the merged buffer (idempotent).
-    speedwave_runtime::log_sanitizer::sanitize(&format!("{compose}{desktop}{mcp_os}{claude}{lima}"))
+    speedwave_runtime::log_sanitizer::sanitize(&format!(
+        "{compose}{desktop}{mcp_os}{claude}{lima}{audit_proxy}{audit_hub}"
+    ))
 }
 
 /// Compose-logs fetch timeout; a busy container engine must not blank the
@@ -257,6 +265,8 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
                 mcp_os: read_source("mcp-os"),
                 claude: read_source("claude"),
                 lima: read_source("lima"),
+                audit_proxy: read_source("audit-proxy"),
+                audit_hub: read_source("audit-hub"),
             },
             &project,
         ))
@@ -571,6 +581,8 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -588,6 +600,8 @@ mod tests {
                 mcp_os: "ready\n".to_string(),
                 claude: "session started\n".to_string(),
                 lima: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -612,6 +626,8 @@ mod tests {
                 mcp_os: "MARKER_mcp_os\n".to_string(),
                 claude: "MARKER_claude\n".to_string(),
                 lima: "MARKER_lima\n".to_string(),
+                audit_proxy: "MARKER_audit_proxy\n".to_string(),
+                audit_hub: "MARKER_audit_hub\n".to_string(),
             },
             "proj",
         );
@@ -642,6 +658,8 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -662,6 +680,8 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -679,6 +699,8 @@ mod tests {
                 mcp_os: "mcp_os_line\n".to_string(),
                 claude: "claude_line\n".to_string(),
                 lima: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );

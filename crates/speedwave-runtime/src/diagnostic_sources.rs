@@ -77,6 +77,14 @@ fn compose_yml_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     crate::compose::compose_output_path_in(data_dir, project).ok()
 }
 
+fn audit_proxy_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
+    Some(crate::audit::audit_dir_in(data_dir, project).join(consts::AUDIT_PROXY_FILE))
+}
+
+fn audit_hub_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
+    Some(crate::audit::audit_dir_in(data_dir, project).join(consts::AUDIT_HUB_FILE))
+}
+
 /// The SSOT list. Adding a source = one row here; both consumers pick it up.
 pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
     DiagnosticSource {
@@ -120,6 +128,20 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: false,
         platforms: Platforms::All,
         kind: SourceKind::File(compose_yml_path),
+    },
+    DiagnosticSource {
+        key: "audit-proxy",
+        zip_entry: "audit/audit-proxy.jsonl",
+        displayable: true,
+        platforms: Platforms::All,
+        kind: SourceKind::File(audit_proxy_path),
+    },
+    DiagnosticSource {
+        key: "audit-hub",
+        zip_entry: "audit/audit-hub.jsonl",
+        displayable: true,
+        platforms: Platforms::All,
+        kind: SourceKind::File(audit_hub_path),
     },
 ];
 
@@ -213,6 +235,8 @@ mod tests {
         };
         assert!(entry("mcp-os").ends_with(consts::MCP_OS_LOG_FILE));
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
+        assert!(entry("audit-proxy").ends_with(consts::AUDIT_PROXY_FILE));
+        assert!(entry("audit-hub").ends_with(consts::AUDIT_HUB_FILE));
         // `lima`/`compose-yml` filenames aren't Speedwave consts, nothing to drift against.
     }
 }
