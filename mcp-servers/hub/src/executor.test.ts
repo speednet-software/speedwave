@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
   executeCode,
   _setBridgesForTesting,
@@ -1607,6 +1610,184 @@ describe('executor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
+    });
+  });
+
+  describe('sandbox-return scan + PII audit writer (F3.4)', () => {
+    let auditDir: string | undefined;
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      if (auditDir) {
+        rmSync(auditDir, { recursive: true, force: true });
+        auditDir = undefined;
+      }
+    });
+
+    it('tokenizes a literal PII value the sandbox code returns directly (no bridge call)', async () => {
+      const code = `return { email: 'alice@example.com' };`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      const email = (result.data as { email: string }).email;
+      expect(email).not.toBe('alice@example.com');
+      expect(email).toMatch(/^\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]$/);
+    });
+
+    it('executes successfully without touching disk when AUDIT_DIR is unset', async () => {
+      vi.stubEnv('AUDIT_DIR', undefined);
+
+      const result = await executeCode({ code: `return { ok: true };`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('writes B-result and sandbox-return audit events when AUDIT_DIR is set', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      vi.stubEnv('AUDIT_DIR', auditDir);
+
+      const code = `return { email: 'bob@example.com' };`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      expect(result.success).toBe(true);
+
+      const content = readFileSync(join(auditDir, 'audit-hub.jsonl'), 'utf-8');
+      const rows = content
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      expect(rows.length).toBeGreaterThan(0);
+      const sandboxRow = rows.find((r) => r.layer === 'sandbox-return' && r.category === 'EMAIL');
+      expect(sandboxRow).toMatchObject({ action: 'tokenized', count: 1, tool: null });
+      // Never carries the scanned value itself.
+      expect(content).not.toContain('bob@example.com');
+    });
+
+    it('does not fail execution when AUDIT_DIR points at a file instead of a directory', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      const notADir = join(auditDir, 'not-a-dir');
+      writeFileSync(notADir, 'x');
+      vi.stubEnv('AUDIT_DIR', notADir);
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const result = await executeCode({ code: `return { email: 'carol@example.com' };`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('B-result audit aggregation across repeated calls within one executeCode (F3.4 fix)', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+    const workerUrls: Record<string, string | undefined> = {};
+    let originalFetch: typeof globalThis.fetch;
+    let auditDir: string | undefined;
+
+    beforeEach(() => {
+      const services = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+      for (let i = 0; i < services.length; i++) {
+        const key = `WORKER_${services[i].toUpperCase()}_URL`;
+        workerUrls[key] = process.env[key];
+        process.env[key] = `http://mcp-${services[i]}:${3001 + i}`;
+      }
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      _setBridgesForTesting(createMockBridges());
+      originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      _setBridgesForTesting(null);
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      for (const [key, val] of Object.entries(workerUrls)) {
+        if (val === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = val;
+        }
+      }
+      resetServiceCaches();
+      vi.unstubAllEnvs();
+      if (auditDir) {
+        rmSync(auditDir, { recursive: true, force: true });
+        auditDir = undefined;
+      }
+    });
+
+    /** Mock every worker call with a JSON body carrying an email, regardless of which tool is invoked. */
+    function mockWorkerJsonResponseWithEmail(): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          result: {
+            content: [{ type: 'text', text: JSON.stringify({ email: 'alice@example.com' }) }],
+          },
+        }),
+        text: async () => '',
+      }) as unknown as typeof fetch;
+    }
+
+    it('collapses two calls to the SAME tool into one B-result row with a summed count', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      vi.stubEnv('AUDIT_DIR', auditDir);
+      mockWorkerJsonResponseWithEmail();
+
+      const code = `
+        await slack.sendChannel({ channel: 'general', text: 'hi 1' });
+        await slack.sendChannel({ channel: 'general', text: 'hi 2' });
+        return { ok: true };
+      `;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      expect(result.success).toBe(true);
+
+      const content = readFileSync(join(auditDir, 'audit-hub.jsonl'), 'utf-8');
+      const rows = content
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      const bResultEmailRows = rows.filter(
+        (r) => r.layer === 'B-result' && r.category === 'EMAIL' && r.tool === 'slack.sendChannel'
+      );
+      expect(bResultEmailRows).toHaveLength(1);
+      expect(bResultEmailRows[0]).toMatchObject({ action: 'tokenized', count: 2 });
+    });
+
+    it('keeps two DIFFERENT tools reporting the same category as two separate B-result rows', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      vi.stubEnv('AUDIT_DIR', auditDir);
+      mockWorkerJsonResponseWithEmail();
+
+      const code = `
+        await slack.sendChannel({ channel: 'general', text: 'hi' });
+        await sharepoint.uploadFile({ path: '/doc.txt', content: 'hi' });
+        return { ok: true };
+      `;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      expect(result.success).toBe(true);
+
+      const content = readFileSync(join(auditDir, 'audit-hub.jsonl'), 'utf-8');
+      const rows = content
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      const bResultEmailRows = rows.filter((r) => r.layer === 'B-result' && r.category === 'EMAIL');
+      const tools = bResultEmailRows.map((r) => r.tool).sort();
+      expect(tools).toEqual(['sharepoint.uploadFile', 'slack.sendChannel']);
+      for (const row of bResultEmailRows) {
+        expect(row).toMatchObject({ action: 'tokenized', count: 1 });
+      }
     });
   });
 });

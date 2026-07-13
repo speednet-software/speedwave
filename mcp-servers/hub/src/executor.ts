@@ -5,6 +5,7 @@
 
 import { IToolResult } from './hub-types.js';
 import { getEngine } from './policy.js';
+import { aggregateDetections, writePiiAudit, type DetectionBatch } from './audit-pii.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import { addAutoReturn } from './auto-return.js';
@@ -249,6 +250,13 @@ function createToolWrappers(
   executionStartTime: number,
   timeoutMs: number
 ) {
+  // Raw detection batches collected across every bridge call in this executeCode invocation
+  // (one batch per wrapBridgeCall), aggregated once via aggregateDetections() and flushed via
+  // writePiiAudit() after execution finishes (see executeCode's finally block). Buffering raw
+  // detections rather than pre-aggregated events lets repeated calls to the same tool collapse
+  // into a single summed row instead of one row per call.
+  const detectionBatches: DetectionBatch[] = [];
+
   /** Remaining timeout for worker calls; at least MIN_TIMEOUT_MS so short operations complete. */
   const getRemainingTimeout = (): number => {
     const elapsed = Date.now() - executionStartTime;
@@ -273,15 +281,22 @@ function createToolWrappers(
    * Generic wrapper for bridge calls with PII handling; `serviceName` labels error reports.
    * @param bridgeCall - Function that makes the bridge call to execute.
    * @param serviceName - Name of the service being called for error reporting.
+   * @param toolName - camelCase tool method name, for B-result PII audit attribution.
    */
   const wrapBridgeCall: WrapBridgeCallFn = async <T>(
     bridgeCall: () => Promise<T>,
-    serviceName: string
+    serviceName: string,
+    toolName?: string
   ): Promise<T> => {
     try {
       const result = await bridgeCall();
-      // Tokenize result (replace sensitive data with tokens)
-      return getEngine().tokenize(result).value as T;
+      // Tokenize result (replace sensitive data with tokens); buffer the raw B-result detections.
+      const { value, detections } = getEngine().tokenize(result);
+      const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
+      if (detections.length > 0) {
+        detectionBatches.push({ layer: 'B-result', tool, detections });
+      }
+      return value as T;
     } catch (error) {
       logErrorDebug(serviceName, error);
       const message = formatErrorMessage(error);
@@ -337,7 +352,7 @@ function createToolWrappers(
     }
   }
 
-  return tools;
+  return { tools, detectionBatches };
 }
 
 // ── Parallel Execution Helpers (Anthropic "Advanced Tool Use" pattern) ──────────────────────────
@@ -446,8 +461,9 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   // Create audit context for tracking tool executions
   const auditContext = createAuditContext();
 
-  // Create tool wrappers with timeout context
-  const tools = createToolWrappers(auditContext, startTime, timeoutMs);
+  // Create tool wrappers with timeout context; detectionBatches accumulates raw B-result
+  // detections across every bridge call, aggregated once below alongside the sandbox-return scan.
+  const { tools, detectionBatches } = createToolWrappers(auditContext, startTime, timeoutMs);
 
   // Prepare sandbox context — spread all service tools (built-in + plugins) dynamically
   const sandboxContext: Record<string, unknown> = {
@@ -515,11 +531,22 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
 
     const result = await Promise.race([fn(...contextValues), timeoutPromise]);
 
+    // Safety-net scan: sandbox code can assemble PII from fragments that individually passed
+    // B-result scanning untouched (an encoded/re-cased value can still slip through; accepted).
+    const sandboxScan = getEngine().tokenize(result);
+    if (sandboxScan.detections.length > 0) {
+      detectionBatches.push({
+        layer: 'sandbox-return',
+        tool: null,
+        detections: sandboxScan.detections,
+      });
+    }
+
     const executionMs = Date.now() - startTime;
 
     return {
       success: true,
-      data: result,
+      data: sandboxScan.value,
       metadata: {
         timestamp: new Date().toISOString(),
         executionMs,
@@ -596,6 +623,10 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
         retryable: message.includes('timeout'),
       },
     };
+  } finally {
+    // Aggregate and flush whatever PII detections were collected, success or failure; the
+    // writer itself never throws, so this cannot turn a completed execution into a failed one.
+    writePiiAudit(aggregateDetections(detectionBatches, null));
   }
 }
 

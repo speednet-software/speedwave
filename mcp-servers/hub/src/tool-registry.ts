@@ -524,8 +524,13 @@ export type PrepareParamsFn = <T>(params: T) => T;
 
 /**
  * Function type for wrapping bridge calls with error handling.
+ * @param toolName - camelCase tool method name, for B-result PII audit attribution.
  */
-export type WrapBridgeCallFn = <T>(bridgeCall: () => Promise<T>, serviceName: string) => Promise<T>;
+export type WrapBridgeCallFn = <T>(
+  bridgeCall: () => Promise<T>,
+  serviceName: string,
+  toolName?: string
+) => Promise<T>;
 
 /**
  * Build executor tool wrappers for a service from registry.
@@ -573,7 +578,7 @@ export function buildExecutorWrappers(
       methodName,
       async (params?: Record<string, unknown>) => {
         const p = prepareParams(params || {});
-        return wrapBridgeCall(() => bridgeMethod(p), service);
+        return wrapBridgeCall(() => bridgeMethod(p), service, methodName);
       }
     );
   }

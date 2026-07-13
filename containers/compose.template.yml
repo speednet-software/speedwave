@@ -106,6 +106,8 @@ services:
       - PORT=${PORT_HUB}
       - POLICY_FILE=/policy/policy.json
       - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
+      # Mirrors the /audit:rw mount above; hub/src/audit-pii.ts reads this to place audit-hub.jsonl.
+      - AUDIT_DIR=/audit
       - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
       - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_WORKER}
