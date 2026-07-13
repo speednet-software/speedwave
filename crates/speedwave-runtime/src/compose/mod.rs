@@ -351,6 +351,7 @@ pub fn render_compose_in(
         .pii_policy
         .as_ref()
         .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
+    crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
     crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
     let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
     yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
@@ -3606,6 +3607,12 @@ services:
         assert!(
             !digest.contains("${"),
             "digest placeholder must be substituted"
+        );
+
+        let key_path = crate::pii_key::project_key_path_in(data_dir.path(), "test-project");
+        assert!(
+            key_path.is_file(),
+            "render_compose must ensure the per-project tokenization key next to policy.json"
         );
     }
 

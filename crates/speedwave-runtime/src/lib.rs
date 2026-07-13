@@ -27,6 +27,7 @@ pub mod oauth_persist;
 pub mod oauth_process;
 pub mod oauth_state_migration;
 pub mod os_prereqs;
+pub mod pii_key;
 pub mod pii_policy;
 pub mod pkce;
 pub mod plugin;
