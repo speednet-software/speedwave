@@ -46,12 +46,9 @@ export class AnthropicModelsService {
   }
 
   /**
-   * Context-window lookup for a given model id. Returns `null` when the
-   * catalog hasn't loaded yet or the id isn't recognised — callers decide
-   * whether to fall back to {@link DEFAULT_CONTEXT_TOKENS}.
-   * @param modelId - exact API id or alias (e.g. `claude-opus-4-7`,
-   *   `opus-4.7`). Aliases without `claude-` prefix are tried with the
-   *   prefix to match Claude Code's short form in session metadata.
+   * Context-window lookup for a given model id (exact API id or alias, e.g. `claude-opus-4-7` /
+   * `opus-4.7`). Returns `null` when the catalog hasn't loaded or the id isn't recognised.
+   * @param modelId - Exact API id or alias.
    */
   contextTokensFor(modelId: string | null | undefined): number | null {
     if (!this.cache || !modelId) return null;
@@ -68,10 +65,8 @@ export class AnthropicModelsService {
   }
 
   /**
-   * Synchronous variant of {@link contextTokensFor} that always returns a
-   * usable number — falls back to {@link DEFAULT_CONTEXT_TOKENS} when the
-   * model is unknown or the catalog hasn't loaded yet. Convenient for
-   * computed signals that need a concrete value every render.
+   * Synchronous variant of {@link contextTokensFor}, always returning a usable number — falls back
+   * to {@link DEFAULT_CONTEXT_TOKENS} when unknown/not-yet-loaded (for computed signals).
    * @param modelId - Same id as accepted by {@link contextTokensFor}.
    */
   contextTokensOrDefault(modelId: string | null | undefined): number {

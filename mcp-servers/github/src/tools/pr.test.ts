@@ -1,8 +1,9 @@
 /** Tests for GitHub Pull Request Tools. */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createPrTools } from './pr-tools.js';
+import { createToolDefinitions } from './index.js';
 import type { GitHubClient } from '../client.js';
 
 type MockClient = {
@@ -108,11 +109,13 @@ describe('Pull Request Tools', () => {
     it('returns 7 tools when configured, listPullRequests is eager-loaded', () => {
       const tools = createPrTools(mockClient as unknown as GitHubClient);
       expect(tools.map((t) => t.tool.name)).toEqual(ALL_TOOL_NAMES);
-      expect(tools.find((t) => t.tool.name === 'listPullRequests')?.tool._meta?.deferLoading).toBe(
-        false
-      );
+      expect(
+        tools.find((t) => t.tool.name === 'listPullRequests')?.tool._meta?.[META_KEYS.DEFER_LOADING]
+      ).toBe(false);
       for (const name of ALL_TOOL_NAMES.filter((n) => n !== 'listPullRequests')) {
-        expect(tools.find((t) => t.tool.name === name)?.tool._meta?.deferLoading).toBe(true);
+        expect(tools.find((t) => t.tool.name === name)?.tool._meta?.[META_KEYS.DEFER_LOADING]).toBe(
+          true
+        );
       }
     });
 
@@ -223,6 +226,26 @@ describe('Pull Request Tools', () => {
       const result = await handler!({ owner: 'o', repo: 'r', number: 99 });
 
       expect(result).toMatchObject({ isError: true });
+    });
+
+    it('tolerates a "#42" style PR number (numeric forgiveness applied at registration)', async () => {
+      mockClient.getPullRequest.mockResolvedValue(makePr({ number: 42 }));
+
+      const tools = createToolDefinitions(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'getPullRequest')?.handler;
+      await handler!({ owner: 'octocat', repo: 'hello-world', number: '#42' });
+
+      expect(mockClient.getPullRequest).toHaveBeenCalledWith('octocat', 'hello-world', 42);
+    });
+
+    it('splits a combined owner/repo string passed in repo', async () => {
+      mockClient.getPullRequest.mockResolvedValue(makePr({ number: 7 }));
+
+      const tools = createPrTools(mockClient as unknown as GitHubClient);
+      const handler = tools.find((t) => t.tool.name === 'getPullRequest')?.handler;
+      await handler!({ repo: 'octocat/hello-world', number: 7 });
+
+      expect(mockClient.getPullRequest).toHaveBeenCalledWith('octocat', 'hello-world', 7);
     });
   });
 
@@ -385,7 +408,7 @@ describe('Pull Request Tools', () => {
   });
 
   describe('getPrDiff', () => {
-    it('returns the raw diff as plain text (not JSON)', async () => {
+    it('returns the diff under a `diff` field (object-typed result)', async () => {
       const diff =
         'diff --git a/file.txt b/file.txt\nindex e69de29..0d08373 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -0,0 +1 @@\n+hello\n';
       mockClient.getPrDiff.mockResolvedValue(diff);
@@ -394,7 +417,9 @@ describe('Pull Request Tools', () => {
       const handler = tools.find((t) => t.tool.name === 'getPrDiff')?.handler;
       const result = await handler!({ owner: 'octocat', repo: 'hello-world', number: 42 });
 
-      expect(result).toEqual({ content: [{ type: 'text', text: diff }] });
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ diff }, null, 2) }],
+      });
       expect(mockClient.getPrDiff).toHaveBeenCalledWith('octocat', 'hello-world', 42);
     });
 
@@ -405,7 +430,9 @@ describe('Pull Request Tools', () => {
       const handler = tools.find((t) => t.tool.name === 'getPrDiff')?.handler;
       const result = await handler!({ owner: 'o', repo: 'r', number: 1 });
 
-      expect(result).toEqual({ content: [{ type: 'text', text: '' }] });
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify({ diff: '' }, null, 2) }],
+      });
     });
 
     it('returns error on failure', async () => {

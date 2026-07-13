@@ -1,18 +1,6 @@
 #!/usr/bin/env bash
-# e2e-vm-setup.sh — Provisions E2E testing environments.
-#
-# Windows: provisions a remote machine via SSH to WSL2 (SPEEDWAVE_WINDOWS_HOST).
-# macOS:   provisions a remote machine via SSH (SPEEDWAVE_MACOS_HOST).
-#
-# Prerequisites:
-#   - Windows: SSH key-based auth to WSL2 on SPEEDWAVE_WINDOWS_HOST (port 2222),
-#     WSL2 with powershell.exe interop working
-#   - macOS: SSH key-based auth to SPEEDWAVE_MACOS_HOST, Xcode CLI Tools available
-#
-# Usage:
-#   scripts/e2e-vm-setup.sh              # provision all environments
-#   scripts/e2e-vm-setup.sh windows      # provision Windows only (SSH)
-#   scripts/e2e-vm-setup.sh macos        # provision macOS only (SSH)
+# e2e-vm-setup.sh — Provisions E2E envs: Windows via SSH to WSL2 (SPEEDWAVE_WINDOWS_HOST) and
+# macOS via SSH (SPEEDWAVE_MACOS_HOST). Usage: scripts/e2e-vm-setup.sh [windows|macos|all]
 
 set -euo pipefail
 
@@ -26,10 +14,8 @@ NODE_VERSION="$(cat "$(dirname "$0")/../.node-version")"
 
 # -- Helper functions ----------------------------------------------------------
 
-# Run a PowerShell script on the Windows host via SSH.
-# Writes the script to a .ps1 temp file via scp, then executes via -File.
-# This is necessary because `powershell.exe -Command -` (reading from stdin)
-# ignores $ErrorActionPreference and does not propagate non-zero exit codes.
+# Runs a PowerShell script on the Windows host: writes it to a .ps1 temp file via scp,
+# executes via -File — `-Command -` (stdin) ignores $ErrorActionPreference, drops exit codes.
 windows_ps() {
     local ps_script tmpname tmpfile_win tmpfile_local
     ps_script=$(cat)
@@ -90,12 +76,8 @@ SCRIPT
     echo "[windows] Installing CMake (Kitware — required by whisper-rs-sys)..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
-# whisper-rs-sys uses the `cmake` Rust crate to drive a real cmake invocation
-# (Visual Studio's bundled cmake is not on PATH and the crate spawns
-# `cmake.exe` from PATH, not from VS's private layout). Install the official
-# Kitware build so `cmake.exe` lives in `C:\Program Files\CMake\bin` and is
-# on the Machine PATH for every process started afterwards.
-# Idempotent: skip if cmake.exe already present at the expected path.
+# whisper-rs-sys drives a real cmake.exe via the `cmake` crate (VS's bundled cmake is not on
+# PATH); install Kitware's build to `C:\Program Files\CMake\bin` on the Machine PATH. Idempotent.
 $cmakeBin = 'C:\Program Files\CMake\bin'
 if (Test-Path "$cmakeBin\cmake.exe") {
     Write-Host "CMake already installed: $cmakeBin"
@@ -218,9 +200,8 @@ SCRIPT
     windows_ps <<SCRIPT
 \$ErrorActionPreference = 'Stop'
 \$distro = '${wsl_distro}'
-# wsl.exe -l -q emits UTF-16 LE. PowerShell over SSH receives the raw bytes
-# as null-interlaced ASCII (e.g. "U\0b\0u\0n\0t\0u\0"), so a naive -match
-# against the plain distro name never hits. Strip nulls before matching.
+# wsl.exe -l -q emits UTF-16LE; PowerShell over SSH sees null-interlaced ASCII (e.g.
+# "U\0b\0u\0n\0t\0u\0"), so a naive -match never hits — strip nulls before matching.
 \$installed = (wsl.exe -l -q 2>\$null) -replace "\`0","" | Where-Object { \$_ -match [regex]::Escape(\$distro) }
 if (\$installed) {
     Write-Host "WSL2 distro \$distro already installed"

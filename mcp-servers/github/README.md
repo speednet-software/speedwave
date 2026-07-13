@@ -28,10 +28,11 @@ Isolated GitHub MCP server with per-service token isolation for Speedwave.
 - Error sanitization (no internal path leaks; tokens never echoed in responses)
 - Non-root user in container, read-only token mount
 
-## Tools (45 total)
+## Tools (46 total)
 
 | Domain             | Count | Tools                                                                                                                     |
 | ------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------- |
+| Identity           | 1     | get current user (resolve the token's `login` for 'me'/'my' filters)                                                      |
 | Repos              | 3     | list repos / search repos, get repo, search code                                                                          |
 | Pull Requests      | 7     | list, get, create, merge, update, get diff, get files                                                                     |
 | PR Review          | 6     | list commits, list reviews, create review, list comments, create comment, create review (line) comment                    |
@@ -99,4 +100,3 @@ curl http://localhost:3000/health
 - **GitHub REST API**: https://docs.github.com/en/rest
 - **@octokit/rest**: https://github.com/octokit/rest.js
 - **MCP Spec**: https://modelcontextprotocol.io/
-- **Speedwave Architecture**: `docs/architecture/README.md`

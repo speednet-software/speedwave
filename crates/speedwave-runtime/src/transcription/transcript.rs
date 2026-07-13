@@ -67,6 +67,10 @@ pub struct TranscriptSession {
     pub models_used: ModelsUsed,
     /// Last event seq emitted for this session — for snapshot+stream resume.
     pub last_seq: u64,
+    /// Uncommitted tail of the latest live decode — replace-only display state,
+    /// never persisted and never part of `effective_segments`.
+    #[serde(skip, default)]
+    pub live_draft: String,
 }
 
 impl TranscriptSession {
@@ -75,9 +79,8 @@ impl TranscriptSession {
         Self::new_with_id(Uuid::new_v4(), language, audio_source, audio_path)
     }
 
-    /// Like `new`, but with a caller-chosen id — used when the audio-file path
-    /// (which lives under `<root>/<id>/`) must be known *before* the session is
-    /// created (so it's correct from the first persisted write).
+    /// Like `new`, but with a caller-chosen id — for when the audio-file path (under
+    /// `<root>/<id>/`) must be known before the session is created.
     pub fn new_with_id(
         id: Uuid,
         language: Language,
@@ -95,6 +98,7 @@ impl TranscriptSession {
             audio_path: Some(audio_path),
             models_used: ModelsUsed::default(),
             last_seq: 0,
+            live_draft: String::new(),
         }
     }
 
@@ -138,17 +142,14 @@ impl TranscriptSession {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    /// Saves this session to `<dir>/transcript.json` (atomic write + 0o600).
+    /// Saves this session to `<dir>/transcript.json` (durable atomic write + owner-only perms).
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let final_path = dir.join(TRANSCRIPT_JSON);
-        let tmp_path = dir.join(format!(".{TRANSCRIPT_JSON}.part"));
         let body = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp_path, body)?;
-        std::fs::rename(&tmp_path, &final_path)?;
-        restrict_file_perms(&final_path);
-        Ok(())
+        crate::fs_perms::write_restricted_file_atomic(&final_path, &body)
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 
@@ -224,18 +225,11 @@ fn is_leap(y: i32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-fn restrict_file_perms(p: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = p;
-}
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: unwrap on fixtures is the sanctioned boundary"
+)]
 mod tests {
     use super::*;
     use crate::transcription::audio::AudioSource;
@@ -319,10 +313,8 @@ mod tests {
 
     #[test]
     fn old_transcript_json_with_speaker_fields_still_loads() {
-        // Backward compat (ADR-075): a pre-removal transcript.json carried
-        // `speaker_names`, `expected_speakers`, per-segment `speaker`, and
-        // `models_used.diarization_*`. Loading must ignore them (serde drops
-        // unknown keys) and re-save in the new shape.
+        // Backward compat (ADR-075): a pre-removal transcript.json carried `speaker_names`,
+        // `expected_speakers`, `speaker`, `models_used.diarization_*` — serde drops unknown keys.
         let dir = tempfile::tempdir().unwrap();
         let legacy = r#"{
             "id":"00000000-0000-4000-8000-000000000000",
@@ -361,8 +353,13 @@ mod tests {
         s.live_segments = vec![seg(0.0, 1.0, "hi")];
         s.last_seq = 42;
         s.save(dir.path()).unwrap();
-        // No leftover .part temp.
-        assert!(!dir.path().join(format!(".{TRANSCRIPT_JSON}.part")).exists());
+        // Only the final file remains — no leftover tmp of any naming scheme.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries, vec![TRANSCRIPT_JSON.to_string()]);
         let loaded = TranscriptSession::load(dir.path()).unwrap();
         assert_eq!(loaded, s);
         #[cfg(unix)]
@@ -414,9 +411,7 @@ mod tests {
     fn ymd_hms_known_epochs() {
         // 1970-01-01T00:00:00Z
         assert_eq!(secs_to_ymd_hms(0), (1970, 1, 1, 0, 0, 0));
-        // 2000-02-29 (leap day) at 12:34:56: precompute the exact seconds.
-        // Use the algorithm itself to derive — but we can pick a known date:
-        // 2024-01-01T00:00:00Z = 1_704_067_200.
+        // 2024-01-01T00:00:00Z = 1_704_067_200 (precomputed known epoch).
         assert_eq!(secs_to_ymd_hms(1_704_067_200), (2024, 1, 1, 0, 0, 0));
         // 2024-12-31T23:59:59Z = 1_735_689_599.
         assert_eq!(secs_to_ymd_hms(1_735_689_599), (2024, 12, 31, 23, 59, 59));

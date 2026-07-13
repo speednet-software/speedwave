@@ -2,9 +2,9 @@
  * User Tools - Tools for Slack user operations
  */
 
-import { Tool, ToolDefinition, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
+import { Tool, ToolDefinition, READ_ONLY_ANNOTATIONS, META_KEYS } from '@speedwave/mcp-shared';
 import { withValidation, withClients, ToolResult } from './validation.js';
-import { SlackClients, getUsers, formatSlackError } from '../client.js';
+import { SlackClients, getUsers, getCurrentUser, formatSlackError } from '../client.js';
 import { searchUsers } from '../user-directory.js';
 
 interface GetUsersParams {
@@ -19,7 +19,7 @@ interface FindUsersParams {
 const getUsersTool: Tool = {
   name: 'getUsers',
   description:
-    'Look up a Slack user by exact email address. For finding people by name, use findUsers.',
+    "Look up a Slack user by exact email address. For finding people by name, use findUsers. To resolve the SIGNED-IN user's own identity, use getCurrentUser instead.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -28,7 +28,7 @@ const getUsersTool: Tool = {
     required: ['email'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['slack', 'user', 'email', 'lookup', 'find'],
   example: 'const user = await slack.getUsers({ email: "alice@example.com" })',
   outputSchema: {
@@ -70,7 +70,7 @@ const findUsersTool: Tool = {
     required: ['query'],
   },
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['slack', 'user', 'find', 'search', 'name', 'person', 'who', 'dm'],
   example: 'const hits = await slack.findUsers({ query: "pawel" })',
   outputSchema: {
@@ -105,8 +105,41 @@ const findUsersTool: Tool = {
   ],
 };
 
+const getCurrentUserTool: Tool = {
+  name: 'getCurrentUser',
+  description:
+    'Resolve the SIGNED-IN user\'s own Slack identity (id, name, real name, team). This is the only ground truth for "me" — to find messages the signed-in user sent or was addressed to, call this first and compare the returned `id` against the `user` field in getChannelMessages/getThreadMessages results.',
+  inputSchema: {
+    type: 'object',
+    properties: {},
+  },
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['slack', 'user', 'me', 'myself', 'current', 'whoami', 'identity', 'self'],
+  example: 'const me = await slack.getCurrentUser()',
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      id: { type: 'string', description: "The signed-in user's own Slack user ID" },
+      name: { type: 'string', description: 'Username handle' },
+      real_name: { type: 'string' },
+      display_name: { type: 'string', description: 'Profile display name' },
+      team_id: { type: 'string' },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Resolve the signed-in user before filtering "my messages"',
+      input: {},
+    },
+  ],
+};
+
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */
@@ -123,7 +156,7 @@ export async function handleFindUsers(
 }
 
 /**
- * Tool handler function
+ * Tool handler function.
  * @param clients - Slack client instances
  * @param params - Tool parameters
  */
@@ -141,6 +174,23 @@ export async function handleGetUsers(
 
 /**
  * Tool handler function.
+ * @param clients - Slack client instances
+ * @param _params - Tool parameters (none)
+ */
+export async function handleGetCurrentUser(
+  clients: SlackClients,
+  _params: Record<string, never>
+): Promise<ToolResult> {
+  try {
+    const user = await getCurrentUser(clients);
+    return { success: true, data: user };
+  } catch (error) {
+    return { success: false, error: { code: 'LOOKUP_FAILED', message: formatSlackError(error) } };
+  }
+}
+
+/**
+ * Tool factory.
  * @param clients - Slack client instances (always non-null; checks
  *   `_tokensStatus === 'missing'` to surface the configuration error).
  */
@@ -150,5 +200,9 @@ export function createUserTools(clients: SlackClients): ToolDefinition[] {
   return [
     { tool: getUsersTool, handler: withValidation<GetUsersParams>(gate(handleGetUsers)) },
     { tool: findUsersTool, handler: withValidation<FindUsersParams>(gate(handleFindUsers)) },
+    {
+      tool: getCurrentUserTool,
+      handler: withValidation<Record<string, never>>(gate(handleGetCurrentUser)),
+    },
   ];
 }

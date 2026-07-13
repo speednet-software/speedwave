@@ -9,11 +9,7 @@ import { LoggerService } from '../../services/logger.service';
 import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
 import { OAuthFlowStatus } from '../../models/integration';
 
-/**
- * Renders a form for a plugin's `auth_fields[]`. Emits the filled subset
- * on submit; emits a separate event when the user requests a full reset.
- * Stored token values are never read back; inputs render empty.
- */
+/** Renders a form for a plugin's `auth_fields[]`; emits the filled subset on submit and a separate event on full reset. Stored token values are never read back; inputs render empty. */
 @Component({
   selector: 'app-plugin-credentials-form',
   imports: [CommonModule, OauthConnectComponent],
@@ -280,8 +276,7 @@ export class PluginCredentialsFormComponent {
   /**
    * Space-joined `id`s for `aria-describedby` (help and/or error `<p>`);
    * `null` when neither is present so Angular drops the attribute.
-   * @param key the field key
-   * @returns the attribute value, or `null`
+   * @param key the `auth_fields[].key` identifying the field
    */
   describedByFor(key: string): string | null {
     const field = this.authFields().find((f) => f.key === key);
@@ -292,10 +287,10 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Re-validate a single field when focus leaves it, so format errors are
-   * surfaced as soon as the user moves on — not held until submit.
-   * @param field the auth field
-   * @param event the blur event
+   * Re-validates a single field on blur, so format errors surface as soon
+   * as the user moves on — not held until submit.
+   * @param field the auth field being validated
+   * @param event the blur `Event` whose target holds the current value
    */
   onFieldBlur(field: PluginAuthField, event: Event): void {
     const target = event.target;
@@ -314,9 +309,9 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * True when the given field key has a value stored on disk.
-   * @param key the field key (as declared by `auth_fields[].key`)
-   * @returns whether `configuredFields` reports a stored value for it
+   * True when the given field key (as declared by `auth_fields[].key`) has
+   * a value stored on disk, per `configuredFields`.
+   * @param key the `auth_fields[].key` identifying the field
    */
   isConfigured(key: string): boolean {
     return this.configuredFields().includes(key);
@@ -329,20 +324,18 @@ export class PluginCredentialsFormComponent {
   private values: Record<string, string> = {};
 
   /**
-   * Returns the current edit-buffer value for a given field key, or an
-   * empty string when the user has not typed anything for that key yet.
-   * @param key the field key (as declared by `auth_fields[].key` in the
-   *   plugin manifest)
-   * @returns the user's pending input for that key, or `''`
+   * Returns the current edit-buffer value for a field key
+   * (`auth_fields[].key`), or `''` when nothing has been typed yet.
+   * @param key the `auth_fields[].key` identifying the field
    */
   getValue(key: string): string {
     return this.values[key] ?? '';
   }
 
   /**
-   * Captures an input event into the edit buffer; trims only at submit.
-   * @param key the field key being edited
-   * @param event the DOM input event from the bound `<input>` or `<textarea>`
+   * Captures an input event into the edit buffer for `key`; trims only at submit.
+   * @param key the `auth_fields[].key` identifying the field
+   * @param event the `input` event whose target holds the new value
    */
   onFieldInput(key: string, event: Event): void {
     // Guard the cast against a non-field event target.
@@ -353,28 +346,23 @@ export class PluginCredentialsFormComponent {
     delete this.validationErrors[key];
   }
 
-  /**
-   * Per-field client-side validation errors, populated on submit. Advisory
-   * only — `save_plugin_credentials` re-checks the same patterns host-side
-   * (the IPC boundary is the authoritative gate).
-   */
+  /** Per-field client-side validation errors, populated on submit. Advisory only — `save_plugin_credentials` re-checks host-side (authoritative gate). */
   private validationErrors: Record<string, string> = {};
 
   /**
-   * Returns the current validation error for a field, or `undefined`.
-   * @param key the field key
-   * @returns the message to render under the input, or `undefined`
+   * Returns the current validation error for a field key, or `undefined`;
+   * the message to render under the input.
+   * @param key the `auth_fields[].key` identifying the field
    */
   errorFor(key: string): string | undefined {
     return this.validationErrors[key];
   }
 
   /**
-   * Tests a trimmed value against a field's optional regex (anchored full-match).
-   * No `validation` or an uncompilable pattern is treated as valid here.
-   * @param field the auth field whose constraint to apply
-   * @param value the trimmed candidate value
-   * @returns the error message on mismatch, or `null` when acceptable
+   * Tests a trimmed value against a field's optional regex (anchored
+   * full-match); no `validation` or an uncompilable pattern is treated as valid.
+   * @param field the auth field whose `validation` pattern to apply
+   * @param value the trimmed value to test
    */
   private validationErrorFor(field: PluginAuthField, value: string): string | null {
     const validation = field.validation;
@@ -393,11 +381,7 @@ export class PluginCredentialsFormComponent {
     return validation.message ?? `Value for "${field.label}" does not match the required format`;
   }
 
-  /**
-   * True if any field has a non-whitespace value in the edit buffer;
-   * drives the Save button's `disabled` state.
-   * @returns whether any input has typed content worth saving
-   */
+  /** True if any field has a non-whitespace value in the edit buffer; drives the Save button's `disabled` state. */
   hasAnyValue(): boolean {
     return Object.values(this.values).some((v) => v.trim().length > 0);
   }
@@ -405,7 +389,7 @@ export class PluginCredentialsFormComponent {
   /**
    * Handles `<form>` submit: trims values, drops empty entries, emits `save`.
    * Whitespace-only or fully-empty submits are no-ops.
-   * @param event the form submit event (preventDefault called immediately)
+   * @param event the form `submit` event
    */
   onSubmit(event: Event): void {
     event.preventDefault();

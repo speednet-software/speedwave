@@ -235,7 +235,11 @@ export class ToolBlockComponent {
 
   /** Returns the normalized tool input — recomputes only when input_json changes. */
   readonly normalized = computed<NormalizedToolInput>(() =>
-    this.normalizer.normalize(this.tool().tool_name, this.tool().input_json)
+    this.normalizer.normalize(
+      this.tool().tool_name,
+      this.tool().input_json,
+      this.tool().status !== 'running'
+    )
   );
 
   /** Whether this tool's body is currently hidden. */
@@ -279,11 +283,7 @@ export class ToolBlockComponent {
     return marker.includes('stopped') || marker.includes('interrupted');
   });
 
-  /**
-   * Header glyph for non-running statuses. The running variant is rendered as
-   * an inline spin SVG directly in the template (matches the mockup) so this
-   * computed never returns a placeholder for it.
-   */
+  /** Header glyph for non-running statuses; the running variant is an inline spin SVG in the template, so this computed never returns a placeholder for it. */
   readonly statusGlyph = computed<string>(() => {
     if (this.isStopped()) {
       return '⊘';

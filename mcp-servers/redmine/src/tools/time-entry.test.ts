@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createTimeEntryTools } from './time-entry-tools.js';
-import { ProjectScopeError } from '../client.js';
-import type { RedmineClient } from '../client.js';
+import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listTimeEntries: Mock;
@@ -148,6 +147,39 @@ describe('time-entry-tools', () => {
         user_id: 5,
         limit: 50,
       });
+    });
+
+    it("passes user_id: 'me' through verbatim without resolving it", async () => {
+      mockClient.listTimeEntries.mockResolvedValue({ time_entries: [], total_count: 0 });
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listTimeEntries')?.handler;
+
+      await handler!({ user_id: 'me' });
+
+      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ user_id: 'me' });
+    });
+
+    it('forwards an oversized limit unchanged (the client owns clamping, not the handler)', async () => {
+      mockClient.listTimeEntries.mockResolvedValue({ time_entries: [], total_count: 0 });
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listTimeEntries')?.handler;
+
+      await handler!({ limit: 5000 });
+
+      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ limit: 5000 });
+    });
+
+    it('forwards a non-numeric limit unchanged (the client owns clamping, not the handler)', async () => {
+      mockClient.listTimeEntries.mockResolvedValue({ time_entries: [], total_count: 0 });
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listTimeEntries')?.handler;
+
+      await handler!({ limit: 'not-a-number' });
+
+      expect(mockClient.listTimeEntries).toHaveBeenCalledWith({ limit: 'not-a-number' });
     });
 
     it('handles API errors', async () => {
@@ -453,6 +485,18 @@ describe('time-entry-tools', () => {
         content: [{ type: 'text', text: 'Error: Resource not found in Redmine.' }],
         isError: true,
       });
+    });
+
+    it('passes time_entry_id as formatError context on failure', async () => {
+      mockClient.updateTimeEntry.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createTimeEntryTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'updateTimeEntry')?.handler;
+
+      await handler!({ time_entry_id: 9999, hours: 2.0 });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { time_entry_id: 9999 });
     });
 
     it('handles permission errors', async () => {

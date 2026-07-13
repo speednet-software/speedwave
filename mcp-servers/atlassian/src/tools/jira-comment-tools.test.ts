@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const stub = { add: vi.fn(), list: vi.fn(), addWorklog: vi.fn() };
 vi.mock('../domains/jira-comments.js', () => ({ createJiraCommentsClient: () => stub }));
 
+import { META_KEYS } from '@speedwave/mcp-shared';
 import { createJiraCommentTools } from './jira-comment-tools.js';
 import type { AtlassianClient } from '../client.js';
 
@@ -37,6 +38,13 @@ describe('definitions', () => {
       expect(tool.outputSchema?.required).toContain('success');
       expect(tool.inputExamples?.length).toBeGreaterThan(0);
     }
+  });
+  it('addWorklog carries no identity metadata but documents the fixed-account attribution in its description', () => {
+    const tool = createJiraCommentTools(FAKE_CLIENT).find(
+      (d) => d.tool.name === 'addWorklog'
+    )?.tool;
+    expect(tool?._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
+    expect(tool?.description).toContain('shared Atlassian account');
   });
 });
 

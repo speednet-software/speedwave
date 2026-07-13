@@ -1,7 +1,5 @@
 /**
- * Slack worker auth wiring tests (SEC-035)
- *
- * Verifies that mcp-slack reads MCP_SLACK_AUTH_TOKEN and passes it to createMCPServer.
+ * Slack worker auth wiring tests (SEC-035): verifies mcp-slack reads MCP_SLACK_AUTH_TOKEN and passes it to createMCPServer.
  * Middleware correctness is covered by shared/src/server.test.ts — here we test wiring only.
  */
 

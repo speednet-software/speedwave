@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createJournalTools } from './journal-tools.js';
-import { ProjectScopeError } from '../client.js';
-import type { RedmineClient } from '../client.js';
+import { RedmineClient, ProjectScopeError } from '../client.js';
 
 type MockClient = {
   listJournals: Mock;
@@ -165,6 +164,18 @@ describe('journal-tools', () => {
       });
     });
 
+    it('passes issue_id as formatError context on failure', async () => {
+      mockClient.listJournals.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createJournalTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'listJournals')?.handler;
+
+      await handler!({ issue_id: 9999 });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), { issue_id: 9999 });
+    });
+
     it('handles API errors', async () => {
       mockClient.listJournals.mockRejectedValue(new Error('Network error'));
 
@@ -254,6 +265,21 @@ describe('journal-tools', () => {
       });
     });
 
+    it('passes issue_id and journal_id as formatError context on failure', async () => {
+      mockClient.updateJournal.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createJournalTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'updateJournal')?.handler;
+
+      await handler!({ issue_id: 10, journal_id: 9999, notes: 'Updated' });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), {
+        issue_id: 10,
+        journal_id: 9999,
+      });
+    });
+
     it('handles permission errors', async () => {
       mockClient.updateJournal.mockRejectedValue(
         new Error('Permission denied. Your Redmine API key may not have sufficient permissions.')
@@ -339,6 +365,21 @@ describe('journal-tools', () => {
       expect(result).toEqual({
         content: [{ type: 'text', text: 'Error: Resource not found in Redmine.' }],
         isError: true,
+      });
+    });
+
+    it('passes issue_id and journal_id as formatError context on failure', async () => {
+      mockClient.deleteJournal.mockRejectedValue(new Error('Not found'));
+      const formatErrorSpy = vi.spyOn(RedmineClient, 'formatError');
+
+      const tools = createJournalTools(mockClient as unknown as RedmineClient);
+      const handler = tools.find((t) => t.tool.name === 'deleteJournal')?.handler;
+
+      await handler!({ issue_id: 10, journal_id: 9999 });
+
+      expect(formatErrorSpy).toHaveBeenCalledWith(expect.any(Error), {
+        issue_id: 10,
+        journal_id: 9999,
       });
     });
 

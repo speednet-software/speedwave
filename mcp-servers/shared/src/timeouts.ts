@@ -1,13 +1,6 @@
 /**
- * Centralna konfiguracja timeoutów - SSOT
+ * Centralna konfiguracja timeoutów - SSOT. Bazowy timeout z SPEEDWAVE_TIMEOUT_MS; nazewnictwo UPPER_SNAKE_CASE, suffix _MS.
  * @module shared/timeouts
- *
- * Wszystkie timeouty w Speedwave MCP powinny być importowane z tego modułu.
- * Bazowy timeout jest konfigurowalny przez zmienną środowiskową SPEEDWAVE_TIMEOUT_MS.
- *
- * Konwencja nazewnictwa:
- * - UPPER_SNAKE_CASE
- * - Suffix _MS dla wartości w milisekundach
  */
 
 import { ts } from './logger.js';
@@ -82,10 +75,5 @@ export const TIMEOUTS = {
   SHAREPOINT_SYNC_MS: parseInt(process.env.SHAREPOINT_SYNC_TIMEOUT_MS || '900000', 10),
 } as const;
 
-/**
- * Type representing valid keys of the TIMEOUTS object.
- * Use this type when you need to reference timeout keys dynamically.
- * @typedef {keyof typeof TIMEOUTS} TimeoutKey
- * @internal
- */
+/** Valid keys of the TIMEOUTS object, for dynamic timeout-key references. */
 export type TimeoutKey = keyof typeof TIMEOUTS;

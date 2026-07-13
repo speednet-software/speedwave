@@ -1,6 +1,5 @@
-//! Startup sanitation of legacy secret-bearing state: v1 SharePoint secrets
-//! left in the worker-mounted token dir (ADR-060) and the retired host_exec
-//! worker's state tree (ADR-054, reverted). Best-effort, idempotent.
+//! Startup sanitation of legacy secret-bearing state: v1 SharePoint secrets in the worker-mounted
+//! token dir (ADR-060), and the retired host_exec state tree (ADR-054). Best-effort, idempotent.
 
 use std::path::Path;
 
@@ -14,9 +13,8 @@ const LEGACY_SHAREPOINT_FILES: &[&str] = &["refresh_token", "client_id", "tenant
 /// kept per-project state (0600 auth-token, config.json, logs). Legacy-only.
 pub(crate) const LEGACY_HOST_EXEC_SUBDIR: &str = "host-exec";
 
-/// Run cleanup once at startup: sweep the retired host_exec state tree, then
-/// sanitise legacy SharePoint token files. Best-effort — failures are logged.
-/// Returns the number of projects where a legacy SharePoint file was removed.
+/// Run cleanup once at startup: sweep the retired host_exec state tree, then sanitise legacy
+/// SharePoint token files. Best-effort (failures logged); returns the count of projects cleaned.
 pub fn run_legacy_token_cleanup_at_startup() -> usize {
     run_with_data_dir(consts::data_dir())
 }
@@ -95,9 +93,8 @@ fn cleanup_sharepoint_for_project(project: &str, project_dir: &Path) -> bool {
     any_removed
 }
 
-/// Delete the whole legacy `host-exec/` tree. Nothing reads it since the
-/// host_exec worker was removed, but it still holds secret-bearing files
-/// (auth-token, config.json). Returns `true` when the tree was removed.
+/// Delete the whole legacy `host-exec/` tree. Nothing reads it since the worker was removed, but
+/// it still holds secret-bearing files (auth-token, config.json). Returns `true` if removed.
 fn remove_legacy_host_exec_tree(data_dir: &Path) -> bool {
     let root = data_dir.join(LEGACY_HOST_EXEC_SUBDIR);
     match std::fs::remove_dir_all(&root) {
@@ -120,7 +117,10 @@ fn remove_legacy_host_exec_tree(data_dir: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -387,9 +387,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn host_exec_sweep_survives_permission_denied() {
-        // remove_dir_all cannot unlink inside a r-x dir: the sweep must report
-        // failure via its return value (logged as warn), never panic. As root
-        // the unlink succeeds anyway, so both outcomes are asserted coherently.
+        // remove_dir_all cannot unlink inside a r-x dir: the sweep reports failure via its return
+        // value (warn-logged), never panics. As root it succeeds, so both outcomes are asserted.
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_tmp_data_dir();
         let protected = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR).join("protected");

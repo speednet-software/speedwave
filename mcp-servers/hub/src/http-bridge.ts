@@ -1,18 +1,6 @@
 /**
- * HTTP Bridge - Hub-to-Worker Communication
- * @module http-bridge
- *
- * Enables mcp-hub to call isolated MCP workers via HTTP.
- * Each worker only has access to its own service tokens.
- *
- * Architecture:
- * - Hub (this service) has NO tokens - only orchestrates
- * - Workers have per-service token isolation
- * - All communication via JSON-RPC 2.0 over HTTP
- *
- * Security:
- * - Internal Docker network only (no exposed ports)
- * - Network isolation provides security - no host access
+ * HTTP Bridge — Hub-to-Worker Communication. Hub has NO tokens; each worker holds only its own
+ * service tokens. All communication is JSON-RPC 2.0 over HTTP on the internal Docker network.
  */
 
 import { randomUUID } from 'crypto';
@@ -22,13 +10,10 @@ import { getAllServiceNames } from './service-list.js';
 import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
 import { deriveWorkerEnv } from './worker-env.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Configuration
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Configuration ────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve worker URL for a given service from WORKER_{SERVICE}_URL env var.
- * Returns undefined if the env var is not set (service not enabled).
+ * Resolve worker URL for a service from WORKER_{SERVICE}_URL; undefined if unset (not enabled).
  * @param service - service name (e.g. 'slack', 'gitlab')
  */
 function getWorkerUrl(service: string): string | undefined {
@@ -51,17 +36,12 @@ function getConfiguredServices(): string[] {
   return getAllServiceNames().filter((service) => Boolean(getWorkerUrl(service)));
 }
 
-/**
- * Get current worker request timeout value (for testing)
- * @returns Current timeout in milliseconds
- */
+/** Get current worker request timeout value in milliseconds (for testing). */
 export function getRequestTimeout(): number {
   return TIMEOUTS.WORKER_REQUEST_MS;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Types ────────────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Worker response structure
@@ -105,9 +85,8 @@ export interface JSONRPCResponse {
 }
 
 /**
- * Build standard MCP-compliant headers for worker requests.
- * Includes Content-Type, Accept (JSON + SSE), and MCP-Protocol-Version.
- * Optionally adds Authorization header when an auth token is available.
+ * Build standard MCP-compliant headers for worker requests (Content-Type, Accept, Protocol-Ver).
+ * Optionally adds Authorization when an auth token is available.
  * @param authToken - Optional bearer token for authentication
  */
 export function buildWorkerHeaders(authToken?: string): Record<string, string> {
@@ -161,9 +140,7 @@ export async function parseResponse(response: Response): Promise<JSONRPCResponse
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Worker Status Cache
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Worker Status Cache ──────────────────────────────────────────────────────────────────────────
 
 /**
  * Worker status cache entry
@@ -204,7 +181,7 @@ function classifyHealthError(error: unknown): string {
 }
 
 /**
- * Perform MCP initialize handshake; returns Mcp-Session-Id (empty if stateless), null on failure.
+ * Perform MCP initialize handshake; returns Mcp-Session-Id (empty if stateless), null on fail.
  * @param url - Worker base URL
  * @param authToken - Optional bearer token
  */
@@ -231,7 +208,7 @@ async function performMcpInitialize(url: string, authToken?: string): Promise<st
     const result = await parseResponse(response);
     if (result.error) return null;
 
-    // Per MCP spec, notifications/initialized must complete before subsequent requests on this session.
+    // Per MCP spec, notifications/initialized must complete before further requests on the session.
     const notifHeaders = buildWorkerHeaders(authToken);
     if (sessionId) notifHeaders['Mcp-Session-Id'] = sessionId;
     const notifResponse = await fetch(url, {
@@ -261,7 +238,7 @@ async function performMcpInitialize(url: string, authToken?: string): Promise<st
 }
 
 /**
- * Single health-check via MCP ping with /health fallback (plain ping, then initialize+ping, then legacy GET).
+ * Single health-check: plain ping, then initialize+ping, then legacy /health GET fallback.
  * @param service - Service name to check
  */
 async function checkWorkerHealth(service: string): Promise<boolean> {
@@ -331,7 +308,7 @@ async function checkWorkerHealth(service: string): Promise<boolean> {
 }
 
 /**
- * Check if worker is available (with caching)
+ * Check if worker is available (with caching).
  * @param service - Service name to check
  * @returns True if worker is available, false otherwise
  */
@@ -365,7 +342,7 @@ export const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 /**
  * Check worker health at startup with retry + backoff.
- * Logs at info level (not warn) because startup races are expected.
+ * Logs at info (not warn) — startup races are expected.
  * @param service - Service name to check
  */
 async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
@@ -394,7 +371,7 @@ async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
 }
 
 /**
- * Get all available services
+ * Get all currently available service names.
  * @returns Array of service names that are currently available
  */
 export async function getAvailableServices(): Promise<string[]> {
@@ -409,28 +386,14 @@ export async function getAvailableServices(): Promise<string[]> {
   return results.filter((r) => r.available).map((r) => r.service);
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Error Parsing
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Error Parsing ────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Parses and extracts meaningful error messages from MCP service errors.
- * Handles various error structures from different APIs (GitLab, Slack, SharePoint, etc.).
- *
- * Error sources handled:
- * - GitBeaker: error.cause.description, error.response.body.message
- * - HTTP errors: error.response.status, error.response.body.error
- * - Network errors: error.code (ECONNREFUSED, ETIMEDOUT)
- * - Generic errors: error.message
- * @param {unknown} error - The raw error from an MCP service call
- * @param {string} serviceName - Name of the service for prefixing (e.g., 'gitlab', 'slack')
- * @returns {string} A sanitized, user-friendly error message
- * @example
- * parseServiceError({ cause: { description: 'Invalid token' } }, 'gitlab')
- * // → 'gitlab: Invalid token'
- *
- * parseServiceError({ response: { status: 404 } }, 'gitlab')
- * // → 'gitlab: Resource not found'
+ * Extracts a sanitized, user-friendly error message from an MCP service error, checked in order:
+ * GitBeaker cause.description, HTTP response.body/status, network error.code, then error.message.
+ * @param error - The raw error from an MCP service call
+ * @param serviceName - Name of the service for prefixing (e.g., 'gitlab', 'slack')
+ * @returns A sanitized, user-friendly error message
  */
 export function parseServiceError(error: unknown, serviceName: string): string {
   const prefix = serviceName ? `${serviceName}: ` : '';
@@ -509,9 +472,7 @@ export function parseServiceError(error: unknown, serviceName: string): string {
   return `${prefix}Unknown error`;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// HTTP Bridge Functions
-//═══════════════════════════════════════════════════════════════════════════════
+// ── HTTP Bridge Functions ────────────────────────────────────────────────────────────────────────
 
 /**
  * Per-service cache of Mcp-Session-Id values; empty string means stateless.
@@ -561,11 +522,11 @@ export function _clearWorkerSessionCacheForTesting(): void {
 }
 
 /**
- * Call a worker tool via HTTP bridge.
- * @param service Service name (slack, sharepoint, redmine, gitlab)
- * @param toolName Tool name to call
- * @param params Tool parameters
- * @param options Optional configuration (timeoutMs for custom timeout)
+ * Call a worker tool via HTTP bridge; `options.timeoutMs` overrides the default timeout.
+ * @param service - Service name (slack, sharepoint, redmine, gitlab)
+ * @param toolName - Tool name to call
+ * @param params - Tool parameters
+ * @param options - Optional configuration (timeoutMs for custom timeout)
  * @param options.timeoutMs - Custom timeout in milliseconds for this specific call
  * @returns Tool result
  */
@@ -684,9 +645,7 @@ export async function callWorker<T = unknown>(
   }
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Service-Specific Bridge Functions (for executor.ts compatibility)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Service-Specific Bridge Functions (for executor.ts compatibility) ────────────────────────────
 
 /** Create Slack bridge for executor sandbox. */
 export function createSlackBridge() {
@@ -713,19 +672,14 @@ export function createOsBridge() {
   return buildServiceBridge('os', callWorker);
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Create All Bridges (Lazy Initialization)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Create All Bridges (Lazy Initialization) ─────────────────────────────────────────────────────
 
-/**
- * All service bridges combined.
- * Dynamic Record type to support both built-in and plugin services.
- */
+/** All service bridges combined; a dynamic Record to support both built-in and plugin services. */
 export type AllBridges = Record<string, ReturnType<typeof buildServiceBridge> | null>;
 
 /**
- * Initialize all service bridges (lazy mode: created regardless of worker availability, health checked at startup).
- * @returns All initialized bridges
+ * Initialize all service bridges (lazy mode): created regardless of availability,
+ * health-checked at startup.
  */
 export async function initializeAllBridges(): Promise<AllBridges> {
   console.log(`${ts()} 🔗 Initializing HTTP bridges to workers (lazy mode)...`);

@@ -1,12 +1,5 @@
 /**
- * Atlassian worker credential loading from the read-only `/tokens` mount.
- *
- * Credential layout (one file per field, perms `0o600`, mounted `:ro`):
- * - `/tokens/site_url`               — required, e.g. `https://acme.atlassian.net`
- * - `/tokens/email`                  — required (Basic-auth username)
- * - `/tokens/api_token`              — required (Basic-auth password) — never logged
- * - `/tokens/jira_project_keys`      — optional allowlist, comma-separated; empty/missing = unrestricted
- * - `/tokens/confluence_space_keys`  — optional allowlist, comma-separated; empty/missing = unrestricted
+ * Atlassian worker credentials from `/tokens` (`0o600`, `:ro`): `site_url`/`email`/`api_token` required; key allowlists optional.
  * @module mcp-atlassian/auth
  */
 
@@ -19,11 +12,9 @@ import type { AtlassianConfig } from './types.js';
 const REQUIRED_FILES = ['site_url', 'email', 'api_token'] as const;
 
 /**
- * Read and trim a required credential file. Returns `null` (with a guidance log)
- * if the file is missing or empty — the worker then starts in "not configured"
- * mode rather than crashing.
- * @param name - Credential file name under {@link tokensDir}.
- * @returns Trimmed contents, or `null` if missing/empty.
+ * Read and trim a required credential file; `null` (guidance-logged) if missing/empty — "not configured" mode, not a crash.
+ * @param name - Credential file name under `tokensDir()`.
+ * @returns The trimmed value, or `null` if missing/empty.
  */
 async function readRequired(name: string): Promise<string | null> {
   try {
@@ -47,10 +38,10 @@ async function readRequired(name: string): Promise<string | null> {
 }
 
 /**
- * Read an optional allowlist file (comma- or whitespace-separated). Missing file
- * or empty contents yield an empty list (= unrestricted).
- * @param name - File name under {@link tokensDir}.
- * @returns Deduplicated, trimmed, upper-cased keys (Atlassian keys are upper-case).
+ * Read an optional allowlist file (comma/whitespace-separated); missing/empty yields an empty list (unrestricted).
+ * Returns deduplicated, trimmed, upper-cased keys (Atlassian keys are upper-case).
+ * @param name - Allowlist file name under `tokensDir()`.
+ * @returns Deduplicated, trimmed, upper-cased keys.
  */
 async function readAllowlist(name: string): Promise<string[]> {
   try {
@@ -71,12 +62,10 @@ async function readAllowlist(name: string): Promise<string[]> {
 }
 
 /**
- * Validate and normalise the site URL: must be `https://`, host must end in
- * `.atlassian.net` (Atlassian Cloud only — Server/Data Center is not supported),
- * no path/query/fragment. Returns the normalised `https://host` form, or `null`
- * if invalid.
- * @param raw - Raw `site_url` credential value.
- * @returns Normalised origin, or `null` if invalid.
+ * Validate and normalise the site URL: must be `https://`, host must end in `.atlassian.net`
+ * (Cloud only, not Server/Data Center), no path/query/fragment.
+ * @param raw - The raw site URL string to validate.
+ * @returns `https://host`, or `null` if invalid.
  */
 export function normalizeSiteUrl(raw: string): string | null {
   let url: URL;

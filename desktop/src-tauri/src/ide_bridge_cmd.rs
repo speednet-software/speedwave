@@ -62,8 +62,7 @@ pub(crate) fn get_selected_ide() -> Result<Option<speedwave_runtime::config::Sel
 }
 
 /// User-initiated disconnect from the upstream IDE. Clears both the live
-/// bridge proxy and the persisted `selected_ide` so a restart will not
-/// auto-reconnect.
+/// bridge proxy and the persisted `selected_ide` so a restart will not auto-reconnect.
 #[tauri::command]
 pub(crate) fn disconnect_ide(state: tauri::State<SharedIdeBridge>) -> Result<(), String> {
     log::info!(target: "ide_bridge", "disconnect_ide: clearing upstream");

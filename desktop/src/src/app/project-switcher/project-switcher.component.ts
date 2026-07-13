@@ -26,8 +26,7 @@ import { swatchFor } from './project-swatch';
 const ACTIVE_PROJECT_ERR_PREFIX = 'active_project_removal: ';
 
 /**
- * Strips the runtime sentinel prefix so the user sees the human-readable message.
- * Exported for unit testing.
+ * Strips the runtime sentinel prefix so the user sees the human-readable message. Exported for unit testing.
  * @param msg - Raw backend error message that may carry the sentinel prefix.
  */
 export function cleanRemoveErrorMessage(msg: string): string {
@@ -36,12 +35,8 @@ export function cleanRemoveErrorMessage(msg: string): string {
 }
 
 /**
- * Project switcher dropdown — toggled from the chat header / command palette.
- *
- * Visibility is wired to {@link UiStateService.projectSwitcherOpen} so the
- * shell, the chat header, and the palette can all open/close it without
- * routing through this component. The `showAddForm` field tracks the inline
- * "Add project" form's own collapse state inside the dropdown footer.
+ * Project switcher dropdown — toggled from the chat header / command palette; visibility is
+ * wired to {@link UiStateService.projectSwitcherOpen}. `showAddForm` tracks the inline "Add project" form's own collapse state.
  */
 @Component({
   selector: 'app-project-switcher',

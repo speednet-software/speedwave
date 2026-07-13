@@ -60,11 +60,7 @@ export interface ProjectSwitchFailedPayload {
   project: string | null;
   /** Full error message (may be user-readable or prefix-encoded). */
   error: string;
-  /**
-   * Structured error kind for frontend routing.
-   * - `'cloudstorage_tcc_required'`: project directory is in CloudStorage with no TCC
-   * - `undefined`: generic error, show normal error banner
-   */
+  /** Structured error kind for frontend routing: `'cloudstorage_tcc_required'` = project dir in CloudStorage with no TCC; `undefined` = generic error, show normal banner. */
   error_kind?: 'cloudstorage_tcc_required';
   /** CloudStorage provider display name (e.g. "OneDrive") when error_kind is set. */
   provider?: string;

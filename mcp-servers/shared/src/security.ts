@@ -1,19 +1,13 @@
 /**
- * MCP Security Module
- * Defense-in-depth security for MCP servers
- *
- * Security Principles:
- * 1. Validate ALL inputs
- * 2. Never expose tokens
- * 3. Validate Origin headers per MCP Streamable HTTP spec
+ * MCP Security Module: defense-in-depth for MCP servers.
+ * Validate all inputs, never expose tokens, validate Origin headers per MCP Streamable HTTP spec.
  */
 import fs from 'fs/promises';
 import path from 'node:path';
 
 /**
- * Directory the orchestrator mounts service credentials into (read-only).
- * SSOT for the `TOKENS_DIR`-or-`/tokens` literal repeated across every worker.
- * @returns `process.env.TOKENS_DIR` when set and non-empty, else `/tokens`.
+ * Directory the orchestrator mounts service credentials into (read-only); SSOT for the
+ * `TOKENS_DIR`-or-`/tokens` literal repeated across every worker.
  */
 export function tokensDir(): string {
   const dir = process.env.TOKENS_DIR;
@@ -21,21 +15,18 @@ export function tokensDir(): string {
 }
 
 /**
- * Load a credential file by name from {@link tokensDir}.
- * @param name - File name under the tokens directory (e.g. `bot_token`).
- * @returns Trimmed file contents.
- * @throws {Error} With errno cause forwarded (ENOENT/EACCES/EISDIR/…).
+ * Load a credential file by name from {@link tokensDir}, returning trimmed contents.
+ * @param name - file name under the tokens directory (e.g. `bot_token`)
+ * @throws {Error} with errno cause forwarded (ENOENT/EACCES/EISDIR/…).
  */
 export async function loadTokenFile(name: string): Promise<string> {
   return loadToken(path.join(tokensDir(), name));
 }
 
 /**
- * Load token from file (used for secrets management)
- * Tokens are mounted read-only from host to /tokens/ directory
- * @param tokenPath - Path to token file
- * @returns Token string (trimmed)
- * @throws {Error} Error with specific details about the failure
+ * Load a token from a file (mounted read-only from host to /tokens/), trimmed.
+ * @param tokenPath - path to the token file
+ * @throws {Error} with details specific to the failure mode (ENOENT/EACCES/EISDIR/other).
  */
 export async function loadToken(tokenPath: string): Promise<string> {
   try {
@@ -83,10 +74,8 @@ export const BASE_SAFE_ENV_KEYS: readonly string[] = [
 ];
 
 /**
- * Validate JSON-RPC message structure
- * Prevents injection attacks and malformed requests
- * @param body Request body
- * @returns true if valid JSON-RPC message
+ * Validate JSON-RPC message structure; prevents injection attacks and malformed requests.
+ * @param body - request body to validate
  */
 export function validateJSONRPCMessage(body: unknown): boolean {
   // Must have jsonrpc field
@@ -131,10 +120,8 @@ export function validateJSONRPCMessage(body: unknown): boolean {
 }
 
 /**
- * Validate JSON-RPC params structure
- * Params must be an object or array (per JSON-RPC 2.0 spec), or absent
- * @param params - The params value to validate
- * @returns true if valid params (object, array, or undefined)
+ * Validate JSON-RPC params: must be an object or array (per JSON-RPC 2.0 spec), or absent.
+ * @param params - the params value to validate
  */
 export function validateParams(
   params: unknown
@@ -144,10 +131,8 @@ export function validateParams(
 }
 
 /**
- * Validate session ID format
- * Session IDs must be UUIDs (crypto.randomUUID())
- * @param sessionId Session ID to validate
- * @returns true if valid
+ * Validate session ID format; session IDs must be UUIDs (crypto.randomUUID()).
+ * @param sessionId - session ID to validate
  */
 export function validateSessionId(sessionId: string): boolean {
   // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
@@ -156,10 +141,8 @@ export function validateSessionId(sessionId: string): boolean {
 }
 
 /**
- * Validate tool name to prevent command injection
- * Tool names must be alphanumeric with underscores only
- * @param toolName Tool name to validate
- * @returns true if valid
+ * Validate tool name to prevent command injection; alphanumeric with underscores/hyphens only.
+ * @param toolName - tool name to validate
  */
 export function validateToolName(toolName: string): boolean {
   // Only allow: letters, numbers, underscore, hyphen
@@ -174,16 +157,9 @@ const CONTAINER_HOSTNAME_RE = /^mcp-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 export const HOST_GATEWAY_ALIAS = 'host.docker.internal';
 
 /**
- * Validate that a worker URL matches canonical Speedwave internal endpoints.
- * Defense-in-depth: asserts that runtime provided a correct internal URL.
- *
- * Accepted patterns:
- * - Container workers: http://mcp-{name}:{port} (Docker internal DNS)
- * - Host gateway (OS worker): http://host.docker.internal:{port}
- *
- * Rejects everything else (external hosts, IPs, wrong protocols, paths, query strings).
+ * Validate a worker URL matches canonical Speedwave internal endpoints: `http://mcp-{name}:{port}`
+ * or `http://host.docker.internal:{port}`; rejects external hosts/IPs/protocols/paths/queries.
  * @param url - URL string to validate
- * @returns true if the URL matches a canonical worker endpoint
  */
 export function validateWorkerUrl(url: string): boolean {
   let parsed: URL;
@@ -221,12 +197,10 @@ export function validateWorkerUrl(url: string): boolean {
 }
 
 /**
- * Validate Origin header per MCP Streamable HTTP spec.
- * Missing Origin (non-browser clients) is allowed.
- * Present Origin must be in allowedOrigins list.
+ * Validate Origin header per MCP Streamable HTTP spec: missing Origin (non-browser clients)
+ * is allowed; a present Origin must be in `allowedOrigins`.
  * @param origin - Origin header value (undefined if absent)
- * @param allowedOrigins - List of allowed origin strings
- * @returns true if the origin is acceptable
+ * @param allowedOrigins - list of allowed origin strings
  */
 export function validateOrigin(origin: string | undefined, allowedOrigins?: string[]): boolean {
   if (origin == null) return true;

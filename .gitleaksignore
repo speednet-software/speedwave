@@ -41,3 +41,6 @@ mcp-servers/shared/src/sanitizer.test.ts:generic-api-key:18
 crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:143
 crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:154
 crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:176
+
+# Whisper model key "large-v3-turbo" in a download-tracking test — not a secret.
+desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:605

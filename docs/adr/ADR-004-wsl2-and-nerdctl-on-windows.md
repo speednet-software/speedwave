@@ -9,19 +9,19 @@ On Windows, Speedwave runs containers via nerdctl inside a dedicated WSL2 (Hyper
 
 ## Why
 
-- WSL2 ships with Windows 10/11 and uses Hyper-V — the same hypervisor Docker Desktop relies on — so no extra hypervisor install is needed.
+- WSL2 ships with Windows 10/11 and uses Hyper-V — the same hypervisor Docker Desktop relies on — so no extra hypervisor install is needed.[^1]
 - The Rust runtime can drive WSL2 entirely through `wsl.exe -d <distro> -- ...`, keeping the orchestration layer thin (KISS).
 - A dedicated, Speedwave-owned distribution isolates the container environment from any user-configured WSL distros (Ubuntu, Debian, etc.) and lets Speedwave verify the distro's origin before trusting it.
-- `windows-rs` (Microsoft-maintained) provides WinRT access; `mapi-rs` provides Outlook mail and calendar bindings for the host-side native helpers.
+- `windows-rs` (Microsoft-maintained) provides WinRT access;[^2] `mapi-rs` provides Outlook mail and calendar bindings for the host-side native helpers.[^3]
 
 ## Auto-Installation
 
 The Setup Wizard provisions WSL2 automatically (see ADR-021):
 
 1. Detection — prerequisite checks decide whether WSL2 is installed and operational.
-2. Installation — if WSL2 is missing, the wizard runs `wsl --install --no-distribution` via elevated PowerShell (UAC). The `--no-distribution` flag installs only the WSL2 kernel; Speedwave imports its own distro.
+2. Installation — if WSL2 is missing, the wizard runs `wsl --install --no-distribution` via elevated PowerShell (UAC). The `--no-distribution` flag installs only the WSL2 kernel; Speedwave imports its own distro.[^4]
 3. Reboot — the user is prompted to restart (required after first-time kernel install).
-4. Distribution import — the bundled Ubuntu rootfs (SHA256-verified) is imported with `wsl --import` into a dedicated named distribution.
+4. Distribution import — the bundled Ubuntu rootfs (SHA256-verified) is imported with `wsl --import` into a dedicated named distribution.[^5]
 
 Implemented in `desktop/src-tauri/src/setup_wizard.rs` (`attempt_wsl_install`, `import_wsl_distro`).
 
@@ -35,9 +35,9 @@ Implemented in `desktop/src-tauri/src/setup_wizard.rs` (`attempt_wsl_install`, `
 
 ## System Requirements
 
-- Windows 10 version 21H2 (Build 19044) or later
-- Hyper-V-capable hardware (virtualization enabled in BIOS/UEFI)
-- Administrator privileges for the initial WSL2 install (one UAC prompt)
+- Windows 10 version 21H2 (Build 19044) or later[^6]
+- Hyper-V-capable hardware (virtualization enabled in BIOS/UEFI)[^7]
+- Administrator privileges for the initial WSL2 install (one UAC prompt)[^7]
 
 ## Rejected alternatives
 
@@ -46,12 +46,16 @@ Implemented in `desktop/src-tauri/src/setup_wizard.rs` (`attempt_wsl_install`, `
 
 ---
 
-[WSL2 architecture — Microsoft Docs](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)
+[^1]: [Comparing WSL 1 and WSL 2 - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/compare-versions) ("WSL 2 is running as a Hyper-V virtual machine.")
 
-[Install WSL — Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install)
+[^2]: [microsoft/windows-rs - Rust for Windows](https://github.com/microsoft/windows-rs)
 
-[Import a Linux distribution — wsl --import](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro)
+[^3]: [microsoft/mapi-rs - Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)
 
-[microsoft/windows-rs — Rust for Windows](https://github.com/microsoft/windows-rs)
+[^4]: [Basic commands for WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/basic-commands) ("`--no-distribution`: Do not install a distribution when installing WSL.")
 
-[microsoft/mapi-rs — Rust bindings for Outlook MAPI](https://github.com/microsoft/mapi-rs)
+[^5]: [Import a Linux distribution - wsl --import - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/use-custom-distro)
+
+[^6]: [Comparing WSL 1 and WSL 2 - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/compare-versions) ("Beginning in Windows version 19044 or higher, running the `wsl.exe --install` command will install the WSL servicing update from the Microsoft Store."); build 19044 corresponds to Windows 10 version 21H2 per [Windows 10 release information - Microsoft Learn](https://learn.microsoft.com/en-us/windows/release-health/release-information).
+
+[^7]: [Manual installation steps for older versions of WSL - Microsoft Learn](https://learn.microsoft.com/en-us/windows/wsl/install-manual) (Step 3, "Your machine will require virtualization capabilities"; all install steps run "PowerShell as Administrator").

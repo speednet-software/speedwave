@@ -111,18 +111,18 @@ nerdctl's config-hash convergence only recreates services whose compose definiti
 
 [^1]: pip `--require-hashes` secure-installs mode (the supply-chain machinery this design retires by having no Python deps): https://pip.pypa.io/en/stable/topics/secure-installs/
 
-[^2]: OpenRouter exposes the Anthropic Messages API (`POST /v1/messages`, native request/response + streaming): https://openrouter.ai/docs/api/api-reference/anthropic-messages/create-messages
+[^2]: OpenRouter exposes the Anthropic Messages API (`POST /messages`, "Creates a message using the Anthropic Messages API format... Supports text, images, PDFs, tools, and extended thinking"): https://openrouter.ai/openapi.json (see `paths./messages.post`)
 
-[^3]: llama.cpp `llama-server` added native Anthropic Messages API support (incl. `POST /v1/messages/count_tokens`, tools, vision, streaming with Anthropic SSE events) — PR #17570: https://github.com/ggml-org/llama.cpp/pull/17570
+[^3]: llama.cpp `llama-server` added native Anthropic Messages API support (incl. `POST /v1/messages/count_tokens`, tools, vision, streaming with Anthropic SSE events) - PR #17570: https://github.com/ggml-org/llama.cpp/pull/17570
 
-[^4]: vLLM Anthropic Messages API endpoints (`/v1/messages` + `/v1/messages/count_tokens`) — feature issue #21313: https://github.com/vllm-project/vllm/issues/21313 ; serving docs: https://docs.vllm.ai/en/latest/serving/online_serving/
+[^4]: vLLM Anthropic Messages API endpoints (`/v1/messages` + `/v1/messages/count_tokens`) - feature issue #21313: https://github.com/vllm-project/vllm/issues/21313 ; serving docs: https://docs.vllm.ai/en/latest/serving/online_serving/
 
 [^5]: LM Studio 0.4.1 added an Anthropic-compatible `POST /v1/messages` endpoint with SSE streaming (`message_start`, `content_block_delta`, `message_stop`): https://lmstudio.ai/docs/developer/anthropic-compat/messages
 
-[^6]: Ollama exposes the Anthropic-compatible `/v1/messages` endpoint but does not implement `/v1/messages/count_tokens`; the unhandled probe degrades the server into 500s/timeouts (the cascade the shim prevents) — issue #13949: https://github.com/ollama/ollama/issues/13949 ; Anthropic compatibility docs: https://docs.ollama.com/api/anthropic-compatibility
+[^6]: Ollama exposes the Anthropic-compatible `/v1/messages` endpoint but does not implement `/v1/messages/count_tokens`; the unhandled probe degrades the server into 500s/timeouts (the cascade the shim prevents) - issue #13949: https://github.com/ollama/ollama/issues/13949 ; Anthropic compatibility docs: https://docs.ollama.com/api/anthropic-compatibility
 
 [^7]: Claude Code OAuth/admin endpoints ignore `ANTHROPIC_BASE_URL` (hardcoded to api.anthropic.com), so the login flow never traverses the proxy: https://github.com/anthropics/claude-code/issues/48011
 
-[^8]: OpenRouter exposes per-generation cost (`data.total_cost`, USD) via `GET /api/v1/generation?id=<gen-id>`: https://openrouter.ai/docs/api-reference/get-a-generation
+[^8]: OpenRouter exposes per-generation cost (`data.total_cost`, USD) via `GET /generation?id=<gen-id>`: https://openrouter.ai/openapi.json (see `paths./generation.get` response schema field `total_cost`)
 
 [^9]: Generation throughput excludes time-to-first-token: `TPOT = (E2E latency − TTFT) / (output tokens − 1)` (Anyscale): https://docs.anyscale.com/llm/serving/benchmarking/metrics ; "total tokens produced by generation time, excluding TTFT" (GMI Cloud): https://www.gmicloud.ai/en/blog/ttft-llm-speed-metrics . Speedwave divides by all `output tokens` (not `output − 1`) as a practical approximation for the aggregate metric over many requests; the strict per-request `−1` form differs only on very short responses.

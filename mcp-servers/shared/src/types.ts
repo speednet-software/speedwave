@@ -1,17 +1,12 @@
 /**
- * MCP Protocol TypeScript Types
- * Based on: Model Context Protocol Specification 2025-11-25
- *
- * Security: Strongly typed to prevent injection attacks
+ * MCP Protocol TypeScript types (Model Context Protocol Specification 2025-11-25); strongly typed
+ * to prevent injection attacks.
  */
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Protocol Version Constants
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Protocol Version Constants ───────────────────────────────────────────────────────────────────
 
 /**
- * Protocol versions supported by this MCP implementation.
- * SSOT — imported by jsonrpc.ts, transport.ts, and hub tool-discovery.ts.
+ * Protocol versions supported by this MCP implementation. SSOT for jsonrpc/transport/tool-discovery.
  * @see https://modelcontextprotocol.io/docs/specification/protocol
  */
 export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
@@ -20,21 +15,14 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = Object.freeze([
   '2025-11-25',
 ]);
 
-/**
- * The latest (most recent) protocol version supported by this implementation.
- * Used when the hub initiates connections to workers.
- */
+/** The latest (most recent) protocol version supported by this implementation; used when the hub initiates worker connections. */
 export const LATEST_PROTOCOL_VERSION: string =
   SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
 
-//═══════════════════════════════════════════════════════════════════════════════
-// JSON-RPC 2.0 Base Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── JSON-RPC 2.0 Base Types ──────────────────────────────────────────────────────────────────────
 
 /**
- * JSON-RPC 2.0 request message structure.
- * Used for communication between MCP client and server.
- * @interface JSONRPCRequest
+ * JSON-RPC 2.0 request message structure, used for MCP client↔server communication.
  * @see https://www.jsonrpc.org/specification
  */
 export interface JSONRPCRequest {
@@ -49,9 +37,7 @@ export interface JSONRPCRequest {
 }
 
 /**
- * JSON-RPC 2.0 notification message structure.
- * Notifications are like requests but do not expect a response.
- * @interface JSONRPCNotification
+ * JSON-RPC 2.0 notification message structure — like a request but expects no response.
  * @see https://www.jsonrpc.org/specification
  */
 export interface JSONRPCNotification {
@@ -64,9 +50,7 @@ export interface JSONRPCNotification {
 }
 
 /**
- * JSON-RPC 2.0 response message structure.
- * Sent by server in response to a request. Contains either result or error.
- * @interface JSONRPCResponse
+ * JSON-RPC 2.0 response message structure, sent by the server; contains either result or error.
  * @see https://www.jsonrpc.org/specification
  */
 export interface JSONRPCResponse {
@@ -81,9 +65,7 @@ export interface JSONRPCResponse {
 }
 
 /**
- * JSON-RPC 2.0 error object structure.
- * Provides standardized error information in responses.
- * @interface JSONRPCError
+ * JSON-RPC 2.0 error object structure — standardized error information in responses.
  * @see https://www.jsonrpc.org/specification#error_object
  */
 export interface JSONRPCError {
@@ -96,9 +78,7 @@ export interface JSONRPCError {
 }
 
 /**
- * Standard JSON-RPC 2.0 error codes and custom extensions.
- * Negative codes from -32768 to -32000 are reserved by JSON-RPC spec.
- * @enum {number}
+ * Standard JSON-RPC 2.0 error codes and custom extensions. Codes -32768..-32000 are JSON-RPC-spec reserved.
  * @see https://www.jsonrpc.org/specification#error_object
  */
 export enum JSONRPCErrorCode {
@@ -116,14 +96,10 @@ export enum JSONRPCErrorCode {
   SessionError = -32001,
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// MCP Protocol Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── MCP Protocol Types ───────────────────────────────────────────────────────────────────────────
 
 /**
- * MCP protocol initialization request from client to server.
- * First message sent to establish protocol version and exchange capabilities.
- * @interface InitializeRequest
+ * MCP protocol initialization request from client to server; first message, establishes protocol version and capabilities.
  * @see https://modelcontextprotocol.io/docs/specification/protocol
  */
 export interface InitializeRequest {
@@ -150,9 +126,7 @@ export interface InitializeRequest {
 }
 
 /**
- * MCP protocol initialization response from server to client.
- * Sent in response to InitializeRequest to confirm protocol and capabilities.
- * @interface InitializeResult
+ * MCP protocol initialization response from server to client, confirming protocol version and capabilities.
  * @see https://modelcontextprotocol.io/docs/specification/protocol
  */
 export interface InitializeResult {
@@ -170,9 +144,7 @@ export interface InitializeResult {
 }
 
 /**
- * Capabilities advertised by the MCP client during initialization.
- * Informs server what features the client supports.
- * @interface ClientCapabilities
+ * Capabilities advertised by the MCP client during initialization — informs the server what it supports.
  * @see https://modelcontextprotocol.io/docs/specification/protocol
  */
 export interface ClientCapabilities {
@@ -188,9 +160,7 @@ export interface ClientCapabilities {
 }
 
 /**
- * Capabilities advertised by the MCP server during initialization.
- * Informs client what features the server provides.
- * @interface ServerCapabilities
+ * Capabilities advertised by the MCP server during initialization — informs the client what it provides.
  * @see https://modelcontextprotocol.io/docs/specification/protocol
  */
 export interface ServerCapabilities {
@@ -217,15 +187,11 @@ export interface ServerCapabilities {
   experimental?: Record<string, unknown>;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Annotations
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Annotations ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Hints describing a tool's behavior and side effects.
- * Clients may use these to make UI/safety decisions (e.g., auto-approve read-only tools).
- * All fields are optional; the defaults listed are those specified by the MCP spec.
- * @interface ToolAnnotations
+ * Hints describing a tool's behavior/side effects for client UI/safety decisions. All fields
+ * optional; defaults per the MCP spec.
  * @see https://modelcontextprotocol.io/docs/specification/tools#annotations
  */
 export interface ToolAnnotations {
@@ -241,9 +207,7 @@ export interface ToolAnnotations {
   openWorldHint?: boolean;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Annotation Constants
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Annotation Constants ─────────────────────────────────────────────────────────────────────────
 
 /** Annotations for tools that only read data without side effects. */
 export const READ_ONLY_ANNOTATIONS: ToolAnnotations = {
@@ -266,15 +230,9 @@ export const DESTRUCTIVE_ANNOTATIONS: ToolAnnotations = {
   openWorldHint: true,
 };
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Request Processing Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Request Processing Types ─────────────────────────────────────────────────────────────────────
 
-/**
- * Result of processing an incoming JSON-RPC request.
- * Contains the response to send back (or null for notifications) and an optional session ID.
- * @interface ProcessRequestResult
- */
+/** Result of processing an incoming JSON-RPC request: the response (null for notifications) and an optional session ID. */
 export interface ProcessRequestResult {
   /** JSON-RPC response to send back, or null for notifications that require no response */
   response: JSONRPCResponse | null;
@@ -282,14 +240,10 @@ export interface ProcessRequestResult {
   sessionId?: string;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Types ───────────────────────────────────────────────────────────────────────────────────
 
 /**
- * MCP tool definition describing a callable function/operation.
- * Tools are exposed by servers and can be invoked by clients.
- * @interface Tool
+ * MCP tool definition describing a callable function/operation, exposed by servers and invoked by clients.
  * @see https://modelcontextprotocol.io/docs/specification/tools
  */
 export interface Tool {
@@ -342,9 +296,7 @@ export interface Tool {
 }
 
 /**
- * Request to list all available tools from the server.
- * Supports pagination via cursor for large tool sets.
- * @interface ToolsListRequest
+ * Request to list all available tools from the server; supports pagination via cursor for large tool sets.
  * @see https://modelcontextprotocol.io/docs/specification/tools
  */
 export interface ToolsListRequest {
@@ -362,9 +314,7 @@ export interface ToolsListRequest {
 }
 
 /**
- * Response containing list of available tools.
- * May include cursor for pagination if more tools are available.
- * @interface ToolsListResult
+ * Response containing list of available tools; may include a cursor when more tools are available.
  * @see https://modelcontextprotocol.io/docs/specification/tools
  */
 export interface ToolsListResult {
@@ -376,7 +326,6 @@ export interface ToolsListResult {
 
 /**
  * Request to invoke/execute a specific tool with provided arguments.
- * @interface ToolsCallRequest
  * @see https://modelcontextprotocol.io/docs/specification/tools
  */
 export interface ToolsCallRequest {
@@ -396,9 +345,7 @@ export interface ToolsCallRequest {
 }
 
 /**
- * Response from a tool invocation containing results or error information.
- * Content can be text, images, or resource references.
- * @interface ToolsCallResult
+ * Response from a tool invocation containing results or error info; content may be text, images, or resource refs.
  * @see https://modelcontextprotocol.io/docs/specification/tools
  */
 export interface ToolsCallResult {
@@ -419,15 +366,9 @@ export interface ToolsCallResult {
   structuredContent?: Record<string, unknown>;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Session Management Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Session Management Types ─────────────────────────────────────────────────────────────────────
 
-/**
- * Represents an active MCP session between client and server.
- * Used for tracking connection state and enforcing timeouts.
- * @interface Session
- */
+/** Represents an active MCP session between client and server; tracks connection state and enforces timeouts. */
 export interface Session {
   /** Unique session identifier (UUID) */
   id: string;
@@ -444,14 +385,10 @@ export interface Session {
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// SSE Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── SSE Types ────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Server-Sent Events (SSE) message structure.
- * Used for streaming JSON-RPC messages from server to client over HTTP.
- * @interface SSEEvent
+ * Server-Sent Events (SSE) message structure, used for streaming JSON-RPC messages server→client over HTTP.
  * @see https://html.spec.whatwg.org/multipage/server-sent-events.html
  */
 export interface SSEEvent {
@@ -465,9 +402,7 @@ export interface SSEEvent {
   retry?: number;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tool Handler Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tool Handler Types ───────────────────────────────────────────────────────────────────────────
 
 /**
  * Optional per-call context passed to tool handlers (caller id from bearer token, ADR-060).
@@ -478,24 +413,15 @@ export interface ToolHandlerContext {
 }
 
 /**
- * Function signature for implementing a tool's execution logic.
- * Receives validated parameters and an optional context (caller info) and
- * returns the formatted result.
- * @callback ToolHandler
- * @param {Record<string, unknown>} params - Tool parameters (validated against inputSchema)
- * @param {ToolHandlerContext} [context] - Optional per-call context
- * @returns {Promise<ToolsCallResult>} Tool execution result
+ * Function signature for implementing a tool's execution logic: receives validated params and an
+ * optional per-call context (caller info), returns the formatted result.
  */
 export type ToolHandler = (
   params: Record<string, unknown>,
   context?: ToolHandlerContext
 ) => Promise<ToolsCallResult>;
 
-/**
- * Complete tool definition combining schema and implementation.
- * Used internally by MCP servers to register tools.
- * @interface ToolDefinition
- */
+/** Complete tool definition combining schema and implementation; used internally by MCP servers to register tools. */
 export interface ToolDefinition {
   /** Tool schema and metadata */
   tool: Tool;
@@ -503,9 +429,7 @@ export interface ToolDefinition {
   handler: ToolHandler;
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Error Handling Types
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Error Handling Types ─────────────────────────────────────────────────────────────────────────
 
 /**
  * Generic error shape for catch blocks.
@@ -534,15 +458,8 @@ export interface ErrorLike {
 }
 
 /**
- * Type guard for ErrorLike - use in catch blocks
- * @param e - Value to check if it is error-like
- * @returns True if the value is error-like (object with error properties)
- * @example
- * catch (error: unknown) {
- *   if (isErrorLike(error)) {
- *     console.log(error.message);
- *   }
- * }
+ * Type guard for ErrorLike — true when the value is an object with error properties; use in catch blocks.
+ * @param e - The caught value to narrow.
  */
 export function isErrorLike(e: unknown): e is ErrorLike {
   return typeof e === 'object' && e !== null;

@@ -3,19 +3,20 @@ import {
   ChangeDetectorRef,
   Component,
   OnInit,
+  computed,
   inject,
   output,
   signal,
 } from '@angular/core';
 
+import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { RecommendedModelAck } from '../../models/transcript';
+import type { MicPermissionStatus, RecommendedModelAck } from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 
 /**
- * Settings → Meeting transcription (ADR-056). One auto-selected model for this
- * hardware (large-v3 on GPU, large-v3-turbo on CPU) with a single download /
- * remove control. No toggle, no model list, no per-feature defaults.
+ * Settings → Meeting transcription (ADR-056): one auto-selected model for this hardware
+ * (large-v3 GPU / large-v3-turbo CPU), single download/remove control, no model list.
  */
 @Component({
   selector: 'app-transcription-section',
@@ -76,9 +77,63 @@ import { formatBytes } from '../../shared/format-bytes';
                 [disabled]="busy()"
                 (click)="download(m.key)"
               >
-                {{ busy() ? progressLabel() : 'download model' }}
+                {{ downloading() ? progressLabel() : 'download model' }}
               </button>
             }
+          </div>
+        </div>
+      }
+
+      @if (isMacos()) {
+        <div
+          class="mt-4 space-y-3 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-3"
+          data-testid="transcription-permissions"
+        >
+          <div class="mono text-[11px] text-[var(--ink-mute)]">Permissions</div>
+
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-[12px] text-[var(--ink)]">Microphone</div>
+              <div class="text-[11px] text-[var(--ink-mute)]" data-testid="mic-permission-state">
+                {{ micStatusLabel() }}
+              </div>
+            </div>
+            @if (micStatus() === 'undetermined') {
+              <button
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                data-testid="request-mic-permission"
+                (click)="requestMic()"
+              >
+                request access
+              </button>
+            } @else if (micStatus() === 'denied') {
+              <button
+                type="button"
+                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                data-testid="open-mic-privacy"
+                (click)="openMicPane()"
+              >
+                open System Settings
+              </button>
+            }
+          </div>
+
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-[12px] text-[var(--ink)]">System Audio Recording</div>
+              <div class="text-[11px] text-[var(--ink-mute)]">
+                Asked on the first recording; if recordings stay silent, re-enable Speedwave here.
+              </div>
+            </div>
+            <button
+              type="button"
+              class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+              data-testid="open-audio-privacy"
+              (click)="openAudioPane()"
+            >
+              open System Settings
+            </button>
           </div>
         </div>
       }
@@ -91,25 +146,104 @@ export class TranscriptionSectionComponent implements OnInit {
 
   /** The recommended model + its state; `null` while loading. */
   readonly model = signal<RecommendedModelAck | null>(null);
-  /** Disables the button while a download/remove is in flight. */
-  readonly busy = signal(false);
-  /** Live download progress label (e.g. `downloading 42%`). */
-  readonly progressLabel = signal('downloading…');
   /** Local error string. */
   readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
+  private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
+
+  /** Permissions rows are macOS-only (TCC); Windows has no per-app prompt. */
+  readonly isMacos = signal(false);
+  /** Mic-consent state (null while loading). */
+  readonly micStatus = signal<MicPermissionStatus | null>(null);
+
+  /** Human label for the mic-consent state. */
+  readonly micStatusLabel = computed(() => {
+    switch (this.micStatus()) {
+      case 'granted':
+        return 'Granted';
+      case 'denied':
+        return 'Denied — recordings fall back to system audio only';
+      case 'undetermined':
+        return 'Not asked yet — macOS will show a prompt';
+      default:
+        return 'Checking…';
+    }
+  });
+
+  /** `true` while a remove is in flight (download state lives in the service). */
+  private readonly removeBusy = signal(false);
+
+  /**
+   * Download-in-flight — from the service, so a remounted section still sees it.
+   */
+  readonly downloading = computed(() => this.transcription.downloadingModelKey() !== null);
+
+  /** Disables both buttons while a download or remove is in flight. */
+  readonly busy = computed(() => this.downloading() || this.removeBusy());
+
+  /** Live download progress label (e.g. `downloading 42%`). */
+  readonly progressLabel = computed(() => {
+    const p = this.transcription.downloadProgress();
+    if (!p?.total_bytes) return 'downloading…';
+    return `downloading ${Math.round((p.downloaded_bytes / p.total_bytes) * 100)}%`;
+  });
 
   /** Reads the recommended model + its download state on first paint. */
   async ngOnInit(): Promise<void> {
-    await this.refresh();
+    await Promise.all([this.refresh(), this.refreshPermissions()]);
   }
 
-  /** Re-reads the recommended-model state from the backend. */
+  /** Reads the platform + mic-consent state; non-fatal on failure. */
+  private async refreshPermissions(): Promise<void> {
+    try {
+      const platform = await this.tauri.invoke<string>('get_platform');
+      this.isMacos.set(platform === 'macos');
+      if (platform === 'macos') {
+        this.micStatus.set(await this.transcription.microphonePermissionStatus());
+      }
+    } catch {
+      // Permissions rows are informational — the section still works without them.
+      this.isMacos.set(false);
+    }
+    this.cdr.markForCheck();
+  }
+
+  /** Shows the mic-consent prompt, then re-reads the state. */
+  async requestMic(): Promise<void> {
+    try {
+      await this.transcription.requestMicrophonePermission();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
+    }
+    await this.refreshPermissions();
+  }
+
+  /** Opens System Settings → Privacy → Microphone. */
+  async openMicPane(): Promise<void> {
+    await this.transcription.openMicrophonePrivacyPane().catch(() => undefined);
+  }
+
+  /** Opens System Settings → Privacy → Audio Recording. */
+  async openAudioPane(): Promise<void> {
+    await this.transcription.openAudioCapturePrivacyPane().catch(() => undefined);
+  }
+
+  /** Re-reads the recommended-model state and re-syncs download tracking. */
   private async refresh(): Promise<void> {
     try {
-      this.model.set(await this.transcription.recommendedModel());
+      const ack = await this.transcription.recommendedModel();
+      this.model.set(ack);
+      if (ack.downloading && this.transcription.downloadingModelKey() !== ack.key) {
+        // Backend download survived a webview reload — reattach progress.
+        await this.transcription.resumeDownloadTracking(ack.key);
+      } else if (!ack.downloading && this.transcription.downloadingModelKey() === ack.key) {
+        // Stale tracking for a download the backend already finished.
+        this.transcription.clearDownloadTracking();
+      }
       this.error.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -124,25 +258,14 @@ export class TranscriptionSectionComponent implements OnInit {
    * @param key - the model catalogue key.
    */
   async download(key: string): Promise<void> {
-    this.busy.set(true);
-    this.progressLabel.set('downloading…');
-    this.cdr.markForCheck();
     try {
-      const { done } = await this.transcription.downloadModel(key, (p) => {
-        if (p.total_bytes) {
-          const pct = Math.round((p.downloaded_bytes / p.total_bytes) * 100);
-          this.progressLabel.set(`downloading ${pct}%`);
-          this.cdr.markForCheck();
-        }
-      });
-      await done;
+      await this.transcription.downloadModel(key);
       await this.refresh();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
-    this.busy.set(false);
     this.cdr.markForCheck();
   }
 
@@ -151,7 +274,7 @@ export class TranscriptionSectionComponent implements OnInit {
    * @param key - the model catalogue key.
    */
   async remove(key: string): Promise<void> {
-    this.busy.set(true);
+    this.removeBusy.set(true);
     try {
       await this.transcription.deleteModel(key);
       await this.refresh();
@@ -160,7 +283,7 @@ export class TranscriptionSectionComponent implements OnInit {
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
-    this.busy.set(false);
+    this.removeBusy.set(false);
     this.cdr.markForCheck();
   }
 

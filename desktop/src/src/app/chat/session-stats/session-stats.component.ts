@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import type { SessionStats } from '../../models/chat';
+import { contextTokensFrom, type SessionStats } from '../../models/chat';
 import { formatContextLabel } from '../../models/llm';
 import { IconComponent } from '../../shared/icon.component';
 import { TooltipDirective } from '../../shared/tooltip.directive';
@@ -133,16 +133,18 @@ export class SessionStatsComponent {
   /** New input tokens this turn — `input_tokens` only, excludes cached reads. */
   readonly inboundTokens = computed<number>(() => this.stats()?.usage?.input_tokens ?? 0);
 
-  /** Total tokens occupying the context window: `input` + `cache_read` + `cache_write`. */
+  /**
+   * Tokens occupying the context window, from the last main-chain API call only — the per-turn `usage`
+   * sums cache reads across calls and must never feed this meter (exceeds the window on tool-use turns).
+   */
   readonly ctxTotal = computed<number>(() => {
-    const usage = this.stats()?.usage;
-    if (!usage) return 0;
-    return usage.input_tokens + (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0);
+    const usage = this.stats()?.context_usage;
+    return usage ? contextTokensFrom(usage) : 0;
   });
 
   /**
-   * Context usage as integer percent (0–100); `null` when window unknown (local
-   * model, ADR-041 — segment hidden, not fabricated), 0 when known but unused.
+   * Context usage as integer percent (0–100); `null` when window unknown (local model, ADR-041 —
+   * segment hidden, not fabricated), 0 when known but unused.
    */
   readonly ctxPct = computed<number | null>(() => {
     const windowSize = this.stats()?.context_window_size;

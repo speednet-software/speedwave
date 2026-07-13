@@ -1,7 +1,10 @@
 //! Drift guard: every `ANTHROPIC_MODELS` entry (and each 1M family's `[1m]`
 //! variant) must carry usable pricing the serialized catalog exposes.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test code: expect on fixtures is the sanctioned boundary"
+)]
 
 use speedwave_runtime::defaults::{ModelPricing, ANTHROPIC_MODELS};
 

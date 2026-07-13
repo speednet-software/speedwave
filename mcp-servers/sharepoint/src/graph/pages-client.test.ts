@@ -1,11 +1,5 @@
-/**
- * Tests for {@link ./pages-client.ts} — Graph URL builders + request helpers
- * for the SharePoint Pages API.
- *
- * Black-box: we feed a fake {@link GraphRequester} (records every call) and
- * assert that `PagesClient` produces the Graph paths Microsoft documents for
- * `microsoft.graph.sitePage` and the canvasLayout web-part endpoints.
- */
+/** Tests for {@link ./pages-client.ts} — Graph URL builders + request helpers for the SharePoint Pages API.
+ * Black-box: feeds a fake {@link GraphRequester} and asserts the Graph paths Microsoft documents for `microsoft.graph.sitePage` and the canvasLayout web-part endpoints. */
 import { describe, it, expect, vi } from 'vitest';
 import {
   PagesClient,

@@ -8,13 +8,12 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { withValidation, ToolResult, validateAll, asRecord, MAX_LENGTHS } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
-//=============================================================================
-// Types
-//=============================================================================
+// ── Types ──────────────────────────────────────────────────────────────
 
 /** Input parameters for the listNoteFolders tool (no params required). */
 type ListNoteFoldersParams = Record<string, never>;
@@ -69,15 +68,18 @@ interface DeleteNoteParams {
   id: string;
 }
 
-//=============================================================================
-// Tool Definitions
-//=============================================================================
+// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listNoteFoldersTool: Tool = {
   name: 'listNoteFolders',
-  description: 'List all note folders/notebooks available on this device',
+  description:
+    "List all note folders/notebooks available on this device. Use each folder's name field (not id) as the folder_id parameter on listNotes/searchNotes/createNote — folder lookups match by name, not by this opaque id.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'notes', 'folders', 'notebooks', 'list', 'categories'],
   example: 'const { folders } = await os.listNoteFolders()',
   inputSchema: {
@@ -92,8 +94,14 @@ const listNoteFoldersTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            id: { type: 'string' },
-            name: { type: 'string' },
+            id: {
+              type: 'string',
+              description: 'Opaque CoreData id; not usable as folder_id elsewhere',
+            },
+            name: {
+              type: 'string',
+              description: 'Folder name; pass this as folder_id to other notes tools',
+            },
             account_name: { type: 'string' },
             note_count: { type: 'number' },
           },
@@ -111,16 +119,23 @@ const listNoteFoldersTool: Tool = {
 
 const listNotesTool: Tool = {
   name: 'listNotes',
-  description: 'List notes, optionally filtered by folder',
+  description: 'List notes, optionally filtered by folder. If limit is omitted, defaults to 20.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'notes', 'list', 'documents', 'memos'],
   example: 'const { notes } = await os.listNotes({ limit: 20 })',
   inputSchema: {
     type: 'object',
     properties: {
-      folder_id: { type: 'string', description: 'Filter by folder ID' },
-      limit: { type: 'number', description: 'Max notes to return (default 50)' },
+      folder_id: {
+        type: 'string',
+        description: "Filter by folder name (use the name field from listNoteFolders' output)",
+      },
+      limit: { type: 'number', description: 'Max notes to return (default 20)' },
     },
   },
   outputSchema: {
@@ -148,7 +163,7 @@ const listNotesTool: Tool = {
     },
     {
       description: 'Full: list from specific folder',
-      input: { folder_id: 'folder-123', limit: 10 },
+      input: { folder_id: 'Work', limit: 10 },
     },
   ],
 };
@@ -157,7 +172,11 @@ const getNoteTool: Tool = {
   name: 'getNote',
   description: 'Get a specific note by ID with full body content',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'note', 'get', 'read', 'detail', 'content', 'body'],
   example: 'const note = await os.getNote({ id: "note-789" })',
   inputSchema: {
@@ -192,14 +211,22 @@ const searchNotesTool: Tool = {
   name: 'searchNotes',
   description: 'Search notes by query string',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'notes', 'search', 'find', 'query'],
   example: 'const { notes } = await os.searchNotes({ query: "meeting notes" })',
   inputSchema: {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Search query (searches title and body)' },
-      folder_id: { type: 'string', description: 'Limit search to specific folder' },
+      folder_id: {
+        type: 'string',
+        description:
+          "Limit search to specific folder (use the name field from listNoteFolders' output)",
+      },
       limit: { type: 'number', description: 'Max results (default 20)' },
     },
     required: ['query'],
@@ -230,7 +257,7 @@ const searchNotesTool: Tool = {
     },
     {
       description: 'Full: search in specific folder',
-      input: { query: 'architecture decision', folder_id: 'work-folder', limit: 5 },
+      input: { query: 'architecture decision', folder_id: 'Work', limit: 5 },
     },
   ],
 };
@@ -239,7 +266,11 @@ const createNoteTool: Tool = {
   name: 'createNote',
   description: 'Create a new note',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'note', 'create', 'new', 'add', 'write'],
   example:
     'const { id } = await os.createNote({ title: "Sprint Retro Notes", body: "## What went well\\n- Deployment was smooth" })',
@@ -248,7 +279,11 @@ const createNoteTool: Tool = {
     properties: {
       title: { type: 'string', description: 'Note title' },
       body: { type: 'string', description: 'Note body content (plain text or HTML)' },
-      folder_id: { type: 'string', description: 'Target folder ID (uses default if omitted)' },
+      folder_id: {
+        type: 'string',
+        description:
+          "Target folder name (use the name field from listNoteFolders' output; uses default folder if omitted)",
+      },
     },
     required: ['title'],
   },
@@ -269,7 +304,7 @@ const createNoteTool: Tool = {
       input: {
         title: 'Sprint Retro Notes',
         body: '## What went well\n- Deployment was smooth\n- Tests all passed',
-        folder_id: 'work-folder',
+        folder_id: 'Work',
       },
     },
   ],
@@ -279,7 +314,11 @@ const updateNoteTool: Tool = {
   name: 'updateNote',
   description: 'Update an existing note',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'note', 'update', 'edit', 'modify'],
   example: 'await os.updateNote({ id: "note-789", body: "Updated content here" })',
   inputSchema: {
@@ -313,7 +352,11 @@ const deleteNoteTool: Tool = {
   name: 'deleteNote',
   description: 'Delete a note',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: false, timeoutMs: 30_000, osCategory: 'notes' },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.TIMEOUT_MS]: 30_000,
+    [META_KEYS.OS_CATEGORY]: 'notes',
+  },
   keywords: ['os', 'note', 'delete', 'remove'],
   example: 'await os.deleteNote({ id: "note-789" })',
   inputSchema: {
@@ -337,9 +380,7 @@ const deleteNoteTool: Tool = {
   ],
 };
 
-//=============================================================================
-// Handlers
-//=============================================================================
+// ── Handlers ──────────────────────────────────────────────────────────
 
 /**
  * Lists all note folders/notebooks available on this device.
@@ -452,9 +493,7 @@ export async function handleDeleteNote(params: DeleteNoteParams): Promise<ToolRe
   return { success: true, data: result.parsed };
 }
 
-//=============================================================================
-// Export
-//=============================================================================
+// ── Export ────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all notes operations. */
 export function createNoteTools(): ToolDefinition[] {

@@ -24,10 +24,17 @@ def _write_pdf(writer, dest: str) -> None:
     atomic_save(dest, lambda p: writer.write(p))
 
 
-def _open_reader(path: str):
+def _open_reader(path: str, position: tuple[int, int] | None = None):
     from pypdf import PdfReader
 
-    return PdfReader(path)
+    try:
+        return PdfReader(path)
+    except Exception as exc:  # noqa: BLE001 — turn any pypdf parse failure into one actionable line
+        where = f" (item {position[0]} of {position[1]} in the input list)" if position else ""
+        fail(
+            f"could not read '{path}'{where} as a PDF ({type(exc).__name__}: {exc}) -- verify the "
+            "file is a valid, non-corrupted PDF and not renamed from another format"
+        )
 
 
 def _metadata(path: str) -> None:
@@ -51,8 +58,9 @@ def _merge(output: str, inputs: list[str]) -> None:
     if len(inputs) < 2:
         fail("merge needs at least two input PDFs")
     writer = PdfWriter()
-    for path in inputs:
-        for page in _open_reader(path).pages:
+    total = len(inputs)
+    for i, path in enumerate(inputs, start=1):
+        for page in _open_reader(path, (i, total)).pages:
             writer.add_page(page)
     _write_pdf(writer, output)
     ok(path=output, pages=len(writer.pages))
@@ -113,24 +121,84 @@ def _watermark(src: str, watermark: str, output: str) -> None:
     ok(path=output, pages=len(writer.pages))
 
 
-def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
-    from pypdf import PdfReader, PdfWriter
+def _qualified_field_name(node) -> str:
+    """Full dotted field name for `node`, walking `/Parent` the way pypdf's own
+    `_get_qualified_field_name` does (and `get_fields()` keys its result by)."""
+    visited: set[int] = set()
+    parts: list[str] = []
+    while node is not None and id(node) not in visited:
+        visited.add(id(node))
+        if "/TM" in node:
+            parts.append(str(node["/TM"]))
+            break
+        parts.append(str(node.get("/T", "")))
+        parent = node.get("/Parent")
+        node = parent.get_object() if parent is not None else None
+    return ".".join(reversed(parts))
 
-    reader = PdfReader(src)
+
+def _annotation_field_names(annot) -> set[str]:
+    """Every name pypdf's `update_page_form_field_values` would match `annot` against:
+    its fully-qualified dotted name and the bare `/T` of the widget or its immediate parent."""
+    if "/FT" in annot and "/T" in annot:
+        parent_annotation = annot
+    else:
+        parent = annot.get("/Parent")
+        parent_annotation = parent.get_object() if parent is not None else {}
+    names: set[str] = set()
+    qualified = _qualified_field_name(parent_annotation)
+    if qualified:
+        names.add(qualified)
+    bare = parent_annotation.get("/T") if hasattr(parent_annotation, "get") else None
+    if bare is not None:
+        names.add(str(bare))
+    return names
+
+
+def _page_field_names(page) -> set[str]:
+    """Names of AcroForm widget annotations on `page`, in the same name-space pypdf's
+    `get_fields()` and `update_page_form_field_values` use (qualified and bare `/T`)."""
+    names: set[str] = set()
+    for annot_ref in page.get("/Annots") or []:
+        annot = annot_ref.get_object()
+        names |= _annotation_field_names(annot)
+    return names
+
+
+def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
+    from pypdf import PdfWriter
+
+    reader = _open_reader(src)
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
+    # Same widget-walking name-space update_page_form_field_values matches against, not
+    # reader.get_fields() alone: a hierarchical field's bare name would else be falsely "unknown".
+    known_fields: set[str] = set()
+    for page in writer.pages:
+        known_fields |= _page_field_names(page)
+    fill_warnings: list[str] = []
+    if known_fields:
+        fill_warnings = [
+            f"unknown field name: {name!r} — not present in this PDF's AcroForm"
+            for name in str_fields
+            if name not in known_fields
+        ]
     # pypdf raises when a page has no form fields (the common case for most of a PDF's pages),
-    # so we silently skip those and only flag if NO page accepted the fields — that means the
-    # caller asked to fill a form that doesn't exist in this PDF.
+    # so we silently skip those; a page whose own annotations DO include one of the fields we're
+    # writing narrows the except to that case only, so a genuine write failure there still surfaces.
     pages_filled = 0
     for page in writer.pages:
+        page_field_names = _page_field_names(page) & set(str_fields)
         try:
             writer.update_page_form_field_values(page, str_fields, auto_regenerate=False)
             pages_filled += 1
-        except Exception:  # noqa: BLE001
-            pass
-    fill_warnings: list[str] = []
+        except Exception as exc:  # noqa: BLE001
+            if page_field_names:
+                fail(
+                    f"failed to write field(s) {sorted(page_field_names)!r} on a page that has "
+                    f"them ({type(exc).__name__}: {exc})"
+                )
     if pages_filled == 0:
         fill_warnings.append("no AcroForm fields found in the input PDF — values not written")
     flattened = False

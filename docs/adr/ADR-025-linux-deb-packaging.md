@@ -31,21 +31,21 @@ This decision left no live code — ADR-059 removed Linux as a host platform. Th
 - **Flatpak.** Its Bubblewrap sandbox restricts Linux namespaces, cgroups, and `/run/user/<uid>/` — all required by rootless containerd.[^9]
 - **Snap.** Similar confinement restrictions to Flatpak, plus a hard `snapd` dependency not present on every distribution.[^10]
 
-[^1]: [AppImage Type 2 runtime — SquashFS mount behavior](https://docs.appimage.org/reference/architecture.html)
+[^1]: [AppImage Type 2 runtime - SquashFS mount behavior](https://docs.appimage.org/reference/architecture.html)
 
 [^2]: [Ubuntu 23.10+ restricts unprivileged user namespaces](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces)
 
-[^3]: [linuxdeploy — ELF binary patching](https://github.com/linuxdeploy/linuxdeploy)
+[^3]: [linuxdeploy - ELF binary patching](https://github.com/linuxdeploy/linuxdeploy)
 
-[^4]: [Docker Desktop for Linux — .deb packages](https://docs.docker.com/desktop/install/linux/)
+[^4]: [Docker Desktop for Linux - .deb packages](https://docs.docker.com/desktop/install/linux/)
 
-[^5]: [Rancher Desktop releases — .deb packages](https://github.com/rancher-sandbox/rancher-desktop/releases)
+[^5]: [Rancher Desktop releases - .deb packages](https://github.com/rancher-sandbox/rancher-desktop/releases)
 
-[^6]: [Firezone Linux GUI Client — .deb via APT](https://www.firezone.dev/kb/client-apps/linux-gui-client)
+[^6]: [Firezone Linux GUI Client - .deb via APT](https://www.firezone.dev/kb/client-apps/linux-gui-client)
 
-[^7]: [Tauri Updater — Linux support limited to AppImage](https://tauri.app/plugin/updater/)
+[^7]: [Tauri Updater - Linux support limited to AppImage](https://tauri.app/plugin/updater/)
 
-[^8]: [DistroWatch — distribution popularity](https://distrowatch.com/dwres.php?resource=popularity)
+[^8]: [DistroWatch - distribution popularity](https://distrowatch.com/dwres.php?resource=popularity)
 
 [^9]: [Flatpak sandbox limitations for container tools](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
 

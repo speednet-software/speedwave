@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::consts;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+// ── Types ───────────────────────────────────────────────────────────────────────────────
 
 /// Summary of a single conversation (session file).
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -73,9 +71,7 @@ pub struct ConversationTranscript {
     pub messages: Vec<ConversationMessage>,
 }
 
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
+// ── Path helpers ────────────────────────────────────────────────────────────────────────
 
 fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
@@ -130,9 +126,7 @@ fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
     default
 }
 
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
+// ── Validation ──────────────────────────────────────────────────────────────────────────
 
 /// Validate that `id` looks like a lowercase UUID v4 hex string.
 /// Accepts: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12, hex digits).
@@ -160,9 +154,7 @@ fn validate_session_id_impl(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// JSONL parsing helpers
-// ---------------------------------------------------------------------------
+// ── JSONL parsing helpers ───────────────────────────────────────────────────────────────
 
 /// Extract displayable text from a JSONL message line.
 /// Returns `None` if the line should be skipped.
@@ -386,10 +378,15 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
     };
 
     let model = message["model"].as_str().map(String::from);
-    // JSONL field names differ from TurnUsage; the chat SSOT remaps on parse.
-    let usage = message
-        .get("usage")
-        .and_then(crate::chat::turn_usage_from_jsonl);
+    // JSONL field names differ from TurnUsage; chat SSOT remaps on parse. Sidechain (subagent)
+    // calls have their own context — never attach their usage or resume seed reads a foreign size.
+    let usage = if crate::chat::is_sidechain_event(parsed) {
+        None
+    } else {
+        message
+            .get("usage")
+            .and_then(crate::chat::turn_usage_from_jsonl)
+    };
 
     Some(ConversationMessage {
         role: "assistant".to_string(),
@@ -441,9 +438,7 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     })
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────────────────────
 
 /// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
 /// Safe for multi-byte UTF-8 content (operates on char boundaries, not bytes).
@@ -680,9 +675,7 @@ fn delete_conversation_impl(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Resume snapshot
-// ---------------------------------------------------------------------------
+// ── Resume snapshot ─────────────────────────────────────────────────────────────────────
 
 /// Cumulative session state recovered from a transcript. Seeds the
 /// `StreamParser` on resume so the first new turn reports a real delta.
@@ -702,6 +695,9 @@ pub struct ResumeSnapshot {
     /// Most recently observed model. Pulled from the latest `result`'s
     /// `modelUsage` keys; falls back to the last `system init` model.
     pub model: Option<String>,
+    /// Usage of the last main-chain assistant line (`message.usage`) —
+    /// context-window occupancy at the point the session was left off.
+    pub context_usage: Option<crate::chat::TurnUsage>,
 }
 
 /// Compute the cumulative session snapshot from a JSONL transcript: prefers the
@@ -731,6 +727,7 @@ fn compute_resume_snapshot_impl(
     let mut latest_cost: Option<f64> = None;
     let mut latest_modelusage_model: Option<String> = None;
     let mut latest_init_model: Option<String> = None;
+    let mut last_context_usage: Option<crate::chat::TurnUsage> = None;
 
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
@@ -813,6 +810,18 @@ fn compute_resume_snapshot_impl(
                     }
                 }
             }
+            "assistant" => {
+                // Last main-chain call's usage = context occupancy; sidechain
+                // (subagent) lines have their own context and are skipped.
+                if !crate::chat::is_sidechain_event(&parsed) {
+                    if let Some(u) = crate::chat::turn_usage_from_jsonl(&parsed["message"]["usage"])
+                    {
+                        if u != crate::chat::TurnUsage::default() {
+                            last_context_usage = Some(u);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -820,15 +829,14 @@ fn compute_resume_snapshot_impl(
     let mut snap = latest_cumulative.unwrap_or(summed);
     snap.total_cost = latest_cost;
     snap.model = latest_modelusage_model.or(latest_init_model);
+    snap.context_usage = last_context_usage;
     Ok(snap)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
 
@@ -1153,6 +1161,27 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 56);
         // cache_creation_input_tokens → cache_write_tokens
         assert_eq!(usage.cache_write_tokens, 78);
+    }
+
+    #[test]
+    fn parse_assistant_message_sidechain_line_drops_usage() {
+        // Subagent lines must not carry usage — the frontend resume seed
+        // reads the last usage-bearing message as the context occupancy.
+        let line = r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.usage.is_none());
+        // Non-usage metadata is unaffected.
+        assert_eq!(msg.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn parse_assistant_message_parent_tool_use_id_line_also_drops_usage() {
+        // The on-disk transcript path shares `is_sidechain_event` with the live
+        // stream-json path — `parent_tool_use_id` alone (no `isSidechain`) must
+        // also drop usage, not just the transcript-native `isSidechain` marker.
+        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
+        let msg = parse_jsonl_message(line).unwrap();
+        assert!(msg.usage.is_none());
     }
 
     #[test]
@@ -2133,6 +2162,75 @@ mod tests {
         assert_eq!(snap.total_cost, Some(0.05));
         // No `modelUsage` ever, so the system init model is the fallback.
         assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_takes_context_usage_from_last_mainchain_assistant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Real transcripts carry NO result/system lines — only per-call
+        // assistant usage. Sidechain and all-zero lines never win.
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","usage":{"input_tokens":5,"output_tokens":9,"cache_read_input_tokens":30000,"cache_creation_input_tokens":100}}}"#,
+                r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","usage":{"input_tokens":2,"output_tokens":1660,"cache_read_input_tokens":66844,"cache_creation_input_tokens":4920}}}"#,
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#,
+                r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        let cu = snap.context_usage.expect("context_usage must be present");
+        assert_eq!(cu.input_tokens, 2);
+        assert_eq!(cu.output_tokens, 1660);
+        assert_eq!(cu.cache_read_tokens, 66844);
+        assert_eq!(cu.cache_write_tokens, 4920);
+    }
+
+    #[test]
+    fn compute_resume_snapshot_skips_sidechain_marked_via_parent_tool_use_id_only() {
+        // Same exclusion as `isSidechain`, but via the live-stream marker with
+        // no `isSidechain` field at all — proves the shared `is_sidechain_event`
+        // helper (not a transcript-local `isSidechain` check) drives this path.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":2,"output_tokens":1660,"cache_read_input_tokens":66844,"cache_creation_input_tokens":4920}}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        let cu = snap.context_usage.expect("context_usage must be present");
+        assert_eq!(cu.cache_read_tokens, 66844);
+    }
+
+    #[test]
+    fn compute_resume_snapshot_context_usage_none_without_assistant_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"no usage here"}]}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert!(snap.context_usage.is_none());
     }
 
     #[test]

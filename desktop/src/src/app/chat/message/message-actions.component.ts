@@ -12,8 +12,7 @@ const COPY_FEEDBACK_MS = 1_500;
 
 /**
  * Per-assistant action row — `[copy] [retry] ✓ copied` (mockup lines 920–924).
- * Per-turn metadata (model · edited · tokens · cache · cost) lives in the
- * sibling `<app-message-metadata>` component.
+ * Per-turn metadata (model · edited · tokens · cache · cost) lives in the sibling `<app-message-metadata>`.
  */
 @Component({
   selector: 'app-message-actions',

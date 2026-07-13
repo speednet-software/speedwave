@@ -153,7 +153,10 @@ pub fn validate_collector_url(url: &str, policy: PrivatePolicy) -> Result<url::U
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: unwrap on fixtures is the sanctioned boundary"
+)]
 mod tests {
     use super::*;
 

@@ -1,6 +1,5 @@
-//! Process manager for the singleton mcp-os Node MCP worker.
-//! `McpOsProcess` is a type alias over [`crate::host_mcp_process::HostMcpProcess`]
-//! with `McpOsSpec` as the per-worker `WorkerSpec`.
+//! Process manager for the singleton mcp-os Node MCP worker. `McpOsProcess` is a type alias over
+//! [`crate::host_mcp_process::HostMcpProcess`] with `McpOsSpec` as the per-worker `WorkerSpec`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,9 +36,8 @@ impl WorkerSpec for McpOsSpec {
     fn probe(&self) -> LivenessProbe {
         LivenessProbe::Custom(is_mcp_os_alive_static)
     }
-    /// Standalone token mount file written by [`McpOsSpec::pre_spawn`]
-    /// — must be removed on Drop alongside `lock.json` so the hub does
-    /// not see a stale token.
+    /// Standalone token mount file written by [`McpOsSpec::pre_spawn`] — must be removed on Drop
+    /// alongside `lock.json` so the hub does not see a stale token.
     fn extra_cleanup_files(&self, ctx: &SpawnContext) -> Vec<PathBuf> {
         vec![ctx.data_dir.join(consts::MCP_OS_AUTH_TOKEN_FILE)]
     }
@@ -92,16 +90,14 @@ impl McpOsProcess {
     }
 }
 
-/// Check whether the singleton mcp-os process is alive AND listening
-/// on its port. Reads `mcp-os.lock.json` from the process-global
-/// `data_dir()` then probes TCP. Re-exported via `desktop::health`.
+/// Check whether the singleton mcp-os process is alive AND listening on its port. Reads
+/// `mcp-os.lock.json` from `data_dir()` then probes TCP. Re-exported via `desktop::health`.
 pub fn is_mcp_os_alive() -> bool {
     is_mcp_os_alive_in(consts::data_dir())
 }
 
-/// Testable inner implementation; takes `data_dir` so tests can point
-/// at a temporary directory. Returns `false` if `lock.json` is missing
-/// or the recorded PID/port no longer answer.
+/// Testable inner implementation; takes `data_dir` so tests can point at a temporary directory.
+/// Returns `false` if `lock.json` is missing or the recorded PID/port no longer answer.
 pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
     let lock_path = data_dir.join(consts::MCP_OS_LOCK_FILE);
     let lock = match lock::read(&lock_path, LockService::McpOs) {
@@ -116,7 +112,11 @@ pub fn is_mcp_os_alive_in(data_dir: &Path) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
 mod tests {
     use super::*;
     use crate::host_mcp_process::drain::test_support::write_fake_worker;
@@ -132,6 +132,7 @@ mod tests {
 
     #[test]
     fn mcp_os_spec_apply_env_sets_port_zero_and_token() {
+        // SSOT-allow: test fixture spawn
         let mut cmd = Command::new("true");
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join("lock");
@@ -258,6 +259,7 @@ mod tests {
     fn respawn_does_not_delete_new_token_mount() {
         let tmp = tempfile::tempdir().unwrap();
         let script = write_fake_worker(tmp.path(), "fake.js");
+        // SSOT-allow: test fixture spawn
         let node_ok = Command::new("node")
             .arg("--version")
             .stdout(Stdio::null())
@@ -300,6 +302,7 @@ mod tests {
 
         let script = write_fake_worker(tmp.path(), "fake.js");
         // `which node` — skip when node unavailable in test env.
+        // SSOT-allow: test fixture spawn
         let node_ok = Command::new("node")
             .arg("--version")
             .stdout(Stdio::null())

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ToolBlockComponent } from './tool-block.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
@@ -536,6 +536,24 @@ describe('ToolBlockComponent', () => {
       const second = component.normalized();
 
       expect(first).not.toBe(second);
+    });
+
+    it('does not warn on partial input_json while the tool is running', () => {
+      const normalizer = TestBed.inject(ToolNormalizerService);
+      const spy = vi.spyOn(normalizer, 'normalize');
+
+      setTool(makeTool({ status: 'running', input_json: '{"command":"ls -' }));
+      expect(component.normalized()).toEqual({ kind: 'generic', raw_json: '{"command":"ls -' });
+      expect(spy).toHaveBeenCalledWith('Read', '{"command":"ls -', false);
+    });
+
+    it('flags the input as complete once the tool is done', () => {
+      const normalizer = TestBed.inject(ToolNormalizerService);
+      const spy = vi.spyOn(normalizer, 'normalize');
+
+      setTool(makeTool({ status: 'done', input_json: '{"file_path":"/a.ts"}' }));
+      component.normalized();
+      expect(spy).toHaveBeenCalledWith('Read', '{"file_path":"/a.ts"}', true);
     });
   });
 

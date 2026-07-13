@@ -1,28 +1,29 @@
-//! Cross-platform owner-only file/directory permission utilities (chmod 0o600/0o700 Unix / DACL Windows).
-//! SSOT for runtime supervisors + Desktop layer.
+//! Cross-platform owner-only file/directory permission utilities (chmod 0o600/0o700 Unix / DACL
+//! Windows). SSOT for runtime supervisors + Desktop layer.
 
 use std::io::Write;
 use std::path::Path;
 
 use tempfile::NamedTempFile;
 
-/// Restrict file permissions to owner-only access.
-/// - Unix: `chmod 0o600`
-/// - Windows: DACL with a single `GENERIC_ALL` ACE for the current user
+/// Prefix every `NamedTempFile::with_prefix_in` call in this module uses; a
+/// crash between creation and `persist` orphans a file with this prefix.
+const ATOMIC_WRITE_TEMP_PREFIX: &str = "write-";
+
+/// Restrict file permissions to owner-only access: Unix `chmod 0o600`; Windows DACL with a single
+/// `GENERIC_ALL` ACE for the current user.
 pub fn set_owner_only(path: &Path) -> Result<(), String> {
     set_owner_only_with_mode(path, 0o600)
 }
 
-/// Restrict directory permissions to owner-only access.
-/// - Unix: `chmod 0o700`
-/// - Windows: DACL with a single `GENERIC_ALL` ACE for the current user
+/// Restrict directory permissions to owner-only access: Unix `chmod 0o700`; Windows DACL with a
+/// single `GENERIC_ALL` ACE for the current user.
 pub fn set_owner_only_dir(path: &Path) -> Result<(), String> {
     set_owner_only_with_mode(path, 0o700)
 }
 
-/// SSOT for [`set_owner_only`] and [`set_owner_only_dir`]. Unix mode differs
-/// between files (`0o600`) and dirs (`0o700`); on Windows `SE_FILE_OBJECT`
-/// handles both, so the ACL helper is shared and `_mode` is ignored there.
+/// SSOT for [`set_owner_only`] and [`set_owner_only_dir`]. Unix mode differs between files
+/// (`0o600`) and dirs (`0o700`); Windows `SE_FILE_OBJECT` handles both, so `_mode` is unused.
 fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -40,10 +41,12 @@ fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
 }
 
 /// Restrict a file or directory to the current user only via a Windows DACL.
-/// **Returns `Err` on any Win32 failure** — caller must remove/quarantine the
-/// target.
+/// **Returns `Err` on any Win32 failure** — caller must remove/quarantine the target.
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "Windows DACL FFI boundary; every block carries a SAFETY comment"
+)]
 fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL};
@@ -59,22 +62,30 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
 
     unsafe {
         let mut token_handle = std::mem::zeroed();
+        // SAFETY: GetCurrentProcess returns a pseudo-handle needing no close;
+        // token_handle is a plain out-param, closed on every exit path below.
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
             return Err("OpenProcessToken failed".to_string());
         }
-        let mut buf = vec![0u8; 256];
+        // u64 backing keeps the TOKEN_USER cast below aligned; 256 B exceeds the
+        // maximum payload (SID_AND_ATTRIBUTES + SECURITY_MAX_SID_SIZE).
+        let mut buf = [0u64; 32];
         let mut returned = 0u32;
+        // SAFETY: token_handle is live; buf is writable for the byte length passed.
+        // A too-small buffer fails the call and we return Err.
         if GetTokenInformation(
             token_handle,
             TokenUser,
             buf.as_mut_ptr().cast(),
-            buf.len() as u32,
+            std::mem::size_of_val(&buf) as u32,
             &mut returned,
         ) == 0
         {
             CloseHandle(token_handle);
             return Err("GetTokenInformation failed".to_string());
         }
+        // SAFETY: the call above succeeded, so buf holds an initialized TOKEN_USER;
+        // the u64 backing satisfies its pointer alignment.
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
         let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: GENERIC_ALL,
@@ -89,6 +100,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
             },
         };
         let mut new_acl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: ea's SID pointer targets buf, which outlives this call; on success
+        // new_acl is a LocalAlloc'd ACL, freed exactly once below.
         if SetEntriesInAclW(1, &ea, std::ptr::null_mut(), &mut new_acl) != 0 {
             CloseHandle(token_handle);
             return Err("SetEntriesInAclW failed".to_string());
@@ -98,6 +111,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
+        // SAFETY: wide_path is NUL-terminated UTF-16 and new_acl is valid from
+        // SetEntriesInAclW; both stay alive across the call.
         let rc = SetNamedSecurityInfoW(
             wide_path.as_ptr(),
             SE_FILE_OBJECT,
@@ -107,6 +122,7 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
             new_acl,
             std::ptr::null_mut(),
         );
+        // SAFETY: new_acl and token_handle are owned here and released exactly once.
         LocalFree(new_acl.cast());
         CloseHandle(token_handle);
         if rc != 0 {
@@ -116,9 +132,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Flushes file data to stable media. macOS: `F_FULLFSYNC` with fallback to
-/// `fsync` then best-effort no-op on unsupported fs (SMB/NFS). Other Unix:
-/// `fsync`. Windows: no-op.
+/// Flushes file data to stable media. macOS: `F_FULLFSYNC` with fallback to `fsync` then
+/// best-effort no-op on unsupported fs (SMB/NFS). Other Unix: `fsync`. Windows: no-op.
 #[cfg(unix)]
 pub(crate) fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
@@ -156,9 +171,8 @@ pub(crate) fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Best-effort fsync of a directory so a contained rename is itself durable.
-/// Unix-only: opening a directory as a file and `fsync`-ing it commits the
-/// directory entry. Windows has no directory-fsync concept — no-op there.
+/// Best-effort fsync of a directory so a contained rename is itself durable. Unix-only: opening a
+/// directory as a file and fsync-ing it commits the entry; Windows has no directory-fsync concept.
 #[cfg(unix)]
 fn fsync_parent_dir(dir: &Path) {
     if let Ok(handle) = std::fs::File::open(dir) {
@@ -170,9 +184,8 @@ fn fsync_parent_dir(dir: &Path) {
 #[cfg(not(unix))]
 fn fsync_parent_dir(_dir: &Path) {}
 
-/// Write `content` to `path` with owner-only permissions via write-then-atomic-rename;
-/// the destination path never appears world-readable. Windows DACL failure returns
-/// `Err` (ADR-009). Existing directories at `path` are removed first.
+/// Writes `content` to `path` via write-then-atomic-rename, owner-only perms; destination never
+/// appears world-readable. Windows DACL failure returns `Err` (ADR-009); pre-existing dirs removed.
 pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
     // Direct callers: `path` is the final name, so commit its directory entry.
     write_restricted_file_synced(path, content, true)
@@ -200,7 +213,7 @@ fn write_restricted_file_synced(
             path.display()
         )
     })?;
-    let mut tmp = NamedTempFile::with_prefix_in("write-", parent)?;
+    let mut tmp = NamedTempFile::with_prefix_in(ATOMIC_WRITE_TEMP_PREFIX, parent)?;
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
 
@@ -251,9 +264,8 @@ fn write_restricted_file_synced(
     Ok(())
 }
 
-/// Atomic variant of [`write_restricted_file`]: writes to a sibling `.tmp` file
-/// with owner-only perms, then `rename`s into place. Crash between write and
-/// rename leaves the destination untouched.
+/// Atomic variant of [`write_restricted_file`]: writes to a sibling `.tmp` file with owner-only
+/// perms, then `rename`s into place. Crash between write and rename leaves destination untouched.
 pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -290,7 +302,7 @@ pub fn write_shared_file_atomic(path: &Path, content: &str) -> anyhow::Result<()
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
-    let mut tmp = NamedTempFile::with_prefix_in("write-", parent)?;
+    let mut tmp = NamedTempFile::with_prefix_in(ATOMIC_WRITE_TEMP_PREFIX, parent)?;
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
     #[cfg(unix)]
@@ -307,9 +319,8 @@ pub fn write_shared_file_atomic(path: &Path, content: &str) -> anyhow::Result<()
     Ok(())
 }
 
-/// Creates `path` (if missing) and sets it to owner-only perms. Unix: `chmod
-/// 0o700`. Windows: DACL with a single `GENERIC_ALL` ACE for the current user.
-/// Idempotent.
+/// Creates `path` (if missing) and sets owner-only perms. Unix: `chmod 0o700`. Windows: DACL with a
+/// single `GENERIC_ALL` ACE for the current user. Idempotent.
 pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)?;
 
@@ -336,8 +347,46 @@ pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Removes orphaned atomic-write tempfiles (`write-*`) directly under `dir`
+/// older than `min_age`. Shallow, best-effort (a per-entry error is skipped,
+/// never propagated); returns the count removed.
+pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(ATOMIC_WRITE_TEMP_PREFIX) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age >= min_age && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures assert on setup that must not silently fail"
+)]
 mod tests {
     use super::*;
 
@@ -493,9 +542,8 @@ mod tests {
         );
     }
 
-    /// Atomicity smoke test: while the file is being written, the destination
-    /// path either does not exist or already contains the new content with the
-    /// restricted mode — never a partial write with default perms.
+    /// Atomicity smoke test: the destination either doesn't exist or already holds the new content
+    /// with the restricted mode — never a partial write with default perms.
     #[cfg(unix)]
     #[test]
     fn destination_never_observed_world_readable_under_overwrite() {
@@ -515,9 +563,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
-    /// `persist` requires the tempfile to live on the same filesystem as the
-    /// destination. The implementation uses `with_prefix_in(parent)` to ensure
-    /// this — guard against a regression that switches to system tempdir.
+    /// `persist` requires the tempfile on the same filesystem as the destination;
+    /// `with_prefix_in(parent)` ensures this — guard against a regression to system tempdir.
     #[test]
     fn tempfile_created_in_destination_parent() {
         let dir = tempfile::tempdir().unwrap();
@@ -636,9 +683,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
     }
 
-    /// Concurrent writes: two atomic writes racing produce one valid
-    /// destination (the second-to-complete wins via rename), never a
-    /// truncated file. The .tmp cleanup keeps the directory tidy.
+    /// Concurrent writes: two atomic writes racing produce one valid destination (rename picks a
+    /// winner), never a truncated file. The .tmp cleanup keeps the directory tidy.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn atomic_concurrent_writes_leave_destination_valid() {
         let dir = tempfile::tempdir().unwrap();
@@ -741,9 +787,8 @@ mod tests {
         fsync_file_durable(&file).expect("fsync of an open writable file must succeed");
     }
 
-    /// Network-mount regression guard: a target that supports neither
-    /// `F_FULLFSYNC` nor plain `fsync` (ENOTSUP) must degrade to best-effort
-    /// `Ok`, NOT fail the write — else workers can't start on SMB/NFS homes.
+    /// Network-mount regression guard: a target supporting neither `F_FULLFSYNC` nor plain `fsync`
+    /// (ENOTSUP) must degrade to best-effort `Ok` — else workers can't start on SMB/NFS homes.
     #[cfg(target_os = "macos")]
     #[test]
     fn fsync_file_durable_best_effort_on_unsupported_fd() {
@@ -789,8 +834,7 @@ mod tests {
     }
 
     /// Source-ordering guard: the data fsync MUST precede `persist` in
-    /// `write_restricted_file_synced`, otherwise the rename can publish a torn
-    /// file. A future edit reordering these would reintroduce the torn-write bug.
+    /// `write_restricted_file_synced`, else the rename can publish a torn file.
     #[test]
     fn fsync_precedes_persist_in_source() {
         let src = include_str!("fs_perms.rs");
@@ -943,5 +987,78 @@ mod tests {
             mode, 0o600,
             "expected 0o600 after tightening, got 0o{mode:o}"
         );
+    }
+
+    // ── sweep_stale_atomic_write_temp_files ──────────────────────────────
+
+    /// Backdates a file's mtime by `age` so an age-based sweep sees it as stale.
+    fn backdate(path: &Path, age: std::time::Duration) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        let stamp = std::time::SystemTime::now() - age;
+        file.set_modified(stamp).unwrap();
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_write_prefixed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("write-abc123");
+        let fresh = dir.path().join("write-def456");
+        let unrelated = dir.path().join("other-file.txt");
+        std::fs::write(&stale, "orphan").unwrap();
+        std::fs::write(&fresh, "just written").unwrap();
+        std::fs::write(&unrelated, "keep me").unwrap();
+        backdate(&stale, std::time::Duration::from_secs(3600));
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(dir.path(), std::time::Duration::from_secs(60));
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists(), "stale write-* orphan must be removed");
+        assert!(fresh.exists(), "a fresh write-* tempfile must survive");
+        assert!(
+            unrelated.exists(),
+            "non-prefixed files must never be touched"
+        );
+    }
+
+    #[test]
+    fn sweep_is_shallow_and_ignores_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("write-looks-like-a-dir");
+        std::fs::create_dir(&sub).unwrap();
+        let nested = sub.join("write-nested");
+        std::fs::write(&nested, "should not be reached").unwrap();
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(dir.path(), std::time::Duration::from_secs(0));
+
+        assert_eq!(removed, 0, "a directory named like a tempfile is skipped");
+        assert!(nested.exists(), "the sweep must not recurse");
+    }
+
+    #[test]
+    fn sweep_on_missing_directory_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(&missing, std::time::Duration::from_secs(0));
+
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn sweep_leaves_a_persisted_atomic_write_output_untouched() {
+        // The final file from write_shared_file_atomic has no "write-" prefix —
+        // confirms the sweep only ever targets orphaned tempfiles, never real data.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-teardowns");
+        write_shared_file_atomic(&path, "proj-a").unwrap();
+
+        let removed =
+            sweep_stale_atomic_write_temp_files(dir.path(), std::time::Duration::from_secs(0));
+
+        assert_eq!(removed, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "proj-a");
     }
 }

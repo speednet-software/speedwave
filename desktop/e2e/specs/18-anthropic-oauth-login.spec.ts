@@ -12,7 +12,7 @@
  * project-agnostic factory reset runs afterwards.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -88,7 +88,13 @@ describe('Anthropic OAuth Login (no-provider first start)', function () {
       expect(output).not.toContain('exit code 137');
       expect(exited && output.includes('exit code')).toBe(false);
     } finally {
-      child.kill('SIGKILL');
+      // TerminateProcess kills only the direct child on Windows; taskkill /T sweeps
+      // the whole tree so no descendant keeps bin\speedwave.exe locked for spec 07.
+      if (process.platform === 'win32' && child.pid !== undefined) {
+        spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+      } else {
+        child.kill('SIGKILL');
+      }
     }
   });
 });

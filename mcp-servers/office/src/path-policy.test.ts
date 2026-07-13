@@ -1,7 +1,6 @@
 /**
- * Tests for the path policy: workspace confinement, symlink rejection, atomic writes,
+ * Tests the path policy: workspace confinement, symlink rejection, atomic writes,
  * overwrite refusal, and the default output directory.
- * @module mcp-office/path-policy.test
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';

@@ -9,8 +9,8 @@ Give `mcp-playwright` a static `extra_hosts` entry mapping `host.docker.internal
 
 ## Why
 
-- Plugin authors and end users want Claude-driven Playwright to inspect a host-bound dev server (e.g. an Angular app on `host.docker.internal:4200`) or a host-side MCP endpoint. Without the alias, Chromium fails name resolution with `ERR_NAME_NOT_RESOLVED`.
-- The only prior workaround was hardcoding the per-platform gateway IP, which breaks portability: on macOS the gateway is the Lima vzNAT static `192.168.5.2`, but on Windows it is discovered at runtime from the WSL default route and is not a fixed value.
+- Plugin authors and end users want Claude-driven Playwright to inspect a host-bound dev server (e.g. an Angular app on `host.docker.internal:4200`) or a host-side MCP endpoint. Without the alias, Chromium fails name resolution with `ERR_NAME_NOT_RESOLVED`[^1].
+- The only prior workaround was hardcoding the per-platform gateway IP, which breaks portability: on macOS the gateway is the Lima vzNAT static `192.168.5.2`[^2], but on Windows it is discovered at runtime from the WSL default route and is not a fixed value[^3].
 - The canonical alias keeps plugin Containerfiles and project configs free of per-platform IP branches.
 - ADR-039 § Decision 2 claimed `--allowed-hosts mcp-hub`; the code shipped `--allowed-hosts "*"`. This ADR resolves that drift in favour of the code: built-in workers publish no ports (enforced in compose), and any container already on the compose network can forge a `Host` header, so a hostname pin authenticates nothing. Real isolation comes from `cap_drop: ALL`, `read_only`, and the network boundary.
 
@@ -36,3 +36,9 @@ Give `mcp-playwright` a static `extra_hosts` entry mapping `host.docker.internal
 - **A plugin manifest field for host access (e.g. an endpoint allowlist).** Rejected for this ADR: it needs a consent-flow UI and manifest schema work, and does not cover the Claude-driven case (Claude is not a plugin). Left as a possible follow-up, not blocking.
 - **Allowlist URL/port validation inside Playwright tool calls.** Rejected: would require wrapping the upstream [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) server, adding maintenance cost on every version bump, and gives no defence against the real threat (a compromised container can reach the gateway IP regardless of aliasing).
 - **Disable the Lima/WSL2 catch-all forwarder.** Rejected: it would break IDE Bridge, host_exec, mcp-os, and OAuth workers, which all depend on the same forwarder.
+
+[^1]: [Chromium `net_error_list.h`](https://source.chromium.org/chromium/chromium/src/+/main:net/base/net_error_list.h) - `ERR_NAME_NOT_RESOLVED` is the standard Chromium net error for DNS resolution failure.
+
+[^2]: [Lima docs: User-mode Network](https://lima-vm.io/docs/config/network/user/) - documents `192.168.5.2` as the host's address reachable from the guest in Lima's default (vzNAT) user-mode network.
+
+[^3]: [Microsoft Learn: Accessing network applications with WSL](https://learn.microsoft.com/en-us/windows/wsl/networking) - documents that under WSL2's default NAT mode the Windows host IP is not fixed and must be discovered at runtime via `ip route show | grep -i default`.

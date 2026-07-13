@@ -1,8 +1,5 @@
 /**
- * Standalone chart rendering — a JSON {@link ChartSpec} → a PNG/SVG image under `/workspace`,
- * produced by `scripts/render_chart.py` (matplotlib, Agg backend). The image can then be
- * embedded into a PDF (`htmlToPdf` via `<img>` — PNG or SVG), a `.docx` (`createDocx` image
- * element — PNG only; python-docx cannot embed SVG), or a `.pptx` (`createPptx` slide image — PNG).
+ * Standalone chart rendering — a JSON {@link ChartSpec} → a PNG/SVG image under `/workspace`, produced by `scripts/render_chart.py` (matplotlib, Agg backend). Embeddable into a PDF (`htmlToPdf` `<img>`, PNG or SVG), a `.docx` (`createDocx` image, PNG only — python-docx cannot embed SVG), or a `.pptx` (`createPptx` slide image, PNG).
  * @module mcp-office/engine/chart
  */
 
@@ -17,7 +14,7 @@ const CHART_TYPES = new Set(['bar', 'line', 'pie', 'scatter', 'area']);
 
 /**
  * Validate a {@link ChartSpec}: known `type`, non-empty `series`, and each `values` length equal to `labels` length.
- * @param spec - The candidate spec (unknown shape).
+ * @param spec - the candidate spec (unknown shape)
  * @returns The validated {@link ChartSpec}.
  * @throws {ValidationError} If the spec is malformed.
  */
@@ -69,10 +66,10 @@ export function validateChartSpec(spec: unknown): ChartSpec {
 }
 
 /**
- * Render a chart to an image file under `/workspace`.
- * @param spec - The chart spec (validated here).
- * @param outName - Output filename/path (optional; extension defaults to the spec's `format`).
- * @param overwrite - Permit overwriting an existing output (default false).
+ * Render a chart to an image file under `/workspace` (`spec` validated here; extension defaults to its `format`).
+ * @param spec - the chart spec (validated here)
+ * @param outName - output filename/path (optional; extension defaults to the spec's `format`)
+ * @param overwrite - permit overwriting an existing output (default false)
  * @returns The {@link FileResult} for the produced image (`format` is `"png"` or `"svg"`).
  */
 export async function renderChart(

@@ -47,4 +47,4 @@ With the `typeKernelProcessID` scheme `procNotFound` should not occur in practic
 
 [^2]: AESend / Apple Events fail with `procNotFound (-600)` under process-serial-number / bundle-id addressing while a `typeKernelProcessID` (pid) return address works reliably: https://discussions.apple.com/thread/5513047
 
-[^3]: `AEDeterminePermissionToAutomateTarget` return values — `noErr` (authorized), `errAEEventNotPermitted` (-1743, declined), `errAEEventWouldRequireUserConsent` (-1744, consent required) — and the `askUserIfNeeded` parameter: https://developer.apple.com/documentation/coreservices/3025784-aedeterminepermissiontoautomatet
+[^3]: `AEDeterminePermissionToAutomateTarget` return values - `noErr` (authorized), `errAEEventNotPermitted` (-1743, declined), `errAEEventWouldRequireUserConsent` (-1744, consent required) - and the `askUserIfNeeded` parameter: https://developer.apple.com/documentation/coreservices/3025784-aedeterminepermissiontoautomatet

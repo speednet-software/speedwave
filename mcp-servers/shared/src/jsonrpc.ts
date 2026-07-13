@@ -22,45 +22,40 @@ const TOOLS_LIST_PAGE_SIZE = 100;
 /** Builds standardized JSON-RPC error objects */
 export class JSONRPCErrorBuilder {
   /**
-   * Creates a parse error (code -32700) for malformed JSON
-   * @param message - Optional custom error message
-   * @returns JSON-RPC error object
+   * Creates a parse error (code -32700) for malformed JSON.
+   * @param message - Optional custom error message.
    */
   static parseError(message: string = 'Parse error'): JSONRPCError {
     return { code: JSONRPCErrorCode.ParseError, message };
   }
 
   /**
-   * Creates an invalid request error (code -32600) for malformed requests
-   * @param message - Optional custom error message
-   * @returns JSON-RPC error object
+   * Creates an invalid request error (code -32600) for malformed requests.
+   * @param message - Optional custom error message.
    */
   static invalidRequest(message: string = 'Invalid Request'): JSONRPCError {
     return { code: JSONRPCErrorCode.InvalidRequest, message };
   }
 
   /**
-   * Creates a method not found error (code -32601) when method doesn't exist
-   * @param method - Name of the method that was not found
-   * @returns JSON-RPC error object
+   * Creates a method not found error (code -32601) when method doesn't exist.
+   * @param method - Name of the method that was not found.
    */
   static methodNotFound(method: string): JSONRPCError {
     return { code: JSONRPCErrorCode.MethodNotFound, message: `Method not found: ${method}` };
   }
 
   /**
-   * Creates an invalid params error (code -32602) for incorrect parameters
-   * @param message - Optional custom error message
-   * @returns JSON-RPC error object
+   * Creates an invalid params error (code -32602) for incorrect parameters.
+   * @param message - Optional custom error message.
    */
   static invalidParams(message: string = 'Invalid params'): JSONRPCError {
     return { code: JSONRPCErrorCode.InvalidParams, message };
   }
 
   /**
-   * Creates an internal error (code -32603) with error details
-   * @param error - The original error object
-   * @returns JSON-RPC error object
+   * Creates an internal error (code -32603) with error details.
+   * @param error - The original error object.
    */
   static internalError(error: unknown): JSONRPCError {
     console.error(`[JSONRPCErrorBuilder] Internal error details:`, error);
@@ -68,9 +63,8 @@ export class JSONRPCErrorBuilder {
   }
 
   /**
-   * Creates a session error (code -32001) for invalid or expired sessions
-   * @param message - Optional custom error message
-   * @returns JSON-RPC error object
+   * Creates a session error (code -32001) for invalid or expired sessions.
+   * @param message - Optional custom error message.
    */
   static sessionError(message: string = 'Invalid or expired session'): JSONRPCError {
     return { code: JSONRPCErrorCode.SessionError, message };
@@ -87,10 +81,7 @@ export interface JSONRPCHandlerOptions {
   instructions?: string;
 }
 
-/**
- * JSON-RPC Handler
- * Processes MCP protocol messages
- */
+/** JSON-RPC handler that processes MCP protocol messages. */
 export class JSONRPCHandler {
   private tools: Map<string, Tool> = new Map();
   private toolHandlers: Map<string, ToolHandler> = new Map();
@@ -98,8 +89,8 @@ export class JSONRPCHandler {
   private instructions?: string;
 
   /**
-   * Creates a new JSON-RPC handler instance with server identification
-   * @param options - Configuration including server name and version
+   * Creates a new JSON-RPC handler instance with server identification.
+   * @param options - Configuration including server name and version.
    */
   constructor(options: JSONRPCHandlerOptions) {
     this.serverInfo = { name: options.name, version: options.version };
@@ -107,9 +98,9 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Register a tool with its handler
-   * @param tool Tool definition
-   * @param handler Tool handler function
+   * Register a tool with its handler.
+   * @param tool - Tool definition.
+   * @param handler - Tool handler function.
    */
   public registerTool(tool: Tool, handler: ToolHandler): void {
     if (!validateToolName(tool.name)) {
@@ -123,10 +114,10 @@ export class JSONRPCHandler {
 
   /**
    * Process a JSON-RPC request or notification.
-   * @param body Request body
-   * @param sessionId Session ID (or null for new session)
-   * @param context Optional per-call context (caller id resolved from bearer)
-   * @returns ProcessRequestResult with response (null for notifications) and optional sessionId
+   * @param body - Request body.
+   * @param sessionId - Session ID (or null for new session).
+   * @param context - Optional per-call context (caller id resolved from bearer).
+   * @returns response (null for notifications) and optional sessionId; `context` carries the caller id resolved from bearer.
    */
   public async processRequest(
     body: unknown,
@@ -184,8 +175,8 @@ export class JSONRPCHandler {
 
   /**
    * Handle JSON-RPC notifications (messages without id, no response).
-   * @param method - Notification method name
-   * @param params - Optional notification parameters
+   * @param method - Notification method name.
+   * @param params - Optional notification parameters.
    */
   private handleNotification(
     method: string,
@@ -213,9 +204,8 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Handle initialize request
-   * @param request - The initialization request from the client
-   * @returns ProcessRequestResult with server capabilities and sessionId
+   * Handle initialize request, returning server capabilities and sessionId.
+   * @param request - The initialization request from the client.
    */
   private async handleInitialize(request: JSONRPCRequest): Promise<ProcessRequestResult> {
     const params = request.params;
@@ -294,10 +284,9 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Handle tools/list request
-   * @param request - The tools list request from the client
-   * @param sessionId - Current session ID or null for new session
-   * @returns JSON-RPC response with list of available tools
+   * Handle tools/list request, returning a JSON-RPC response with the list of available tools.
+   * @param request - The tools list request from the client.
+   * @param sessionId - Current session ID or null for new session.
    */
   private async handleToolsList(
     request: JSONRPCRequest,
@@ -335,11 +324,10 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Handle tools/call request
-   * @param request - The tool execution request from the client
-   * @param sessionId - Current session ID or null for new session
-   * @param context - Optional per-call context (caller id resolved from bearer)
-   * @returns JSON-RPC response with tool execution result
+   * Handle tools/call request; `context` carries the caller id resolved from bearer.
+   * @param request - The tool execution request from the client.
+   * @param sessionId - Current session ID or null for new session.
+   * @param context - Optional per-call context (caller id resolved from bearer).
    */
   private async handleToolsCall(
     request: JSONRPCRequest,
@@ -405,10 +393,9 @@ export class JSONRPCHandler {
   }
 
   /**
-   * Build an error response
-   * @param id - Request ID to correlate the error with
-   * @param error - The JSON-RPC error object to return
-   * @returns JSON-RPC error response
+   * Build an error response correlated to `id`.
+   * @param id - Request id to correlate the error with (or null).
+   * @param error - JSON-RPC error object.
    */
   private buildErrorResponse(id: string | number | null, error: JSONRPCError): JSONRPCResponse {
     return { jsonrpc: '2.0', id: id ?? null, error };

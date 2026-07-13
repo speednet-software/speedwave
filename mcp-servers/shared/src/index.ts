@@ -1,30 +1,6 @@
 /**
- * Shared MCP infrastructure for Speedwave workers.
- * Eliminates code duplication across MCP services by providing
- * reusable server components, security utilities, and protocol handlers.
- *
- * Usage:
- * ```typescript
- * import {
- *   createMCPServer,
- *   loadToken,
- *   textResult,
- *   jsonResult,
- *   errorResult,
- * } from '@speedwave/mcp-shared';
- *
- * const server = createMCPServer({
- *   name: 'my-service',
- *   version: '1.0.0',
- *   port: 3001,
- *   tools: [
- *     { tool: myTool, handler: myHandler },
- *   ],
- * });
- *
- * server.start();
- * ```
- * @module speedwave/mcp-shared
+ * Shared MCP infrastructure for Speedwave workers: reusable server components, security
+ * utilities, and protocol handlers, eliminating duplication across MCP services.
  */
 
 // Types
@@ -83,7 +59,11 @@ export {
 
 // Tool-handler validation wrappers (SSOT for the two withValidation families)
 export { withResultValidation, withClientValidation } from './tool-validation.js';
-export type { ToolResult, ClientValidationOptions } from './tool-validation.js';
+export type {
+  ToolResult,
+  ClientValidationOptions,
+  ResultValidationOptions,
+} from './tool-validation.js';
 
 // Transport
 export { handleMCPPost, handleMCPDelete, readSessionId } from './transport.js';
@@ -116,6 +96,29 @@ export { sanitize } from './sanitizer.js';
 
 // Errors (SSOT for user-facing messages)
 export { notConfiguredMessage, withSetupGuidance } from './errors.js';
+
+// Teaching-style errors + pagination guard (SSOT)
+export {
+  teachingErrorResult,
+  teachingToolResult,
+  clampPageSize,
+  missingParamResult,
+  MAX_RECEIVED_LENGTH,
+} from './teaching-errors.js';
+export type { TeachingErrorParams } from './teaching-errors.js';
+
+// Strict numeric-id normalization (SSOT for github/gitlab id params)
+export { normalizeNumericId, normalizeNumericIdParams } from './numeric-id.js';
+export type {
+  NumericIdError,
+  NumericIdResult,
+  NumericIdOptions,
+  NumericIdParamsResult,
+} from './numeric-id.js';
+
+// _meta key contract (SSOT for prefixed MCP-spec keys + legacy fallback reader)
+export { META_KEYS, metaValue } from './meta-keys.js';
+export type { MetaKey } from './meta-keys.js';
 
 // Retry
 export { retryAsync } from './retry.js';

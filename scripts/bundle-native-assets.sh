@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$REPO_ROOT/desktop/src-tauri}"
+NATIVE_ROOT="${SPEEDWAVE_NATIVE_MACOS_DIR:-$REPO_ROOT/native/macos}"
 PACKAGES=(reminders calendar mail notes audio-capture)
 
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -11,23 +12,21 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 0
 fi
 
+# Both `.build/release` (swift build) and `.build/apple/Products/Release` (universal build)
+# are legitimate producers — newest wins; an equal-mtime tie deterministically prefers `release`.
 resolve_binary_path() {
   local pkg_dir="$1"
   local binary_name="$2"
-  local candidates=(
-    "$pkg_dir/.build/apple/Products/Release/$binary_name"
-    "$pkg_dir/.build/universal-apple-macosx/release/$binary_name"
-    "$pkg_dir/.build/release/$binary_name"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if [[ -f "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
+  local direct="$pkg_dir/.build/release/$binary_name"
+  local newest="" candidate
+  while IFS= read -r -d '' candidate; do
+    if [[ -z "$newest" || "$candidate" -nt "$newest" ]]; then
+      newest="$candidate"
+    elif [[ "$candidate" == "$direct" && ! "$newest" -nt "$candidate" ]]; then
+      newest="$candidate"
     fi
-  done
-
-  find "$pkg_dir/.build" -type f \( -path "*/release/$binary_name" -o -path "*/Release/$binary_name" \) | sort | tail -n 1
+  done < <(find "$pkg_dir/.build" -type f \( -path "*/release/$binary_name" -o -path "*/Release/$binary_name" \) -print0 2>/dev/null)
+  printf '%s\n' "$newest"
 }
 
 mkdir -p "$DEST"
@@ -49,7 +48,7 @@ adhoc_resign() {
 }
 
 for pkg in "${PACKAGES[@]}"; do
-  pkg_dir="$REPO_ROOT/native/macos/$pkg"
+  pkg_dir="$NATIVE_ROOT/$pkg"
   binary_name="${pkg}-cli"
   binary_path="$(resolve_binary_path "$pkg_dir" "$binary_name")"
 

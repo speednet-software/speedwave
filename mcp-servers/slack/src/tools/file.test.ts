@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RefreshLock } from '@speedwave/mcp-shared';
+import { RefreshLock, META_KEYS } from '@speedwave/mcp-shared';
 import { handleGetFileContent, handleDownloadFile, createFileTools } from './file-tools.js';
 import type { SlackClients } from '../client.js';
 
@@ -114,12 +114,12 @@ describe('file-tools', () => {
       const read = tools[0].tool;
       expect(read.inputSchema.required).toEqual(['file']);
       expect(read.annotations?.readOnlyHint).toBe(true);
-      expect(read._meta?.deferLoading).toBe(true);
+      expect(read._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const download = tools[1].tool;
       expect(download.inputSchema.required).toEqual(['file']);
       // A download writes to disk — it must NOT be a read-only hint.
       expect(download.annotations?.readOnlyHint).not.toBe(true);
-      expect(download._meta?.deferLoading).toBe(true);
+      expect(download._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
     });
 
     it('returns NOT_CONFIGURED for both tools when the worker has no token', async () => {

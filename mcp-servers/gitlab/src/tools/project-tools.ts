@@ -2,15 +2,26 @@
  * Project Tools - 3 tools for GitLab project operations
  */
 
-import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  READ_ONLY_ANNOTATIONS,
+  META_KEYS,
+} from '@speedwave/mcp-shared';
 import { GitLabClient } from '../client.js';
 import { withValidation } from './validation.js';
 
 const listProjectIdsTool: Tool = {
   name: 'listProjectIds',
-  description: 'List project IDs and paths. Use get_project_full for details.',
+  description:
+    'List project IDs and paths. Use getProjectFull for details. For "my projects"/"projects I own", pass owned: true.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.SELF_PARAM]: "owned: true means 'my projects'",
+  },
   keywords: ['gitlab', 'projects', 'list', 'repositories', 'repos', 'ids'],
   example: 'const { projects, count } = await gitlab.listProjectIds({ search: "speedwave" })',
   inputSchema: {
@@ -19,7 +30,12 @@ const listProjectIdsTool: Tool = {
       membership: { type: 'boolean', description: 'Only member projects (default true)' },
       archived: { type: 'boolean', description: 'Include archived (default false)' },
       search: { type: 'string', description: 'Search by name' },
-      limit: { type: 'number', description: 'Max results (default 100)' },
+      owned: {
+        type: 'boolean',
+        description:
+          "Only projects owned by the authenticated user (answers 'my projects'). No separate identity lookup needed.",
+      },
+      limit: { type: 'number', description: 'Max results (default 20, max 100)' },
     },
   },
   outputSchema: {
@@ -63,7 +79,7 @@ const getProjectFullTool: Tool = {
   name: 'getProjectFull',
   description: 'Get complete project data. No truncation.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'project', 'show', 'get', 'detail', 'full'],
   example: 'const project = await gitlab.getProjectFull({ project_id: "speedwave/core" })',
   inputSchema: {
@@ -115,7 +131,7 @@ const searchCodeTool: Tool = {
   name: 'searchCode',
   description: 'Search for code in GitLab projects',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['gitlab', 'search', 'code', 'find', 'grep', 'regex'],
   example:
     'const results = await gitlab.searchCode({ query: "function authenticate", project_id: "speedwave/core" })',
@@ -125,7 +141,8 @@ const searchCodeTool: Tool = {
       query: { type: 'string', description: 'Search query string' },
       project_id: {
         type: ['string', 'number'],
-        description: 'Limit search to specific project (optional)',
+        description:
+          'Limit search to specific project (optional). Must be the exact path or numeric ID — resolve it first via listProjectIds if you only have a partial project name.',
       },
     },
     required: ['query'],
@@ -162,8 +179,8 @@ const searchCodeTool: Tool = {
       input: { query: 'function authenticate', project_id: 'my-group/my-project' },
     },
     {
-      description: 'Full: search with scope',
-      input: { query: 'async.*error', project_id: 'backend-api', scope: 'blobs' },
+      description: 'Full: search with explicit project path',
+      input: { query: 'async.*error', project_id: 'backend-api' },
     },
   ],
 };
@@ -178,7 +195,13 @@ export function createProjectTools(client: GitLabClient | null): ToolDefinition[
       tool: listProjectIdsTool,
       handler: withValidation(client, async (c, params) => {
         const result = await c.listProjects(
-          params as { search?: string; limit?: number; owned?: boolean }
+          params as {
+            search?: string;
+            limit?: number;
+            owned?: boolean;
+            membership?: boolean;
+            archived?: boolean;
+          }
         );
         return jsonResult({
           projects: result.map((p: { id: number; path_with_namespace: string }) => ({

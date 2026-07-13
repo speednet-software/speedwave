@@ -3,9 +3,7 @@ use speedwave_runtime::runtime::ensure_exec_healthy;
 use speedwave_runtime::{build, bundle, compose, config, consts, project, runtime};
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Setup state — persisted to ~/.speedwave/setup_state.json for resume support
-// ---------------------------------------------------------------------------
+// ── Setup state — persisted to ~/.speedwave/setup_state.json for resume support ──
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct SetupState {
@@ -60,7 +58,8 @@ impl SetupState {
                 // Missing file is the normal first-run case; warn on anything else.
                 if !Self::is_missing_state_file(&e) {
                     log::warn!(
-                        "SetupState::load: {} unreadable/corrupt, restarting onboarding from scratch: {e}",
+                        "setup state file {} unreadable/corrupt, restarting onboarding from \
+                         scratch: {e}",
                         path.display()
                     );
                 }
@@ -87,16 +86,14 @@ impl SetupState {
         self.save_to(&path)
     }
 
-    /// Saves setup state to a specific file path (atomic write via rename).
+    /// Saves setup state to a specific file path: atomic, fsynced write via
+    /// [`speedwave_runtime::fs_perms::write_shared_file_atomic`].
     fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
+        speedwave_runtime::fs_perms::write_shared_file_atomic(path, &json)
     }
 
     /// `true` when all required setup steps completed. `cli_linked` is
@@ -110,9 +107,7 @@ impl SetupState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 2: Check and install container runtime
-// ---------------------------------------------------------------------------
+// ── Step 2: Check and install container runtime ──
 
 #[derive(Serialize, Deserialize)]
 pub enum RuntimeStatus {
@@ -135,9 +130,7 @@ pub fn check_runtime() -> anyhow::Result<RuntimeStatus> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 3: Initialize VM (macOS only — Lima)
-// ---------------------------------------------------------------------------
+// ── Step 3: Initialize VM (macOS only — Lima) ──
 
 // VM provisioning primitives live in the runtime SSOT `speedwave_runtime::provision`.
 
@@ -191,9 +184,7 @@ pub use speedwave_runtime::provision::TerminateOnChange;
 #[cfg(target_os = "windows")]
 pub use speedwave_runtime::provision::ensure_wsl_distro_metadata;
 
-// ---------------------------------------------------------------------------
-// Step 4: Create project
-// ---------------------------------------------------------------------------
+// ── Step 4: Create project ──
 
 pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     project::add_project(name, dir)?;
@@ -205,13 +196,10 @@ pub fn create_project(name: &str, dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Setup completeness check
-// ---------------------------------------------------------------------------
+// ── Setup completeness check ──
 
-/// `true` when all required setup steps completed AND the VM / WSL distro
-/// still exists (`cli_linked` excluded). Spawns `limactl list` / `wsl.exe
-/// --list` per call — safe for route guards, do not poll.
+/// `true` when required setup steps completed AND the VM/WSL distro exists (`cli_linked` excluded).
+/// Spawns `limactl list`/`wsl.exe --list` per call — safe for route guards, do not poll.
 pub fn is_setup_complete() -> bool {
     let state = SetupState::load();
     if !state.is_complete() {
@@ -220,9 +208,7 @@ pub fn is_setup_complete() -> bool {
     runtime::detect_runtime().is_installed()
 }
 
-// ---------------------------------------------------------------------------
-// Build container images
-// ---------------------------------------------------------------------------
+// ── Build container images ──
 
 pub fn build_images() -> anyhow::Result<()> {
     let rt = runtime::detect_runtime();
@@ -232,7 +218,7 @@ pub fn build_images() -> anyhow::Result<()> {
         let user_config = match config::load_user_config() {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("build_images: failed to load config, using defaults: {e}");
+                log::warn!("failed to load config, using defaults: {e}");
                 config::SpeedwaveUserConfig::default()
             }
         };
@@ -280,15 +266,13 @@ pub fn build_images() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Start containers for a project
-// ---------------------------------------------------------------------------
+// ── Start containers for a project ──
 
 pub fn start_containers(project: &str) -> anyhow::Result<()> {
     // No provider is a valid state ("choose a provider" screen) — every
     // caller must skip starting rather than let render_compose bail.
     if crate::containers_cmd::project_llm_is_unconfigured(project).map_err(anyhow::Error::msg)? {
-        log::info!("start_containers: '{project}' has no LLM provider — skipping");
+        log::info!("project '{project}' has no LLM provider — skipping container start");
         return defer_container_start_gated(project, true);
     }
 
@@ -317,7 +301,8 @@ pub fn start_containers(project: &str) -> anyhow::Result<()> {
         log::warn!("Failed to list installed plugins: {e}");
         Vec::new()
     });
-    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?;
+    let expected_paths = compose::SecurityExpectedPaths::compute(project, project_dir)?
+        .with_telemetry_locked(resolved.telemetry.any_locked);
     speedwave_runtime::fs_security::ensure_data_dir_permissions(project)?;
     let violations = compose::SecurityCheck::run(&yaml, project, &manifests, &expected_paths);
     if !violations.is_empty() {
@@ -369,9 +354,7 @@ fn defer_container_start_gated(project: &str, llm_unconfigured: bool) -> anyhow:
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Check Claude auth status inside the container
-// ---------------------------------------------------------------------------
+// ── Check Claude auth status inside the container ──
 
 /// Looks up the project's LLM provider name. `None` when the project is
 /// missing or `claude.llm.provider` is unset.
@@ -386,10 +369,8 @@ pub(crate) fn lookup_project_provider<'a>(
         .and_then(|l| l.provider.as_deref())
 }
 
-/// True when the project's sessions need the in-container Anthropic OAuth
-/// check: v2 (ADR-073) only for `AnthropicOauth`. An UNCONFIGURED project (no
-/// llm config, or a dangling active selection) does NOT force OAuth (R7/f1,f4)
-/// — the user is routed to provider configuration instead of an auth wall.
+/// True when sessions need the in-container OAuth check (ADR-073, `AnthropicOauth` only).
+/// Unconfigured projects (no llm config, dangling selection) skip it, routed to provider config
 pub(crate) fn project_needs_anthropic_auth(
     user_config: &speedwave_runtime::config::SpeedwaveUserConfig,
     project: &str,
@@ -423,39 +404,36 @@ pub(crate) fn project_needs_anthropic_auth(
 
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
-        log::warn!(
-            "check_claude_auth: failed to load user config, defaulting to anthropic path: {e}"
-        );
+        log::warn!("failed to load user config, defaulting to anthropic path: {e}");
         speedwave_runtime::config::SpeedwaveUserConfig::default()
     });
     if !project_needs_anthropic_auth(&user_config, project) {
-        log::info!("check_claude_auth: non-OAuth provider — skipping Anthropic OAuth check");
+        log::info!("non-OAuth provider — skipping Anthropic OAuth check");
         return Ok(true);
     }
     let rt = runtime::detect_runtime();
     let container_name = crate::chat::claude_container_name(project);
-    log::info!("check_claude_auth: container={container_name}");
+    log::info!("checking Claude auth in container {container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
-    log::info!("check_claude_auth: container healthy, checking auth");
+    log::info!("container {container_name} healthy, checking auth");
     let mut cmd =
         rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
     let output = cmd.output()?;
-    log::info!("check_claude_auth: auth status exit={}", output.status);
+    log::info!(
+        "auth status check for {container_name} exited with {}",
+        output.status
+    );
     Ok(output.status.success())
 }
 
-// ---------------------------------------------------------------------------
-// Lima VM config migration — upgrade memory from older installs
-// ---------------------------------------------------------------------------
+// ── Lima VM config migration — upgrade memory from older installs ──
 
 /// Migrates the Lima VM config when it drifts from the SSOT (memory, cpus, or
 /// the VPN netplan drop-in). Re-exported from [`speedwave_runtime::provision`].
 #[cfg(target_os = "macos")]
 pub use speedwave_runtime::provision::ensure_lima_vm_config;
 
-// ---------------------------------------------------------------------------
-// Factory reset — stops containers, destroys VM, wipes setup state
-// ---------------------------------------------------------------------------
+// ── Factory reset — stops containers, destroys VM, wipes setup state ──
 
 pub fn factory_reset() -> anyhow::Result<()> {
     let state = SetupState::load();
@@ -527,25 +505,202 @@ pub fn factory_reset() -> anyhow::Result<()> {
     }
     // Windows CLI lives inside data_dir/bin/ — wipe_data_dir handles it.
 
+    // 3b. Kill running CLI processes — Windows cannot delete a running exe's image,
+    // which fails the wipe on bin\speedwave.exe (same class the installer sweep handles).
+    #[cfg(target_os = "windows")]
+    {
+        let home =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+        let cli_exe =
+            speedwave_runtime::consts::cli_install_path_for(true, &home, consts::data_dir());
+        let script = kill_processes_by_image_script(std::path::Path::new(&cli_exe));
+        if let Err(e) = speedwave_runtime::binary::run_powershell(
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ],
+            std::time::Duration::from_secs(15),
+        ) {
+            log::warn!("could not stop running CLI processes before the wipe: {e}");
+        }
+    }
+
     // 4. Wipe entire data directory (~/.speedwave/)
     wipe_data_dir(consts::data_dir())?;
 
     Ok(())
 }
 
-/// Removes the entire data directory (`~/.speedwave/`).
-/// Idempotent: succeeds silently if the directory does not exist.
-fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
-    match std::fs::remove_dir_all(data_dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+/// PowerShell that force-stops every process whose image path equals `exe` —
+/// exact-path scoped; stem split on `\` (`file_stem` won't, on non-Windows hosts).
+#[cfg_attr(
+    not(any(windows, test)),
+    expect(
+        dead_code,
+        reason = "only called from the windows-cfg factory_reset step"
+    )
+)]
+fn kill_processes_by_image_script(exe: &std::path::Path) -> String {
+    let quoted = exe.to_string_lossy().replace('\'', "''");
+    let leaf = quoted.rsplit('\\').next().unwrap_or(&quoted);
+    let stem = leaf.strip_suffix(".exe").unwrap_or(leaf);
+    format!(
+        "Get-Process -Name '{stem}' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{quoted}' }} | Stop-Process -Force -ErrorAction SilentlyContinue"
+    )
+}
+
+/// Number of wipe attempts (1 initial pass + retries) before giving up.
+const WIPE_MAX_ATTEMPTS: u32 = 4;
+/// Delay between wipe passes — absorbs transient handle-release lag
+/// (WSL 9P teardown after `wsl --unregister`, AV scanning).
+const WIPE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Cap on undeletable paths listed in the final error message.
+const WIPE_MAX_LISTED_PATHS: usize = 8;
+/// Cap on nested descendants probed per failing top-level entry.
+const WIPE_MAX_DEEP_PROBE: usize = 3;
+/// Max directory depth the deep probe descends into a failing entry.
+const WIPE_MAX_PROBE_DEPTH: u32 = 6;
+
+/// Runs one best-effort removal pass over `data_dir`'s top-level entries.
+/// Returns the entries that failed to remove (empty = all removed).
+fn wipe_pass(data_dir: &std::path::Path) -> std::io::Result<Vec<(PathBuf, std::io::Error)>> {
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut failed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let result = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = result {
+            failed.push((path, e));
+        }
+    }
+    Ok(failed)
+}
+
+/// Probes up to [`WIPE_MAX_DEEP_PROBE`] undeletable descendants under `dir` (at
+/// most `depth` levels down), to name the actual locked object.
+fn probe_deep_undeletable(dir: &std::path::Path, depth: u32) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    // Never descend through a symlink: read_dir would follow it outside the wiped tree.
+    let is_symlink = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink());
+    if depth == 0 || is_symlink {
+        return found;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return found,
+    };
+    for entry in entries.flatten() {
+        if found.len() >= WIPE_MAX_DEEP_PROBE {
+            break;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let result = if is_dir {
+            std::fs::remove_dir(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if result.is_err() {
+            if is_dir {
+                found.extend(probe_deep_undeletable(&path, depth - 1));
+            }
+            if found.len() < WIPE_MAX_DEEP_PROBE {
+                found.push(path);
+            }
+        }
+    }
+    found.truncate(WIPE_MAX_DEEP_PROBE);
+    found
+}
+
+/// Best-effort: re-grants owner-only access down a failing tree so the next wipe
+/// pass can delete entries born with a broken DACL/mode. Heals itself before descending.
+/// Never follows symlinks: unlinking one never needs the target's permissions healed.
+fn heal_permissions_tree(path: &std::path::Path, depth: u32) {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    let is_dir = metadata.is_dir();
+    let _ = if is_dir {
+        speedwave_runtime::fs_perms::set_owner_only_dir(path)
+    } else {
+        speedwave_runtime::fs_perms::set_owner_only(path)
+    };
+    if depth == 0 || !is_dir {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            heal_permissions_tree(&entry.path(), depth - 1);
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step 7: Copy CLI binary to user PATH
-// ---------------------------------------------------------------------------
+/// Removes the entire data directory (`~/.speedwave/`); Ok if already missing.
+/// Best-effort per entry with bounded retries; the error names undeletable paths.
+fn wipe_data_dir(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let mut failed = wipe_pass(data_dir)?;
+    let mut attempts = 1;
+    while !failed.is_empty() && attempts < WIPE_MAX_ATTEMPTS {
+        for (path, _) in &failed {
+            heal_permissions_tree(path, WIPE_MAX_PROBE_DEPTH);
+        }
+        std::thread::sleep(WIPE_RETRY_DELAY);
+        failed = wipe_pass(data_dir)?;
+        attempts += 1;
+    }
+    if failed.is_empty() {
+        if let Err(e) = std::fs::remove_dir(data_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
+        }
+        return Ok(());
+    }
+
+    let mut listed: Vec<String> = Vec::new();
+    for (path, e) in &failed {
+        if listed.len() >= WIPE_MAX_LISTED_PATHS {
+            break;
+        }
+        listed.push(format!("{} ({e})", path.display()));
+        // Non-following check: Path::is_dir() would send the probe through a symlink.
+        let is_real_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+        if is_real_dir {
+            for deep in probe_deep_undeletable(path, WIPE_MAX_PROBE_DEPTH) {
+                if listed.len() >= WIPE_MAX_LISTED_PATHS {
+                    break;
+                }
+                listed.push(deep.display().to_string());
+            }
+        }
+    }
+    anyhow::bail!(
+        "could not remove {} entr{} under {} after {attempts} attempt{}: {}",
+        failed.len(),
+        if failed.len() == 1 { "y" } else { "ies" },
+        data_dir.display(),
+        if attempts == 1 { "" } else { "s" },
+        listed.join("; ")
+    );
+}
+
+// ── Step 7: Copy CLI binary to user PATH ──
 
 /// Resolves the CLI binary bundled in Tauri resources, with a dev fallback
 /// next to the exe.
@@ -697,9 +852,8 @@ fn parse_shell_env(shell: &str) -> UserShell {
     }
 }
 
-/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of
-/// `.bash_profile`/`.bash_login`/`.profile` (creates `.bash_profile` if none);
-/// unknown → `.profile`.
+/// Shell config file(s) to modify: zsh → `.zshrc`; bash → first of `.bash_profile`,
+/// `.bash_login`, `.profile` (creates `.bash_profile`); unknown → `.profile`.
 #[cfg(unix)]
 fn shell_config_targets(home: &std::path::Path, shell: UserShell) -> Vec<std::path::PathBuf> {
     match shell {
@@ -770,7 +924,7 @@ pub fn link_cli() -> anyhow::Result<()> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     if !consts::data_dir().exists() {
-        log::info!("link_cli: data dir missing, skipping");
+        log::info!("data dir missing, skipping CLI link");
         return Ok(());
     }
 
@@ -786,7 +940,7 @@ pub fn link_cli() -> anyhow::Result<()> {
     // Write resources-dir marker so the external CLI can find build context.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
         if let Err(e) = build::write_resources_marker(std::path::Path::new(&res)) {
-            log::warn!("link_cli: could not write resources-dir marker: {e}");
+            log::warn!("could not write resources-dir marker: {e}");
         }
     }
 
@@ -799,8 +953,7 @@ pub fn link_cli() -> anyhow::Result<()> {
 }
 
 /// Resolves a `windows/<name>` script from the Tauri bundle on Windows: prefer
-/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev
-/// fallbacks. Shared by the sweep and firewall consumers.
+/// `SPEEDWAVE_RESOURCES_DIR`, then the production bundle layout, then dev fallbacks.
 #[cfg(target_os = "windows")]
 pub(crate) fn resolve_bundled_windows_script(name: &str) -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -838,9 +991,8 @@ fn resolve_sweep_script() -> Option<std::path::PathBuf> {
 #[cfg(target_os = "windows")]
 pub(crate) use speedwave_runtime::binary::system_powershell_path;
 
-/// Kills stale Speedwave / Node / CLI processes holding binaries about to be
-/// overwritten. Runs at every Desktop startup, fails open. SSOT for the kill
-/// predicate is `windows/sweep.ps1`.
+/// Kills stale Speedwave/Node/CLI processes holding binaries about to be overwritten.
+/// Runs at every Desktop startup, fails open. Kill predicate SSOT: `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
 fn run_pre_link_sweep() {
     let Some(sweep) = resolve_sweep_script() else {
@@ -918,7 +1070,7 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
         // would kill a user's live `speedwave` session for nothing (ADR-048).
         let target = cli_dir.join(consts::cli_binary_filename(true));
         if files_identical(cli_source, &target) {
-            log::info!("link_cli: installed CLI already current — sweep/copy skipped");
+            log::info!("installed CLI already current — sweep/copy skipped");
         } else {
             // Kill any stale process holding the exe before overwrite (ADR-048).
             run_pre_link_sweep();
@@ -944,15 +1096,16 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
             dir = cli_dir_str
         );
 
-        let status = speedwave_runtime::binary::powershell_command()
-            .args([
+        let status = speedwave_runtime::binary::run_powershell(
+            &[
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
                 &script,
-            ])
-            .status()?;
+            ],
+            std::time::Duration::from_secs(60),
+        )?;
         if !status.success() {
             anyhow::bail!("Failed to add CLI to PATH");
         }
@@ -1069,9 +1222,8 @@ mod tests {
 
     #[test]
     fn local_provider_branch_covers_ollama_lmstudio_llamacpp() {
-        // Guard: `check_claude_auth` skips Anthropic OAuth exactly for the three
-        // local providers. If `is_local_provider` expands or contracts, this
-        // test documents which set the auth-skip branch fires on.
+        // Guard: `check_claude_auth` skips Anthropic OAuth exactly for the three local providers.
+        // Documents which set the auth-skip branch fires on if `is_local_provider` changes.
         use speedwave_runtime::config::is_local_provider;
         assert!(is_local_provider(Some("ollama")));
         assert!(is_local_provider(Some("lmstudio")));
@@ -1116,9 +1268,8 @@ mod tests {
         }
     }
 
-    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth
-    /// check; every other kind (api key, local, openrouter, …) must skip it
-    /// or offline/key-based users get blocked on a claude.ai login.
+    /// ADR-073: only AnthropicOauth sessions need the in-container OAuth check; every other kind
+    /// (api key, local, openrouter, …) must skip it or offline/key-based users hit a login wall.
     #[test]
     fn needs_anthropic_auth_by_v2_kind() {
         use speedwave_runtime::config::LlmProviderKind as K;
@@ -1323,6 +1474,392 @@ mod tests {
 
         assert!(!data_dir.exists(), "data dir should be gone");
         assert!(tmp.path().exists(), "parent should still exist");
+    }
+
+    /// Direct unit coverage: `heal_permissions_tree` must re-tighten a broken mode
+    /// on the root AND descend into children once the root is readable again.
+    #[cfg(unix)]
+    #[test]
+    fn heal_permissions_tree_fixes_root_and_descends_into_children() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let root = tmp.path().join("broken");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("create child dir");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o000))
+            .expect("break child perms");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+            .expect("break root perms");
+
+        heal_permissions_tree(&root, WIPE_MAX_PROBE_DEPTH);
+
+        let root_mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let child_mode = std::fs::metadata(&child).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            root_mode, 0o700,
+            "expected root healed to 0o700, got 0o{root_mode:o}"
+        );
+        assert_eq!(
+            child_mode, 0o700,
+            "expected child healed to 0o700, got 0o{child_mode:o}"
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleanup after test");
+    }
+
+    /// A depth of 0 must heal only the root itself, never descend.
+    #[cfg(unix)]
+    #[test]
+    fn heal_permissions_tree_depth_zero_heals_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let root = tmp.path().join("broken");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("create child dir");
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o000))
+            .expect("break child perms");
+
+        heal_permissions_tree(&root, 0);
+
+        let root_mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let child_mode = std::fs::metadata(&child).unwrap().permissions().mode() & 0o777;
+        assert_eq!(root_mode, 0o700, "root must still be healed at depth 0");
+        assert_eq!(
+            child_mode, 0o000,
+            "child must be untouched when depth is exhausted at the root"
+        );
+
+        std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700))
+            .expect("restore child perms for cleanup");
+        std::fs::remove_dir_all(&root).expect("cleanup after test");
+    }
+
+    /// A missing path is a silent no-op — never panics.
+    #[test]
+    fn heal_permissions_tree_missing_path_is_noop() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let missing = tmp.path().join("does-not-exist");
+        heal_permissions_tree(&missing, WIPE_MAX_PROBE_DEPTH);
+    }
+
+    /// A symlink inside the tree must never be healed or followed: chmod'ing
+    /// its target would let a planted symlink widen an attacker-chosen path.
+    #[cfg(unix)]
+    #[test]
+    fn heal_permissions_tree_does_not_follow_symlink_to_outside_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let outside_tmp = tempfile::tempdir().expect("failed to create outside temp dir");
+        let target = outside_tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).expect("create outside target dir");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("set outside target perms");
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let root = tmp.path().join("broken");
+        std::fs::create_dir_all(&root).expect("create root dir");
+        std::os::unix::fs::symlink(&target, root.join("link")).expect("create symlink");
+
+        heal_permissions_tree(&root, WIPE_MAX_PROBE_DEPTH);
+
+        let target_mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            target_mode, 0o755,
+            "symlink target must be untouched, got 0o{target_mode:o}"
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleanup after test");
+    }
+
+    /// The probe must never read_dir through a symlink — that would attempt
+    /// deletions outside the wiped tree.
+    #[cfg(unix)]
+    #[test]
+    fn probe_deep_undeletable_returns_empty_for_symlink() {
+        let outside_tmp = tempfile::tempdir().expect("failed to create outside temp dir");
+        let target = outside_tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).expect("create outside target dir");
+        let outside_file = target.join("keep.txt");
+        std::fs::write(&outside_file, "data").expect("write outside file");
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let found = probe_deep_undeletable(&link, WIPE_MAX_PROBE_DEPTH);
+
+        assert!(found.is_empty(), "probe must not descend through a symlink");
+        assert!(
+            outside_file.exists(),
+            "probe must not delete files behind the symlink"
+        );
+    }
+
+    /// Final-failure reporting on a symlinked entry must not probe (and thus
+    /// delete) through the link target outside the data dir.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_final_report_does_not_probe_through_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let outside_tmp = tempfile::tempdir().expect("failed to create outside temp dir");
+        let target = outside_tmp.path().join("outside-target");
+        std::fs::create_dir_all(&target).expect("create outside target dir");
+        let outside_file = target.join("keep.txt");
+        std::fs::write(&outside_file, "data").expect("write outside file");
+
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::os::unix::fs::symlink(&target, data_dir.join("link")).expect("create symlink");
+        // Read-only data_dir blocks unlinking the symlink; heal fixes entries, never
+        // the parent, so the wipe reaches the final-failure reporting branch.
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make data dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore data dir perms");
+
+        assert!(result.is_err(), "wipe should fail on the undeletable entry");
+        assert!(
+            outside_file.exists(),
+            "reporting probe must not follow the symlink and delete outside files"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    /// Unix: a dir born with 0o555 (analogous to an empty-DACL dir on Windows) now
+    /// self-heals between retry passes, so the wipe SUCCEEDS instead of erroring.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_heals_locked_dir_between_retry_passes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        result.expect("heal between retry passes must let the wipe succeed");
+        assert!(!data_dir.exists(), "data dir should be gone after healing");
+    }
+
+    /// Opens `path` with no share flags, so any other handle's delete attempt hits a
+    /// sharing violation — deterministic across Windows versions (unlike READONLY).
+    #[cfg(windows)]
+    fn hold_open_no_share(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .expect("open with exclusive share mode")
+    }
+
+    /// Windows companion: an open handle with no delete sharing still blocks removal
+    /// (unlike READONLY, which modern std ignores), so the error still names the path.
+    #[cfg(windows)]
+    #[test]
+    fn wipe_data_dir_names_failing_path_on_error() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        let file_path = locked_dir.join("file.txt");
+        std::fs::write(&file_path, "data").expect("write file");
+
+        let guard = hold_open_no_share(&file_path);
+        let result = wipe_data_dir(&data_dir);
+        drop(guard);
+
+        let err = result.expect_err("wipe should fail while the entry is locked");
+        let message = err.to_string();
+        assert!(
+            message.contains(&locked_dir.display().to_string()),
+            "error message should name the failing path, got: {message}"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    /// Windows: an open handle with no delete sharing is not fixed by healing, so the
+    /// wipe still fails overall — but the deletable sibling is removed regardless.
+    #[cfg(windows)]
+    #[test]
+    fn wipe_data_dir_partial_failure_still_removes_deletable_sibling() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let deletable_dir = data_dir.join("deletable");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        let file_path = locked_dir.join("file.txt");
+        std::fs::write(&file_path, "data").expect("write file");
+        std::fs::create_dir_all(&deletable_dir).expect("create deletable dir");
+        std::fs::write(deletable_dir.join("file.txt"), "data").expect("write file");
+
+        let guard = hold_open_no_share(&file_path);
+        let result = wipe_data_dir(&data_dir);
+        drop(guard);
+
+        assert!(result.is_err(), "wipe should still report the failure");
+        assert!(
+            !deletable_dir.exists(),
+            "sibling deletable dir must be removed despite the locked entry (best effort)"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    /// Unix: the locked dir now self-heals between retry passes, so the whole wipe
+    /// succeeds — both the sibling and the formerly-locked dir are gone.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_heal_removes_both_locked_and_deletable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let deletable_dir = data_dir.join("deletable");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+        std::fs::create_dir_all(&deletable_dir).expect("create deletable dir");
+        std::fs::write(deletable_dir.join("file.txt"), "data").expect("write file");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        result.expect("heal between retry passes must let the wipe succeed");
+        assert!(!data_dir.exists(), "data dir should be gone after healing");
+    }
+
+    #[test]
+    fn wipe_data_dir_retry_succeeds_after_transient_lock_clears() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(locked_dir.join("file.txt"), "data").expect("write file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("make dir read-only");
+        }
+        #[cfg(windows)]
+        {
+            let file_path = locked_dir.join("file.txt");
+            let mut perms = std::fs::metadata(&file_path)
+                .expect("stat file")
+                .permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&file_path, perms).expect("set readonly");
+        }
+
+        let unlock_dir = locked_dir.clone();
+        let unlocker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            // On unix the retry-loop heal may already have unlocked (and removed) this
+            // dir before this thread wakes — that is the new success path, not a race bug.
+            #[cfg(unix)]
+            if unlock_dir.exists() {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o755))
+                    .expect("restore dir permissions");
+            }
+            #[cfg(windows)]
+            {
+                let file_path = unlock_dir.join("file.txt");
+                let mut perms = std::fs::metadata(&file_path)
+                    .expect("stat file")
+                    .permissions();
+                perms.set_readonly(false);
+                std::fs::set_permissions(&file_path, perms).expect("clear readonly");
+            }
+        });
+
+        let result = wipe_data_dir(&data_dir);
+        unlocker.join().expect("unlocker thread should not panic");
+
+        result.expect("wipe should succeed once the retry loop observes the released lock");
+        assert!(!data_dir.exists(), "data dir should be gone after retry");
+    }
+
+    /// Windows-only: an open handle with no delete sharing is not fixed by healing, so
+    /// the deep-probe naming still applies — it can unlink parents but must surface the file.
+    #[cfg(windows)]
+    #[test]
+    fn wipe_data_dir_names_deep_undeletable_path_on_final_failure() {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let deep_dir = locked_dir.join("deep");
+        let nested_file = deep_dir.join("nested.txt");
+        std::fs::create_dir_all(&deep_dir).expect("create nested dirs");
+        std::fs::write(&nested_file, "data").expect("write file");
+
+        let guard = hold_open_no_share(&nested_file);
+        let result = wipe_data_dir(&data_dir);
+        drop(guard);
+
+        let err = result.expect_err("wipe should fail while the entry is locked");
+        let message = err.to_string();
+        assert!(
+            message.contains(&locked_dir.display().to_string()),
+            "error message should name the locked subdir, got: {message}"
+        );
+        assert!(
+            message.contains(&nested_file.display().to_string()),
+            "on Windows the probe can unlink parents so it must surface the held-open file, got: {message}"
+        );
+
+        std::fs::remove_dir_all(&data_dir).expect("cleanup after test");
+    }
+
+    /// Unix: a 0o555 parent with a nested file heals via the retry loop's recursive
+    /// walk, so the whole tree is removed instead of the deep probe naming anything.
+    #[cfg(unix)]
+    #[test]
+    fn wipe_data_dir_heals_nested_locked_dir_between_retry_passes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let data_dir = tmp.path().join("speedwave-data");
+        let locked_dir = data_dir.join("locked");
+        let nested_file = locked_dir.join("nested.txt");
+        std::fs::create_dir_all(&locked_dir).expect("create locked dir");
+        std::fs::write(&nested_file, "data").expect("write file");
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make dir read-only");
+
+        let result = wipe_data_dir(&data_dir);
+
+        result.expect("heal between retry passes must let the wipe succeed");
+        assert!(!data_dir.exists(), "data dir should be gone after healing");
+    }
+
+    #[test]
+    fn kill_processes_by_image_script_happy_path() {
+        let exe = std::path::Path::new("C:\\Users\\u\\.speedwave\\bin\\speedwave.exe");
+        let script = kill_processes_by_image_script(exe);
+        assert!(script.contains("-Name 'speedwave'"));
+        assert!(script.contains("C:\\Users\\u\\.speedwave\\bin\\speedwave.exe"));
+        assert!(script.contains("Stop-Process -Force"));
+    }
+
+    #[test]
+    fn kill_processes_by_image_script_escapes_single_quotes() {
+        let exe = std::path::Path::new("C:\\O'Brien\\.speedwave\\bin\\speedwave.exe");
+        let script = kill_processes_by_image_script(exe);
+        assert!(
+            script.contains("C:\\O''Brien\\.speedwave\\bin\\speedwave.exe"),
+            "single quote in path must be doubled for PowerShell, got: {script}"
+        );
     }
 
     // ── SetupState save/load roundtrip ──────────────────────────────────────
@@ -1600,11 +2137,8 @@ mod tests {
         );
     }
 
-    /// Verifies that init_vm persists both `runtime_ready` and `vm_ready` to
-    /// the state file. This is a regression test: previously init_vm only set
-    /// `vm_ready`, leaving `runtime_ready` false after the check_runtime →
-    /// init_vm flow, which caused `is_setup_complete()` to return false and
-    /// the "Setup complete! Redirecting..." screen to hang indefinitely.
+    /// Regression: init_vm must persist both `runtime_ready` and `vm_ready`; it once set only
+    /// `vm_ready`, leaving `is_setup_complete()` false and the "Setup complete!" screen hung.
     #[test]
     fn init_vm_sets_runtime_ready_and_vm_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1628,12 +2162,8 @@ mod tests {
         assert!(after.vm_ready, "init_vm must set vm_ready = true");
     }
 
-    /// Verifies that check_runtime sets vm_ready=true when the runtime is Ready.
-    ///
-    /// When the runtime is already available (ensure_ready() succeeds), the wizard
-    /// frontend skips init_vm entirely. Without vm_ready=true in the state file,
-    /// is_complete() returns false and the app redirects back to the setup wizard
-    /// after reload instead of to the main shell.
+    /// check_runtime must set vm_ready=true when Ready — the wizard then skips init_vm, so
+    /// without it is_complete() stays false after reload.
     #[test]
     fn check_runtime_ready_sets_vm_ready() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1662,10 +2192,8 @@ mod tests {
         );
     }
 
-    /// Verifies that is_complete() returns false when vm_ready is false,
-    /// even if all other fields are set. This is the specific regression
-    /// that occurred when check_runtime(Ready) skipped init_vm without
-    /// setting vm_ready.
+    /// is_complete() must return false when vm_ready is false, even with other fields set —
+    /// regression from check_runtime(Ready) skipping init_vm without setting vm_ready.
     #[test]
     fn is_complete_false_without_vm_ready() {
         let state = SetupState {
@@ -1889,6 +2417,13 @@ mod tests {
         let loaded = SetupState::load_from(&path).expect("load should succeed");
         assert_eq!(loaded.current_step(), 1);
         assert!(loaded.runtime_ready);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "setup state is shared, not secret, content");
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -2513,17 +3048,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let fake_home = tmp.path().join("home");
         std::fs::create_dir_all(&fake_home).expect("create fake home");
-        // No .speedwave/ inside fake_home — guard should trigger.
-        // We can't call link_cli() directly because it uses dirs::home_dir()
-        // which returns the real home. Instead, verify the guard logic:
+        // No .speedwave/ in fake_home — guard should trigger. Can't call link_cli() directly
+        // (uses dirs::home_dir(), the real home), so verify the guard logic instead:
         let data_dir = fake_home.join(consts::DATA_DIR);
         assert!(
             !data_dir.exists(),
             "precondition: data dir should not exist"
         );
-        // The guard condition in link_cli():
-        //   if !home.join(consts::DATA_DIR).exists() { return Ok(()); }
-        // We verify the same condition holds and data dir stays absent.
+        // Guard in link_cli(): `if !home.join(consts::DATA_DIR).exists() { return Ok(()) }`.
+        // Verify the same condition holds and data dir stays absent.
         assert!(
             !data_dir.exists(),
             "data dir should not be created by guard check"
@@ -2677,10 +3210,8 @@ mod tests {
 
     #[test]
     fn decode_wsl_output_imported_from_runtime_works() {
-        // Smoke test: verify the re-exported decode_wsl_output handles
-        // UTF-16LE correctly. Full test coverage lives in speedwave-runtime.
-        // Build the input from `wsl_distro_name()` (derived from the data_dir
-        // basename) so the test is independent of the process-global data_dir.
+        // Smoke test for re-exported decode_wsl_output (full coverage in speedwave-runtime).
+        // Input built from `wsl_distro_name()`, independent of the process-global data_dir.
         let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
@@ -2789,10 +3320,8 @@ services:
 
     #[test]
     fn start_containers_security_check_passes_valid_compose() {
-        // A compose YAML with all security requirements should produce zero
-        // compose-level violations. `FileSecurityViolation`s are filtered out
-        // because they depend on the real host's `~/.speedwave/` perms — this
-        // test is about YAML semantics, not host filesystem state.
+        // A compose YAML with all security requirements should produce zero compose-level
+        // violations. `FileSecurityViolation`s are filtered; test covers YAML semantics only.
         let yaml = r#"
 version: "3"
 services:
@@ -2830,12 +3359,8 @@ networks:
         );
     }
 
-    /// Extracts the body of a top-level `pub fn <name>()` from source text by
-    /// counting braces. Used by structural tests to assert on function contents.
-    ///
-    /// Limitation: string literals containing `{` or `}` will throw off the
-    /// depth counter. This is acceptable for architectural guard tests — if a
-    /// future change adds brace-containing strings, the test may need updating.
+    /// Extracts the body of a top-level `pub fn <name>()` from source text by counting braces.
+    /// Limitation: string literals with `{`/`}` throw off the depth counter (acceptable here).
     fn extract_fn_body<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let after_sig = source
             .split(fn_signature)
@@ -2862,11 +3387,8 @@ networks:
         &rest[..end]
     }
 
-    /// Structural test: verifies that `build_images()` handles
-    /// `SnapshotterRecoveryFailed` by calling `restart_container_engine()` and
-    /// retrying the build. This is a source-level test — if the recovery pattern
-    /// is removed or refactored away, this test will fail and force a conscious
-    /// decision about the new error-handling strategy.
+    /// Structural test: `build_images()` must handle `SnapshotterRecoveryFailed` by calling
+    /// `restart_container_engine()` and retrying — fails if that recovery path is removed.
     #[test]
     fn build_images_handles_snapshotter_recovery_with_engine_restart() {
         let source = include_str!("setup_wizard.rs");
@@ -2896,10 +3418,8 @@ networks:
         );
     }
 
-    /// Structural test: verifies that `build_images()` persists `BundleState`
-    /// (with `applied_bundle_id`) after a successful image build and syncs
-    /// claude-resources. Without this, `reconcile_bundle_update` sees
-    /// `bundle_changed=true` on the next startup and triggers a phantom rebuild.
+    /// Structural test: `build_images()` must persist `BundleState.applied_bundle_id` and sync
+    /// resources after a build, or `reconcile_bundle_update` phantom-rebuilds next startup.
     #[test]
     fn build_images_writes_bundle_state_after_success() {
         let source = include_str!("setup_wizard.rs");
@@ -2925,10 +3445,8 @@ networks:
         );
     }
 
-    /// Structural test: verifies that `start_containers()` calls
-    /// `ensure_exec_healthy` between the idempotent `compose_up` and the
-    /// `SetupState` save. Without this, `containers_started = true` could be
-    /// persisted while containers are broken or missing.
+    /// Structural: `start_containers()` must call `ensure_exec_healthy` between compose_up and
+    /// state save, else `containers_started = true` could persist while broken.
     #[test]
     fn start_containers_probes_exec_after_compose_up() {
         let source = include_str!("setup_wizard.rs");
@@ -2980,7 +3498,7 @@ networks:
     #[test]
     fn build_images_warns_on_config_load_failure() {
         let source = include_str!("setup_wizard.rs");
-        let snippet = "log::warn!(\"build_images: failed to load config";
+        let snippet = "log::warn!(\"failed to load config";
         assert!(
             source.contains(snippet),
             "build_images must log::warn before defaulting on config load error, \
@@ -2995,9 +3513,8 @@ networks:
         );
     }
 
-    /// Structural test: `ensure_wslconfig_vpn_compat` must be invoked from
-    /// `main.rs` at startup so existing WSL2 installs pick up the VPN-compat
-    /// keys without a fresh install.
+    /// Structural: `ensure_wslconfig_vpn_compat` must be invoked from `main.rs` at startup so
+    /// existing WSL2 installs pick up the VPN-compat keys without a fresh install.
     #[test]
     fn ensure_wslconfig_vpn_compat_called_from_main() {
         let source = include_str!("main.rs");
@@ -3008,9 +3525,8 @@ networks:
         );
     }
 
-    /// Structural test: `ensure_lima_vm_config()` must be called in `main.rs`
-    /// before `reconcile_bundle_update()` so the VM memory is migrated before
-    /// images are rebuilt.
+    /// Structural: `ensure_lima_vm_config()` must be called in `main.rs` before
+    /// `reconcile_bundle_update()` so VM memory is migrated before images are rebuilt.
     #[test]
     fn ensure_lima_vm_config_called_before_reconcile() {
         let source = include_str!("main.rs");
@@ -3057,10 +3573,8 @@ networks:
         );
     }
 
-    // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(), and
-    // reset_vm() errors must be non-fatal (log::warn and continue).
-    // These tests verify the non-fatal wrapper pattern used in factory_reset
-    // handles both Ok and Err from reset_vm() correctly.
+    // ADR-048: factory_reset calls reset_vm() before wipe_data_dir(); errors must be non-fatal
+    // (log::warn and continue). These tests cover both Ok and Err from reset_vm().
     mod reset_vm_factory_reset_contract {
         use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 

@@ -25,5 +25,9 @@ Group all platform-specific native OS CLI binaries under a single `native/` dire
 
 ## Notes
 
-- `Package.swift` files use relative source paths and needed no change; `.gitignore` patterns (`.build/`, `.swiftpm/`) match at any depth.
-- Build artifacts now sit one level deeper, at `native/macos/<pkg>/.build/release/`.
+- `Package.swift` files use relative source paths and needed no change; `.gitignore` patterns (`.build/`, `.swiftpm/`) match at any depth.[^1]
+- Build artifacts now sit one level deeper, at `native/macos/<pkg>/.build/release/`.[^2]
+
+[^1]: [Git - gitignore Documentation](https://git-scm.com/docs/gitignore) - a pattern with no leading or middle slash matches at any level below the `.gitignore` file's directory.
+
+[^2]: [Swift.org - Building a Server-Side Swift Package](https://www.swift.org/documentation/server/guides/building.html) - Swift Package Manager places build artifacts under `.build/<platform-triple>/<configuration>/` by default.

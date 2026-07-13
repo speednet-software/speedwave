@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createRepositoryTools } from './repository-tools.js';
+import { expectNotFoundTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 // Mock client type with all repository-related methods
@@ -217,10 +218,7 @@ describe('createRepositoryTools', () => {
 
       const result = await handler!({ project_id: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {
@@ -272,7 +270,7 @@ describe('createRepositoryTools', () => {
       const result = await handler!({ project_id: 'project-1', file_path: 'README.md' });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mockFile, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, ...mockFile }, null, 2) }],
       });
       expect(mockClient.getFile).toHaveBeenCalledWith('project-1', 'README.md', undefined);
     });
@@ -303,7 +301,7 @@ describe('createRepositoryTools', () => {
       });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mockFile, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, ...mockFile }, null, 2) }],
       });
       expect(mockClient.getFile).toHaveBeenCalledWith('project-1', 'config/config.json', 'develop');
     });
@@ -334,7 +332,7 @@ describe('createRepositoryTools', () => {
       });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mockFile, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, ...mockFile }, null, 2) }],
       });
       expect(mockClient.getFile).toHaveBeenCalledWith('project-1', 'src/index.ts', 'abc123def456');
     });
@@ -347,10 +345,7 @@ describe('createRepositoryTools', () => {
 
       const result = await handler!({ project_id: 'project-1', file_path: 'nonexistent.txt' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {
@@ -375,7 +370,7 @@ describe('createRepositoryTools', () => {
       const result = await handler!({ project_id: 456, file_path: 'test.js' });
 
       expect(result).toEqual({
-        content: [{ type: 'text', text: JSON.stringify(mockFile, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, ...mockFile }, null, 2) }],
       });
       expect(mockClient.getFile).toHaveBeenCalledWith(456, 'test.js', undefined);
     });

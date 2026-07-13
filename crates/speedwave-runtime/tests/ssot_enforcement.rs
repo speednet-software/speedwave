@@ -1,7 +1,5 @@
-//! Static enforcement of the LockedRuntime SSOT contract:
-//! 1. `ContainerRuntime` trait is `pub(crate)` — not reachable from downstream.
-//! 2. `with_project_compose_lock` is not re-exported from `runtime::`.
-//! 3. `detect_runtime()` returns `LockedRuntime`, never `Box<dyn ...>`.
+//! Static enforcement of the LockedRuntime SSOT contract: `ContainerRuntime` stays `pub(crate)`,
+//! `with_project_compose_lock` is never re-exported, `detect_runtime()` returns `LockedRuntime`.
 
 #[test]
 fn trait_container_runtime_is_pub_crate() {

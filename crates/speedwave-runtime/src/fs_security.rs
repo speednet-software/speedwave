@@ -1,18 +1,10 @@
-//! Host filesystem permission auto-fix for security-sensitive paths.
-//!
-//! Called before `SecurityCheck::run()` on all container start paths (CLI,
-//! Desktop, update, rollback) to silently fix incorrect mode bits.
-//! `speedwave check` does NOT call autofix — it reports violations only.
+//! Host filesystem permission auto-fix for security-sensitive paths. Called before
+//! `SecurityCheck::run()` on all start paths to fix mode bits; `speedwave check` reports-only.
 
 use crate::consts;
 
-/// Fixes permissions on existing security-sensitive paths under the default
-/// data directory (`~/.speedwave/`).
-///
-/// Directories are set to `0o700`, files to `0o600`. Missing paths and
-/// symlinks are silently skipped. Idempotent — safe to call on every startup.
-///
-/// On non-Unix platforms this is a no-op.
+/// Fixes permissions under the default data directory (`~/.speedwave/`): dirs to `0o700`, files to
+/// `0o600`. Skips missing paths and symlinks; idempotent; no-op on non-Unix.
 pub fn ensure_data_dir_permissions(project: &str) -> anyhow::Result<()> {
     ensure_data_dir_permissions_in(consts::data_dir(), project)
 }
@@ -104,14 +96,8 @@ pub(crate) fn ensure_data_dir_permissions_in(
     Ok(())
 }
 
-/// Enumerates security-sensitive paths under `data_dir` for a project.
-///
-/// Returns `(dirs, files)` where:
-/// - `dirs` must have mode `0o700` (owner rwx only)
-/// - `files` must have mode `0o600` (owner rw only)
-///
-/// Used by both `ensure_data_dir_permissions_in()` (to fix) and
-/// `SecurityCheck::check_file_security_with_uid()` (to validate).
+/// Enumerates security-sensitive paths under `data_dir`: `dirs` must be `0o700`, `files` must be `0o600`.
+/// Used by both the autofix path and `SecurityCheck::check_file_security_with_uid()`.
 #[cfg(unix)]
 pub(crate) fn collect_security_paths(
     data_dir: &std::path::Path,
@@ -223,7 +209,10 @@ pub(crate) fn collect_security_paths(
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test-only module: unwraps assert setup succeeded"
+)]
 mod tests {
     use super::*;
 

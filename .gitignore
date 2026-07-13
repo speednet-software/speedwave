@@ -1,9 +1,8 @@
 # Rust / Cargo
 target/
 **/*.rs.bk
-# Per-machine cargo overrides (linker path, etc.) — template in
-# docs/contributing/development-setup.md. `config.local.toml` is not a
-# cargo convention but listed for users who follow the docs anyway.
+# Per-machine cargo overrides (linker path, etc.). `config.local.toml` is not
+# a cargo convention but listed for users who keep one anyway.
 .cargo/config.toml
 .cargo/config.local.toml
 

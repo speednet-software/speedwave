@@ -1,11 +1,6 @@
 /**
- * Security Tests
- *
- * Covers:
- * - Command allowlist enforcement
- * - ISO8601 strict validation
- * - Input sanitization via withValidation
- * - Tool ↔ allowlist parity
+ * Security tests: command allowlist, ISO8601 validation, withValidation
+ * sanitization, tool/allowlist parity.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -52,9 +47,7 @@ describe('Security', () => {
     vi.restoreAllMocks();
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Command Allowlist
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── Command Allowlist ──────────────────────────────────────────────────────────────────────
 
   describe('Command Allowlist', () => {
     it('rejects unknown command names', async () => {
@@ -123,9 +116,7 @@ describe('Security', () => {
     });
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Tool ↔ Allowlist parity
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── Tool ↔ Allowlist parity ────────────────────────────────────────────────────────────────
 
   describe('Tool ↔ Allowlist parity', () => {
     it('every registered tool handler invokes runCommand with an allowlisted command', async () => {
@@ -189,9 +180,7 @@ describe('Security', () => {
     });
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // ISO8601 Strictness
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── ISO8601 Strictness ─────────────────────────────────────────────────────────────────────
 
   describe('ISO8601 Strictness', () => {
     it('rejects human-readable date formats', () => {
@@ -235,9 +224,7 @@ describe('Security', () => {
     });
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Environment Isolation (SEC-025)
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── Environment Isolation (SEC-025) ────────────────────────────────────────────────────────
 
   describe('Environment Isolation', () => {
     const envKeysToClean = [
@@ -298,9 +285,7 @@ describe('Security', () => {
     });
   });
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Input Sanitization (withValidation)
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── Input Sanitization (withValidation) ────────────────────────────────────────────────────
 
   describe('Input Sanitization', () => {
     it('rejects null params via withValidation', async () => {

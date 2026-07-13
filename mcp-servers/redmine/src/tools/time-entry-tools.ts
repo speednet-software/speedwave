@@ -10,15 +10,23 @@ import {
   notConfiguredMessage,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const listTimeEntriesTool: Tool = {
   name: 'listTimeEntries',
-  description: 'List time entries with optional filters.',
+  description:
+    'List time entries with optional filters. Returns entries for ALL users by default — for "my hours"/"my time entries" questions, pass user_id: "me" to scope to the current authenticated user. If this Redmine integration is scoped to a single project, results are silently restricted to that project even when project_id is omitted.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+    [META_KEYS.SELF_PARAM]: "user_id: 'me'",
+  },
   keywords: ['redmine', 'time', 'entries', 'list', 'hours', 'log'],
   example: `const entries = await redmine.listTimeEntries({ issue_id: 12345 })`,
   inputSchema: {
@@ -26,7 +34,10 @@ const listTimeEntriesTool: Tool = {
     properties: {
       issue_id: { type: 'number', description: 'Filter by issue ID' },
       project_id: { type: 'string', description: 'Filter by project ID' },
-      user_id: { type: 'number', description: 'Filter by user ID' },
+      user_id: {
+        type: ['number', 'string'],
+        description: "Filter by user ID, or 'me' for the current authenticated user",
+      },
       from: { type: 'string', description: 'From date (YYYY-MM-DD)' },
       to: { type: 'string', description: 'To date (YYYY-MM-DD)' },
       limit: { type: 'number', description: 'Maximum results (default 25)' },
@@ -80,9 +91,14 @@ const listTimeEntriesTool: Tool = {
 
 const createTimeEntryTool: Tool = {
   name: 'createTimeEntry',
-  description: 'Log time on an issue or project',
+  description:
+    "Log time on an issue or project. The entry is always attributed to the current authenticated user (getCurrentUser) — there is no way to log time on another user's behalf.",
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
+  },
   keywords: ['redmine', 'time', 'entry', 'create', 'log', 'hours'],
   example: `await redmine.createTimeEntry({ hours: 2.5, issue_id: 12345, activity: "development", comments: "Code review" })`,
   inputSchema: {
@@ -149,13 +165,16 @@ const updateTimeEntryTool: Tool = {
   name: 'updateTimeEntry',
   description: 'Update an existing time entry',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'time', 'update', 'modify', 'hours', 'edit'],
   example: `await redmine.updateTimeEntry({ time_entry_id: 789, hours: 3.5 })`,
   inputSchema: {
     type: 'object',
     properties: {
-      time_entry_id: { type: 'number', description: 'Time entry ID' },
+      time_entry_id: {
+        type: 'number',
+        description: 'Time entry ID — obtained from listTimeEntries; look for time_entries[].id',
+      },
       hours: { type: 'number', description: 'Updated hours' },
       activity_id: { type: 'number', description: 'Updated activity ID' },
       activity: { type: 'string', description: 'Activity name' },
@@ -217,45 +236,37 @@ export function createTimeEntryTools(client: RedmineClient | null): ToolDefiniti
   return [
     {
       tool: listTimeEntriesTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const result = await client.listTimeEntries(
             params as Parameters<typeof client.listTimeEntries>[0]
           );
           return jsonResult({ time_entries: result.time_entries, total_count: result.total_count });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: createTimeEntryTool,
-      handler: async (params) => {
-        try {
+      handler: async (params) =>
+        withRedmineErrors(undefined, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
           const result = await client.createTimeEntry(
             resolved as Parameters<typeof client.createTimeEntry>[0]
           );
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
-      },
+        }),
     },
     {
       tool: updateTimeEntryTool,
       handler: async (params) => {
-        try {
+        const { time_entry_id } = params as { time_entry_id: number };
+        return withRedmineErrors({ time_entry_id }, async () => {
           const resolved = resolveParams(params as Record<string, unknown>, client.getMappings());
-          const { time_entry_id } = resolved as { time_entry_id: number };
           await client.updateTimeEntry(
             time_entry_id,
             resolved as Parameters<typeof client.updateTimeEntry>[1]
           );
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
   ];

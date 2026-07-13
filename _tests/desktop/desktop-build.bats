@@ -5,9 +5,7 @@
 TAURI_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.conf.json"
 ANGULAR_JSON="$BATS_TEST_DIRNAME/../../desktop/src/angular.json"
 
-# ---------------------------------------------------------------------------
-# Static checks (no build required)
-# ---------------------------------------------------------------------------
+# ── Static checks (no build required) ──
 
 @test "frontendDist is set in tauri.conf.json" {
     run python3 -c "
@@ -37,10 +35,8 @@ print(fd)
 }
 
 @test "angular.json disables CLI analytics prompt (cli.analytics must be boolean false)" {
-    # Without this setting Angular CLI shows an interactive telemetry prompt on first run
-    # (ng serve / ng test / ng build) that hangs non-interactive shells indefinitely.
-    # The value must be the boolean false — a string "false" would be treated as a user-id
-    # and would enable analytics instead of disabling it (Angular CLI uses === false check).
+    # Without this, Angular CLI shows an interactive telemetry prompt on first run that hangs
+    # non-interactive shells; must be boolean false (a string "false" is a user-id, === false check).
     run python3 -c "
 import json, sys
 cfg = json.load(open('$ANGULAR_JSON'))
@@ -56,9 +52,7 @@ print('ok')
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# Build verification (requires prior `ng build`)
-# ---------------------------------------------------------------------------
+# ── Build verification (requires prior `ng build`) ──
 
 @test "index.html exists at frontendDist path after Angular build" {
     run python3 -c "
@@ -77,9 +71,7 @@ print(f'OK: {index}')
     [ "$status" -eq 0 ]
 }
 
-# ---------------------------------------------------------------------------
-# CLI binary declared in platform-specific Tauri configs
-# ---------------------------------------------------------------------------
+# ── CLI binary declared in platform-specific Tauri configs ──
 
 TAURI_DIR="$BATS_TEST_DIRNAME/../../desktop/src-tauri"
 

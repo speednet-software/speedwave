@@ -101,7 +101,7 @@ Cache is pruned only by the recovery ladder in `with_build_recovery` (shared by
 bundle and plugin builds), in two unrecoverable states — disk-full and
 containerd snapshotter corruption (`failed to stat parent`) — where cache reuse
 is impossible anyway; `nerdctl system prune` does not clear BuildKit cache
-mounts, so both branches call `builder prune` explicitly. Routine updates never
+mounts (unverified), so both branches call `builder prune` explicitly[^5]. Routine updates never
 prune the cache. Bounded cache growth is accepted: nerdctl exposes no
 `--keep-storage` budget for `builder prune` (only `--all`/`--force`)[^2], so a
 threshold-based prune is deferred.
@@ -148,7 +148,7 @@ outside compose locks). The CLI remains a **non-writer** of `bundle-state.json`
 - A hash that changes twice across a _failed_ reconcile can leave one orphan
   tag until the disk-full ladder reclaims it — accepted (bounded, rare).
 - `nerdctl compose up` without `--force-recreate` will NOT recreate a container
-  whose image was rebuilt under an unchanged tag. Per-image content-addressed
+  whose image was rebuilt under an unchanged tag[^4]. Per-image content-addressed
   tags remove that hazard: a changed image always gets a new tag, so plain
   config-hash convergence (nerdctl ≥ 2.2.0[^3]) recreates exactly what changed.
   Combined with the nerdctl 2.2.2 parity bump, this let the project-switch path
@@ -169,3 +169,14 @@ outside compose locks). The CLI remains a **non-writer** of `bundle-state.json`
     nerdctl PR #4550 "compose: align convergence with Docker Compose"
     (config-hash label `com.docker.compose.config-hash`, first released in
     v2.2.0): <https://github.com/containerd/nerdctl/pull/4550>
+
+[^4]:
+    docker/compose issue #9308 "`docker compose up --build` not recreating
+    container" — rebuilding an image under an unchanged tag does not, by
+    itself, cause `compose up` to recreate the container:
+    <https://github.com/docker/compose/issues/9308>
+
+[^5]:
+    nerdctl FAQ, "How to clean cache in BuildKit?" — documents
+    `nerdctl builder prune` as the command to remove cached BuildKit build
+    objects: <https://github.com/containerd/nerdctl/blob/main/docs/faq.md>

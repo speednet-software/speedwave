@@ -11,14 +11,16 @@ import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
   DESTRUCTIVE_ANNOTATIONS,
+  META_KEYS,
 } from '@speedwave/mcp-shared';
 import { RedmineClient } from '../client.js';
+import { withRedmineErrors } from './error-handling.js';
 
 const listRelationsTool: Tool = {
   name: 'listRelations',
   description: 'List all relations for an issue (blocks, precedes, duplicates, etc.)',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'relation', 'link', 'dependency', 'blocks', 'precedes', 'follows', 'list'],
   example: `const { relations } = await redmine.listRelations({ issue_id: 12345 })`,
   inputSchema: {
@@ -76,7 +78,7 @@ const createRelationTool: Tool = {
   name: 'createRelation',
   description: 'Create a relation between two issues',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'relation', 'create', 'link', 'dependency', 'blocks', 'precedes'],
   example: `await redmine.createRelation({ issue_id: 100, issue_to_id: 101, relation_type: 'blocks' })`,
   inputSchema: {
@@ -156,13 +158,17 @@ const deleteRelationTool: Tool = {
   name: 'deleteRelation',
   description: 'Delete a relation between issues',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['redmine', 'relation', 'delete', 'remove', 'unlink'],
   example: `await redmine.deleteRelation({ relation_id: 456 })`,
   inputSchema: {
     type: 'object',
     properties: {
-      relation_id: { type: 'number', description: 'Relation ID to delete' },
+      relation_id: {
+        type: 'number',
+        description:
+          'Relation ID to delete — obtained from listRelations(issue_id); look for relations[].id',
+      },
     },
     required: ['relation_id'],
   },
@@ -212,25 +218,23 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
     {
       tool: listRelationsTool,
       handler: async (params) => {
-        try {
-          const { issue_id } = params as { issue_id: number };
+        const { issue_id } = params as { issue_id: number };
+        return withRedmineErrors({ issue_id }, async () => {
           const result = await client.listRelations(issue_id);
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
     {
       tool: createRelationTool,
       handler: async (params) => {
-        try {
-          const { issue_id, issue_to_id, relation_type, delay } = params as {
-            issue_id: number;
-            issue_to_id: number;
-            relation_type?: RelationType;
-            delay?: number;
-          };
+        const { issue_id, issue_to_id, relation_type, delay } = params as {
+          issue_id: number;
+          issue_to_id: number;
+          relation_type?: RelationType;
+          delay?: number;
+        };
+        return withRedmineErrors({ issue_id, issue_to_id }, async () => {
           const result = await client.createRelation({
             issue_id,
             issue_to_id,
@@ -238,21 +242,17 @@ export function createRelationTools(client: RedmineClient | null): ToolDefinitio
             delay,
           });
           return jsonResult(result);
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
     {
       tool: deleteRelationTool,
       handler: async (params) => {
-        try {
-          const { relation_id } = params as { relation_id: number };
+        const { relation_id } = params as { relation_id: number };
+        return withRedmineErrors({ relation_id }, async () => {
           await client.deleteRelation(relation_id);
           return jsonResult({ ok: true });
-        } catch (error) {
-          return errorResult(RedmineClient.formatError(error));
-        }
+        });
       },
     },
   ];

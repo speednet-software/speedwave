@@ -1,6 +1,9 @@
 //! Integration test for `SPEEDWAVE_DATA_DIR` env var → OnceLock wiring via subprocess re-exec.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "test assertions on setup/mock calls that must not silently fail"
+)]
 
 use std::process::Command;
 

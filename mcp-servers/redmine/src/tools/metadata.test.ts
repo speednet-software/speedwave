@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { createToolDefinitions } from './index.js';
-import { Tool } from '@speedwave/mcp-shared';
+import { Tool, META_KEYS, metaValue } from '@speedwave/mcp-shared';
 
 const ALL_TOOLS: Tool[] = createToolDefinitions(null).map((td) => td.tool);
 
@@ -69,12 +69,87 @@ describe('Redmine tool metadata', () => {
       expect(tool.example!.trim().length).toBeGreaterThan(0);
     });
 
-    it('has _meta with deferLoading', () => {
+    it('has _meta with a prefixed defer-loading key', () => {
       expect(tool._meta, `${tool.name} missing _meta`).toBeDefined();
+      const meta = tool._meta as Record<string, unknown>;
+      expect(META_KEYS.DEFER_LOADING in meta, `${tool.name} uses legacy deferLoading key`).toBe(
+        true
+      );
       expect(
-        typeof (tool._meta as Record<string, unknown>).deferLoading,
+        typeof metaValue(meta, META_KEYS.DEFER_LOADING, 'deferLoading'),
         `${tool.name} missing deferLoading`
       ).toBe('boolean');
+    });
+
+    it('does not use the legacy unprefixed deferLoading key', () => {
+      expect(
+        (tool._meta as Record<string, unknown> | undefined)?.deferLoading,
+        `${tool.name} still uses legacy deferLoading`
+      ).toBeUndefined();
+    });
+
+    it('does not use legacy unprefixed identity keys', () => {
+      const meta = tool._meta as Record<string, unknown> | undefined;
+      expect(meta?.userScoped, `${tool.name} uses legacy userScoped`).toBeUndefined();
+      expect(meta?.currentUserTool, `${tool.name} uses legacy currentUserTool`).toBeUndefined();
+      expect(meta?.selfParam, `${tool.name} uses legacy selfParam`).toBeUndefined();
+    });
+  });
+
+  describe('identity metadata', () => {
+    const byName = (name: string): Tool =>
+      ALL_TOOLS.find((t) => t.name === name) as unknown as Tool;
+
+    it('every tool declaring speedwave.pl/user-scoped also declares a current-user-tool or self-param', () => {
+      for (const tool of ALL_TOOLS) {
+        const meta = tool._meta as Record<string, unknown> | undefined;
+        if (metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped') !== true) continue;
+        const currentUserTool = metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool');
+        const selfParam = metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam');
+        expect(
+          currentUserTool !== undefined || selfParam !== undefined,
+          `${tool.name} is user-scoped but declares neither a current-user-tool nor a self-param`
+        ).toBe(true);
+      }
+    });
+
+    it('is user-scoped on exactly the expected tools', () => {
+      const expectedUserScoped = new Set([
+        'listIssueIds',
+        'createIssue',
+        'updateIssue',
+        'listTimeEntries',
+        'createTimeEntry',
+        'resolveUser',
+        'getCurrentUser',
+      ]);
+      for (const tool of ALL_TOOLS) {
+        const meta = tool._meta as Record<string, unknown> | undefined;
+        const isUserScoped = metaValue(meta, META_KEYS.USER_SCOPED, 'userScoped') === true;
+        expect(isUserScoped, `${tool.name} user-scoped mismatch`).toBe(
+          expectedUserScoped.has(tool.name)
+        );
+      }
+    });
+
+    it('listTimeEntries points to getCurrentUser as its current-user-tool', () => {
+      const meta = byName('listTimeEntries')._meta as Record<string, unknown>;
+      expect(metaValue(meta, META_KEYS.CURRENT_USER_TOOL, 'currentUserTool')).toBe(
+        'getCurrentUser'
+      );
+    });
+
+    it.each(['listIssueIds', 'createIssue', 'updateIssue'])(
+      "%s declares a self-param for assigned_to: 'me'",
+      (name) => {
+        const meta = byName(name)._meta as Record<string, unknown>;
+        expect(metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam')).toBe("assigned_to: 'me'");
+      }
+    );
+
+    it("listTimeEntries declares a self-param for user_id: 'me'", () => {
+      const meta = byName('listTimeEntries')._meta as Record<string, unknown>;
+      expect(metaValue(meta, META_KEYS.SELF_PARAM, 'selfParam')).toBe("user_id: 'me'");
     });
   });
 });

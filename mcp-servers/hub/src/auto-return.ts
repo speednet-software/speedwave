@@ -13,8 +13,7 @@ export interface AutoReturnResult {
 
 /**
  * Adds implicit 'return' to the last expression if no explicit return exists.
- * @param code - JavaScript code to process
- * @returns Result with code and optional parse error
+ * @param code - JavaScript code to process.
  */
 export function addAutoReturn(code: string): AutoReturnResult {
   const trimmed = code.trim();

@@ -502,9 +502,8 @@ describe('parseLogLine', () => {
   });
 
   it('compose-container line: nerdctl stamp → column, the worker `ts()` stamp dropped from the message', () => {
-    // `<container> | <nerdctl-RFC3339-UTC> [<ts()-ISO-local>] msg` — the column
-    // gets nerdctl's stamp (localised at render); the inline `[<ts()>]` is the
-    // same instant, so it's removed from the visible message.
+    // `<container> | <nerdctl-RFC3339-UTC> [<ts()-ISO-local>] msg` — the column gets nerdctl's
+    // stamp (localised at render); the inline `[<ts()>]` is the same instant, so it's removed.
     const line = parseLogLine(
       'mcp_hub | 2026-05-12T13:00:39.816Z [2026-05-12T15:00:39.816+02:00] 🔗 Initializing HTTP bridges'
     );
@@ -721,12 +720,8 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('reports disconnected and surfaces a connect link when bridge is running but no IDE is selected (SSOT regression guard)', async () => {
-    // Backend can report `running: true` (the bridge daemon is scanning for
-    // IDEs) while no IDE has been actively selected — historically the UI
-    // confused the two and showed `connected · Cursor :…` even though the
-    // /integrations table offered a `connect →` button. The status bar must
-    // read `selected_ide` as the source of truth for the connected state
-    // and offer a deep-link to the section where the user can connect.
+    // `running: true` means the bridge daemon is scanning, not that an IDE is selected — the status
+    // bar must read `selected_ide` as SSOT for "connected" and offer a deep-link to connect.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_all_logs') return '';
       if (cmd === 'get_health')
@@ -1121,11 +1116,8 @@ describe('LogsViewComponent — status bar layout', () => {
   });
 
   it('exposes desktop, mcp-os and claude as separate sources in the dropdown', async () => {
-    // Backend `get_all_logs` returns lines pre-prefixed with `<source> | …`.
-    // The existing `parseLogLine` extracts that source token and the
-    // `sources()` signal exposes distinct values. This test pins the
-    // contract: a merged backend response with all token types must produce
-    // matching entries in the dropdown.
+    // `get_all_logs` returns lines pre-prefixed with `<source> | …`; `parseLogLine` extracts the
+    // token and `sources()` exposes distinct values — pins that all token types reach the dropdown.
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
       return [

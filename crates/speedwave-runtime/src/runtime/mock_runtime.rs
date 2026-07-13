@@ -1,7 +1,9 @@
-//! Mock-runtime builder for `LockedRuntime`. Single entry point for tests —
-//! `ContainerRuntime` is `pub(crate)`, so this is the only legal way for
-//! downstream crates to build a mock. Gated behind feature `test-support`.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Mock-runtime builder for `LockedRuntime`. `ContainerRuntime` is `pub(crate)`, so this is
+//! the only legal way for downstream crates to build a mock. Gated behind `test-support`.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test-support builder/mock: unwrap on locked test fixtures is sound"
+)]
 
 use super::{ContainerRuntime, LockedRuntime, VmExecOutput};
 use serde_json::Value;
@@ -282,16 +284,14 @@ impl MockRuntimeBuilder {
         self.image_exists_error = Some(msg.to_string());
         self
     }
-    /// Default value returned by `image_exists(tag)` when no exact-match
-    /// override is set in the `image_exists` map and no
+    /// Default for `image_exists(tag)` when no exact-match override is set and no
     /// `image_missing_substring` matches the tag. Default: `false`.
     pub fn with_image_exists_default(mut self, default: bool) -> Self {
         self.image_exists_default = default;
         self
     }
-    /// Make `image_exists(tag)` return `false` whenever `tag` contains
-    /// `substring`. Wins over `image_exists_default` but loses to an exact
-    /// override set via `with_image_exists`.
+    /// Make `image_exists(tag)` return `false` whenever `tag` contains `substring`. Wins over
+    /// `image_exists_default` but loses to an exact override set via `with_image_exists`.
     pub fn with_image_missing_substring(mut self, substring: &str) -> Self {
         self.image_missing_substrings.push(substring.to_string());
         self
@@ -312,9 +312,8 @@ impl MockRuntimeBuilder {
         self.build_image_result = BuildResult::AllErr(msg.to_string());
         self
     }
-    /// Fail `build_image(tag)` only on the given 1-based attempt count.
-    /// Attempts are tracked per-tag — calling `build_image("a:1")` three times
-    /// surfaces attempt numbers 1, 2, 3 for that tag.
+    /// Fail `build_image(tag)` only on the given 1-based attempt count. Attempts are tracked
+    /// per-tag — calling `build_image("a:1")` three times surfaces attempts 1, 2, 3.
     pub fn with_build_error_for_attempt(mut self, tag: &str, attempt: u32, msg: &str) -> Self {
         self.build_attempt_errors
             .insert((tag.to_string(), attempt), msg.to_string());
@@ -348,9 +347,8 @@ impl MockRuntimeBuilder {
         self.exec_piped_error = Some(msg.to_string());
         self
     }
-    /// Push a scripted failing result for `container_exec_piped` (FIFO). The
-    /// returned `Command` writes `stderr_msg` to stderr and exits non-zero;
-    /// when the queue is empty it falls back to default success.
+    /// Push a scripted failing result for `container_exec_piped` (FIFO): writes `stderr_msg`
+    /// to stderr and exits non-zero; falls back to default success once the queue is empty.
     pub fn push_exec_piped_failure(self, stderr_msg: &str) -> Self {
         self.exec_piped_failure_queue
             .lock()
@@ -498,6 +496,7 @@ impl ContainerRuntime for MockRuntime {
             container: container.to_string(),
             argv: cmd.iter().map(|s| s.to_string()).collect(),
         });
+        // SSOT-allow: test fixture spawn
         Command::new(&self.container_exec_program)
     }
 
@@ -519,17 +518,20 @@ impl ContainerRuntime for MockRuntime {
             }
         };
         if let Some(msg) = next_failure {
+            // SSOT-allow: test fixture spawn
             let mut c = Command::new("sh");
             c.env("SW_MOCK_EXEC_STDERR", msg)
                 .args(["-c", "echo \"$SW_MOCK_EXEC_STDERR\" >&2; exit 1"]);
             return Ok(c);
         }
         if let Some(script) = &self.exec_piped_script {
+            // SSOT-allow: test fixture spawn
             let mut c = Command::new("sh");
             c.env("SW_MOCK_EXEC_SCRIPT", script)
                 .args(["-c", "printf '%s' \"$SW_MOCK_EXEC_SCRIPT\""]);
             return Ok(c);
         }
+        // SSOT-allow: test fixture spawn
         Ok(Command::new(&self.container_exec_program))
     }
 
@@ -777,7 +779,7 @@ impl ContainerRuntime for MockRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
 

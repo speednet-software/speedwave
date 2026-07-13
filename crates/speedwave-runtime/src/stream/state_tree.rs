@@ -160,9 +160,8 @@ pub struct QueuedMessage {
     pub queued_at: u64,
 }
 
-/// One block inside a conversation entry — aggregated state after delta
-/// application, not the raw event. Tagged enum mirrored by
-/// `models/chat.ts::MessageBlock` (CLAUDE.md SSOT alignment).
+/// One block inside a conversation entry — aggregated state after delta application, not the
+/// raw event. Tagged enum mirrored by `models/chat.ts::MessageBlock` (SSOT alignment).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageBlock {
@@ -193,9 +192,8 @@ pub enum MessageBlock {
         #[serde(default)]
         is_error: bool,
     },
-    /// Interactive question(s) from Claude (the `AskUserQuestion` tool).
-    /// Up to `MAX_ASK_USER_QUESTIONS`; rendered sequentially, only
-    /// `current_index` interactive.
+    /// Interactive question(s) from Claude (the `AskUserQuestion` tool). Up to
+    /// `MAX_ASK_USER_QUESTIONS`; rendered sequentially, only `current_index` interactive.
     AskUser {
         /// Tool-use id from the stream event.
         tool_id: String,
@@ -232,9 +230,8 @@ pub const MAX_ASK_USER_QUESTIONS: usize = 4;
 /// stdin for an `AskUserQuestion`; the host fails closed above this cap.
 pub const MAX_ASK_USER_WIRE_BYTES: usize = 64 * 1024;
 
-/// One question inside an `AskUser` block. SDK ships camelCase; the host
-/// translates to snake_case in `StreamParser::parse_ask_user_question`.
-/// Adding a field here requires updating that manual parser.
+/// One question inside an `AskUser` block. SDK ships camelCase; the host translates to
+/// snake_case in `StreamParser::parse_ask_user_question` — a new field needs that parser updated.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AskUserQuestionItem {
     /// Full question text shown to the user. Also doubles as the key in the
@@ -259,7 +256,7 @@ pub struct AskUserOption {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -514,9 +511,8 @@ mod tests {
         );
     }
 
-    /// When `session_id` is `None`, the redaction marker must not appear —
-    /// the redaction maps `Some(_) -> Some("…")` and `None -> None` so
-    /// the absence of an identifier is honestly reported.
+    /// When `session_id` is `None`, the redaction marker must not appear — redaction maps
+    /// `Some(_) -> Some("…")` and `None -> None` so absence is honestly reported.
     #[test]
     fn debug_session_id_none_renders_as_none() {
         let state = ConversationState::default();

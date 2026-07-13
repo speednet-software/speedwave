@@ -66,7 +66,7 @@ While diagnosing the OOM above, a second, unrelated exit-137 cause surfaced and 
 
 [^2]: Claude Code system requirements: "Hardware: 4 GB+ RAM, x64 or ARM64 processor." <https://code.claude.com/docs/en/setup>
 
-[^3]: Docker resource constraints — hard vs soft limits; `--memory` is a hard ceiling the container "can use no more than," not a reservation. <https://docs.docker.com/engine/containers/resource_constraints/>
+[^3]: Docker resource constraints - hard vs soft limits; `--memory` is a hard ceiling the container "can use no more than," not a reservation. <https://docs.docker.com/engine/containers/resource_constraints/>
 
 [^4]: Apple's M3/M4 MacBook Air base config is 16 GB RAM with an 8–10-core CPU. <https://www.apple.com/macbook-air/specs/>
 

@@ -1,6 +1,5 @@
 /**
- * Confluence page tools — searchPages (CQL), getPage, getPageByTitle,
- * createPage, updatePage, getPageChildren. 6 tools.
+ * Confluence page tools — search (CQL), get by ID/title, create, update, children. 6 tools.
  * @module mcp-atlassian/tools/confluence-page-tools
  */
 
@@ -10,6 +9,7 @@ import {
   jsonResult,
   errorResult,
   notConfiguredMessage,
+  META_KEYS,
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
 } from '@speedwave/mcp-shared';
@@ -19,9 +19,10 @@ import { toStorageBodyInput, withValidation } from './validation.js';
 
 const searchPagesTool: Tool = {
   name: 'searchPages',
-  description: 'Search Confluence content with CQL (Confluence Query Language). Returns pages.',
+  description:
+    "Search Confluence content with CQL (Confluence Query Language). Returns pages. If a Confluence space allowlist is configured, matches in other spaces (or matches whose space key can't be resolved — this space-key extraction is best-effort) are silently removed from the results; do not conclude a page doesn't exist from an empty or short result.",
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['confluence', 'pages', 'search', 'cql', 'query', 'wiki', 'find'],
   example:
     'const { pages } = await atlassian.searchPages({ cql: "space = DEV AND type = page AND text ~ \\"runbook\\"", limit: 10 })',
@@ -56,7 +57,7 @@ const getPageTool: Tool = {
   name: 'getPage',
   description: 'Get a Confluence page by ID (optionally including the storage-format body).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: { [META_KEYS.DEFER_LOADING]: false },
   keywords: ['confluence', 'page', 'get', 'show', 'read', 'wiki'],
   example: 'const page = await atlassian.getPage({ pageId: "12345", includeBody: true })',
   inputSchema: {
@@ -89,7 +90,7 @@ const getPageByTitleTool: Tool = {
   name: 'getPageByTitle',
   description: 'Find a Confluence page by exact title within a space.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'page', 'title', 'find', 'lookup'],
   example: 'const page = await atlassian.getPageByTitle({ spaceKey: "DEV", title: "Onboarding" })',
   inputSchema: {
@@ -124,7 +125,7 @@ const createPageTool: Tool = {
   description:
     'Create a Confluence page in a space. Provide `bodyStorage` (storage XHTML) or `bodyText` (plain text, wrapped in a paragraph).',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'page', 'create', 'new', 'wiki', 'write'],
   example:
     'const page = await atlassian.createPage({ spaceKey: "DEV", title: "Release Notes 1.2", bodyText: "Highlights:\\n- ...", parentId: "100" })',
@@ -166,9 +167,9 @@ const createPageTool: Tool = {
 const updatePageTool: Tool = {
   name: 'updatePage',
   description:
-    'Update a Confluence page (the current version is fetched and incremented automatically). Provide `bodyStorage` or `bodyText` to replace the body.',
+    'Update a Confluence page (the current version is fetched and incremented automatically). Provide `bodyStorage` or `bodyText` to replace the body; fields not provided (including the body, if neither is given) are left unchanged.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'page', 'update', 'edit', 'change', 'wiki', 'write'],
   example:
     'await atlassian.updatePage({ pageId: "12345", title: "New Title", bodyText: "Updated content." })',
@@ -202,9 +203,10 @@ const updatePageTool: Tool = {
 
 const getPageChildrenTool: Tool = {
   name: 'getPageChildren',
-  description: 'List the direct child pages of a Confluence page.',
+  description:
+    'List the direct child pages of a Confluence page. Restricted to the configured Confluence space allowlist, if any (checked via the parent page).',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['confluence', 'page', 'children', 'tree', 'list', 'subpages'],
   example: 'const { pages } = await atlassian.getPageChildren({ pageId: "12345" })',
   inputSchema: {
@@ -230,7 +232,6 @@ const getPageChildrenTool: Tool = {
 /**
  * Build the Confluence page tool definitions.
  * @param client - The Atlassian client (`null` when not configured).
- * @returns Tool definitions for Confluence pages.
  */
 export function createConfluencePageTools(client: AtlassianClient | null): ToolDefinition[] {
   const tools = [

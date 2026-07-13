@@ -68,9 +68,13 @@ def test_io_main_turns_exceptions_into_failure(capsys) -> None:
         assert exc.code == 1
     finally:
         sys.argv = saved_argv
-    out = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
     assert out["ok"] is False
-    assert "ValueError: nope" in out["error"]
+    assert "internal error (ValueError): nope" in out["error"]
+    assert "re-check the spec/ops" in out["error"]
+    assert "Traceback (most recent call last)" not in out["error"]
+    assert "Traceback (most recent call last)" in captured.err
 
 
 def test_io_main_passes_argv_tail(capsys) -> None:

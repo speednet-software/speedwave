@@ -31,9 +31,7 @@ describe('Security: validatePath', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Path Traversal Attacks
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Path Traversal Attacks ─────────────────────────────────────────────────────────────────────
 
   describe('Path Traversal Attacks', () => {
     it('should reject path with ../ traversal', async () => {
@@ -100,9 +98,7 @@ describe('Security: validatePath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // URL-Encoded Traversal Attacks
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── URL-Encoded Traversal Attacks ──────────────────────────────────────────────────────────────
 
   describe('URL-Encoded Traversal Attacks', () => {
     it('should reject URL-encoded ../ (%2e%2e%2f)', async () => {
@@ -162,9 +158,7 @@ describe('Security: validatePath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Null Byte Injection
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Null Byte Injection ────────────────────────────────────────────────────────────────────────
 
   describe('Null Byte Injection', () => {
     it('should reject path with URL-encoded null byte (%00)', async () => {
@@ -196,9 +190,7 @@ describe('Security: validatePath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Absolute Paths
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Absolute Paths ─────────────────────────────────────────────────────────────────────────────
 
   describe('Absolute Paths', () => {
     it('should reject Unix absolute path (/etc/passwd)', async () => {
@@ -252,9 +244,7 @@ describe('Security: validatePath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Edge Cases
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Edge Cases ─────────────────────────────────────────────────────────────────────────────────
 
   describe('Edge Cases', () => {
     it('should reject empty string path', async () => {
@@ -311,9 +301,7 @@ describe('Security: validatePath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Valid Paths (should pass)
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Valid Paths (should pass) ──────────────────────────────────────────────────────────────────
 
   describe('Valid Paths', () => {
     beforeEach(() => {
@@ -375,9 +363,7 @@ describe('Security: validatePath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Complex Attack Scenarios
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Complex Attack Scenarios ───────────────────────────────────────────────────────────────────
 
   describe('Complex Attack Scenarios', () => {
     it('should reject mixed encoding and traversal', async () => {
@@ -424,9 +410,7 @@ describe('Security: validateLocalPath', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Whitelist Enforcement
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Whitelist Enforcement ──────────────────────────────────────────────────────────────────────
 
   describe('Whitelist Enforcement', () => {
     it('should reject path outside allowed directory', async () => {
@@ -472,15 +456,19 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject Windows paths', async () => {
-      await expect(client.uploadFile('docs/test.txt', 'C:\\Users\\speedwave')).rejects.toThrow(
-        'Invalid local_path: must be under /workspace'
-      );
+      // path.resolve consults process.cwd(); pin it so the assertion holds for a checkout under /workspace too.
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/home/node');
+      try {
+        await expect(client.uploadFile('docs/test.txt', 'C:\\Users\\speedwave')).rejects.toThrow(
+          'Invalid local_path: must be under /workspace'
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Path Traversal in Local Paths
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Path Traversal in Local Paths ──────────────────────────────────────────────────────────────
 
   describe('Path Traversal in Local Paths', () => {
     it('should reject relative path with traversal escaping whitelist', async () => {
@@ -503,17 +491,19 @@ describe('Security: validateLocalPath', () => {
     });
 
     it('should reject relative path starting with ../', async () => {
-      // Relative paths should resolve based on current working directory
-      // and should fail if they escape the whitelist
-      await expect(client.uploadFile('docs/test.txt', '../../../etc/passwd')).rejects.toThrow(
-        'Invalid local_path: must be under /workspace'
-      );
+      // path.resolve consults process.cwd(); pin it so the traversal escapes /workspace regardless of checkout location.
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/home/node');
+      try {
+        await expect(client.uploadFile('docs/test.txt', '../../../etc/passwd')).rejects.toThrow(
+          'Invalid local_path: must be under /workspace'
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Edge Cases for Local Paths
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Edge Cases for Local Paths ─────────────────────────────────────────────────────────────────
 
   describe('Edge Cases for Local Paths', () => {
     it('should reject empty string path', async () => {
@@ -559,9 +549,7 @@ describe('Security: validateLocalPath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Valid Local Paths (should pass)
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Valid Local Paths (should pass) ────────────────────────────────────────────────────────────
 
   describe('Valid Local Paths', () => {
     beforeEach(() => {
@@ -606,9 +594,7 @@ describe('Security: validateLocalPath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Similarity Attacks (paths that look like whitelist but aren't)
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Similarity Attacks (paths that look like whitelist but aren't) ─────────────────────────────
 
   describe('Similarity Attacks', () => {
     it('should normalize path with extra leading slash', async () => {
@@ -655,9 +641,7 @@ describe('Security: validateLocalPath', () => {
     });
   });
 
-  //═══════════════════════════════════════════════════════════════════════════════
-  // Security Logging Tests
-  //═══════════════════════════════════════════════════════════════════════════════
+  // ── Security Logging Tests ─────────────────────────────────────────────────────────────────────
 
   describe('Security Logging', () => {
     it('should log security warning when path traversal is detected in validatePath', async () => {
@@ -761,9 +745,7 @@ describe('Security: validateLocalPath', () => {
   });
 });
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Denylist Tests
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Denylist Tests ───────────────────────────────────────────────────────────────────────────────
 
 describe('Security: denylist enforcement', () => {
   let client: SharePointClient;
