@@ -1249,11 +1249,13 @@ fn build_security_policy_response(
     resolved: &speedwave_runtime::pii_policy::ResolvedPiiPolicy,
     raw: Option<&config::PiiPolicyUserConfig>,
 ) -> SecurityPolicyResponse {
-    use speedwave_runtime::pii_policy::PiiPolicySource;
-    let template = match &resolved.source {
-        PiiPolicySource::Template { template_id } => template_id.clone(),
-        PiiPolicySource::Custom { .. } => "custom".to_string(),
-    };
+    // v2's `source.policies` is single-element in this task: a template id, or "custom".
+    let template = resolved
+        .source
+        .policies
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "custom".to_string());
     let custom_patterns = raw
         .and_then(|r| r.custom_patterns.clone())
         .unwrap_or_default();
@@ -1263,7 +1265,7 @@ fn build_security_policy_response(
         .unwrap_or_default();
     SecurityPolicyResponse {
         template,
-        categories: resolved.categories,
+        categories: resolved.categories.into(),
         custom_patterns,
         sensitive_keys_add,
     }
@@ -1292,7 +1294,7 @@ pub fn list_security_policy_templates() -> Result<Vec<SecurityPolicyTemplateInfo
             id: t.id.clone(),
             name: t.name.clone(),
             description: t.description.clone(),
-            categories: t.categories,
+            categories: t.categories.into(),
         })
         .collect())
 }

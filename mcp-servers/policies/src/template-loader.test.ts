@@ -6,7 +6,7 @@ describe('loadTemplate', () => {
   it('loads and validates the "strict" template', () => {
     const template = loadTemplate('strict');
     expect(template.id).toBe('strict');
-    expect(template.version).toBe(1);
+    expect(template.version).toBe(2);
     expect(Object.values(template.categories).every((v) => v === true)).toBe(true);
   });
 

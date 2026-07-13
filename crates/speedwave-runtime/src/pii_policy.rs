@@ -167,7 +167,7 @@ impl Default for PiiCategoryFlags {
 }
 
 /// A user-defined detection pattern, additive to the built-in categories.
-/// Shared by `PolicyTemplate` and `ResolvedPiiPolicy` (mirrors TS `CustomPatternRule`).
+/// Shared by `PolicyTemplate` and the user config (mirrors TS `CustomPatternRule`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CustomPiiPattern {
@@ -184,8 +184,7 @@ pub struct CustomPiiPattern {
     pub forced: bool,
 }
 
-/// Sensitive key-name add/remove deltas as shipped by a template (2 fields;
-/// `forcedAdd` is MDM-only and lives on [`ResolvedSensitiveKeyDelta`]).
+/// Sensitive key-name add/remove deltas as shipped by a template or user config.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PiiSensitiveKeyDelta {
@@ -197,17 +196,58 @@ pub struct PiiSensitiveKeyDelta {
     pub remove: Vec<String>,
 }
 
-/// Sensitive key-name add/remove/forcedAdd deltas as written to `policy.json`
-/// (mirrors TS `SensitiveKeyDelta`).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ResolvedSensitiveKeyDelta {
-    /// Key-name substrings to add to the default sensitive-key list.
-    pub add: Vec<String>,
-    /// Key-name substrings to remove from the default sensitive-key list.
-    pub remove: Vec<String>,
-    /// Key-name substrings that always apply, even if also listed in `remove`.
-    pub forced_add: Vec<String>,
+/// Per-category tokenize/log flag pair from policy.json v2 (mirrors the engine's
+/// `speedwave_pii_engine::policy::CategoryFlags`, kept as an independent serde
+/// type since writer and reader schemas are validated separately).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PiiCategoryPolicy {
+    /// Whether hits in this category are tokenized (sealed) before leaving the engine.
+    pub tokenize: bool,
+    /// Whether hits in this category are logged (observation mode).
+    pub log: bool,
+}
+
+impl From<bool> for PiiCategoryPolicy {
+    /// A v1-style bool enablement maps to `tokenize: bool, log: false`.
+    fn from(tokenize: bool) -> Self {
+        Self {
+            tokenize,
+            log: false,
+        }
+    }
+}
+
+/// A custom pattern as written to `policy.json` v2: same identity/regex fields
+/// as [`CustomPiiPattern`], `forced` dropped (host-only), a flag pair added.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedCustomPiiPattern {
+    /// Uppercase-snake token id; must not collide with a built-in category.
+    pub id: String,
+    /// Human-readable name shown in UI.
+    pub display_name: String,
+    /// Regex source, validated by [`validate_value_pattern`] before storage.
+    pub pattern: String,
+    /// Whether the pattern is matched case-insensitively.
+    pub case_insensitive: bool,
+    /// Whether hits are tokenized; always `true` today (every stored pattern is active).
+    pub tokenize: bool,
+    /// Whether hits are logged; always `false` today (no log-only mode yet).
+    pub log: bool,
+}
+
+impl From<&CustomPiiPattern> for ResolvedCustomPiiPattern {
+    fn from(p: &CustomPiiPattern) -> Self {
+        Self {
+            id: p.id.clone(),
+            display_name: p.display_name.clone(),
+            pattern: p.pattern.clone(),
+            case_insensitive: p.case_insensitive,
+            tokenize: true,
+            log: false,
+        }
+    }
 }
 
 /// Optional token-lifecycle overrides; omitted fields keep today's defaults.
@@ -229,25 +269,97 @@ impl Default for PiiPolicyLimits {
     }
 }
 
-/// How a resolved policy was produced (mirrors TS `PolicySelection`).
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(
-    tag = "mode",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum PiiPolicySource {
-    /// Resolved purely from a named built-in template.
-    Template {
-        /// The template's id.
-        template_id: String,
-    },
-    /// Resolved with user overrides layered on top of an optional starting template.
-    Custom {
-        /// The starting template's id, if any.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        template_id: Option<String>,
-    },
+/// Enablement per built-in category as a `{tokenize, log}` pair, exhaustive over
+/// all 8 categories (mirrors the policy.json v2 `categories` object). Shared by
+/// `PolicyTemplate` and `ResolvedPiiPolicy`, paralleling how [`PiiCategoryFlags`]
+/// is shared on the bool-only config side.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PiiCategoryPolicies {
+    /// [`PiiCategory::Email`] flags.
+    #[serde(rename = "EMAIL")]
+    pub email: PiiCategoryPolicy,
+    /// [`PiiCategory::PhonePl`] flags.
+    #[serde(rename = "PHONE_PL")]
+    pub phone_pl: PiiCategoryPolicy,
+    /// [`PiiCategory::Pesel`] flags.
+    #[serde(rename = "PESEL")]
+    pub pesel: PiiCategoryPolicy,
+    /// [`PiiCategory::Nip`] flags.
+    #[serde(rename = "NIP")]
+    pub nip: PiiCategoryPolicy,
+    /// [`PiiCategory::Iban`] flags.
+    #[serde(rename = "IBAN")]
+    pub iban: PiiCategoryPolicy,
+    /// [`PiiCategory::Card`] flags.
+    #[serde(rename = "CARD")]
+    pub card: PiiCategoryPolicy,
+    /// [`PiiCategory::ApiKey`] flags.
+    #[serde(rename = "API_KEY")]
+    pub api_key: PiiCategoryPolicy,
+    /// [`PiiCategory::SensitiveField`] flags.
+    #[serde(rename = "SENSITIVE_FIELD")]
+    pub sensitive_field: PiiCategoryPolicy,
+}
+
+impl PiiCategoryPolicies {
+    /// Reads the flag pair for one category.
+    pub fn get(&self, category: PiiCategory) -> PiiCategoryPolicy {
+        match category {
+            PiiCategory::Email => self.email,
+            PiiCategory::PhonePl => self.phone_pl,
+            PiiCategory::Pesel => self.pesel,
+            PiiCategory::Nip => self.nip,
+            PiiCategory::Iban => self.iban,
+            PiiCategory::Card => self.card,
+            PiiCategory::ApiKey => self.api_key,
+            PiiCategory::SensitiveField => self.sensitive_field,
+        }
+    }
+}
+
+impl From<PiiCategoryFlags> for PiiCategoryPolicies {
+    /// Every bool maps to `{tokenize: bool, log: false}` — v2 has no log-only
+    /// concept on the config side yet.
+    fn from(flags: PiiCategoryFlags) -> Self {
+        Self {
+            email: flags.email.into(),
+            phone_pl: flags.phone_pl.into(),
+            pesel: flags.pesel.into(),
+            nip: flags.nip.into(),
+            iban: flags.iban.into(),
+            card: flags.card.into(),
+            api_key: flags.api_key.into(),
+            sensitive_field: flags.sensitive_field.into(),
+        }
+    }
+}
+
+impl From<PiiCategoryPolicies> for PiiCategoryFlags {
+    /// Drops `log`; the only direction today's bool-only UI/config consumers need.
+    fn from(policies: PiiCategoryPolicies) -> Self {
+        Self {
+            email: policies.email.tokenize,
+            phone_pl: policies.phone_pl.tokenize,
+            pesel: policies.pesel.tokenize,
+            nip: policies.nip.tokenize,
+            iban: policies.iban.tokenize,
+            card: policies.card.tokenize,
+            api_key: policies.api_key.tokenize,
+            sensitive_field: policies.sensitive_field.tokenize,
+        }
+    }
+}
+
+/// Provenance of a resolved policy.json v2 (mirrors the contract's `source`
+/// object). `forced` is always empty in this task; F2.2 fills the MDM union.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedPiiPolicySource {
+    /// The policy id(s) this resolution was built from (a template id, or `"custom"`).
+    pub policies: Vec<String>,
+    /// Policy ids forced by MDM; always empty until F2.2.
+    pub forced: Vec<String>,
 }
 
 /// A named, shippable policy preset loaded from `templates/*.yaml` (mirrors
@@ -255,7 +367,7 @@ pub enum PiiPolicySource {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyTemplate {
-    /// Schema version; the engine supports exactly 1.
+    /// Schema version; the engine supports exactly 2.
     pub version: u32,
     /// Template id, `^[a-z][a-z0-9-]{1,63}$`; "custom" is reserved.
     pub id: String,
@@ -264,7 +376,7 @@ pub struct PolicyTemplate {
     /// Human-readable template description.
     pub description: String,
     /// Enablement per built-in category, exhaustive.
-    pub categories: PiiCategoryFlags,
+    pub categories: PiiCategoryPolicies,
     /// Additive custom detection patterns shipped with the template.
     #[serde(default)]
     pub custom_patterns: Vec<CustomPiiPattern>,
@@ -273,26 +385,23 @@ pub struct PolicyTemplate {
     pub sensitive_keys: PiiSensitiveKeyDelta,
 }
 
-/// The fully-resolved policy written to `policy.json` (mirrors TS
-/// `ResolvedPolicy`). `Default` is the compiled-in fallback: every category on.
+/// The fully-resolved policy written to `policy.json` v2, consumed by
+/// `speedwave_pii_engine::compile_policy_v2`. `Default` is the compiled-in
+/// fallback: every category tokenized, nothing logged.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedPiiPolicy {
-    /// Schema version; the engine supports exactly 1.
+    /// Schema version; the engine supports exactly 2.
     pub version: u8,
     /// Provenance of this resolved policy.
-    pub source: PiiPolicySource,
-    /// Enablement per built-in category, exhaustive.
-    pub categories: PiiCategoryFlags,
+    pub source: ResolvedPiiPolicySource,
+    /// Flag pair per built-in category, exhaustive.
+    pub categories: PiiCategoryPolicies,
     /// Additive custom detection patterns, in application order.
-    pub custom_patterns: Vec<CustomPiiPattern>,
-    /// Sensitive key-name deltas applied to the default list.
-    pub sensitive_keys: ResolvedSensitiveKeyDelta,
-    /// Optional token-lifecycle overrides.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limits: Option<PiiPolicyLimits>,
-    /// Categories forced on regardless of `categories`; MDM union slot, empty in v1.
-    pub forced_categories: Vec<PiiCategory>,
+    pub custom_patterns: Vec<ResolvedCustomPiiPattern>,
+    /// Final sensitive key-name list: defaults + add − remove, lowercased,
+    /// sorted, deduplicated.
+    pub sensitive_keys: Vec<String>,
 }
 
 impl Default for ResolvedPiiPolicy {
@@ -637,8 +746,8 @@ fn scan_nested_quantifiers(pattern: &str) -> Result<(), String> {
 }
 
 fn validate_template(t: &PolicyTemplate) -> Result<(), String> {
-    if t.version != 1 {
-        return Err(format!("unsupported version {}, expected 1", t.version));
+    if t.version != 2 {
+        return Err(format!("unsupported version {}, expected 2", t.version));
     }
     if t.id == "custom" {
         return Err("template id \"custom\" is reserved".to_string());
@@ -704,11 +813,12 @@ pub fn builtin_templates() -> anyhow::Result<&'static [PolicyTemplate]> {
     }
 }
 
-/// Merges the user's PII policy with the (v1: always-empty) MDM slot.
+/// Merges the user's PII policy into a policy.json v2 document. `managed` is
+/// accepted but not yet consulted — MDM union lands in F2.2.
 /// Infallible: degrades toward MORE filtering only (all-on / dropped).
 pub fn resolve_pii_policy(
     user: Option<&crate::config::PiiPolicyUserConfig>,
-    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
+    _managed: Option<&crate::config::ManagedPiiPolicyConfig>,
 ) -> ResolvedPiiPolicy {
     let requested_template_id = user
         .and_then(|u| u.template_id.clone())
@@ -735,10 +845,11 @@ pub fn resolve_pii_policy(
         u.categories.is_some() || u.custom_patterns.is_some() || u.sensitive_keys.is_some()
     });
 
-    let categories = user
+    let categories: PiiCategoryPolicies = user
         .and_then(|u| u.categories)
+        .map(PiiCategoryPolicies::from)
         .or_else(|| template.map(|t| t.categories))
-        .unwrap_or_default();
+        .unwrap_or_else(|| PiiCategoryFlags::default().into());
 
     let mut custom_patterns: Vec<CustomPiiPattern> = template
         .map(|t| t.custom_patterns.clone())
@@ -756,6 +867,10 @@ pub fn resolve_pii_policy(
             false
         }
     });
+    let custom_patterns: Vec<ResolvedCustomPiiPattern> = custom_patterns
+        .iter()
+        .map(ResolvedCustomPiiPattern::from)
+        .collect();
 
     let template_keys = template
         .map(|t| t.sensitive_keys.clone())
@@ -766,37 +881,36 @@ pub fn resolve_pii_policy(
         add.extend(delta.add.iter().cloned());
         remove.extend(delta.remove.iter().cloned());
     }
+    let mut sensitive_keys: std::collections::BTreeSet<String> =
+        speedwave_pii_engine::default_sensitive_keys()
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+    for key in &add {
+        sensitive_keys.insert(key.to_lowercase());
+    }
+    for key in &remove {
+        sensitive_keys.remove(&key.to_lowercase());
+    }
+    let sensitive_keys: Vec<String> = sensitive_keys.into_iter().collect();
 
-    let forced_categories = managed
-        .and_then(|m| m.forced_categories.clone())
-        .unwrap_or_default();
-
-    let limits = user.and_then(|u| u.limits).unwrap_or_default();
-
-    let source = if is_custom {
-        PiiPolicySource::Custom {
-            template_id: user.and_then(|u| u.template_id.clone()),
-        }
+    let policies = if is_custom {
+        vec!["custom".to_string()]
     } else {
-        PiiPolicySource::Template {
-            template_id: template
-                .map(|t| t.id.clone())
-                .unwrap_or_else(|| requested_template_id.clone()),
-        }
+        vec![template
+            .map(|t| t.id.clone())
+            .unwrap_or_else(|| requested_template_id.clone())]
     };
 
     ResolvedPiiPolicy {
-        version: 1,
-        source,
+        version: 2,
+        source: ResolvedPiiPolicySource {
+            policies,
+            forced: Vec::new(),
+        },
         categories,
         custom_patterns,
-        sensitive_keys: ResolvedSensitiveKeyDelta {
-            add,
-            remove,
-            forced_add: Vec::new(),
-        },
-        limits: Some(limits),
-        forced_categories,
+        sensitive_keys,
     }
 }
 
@@ -882,38 +996,33 @@ mod tests {
     fn strict_template_matches_compiled_default() {
         let templates = builtin_templates().unwrap();
         let strict = templates.iter().find(|t| t.id == "strict").unwrap();
-        assert_eq!(strict.categories, PiiCategoryFlags::ALL_ON);
-        assert_eq!(
-            resolve_pii_policy(None, None).categories,
-            PiiCategoryFlags::ALL_ON
-        );
-        assert_eq!(
-            ResolvedPiiPolicy::default().categories,
-            PiiCategoryFlags::ALL_ON
-        );
+        let all_on: PiiCategoryPolicies = PiiCategoryFlags::ALL_ON.into();
+        assert_eq!(strict.categories, all_on);
+        assert_eq!(resolve_pii_policy(None, None).categories, all_on);
+        assert_eq!(ResolvedPiiPolicy::default().categories, all_on);
     }
 
     #[test]
     fn gdpr_and_ai_act_templates_have_expected_category_overrides() {
         let templates = builtin_templates().unwrap();
         let gdpr = templates.iter().find(|t| t.id == "gdpr-art32").unwrap();
-        assert!(!gdpr.categories.api_key);
-        assert!(gdpr.categories.nip);
+        assert!(!gdpr.categories.api_key.tokenize);
+        assert!(gdpr.categories.nip.tokenize);
 
         let ai_act = templates.iter().find(|t| t.id == "eu-ai-act-art5").unwrap();
-        assert!(!ai_act.categories.nip);
-        assert!(!ai_act.categories.api_key);
-        assert!(ai_act.categories.email);
+        assert!(!ai_act.categories.nip.tokenize);
+        assert!(!ai_act.categories.api_key.tokenize);
+        assert!(ai_act.categories.email.tokenize);
     }
 
     #[test]
     fn policy_template_rejects_unknown_top_level_field() {
         let yaml = r#"
-version: 1
+version: 2
 id: strict
 name: "x"
 description: "x"
-categories: { EMAIL: true, PHONE_PL: true, PESEL: true, NIP: true, IBAN: true, CARD: true, API_KEY: true, SENSITIVE_FIELD: true }
+categories: { EMAIL: {tokenize: true, log: false}, PHONE_PL: {tokenize: true, log: false}, PESEL: {tokenize: true, log: false}, NIP: {tokenize: true, log: false}, IBAN: {tokenize: true, log: false}, CARD: {tokenize: true, log: false}, API_KEY: {tokenize: true, log: false}, SENSITIVE_FIELD: {tokenize: true, log: false} }
 customPatterns: []
 sensitiveKeys: { add: [], remove: [] }
 inherit: something
@@ -925,11 +1034,11 @@ inherit: something
     #[test]
     fn policy_template_rejects_missing_category_key() {
         let yaml = r#"
-version: 1
+version: 2
 id: strict
 name: "x"
 description: "x"
-categories: { EMAIL: true, PHONE_PL: true, PESEL: true, NIP: true, IBAN: true, CARD: true, API_KEY: true }
+categories: { EMAIL: {tokenize: true, log: false}, PHONE_PL: {tokenize: true, log: false}, PESEL: {tokenize: true, log: false}, NIP: {tokenize: true, log: false}, IBAN: {tokenize: true, log: false}, CARD: {tokenize: true, log: false}, API_KEY: {tokenize: true, log: false} }
 customPatterns: []
 sensitiveKeys: { add: [], remove: [] }
 "#;
@@ -940,11 +1049,41 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn policy_template_rejects_unknown_category_key() {
         let yaml = r#"
+version: 2
+id: strict
+name: "x"
+description: "x"
+categories: { EMAIL: {tokenize: true, log: false}, PHONE_PL: {tokenize: true, log: false}, PESEL: {tokenize: true, log: false}, NIP: {tokenize: true, log: false}, IBAN: {tokenize: true, log: false}, CARD: {tokenize: true, log: false}, API_KEY: {tokenize: true, log: false}, SENSITIVE_FIELD: {tokenize: true, log: false}, BOGUS: {tokenize: true, log: false} }
+customPatterns: []
+sensitiveKeys: { add: [], remove: [] }
+"#;
+        let result: Result<PolicyTemplate, _> = serde_yaml_ng::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn policy_template_rejects_unsupported_version() {
+        let yaml = r#"
 version: 1
 id: strict
 name: "x"
 description: "x"
-categories: { EMAIL: true, PHONE_PL: true, PESEL: true, NIP: true, IBAN: true, CARD: true, API_KEY: true, SENSITIVE_FIELD: true, BOGUS: true }
+categories: { EMAIL: {tokenize: true, log: false}, PHONE_PL: {tokenize: true, log: false}, PESEL: {tokenize: true, log: false}, NIP: {tokenize: true, log: false}, IBAN: {tokenize: true, log: false}, CARD: {tokenize: true, log: false}, API_KEY: {tokenize: true, log: false}, SENSITIVE_FIELD: {tokenize: true, log: false} }
+customPatterns: []
+sensitiveKeys: { add: [], remove: [] }
+"#;
+        let template: PolicyTemplate = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(validate_template(&template).is_err());
+    }
+
+    #[test]
+    fn policy_template_rejects_unknown_category_flag_pair_key() {
+        let yaml = r#"
+version: 2
+id: strict
+name: "x"
+description: "x"
+categories: { EMAIL: {tokenize: true, log: false, bogus: true}, PHONE_PL: {tokenize: true, log: false}, PESEL: {tokenize: true, log: false}, NIP: {tokenize: true, log: false}, IBAN: {tokenize: true, log: false}, CARD: {tokenize: true, log: false}, API_KEY: {tokenize: true, log: false}, SENSITIVE_FIELD: {tokenize: true, log: false} }
 customPatterns: []
 sensitiveKeys: { add: [], remove: [] }
 "#;
@@ -957,14 +1096,14 @@ sensitiveKeys: { add: [], remove: [] }
     #[test]
     fn resolve_with_no_user_and_no_managed_defaults_to_strict_all_on() {
         let resolved = resolve_pii_policy(None, None);
-        assert_eq!(resolved.categories, PiiCategoryFlags::ALL_ON);
+        assert_eq!(resolved.categories, PiiCategoryFlags::ALL_ON.into());
         assert_eq!(
             resolved.source,
-            PiiPolicySource::Template {
-                template_id: "strict".to_string()
+            ResolvedPiiPolicySource {
+                policies: vec!["strict".to_string()],
+                forced: Vec::new(),
             }
         );
-        assert!(resolved.forced_categories.is_empty());
         assert!(resolved.custom_patterns.is_empty());
     }
 
@@ -975,11 +1114,12 @@ sensitiveKeys: { add: [], remove: [] }
             ..Default::default()
         };
         let resolved = resolve_pii_policy(Some(&user), None);
-        assert!(!resolved.categories.api_key);
+        assert!(!resolved.categories.api_key.tokenize);
         assert_eq!(
             resolved.source,
-            PiiPolicySource::Template {
-                template_id: "gdpr-art32".to_string()
+            ResolvedPiiPolicySource {
+                policies: vec!["gdpr-art32".to_string()],
+                forced: Vec::new(),
             }
         );
     }
@@ -991,11 +1131,12 @@ sensitiveKeys: { add: [], remove: [] }
             ..Default::default()
         };
         let resolved = resolve_pii_policy(Some(&user), None);
-        assert_eq!(resolved.categories, PiiCategoryFlags::ALL_ON);
+        assert_eq!(resolved.categories, PiiCategoryFlags::ALL_ON.into());
         assert_eq!(
             resolved.source,
-            PiiPolicySource::Template {
-                template_id: "totally-bogus-template".to_string()
+            ResolvedPiiPolicySource {
+                policies: vec!["totally-bogus-template".to_string()],
+                forced: Vec::new(),
             }
         );
     }
@@ -1009,10 +1150,13 @@ sensitiveKeys: { add: [], remove: [] }
             ..Default::default()
         };
         let resolved = resolve_pii_policy(Some(&user), None);
-        assert_eq!(resolved.categories, categories);
+        assert_eq!(resolved.categories, categories.into());
         assert_eq!(
             resolved.source,
-            PiiPolicySource::Custom { template_id: None }
+            ResolvedPiiPolicySource {
+                policies: vec!["custom".to_string()],
+                forced: Vec::new(),
+            }
         );
     }
 
@@ -1032,13 +1176,16 @@ sensitiveKeys: { add: [], remove: [] }
         let resolved = resolve_pii_policy(Some(&user), None);
         assert_eq!(
             resolved.source,
-            PiiPolicySource::Custom {
-                template_id: Some("gdpr-art32".to_string())
+            ResolvedPiiPolicySource {
+                policies: vec!["custom".to_string()],
+                forced: Vec::new(),
             }
         );
         assert_eq!(resolved.custom_patterns.len(), 1);
+        assert!(resolved.custom_patterns[0].tokenize);
+        assert!(!resolved.custom_patterns[0].log);
         assert!(
-            !resolved.categories.api_key,
+            !resolved.categories.api_key.tokenize,
             "gdpr-art32 baseline preserved"
         );
     }
@@ -1070,55 +1217,46 @@ sensitiveKeys: { add: [], remove: [] }
     }
 
     #[test]
-    fn resolve_applies_sensitive_key_delta_on_top_of_template() {
+    fn resolve_sensitive_keys_is_the_final_union_lowercased_sorted_deduped() {
         let user = PiiPolicyUserConfig {
             sensitive_keys: Some(PiiSensitiveKeyDelta {
-                add: vec!["salary".to_string()],
-                remove: vec![],
+                add: vec!["Salary".to_string(), "TOKEN".to_string()],
+                remove: vec!["cookie".to_string()],
             }),
             ..Default::default()
         };
         let resolved = resolve_pii_policy(Some(&user), None);
-        assert!(resolved.sensitive_keys.add.contains(&"salary".to_string()));
-        assert!(resolved.sensitive_keys.forced_add.is_empty());
+        assert!(resolved.sensitive_keys.contains(&"salary".to_string()));
+        assert!(resolved.sensitive_keys.contains(&"password".to_string()));
+        assert!(!resolved.sensitive_keys.contains(&"cookie".to_string()));
+        // "token" is both a default key and re-added uppercase — must appear exactly once.
+        assert_eq!(
+            resolved
+                .sensitive_keys
+                .iter()
+                .filter(|k| *k == "token")
+                .count(),
+            1
+        );
+        let mut sorted = resolved.sensitive_keys.clone();
+        sorted.sort();
+        assert_eq!(resolved.sensitive_keys, sorted, "must be sorted");
     }
 
     #[test]
-    fn resolve_carries_mdm_forced_categories_unmerged() {
+    fn resolve_accepts_managed_config_without_surfacing_it_in_v2_output() {
+        // forced_categories has no render slot yet (F2.2); passing Some(managed) must not
+        // change the output relative to None — it is accepted but not yet consulted.
         let managed = ManagedPiiPolicyConfig {
             forced_categories: Some(vec![PiiCategory::ApiKey]),
         };
-        let mut categories = PiiCategoryFlags::ALL_ON;
-        categories.set(PiiCategory::ApiKey, false);
         let user = PiiPolicyUserConfig {
-            categories: Some(categories),
+            template_id: Some("gdpr-art32".to_string()),
             ..Default::default()
         };
-        let resolved = resolve_pii_policy(Some(&user), Some(&managed));
-        assert!(
-            !resolved.categories.api_key,
-            "forced_categories is a separate slot, not OR'd in here"
-        );
-        assert_eq!(resolved.forced_categories, vec![PiiCategory::ApiKey]);
-    }
-
-    #[test]
-    fn resolve_applies_user_limits_override() {
-        let user = PiiPolicyUserConfig {
-            limits: Some(PiiPolicyLimits {
-                max_tokens: 50,
-                ttl_ms: 60_000,
-            }),
-            ..Default::default()
-        };
-        let resolved = resolve_pii_policy(Some(&user), None);
-        assert_eq!(
-            resolved.limits,
-            Some(PiiPolicyLimits {
-                max_tokens: 50,
-                ttl_ms: 60_000
-            })
-        );
+        let with_managed = resolve_pii_policy(Some(&user), Some(&managed));
+        let without_managed = resolve_pii_policy(Some(&user), None);
+        assert_eq!(with_managed, without_managed);
     }
 
     // ---- serde round-trips -------------------------------------------------
@@ -1145,21 +1283,30 @@ sensitiveKeys: { add: [], remove: [] }
         );
 
         let value = serde_json::to_value(&resolved).unwrap();
-        assert_eq!(value["version"], 1);
+        assert_eq!(value["version"], 2);
         assert!(value.get("customPatterns").is_some());
         assert!(value.get("sensitiveKeys").is_some());
-        assert!(value.get("forcedCategories").is_some());
-        assert_eq!(value["categories"]["EMAIL"], true);
+        assert!(value.get("limits").is_none());
+        assert!(value.get("forcedCategories").is_none());
+        assert_eq!(value["categories"]["EMAIL"]["tokenize"], true);
+        assert_eq!(value["categories"]["EMAIL"]["log"], false);
         assert_eq!(value["customPatterns"][0]["displayName"], "Employee ID");
         assert_eq!(value["customPatterns"][0]["caseInsensitive"], false);
-        assert_eq!(value["sensitiveKeys"]["forcedAdd"], serde_json::json!([]));
+        assert_eq!(value["customPatterns"][0]["tokenize"], true);
+        assert_eq!(value["customPatterns"][0]["log"], false);
+        assert!(value["sensitiveKeys"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::String("salary".to_string())));
         // Literal wire values, so a symmetric casing bug can't hide behind the round-trip.
-        assert_eq!(value["source"]["mode"], "custom");
-        assert_eq!(value["source"]["templateId"], "gdpr-art32");
+        assert_eq!(value["source"]["policies"], serde_json::json!(["custom"]));
+        assert_eq!(value["source"]["forced"], serde_json::json!([]));
 
         let default_value = serde_json::to_value(resolve_pii_policy(None, None)).unwrap();
-        assert_eq!(default_value["source"]["mode"], "template");
-        assert_eq!(default_value["source"]["templateId"], "strict");
+        assert_eq!(
+            default_value["source"]["policies"],
+            serde_json::json!(["strict"])
+        );
 
         let round_tripped: ResolvedPiiPolicy = serde_json::from_value(value).unwrap();
         assert_eq!(round_tripped, resolved);
@@ -1475,8 +1622,8 @@ sensitiveKeys: { add: [], remove: [] }
         );
     }
 
-    /// Snapshot: written JSON matches the pinned contract shape, incl. the
-    /// literal `source.mode`/`templateId` values.
+    /// Snapshot: written JSON matches the pinned v2 contract shape, incl. the
+    /// literal `source.policies` value and per-category flag pairs.
     #[test]
     fn write_policy_config_matches_pinned_contract_shape() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1503,16 +1650,20 @@ sensitiveKeys: { add: [], remove: [] }
         let path = policy_config_path_in(tmp.path(), "proj");
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["version"], 1);
-        assert_eq!(v["source"]["mode"], "custom");
-        assert_eq!(v["source"]["templateId"], "gdpr-art32");
-        assert_eq!(v["categories"]["EMAIL"], true);
-        assert!(!v["categories"]["API_KEY"].as_bool().unwrap());
+        assert_eq!(v["version"], 2);
+        assert_eq!(v["source"]["policies"], serde_json::json!(["custom"]));
+        assert_eq!(v["source"]["forced"], serde_json::json!([]));
+        assert_eq!(v["categories"]["EMAIL"]["tokenize"], true);
+        assert!(!v["categories"]["API_KEY"]["tokenize"].as_bool().unwrap());
         assert_eq!(v["customPatterns"][0]["id"], "EMPLOYEE_ID");
         assert_eq!(v["customPatterns"][0]["displayName"], "Employee ID");
-        assert_eq!(v["sensitiveKeys"]["add"][0], "salary");
-        assert_eq!(v["sensitiveKeys"]["forcedAdd"], serde_json::json!([]));
-        assert_eq!(v["forcedCategories"], serde_json::json!([]));
+        assert_eq!(v["customPatterns"][0]["tokenize"], true);
+        assert!(v["sensitiveKeys"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::String("salary".to_string())));
+        assert!(v.get("limits").is_none());
+        assert!(v.get("forcedCategories").is_none());
     }
 
     #[test]
@@ -1545,7 +1696,7 @@ sensitiveKeys: { add: [], remove: [] }
         assert_eq!(d1, policy_state_digest_in(tmp.path(), "proj"));
 
         let mut other = ResolvedPiiPolicy::default();
-        other.categories.set(PiiCategory::Email, false);
+        other.categories.email.tokenize = false;
         write_policy_config_in(tmp.path(), "proj", &other).unwrap();
         let d2 = policy_state_digest_in(tmp.path(), "proj");
         assert_ne!(d1, d2, "changed policy content must change the digest");

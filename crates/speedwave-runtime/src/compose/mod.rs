@@ -1917,7 +1917,8 @@ mod tests {
         add_hub_volume(
             &mut doc,
             &format!("{}:/policy:ro", to_engine_path(&dir).unwrap()),
-        );
+        )
+        .unwrap();
         inject_env_into(&mut doc, "mcp-hub", "POLICY_FILE", "/policy/policy.json");
         serde_yaml_ng::to_string(&doc).unwrap()
     }

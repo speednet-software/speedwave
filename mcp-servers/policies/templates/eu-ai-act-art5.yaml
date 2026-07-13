@@ -1,16 +1,16 @@
-version: 1
+version: 2
 id: eu-ai-act-art5
 name: "EU AI Act Art. 5 - Prohibited Practices Guardrail"
 description: "Covers identity and financial PII relevant to EU AI Act Article 5 guardrails. NIP and API_KEY detection are off — tax-id and credential detection are out of this template's scope."
 categories:
-  EMAIL: true
-  PHONE_PL: true
-  PESEL: true
-  NIP: false
-  IBAN: true
-  CARD: true
-  API_KEY: false
-  SENSITIVE_FIELD: true
+  EMAIL: { tokenize: true, log: false }
+  PHONE_PL: { tokenize: true, log: false }
+  PESEL: { tokenize: true, log: false }
+  NIP: { tokenize: false, log: false }
+  IBAN: { tokenize: true, log: false }
+  CARD: { tokenize: true, log: false }
+  API_KEY: { tokenize: false, log: false }
+  SENSITIVE_FIELD: { tokenize: true, log: false }
 customPatterns: []
 sensitiveKeys:
   add: []

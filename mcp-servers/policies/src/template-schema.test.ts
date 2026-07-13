@@ -13,13 +13,18 @@ const ALL_TRUE = {
   SENSITIVE_FIELD: true,
 };
 
+/** Schema v2 shape: every category's `{tokenize, log}` pair, all tokenize=true. */
+const ALL_TRUE_PAIRS = Object.fromEntries(
+  Object.keys(ALL_TRUE).map((type) => [type, { tokenize: true, log: false }])
+);
+
 function validTemplate(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    version: 1,
+    version: 2,
     id: 'gdpr-art32',
     name: 'GDPR Art. 32',
     description: 'EU PII protection',
-    categories: ALL_TRUE,
+    categories: ALL_TRUE_PAIRS,
     customPatterns: [],
     sensitiveKeys: { add: [], remove: [] },
     ...overrides,
@@ -135,10 +140,10 @@ describe('parseCustomPatterns', () => {
 });
 
 describe('parseTemplate', () => {
-  it('parses a well-formed template', () => {
+  it('parses a well-formed template, mapping category pairs down to their tokenize flag', () => {
     const template = validTemplate();
     expect(parseTemplate(template)).toEqual({
-      version: 1,
+      version: 2,
       id: 'gdpr-art32',
       name: 'GDPR Art. 32',
       description: 'EU PII protection',
@@ -153,7 +158,36 @@ describe('parseTemplate', () => {
   });
 
   it('rejects an unsupported version', () => {
-    expect(() => parseTemplate(validTemplate({ version: 2 }))).toThrow(/unsupported version/);
+    expect(() => parseTemplate(validTemplate({ version: 1 }))).toThrow(/unsupported version/);
+    expect(() => parseTemplate(validTemplate({ version: 3 }))).toThrow(/unsupported version/);
+  });
+
+  it('rejects a category pair missing tokenize', () => {
+    expect(() =>
+      parseTemplate(validTemplate({ categories: { ...ALL_TRUE_PAIRS, EMAIL: { log: false } } }))
+    ).toThrow(/tokenize must be a boolean/);
+  });
+
+  it('rejects a category pair missing log', () => {
+    expect(() =>
+      parseTemplate(validTemplate({ categories: { ...ALL_TRUE_PAIRS, EMAIL: { tokenize: true } } }))
+    ).toThrow(/log must be a boolean/);
+  });
+
+  it('rejects a category pair with an unknown key', () => {
+    expect(() =>
+      parseTemplate(
+        validTemplate({
+          categories: { ...ALL_TRUE_PAIRS, EMAIL: { tokenize: true, log: false, bogus: true } },
+        })
+      )
+    ).toThrow(/unknown key/);
+  });
+
+  it('rejects a category value that is not an object', () => {
+    expect(() =>
+      parseTemplate(validTemplate({ categories: { ...ALL_TRUE_PAIRS, EMAIL: true } }))
+    ).toThrow(/must be an object/);
   });
 
   it('rejects an id not matching the template id pattern', () => {
@@ -173,10 +207,10 @@ describe('parseTemplate', () => {
   });
 
   it.each(['inherit', 'attachments', 'scope'])(
-    'rejects the deprecated field "%s" with a schema-version-1 message',
+    'rejects the deprecated field "%s" with a schema-version-2 message',
     (field) => {
       expect(() => parseTemplate(validTemplate({ [field]: {} }))).toThrow(
-        /not supported in schema version 1/
+        /not supported in schema version 2/
       );
     }
   );

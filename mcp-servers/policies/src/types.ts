@@ -106,11 +106,13 @@ export interface ResolvedPolicy {
 }
 
 /**
- * A named, shippable policy preset loaded from `templates/*.yaml`.
+ * A named, shippable policy preset loaded from `templates/*.yaml`. The YAML schema is v2
+ * (per-category `{tokenize, log}` pairs); `categories` here is mapped down to booleans
+ * (`tokenize`) for today's boolean-only resolved-policy pipeline (still v1, see `ResolvedPolicy`).
  */
 export interface PolicyTemplate {
-  /** Schema version; the engine supports exactly 1 */
-  version: 1;
+  /** YAML schema version; the loader supports exactly 2 */
+  version: 2;
   /** Template id, `^[a-z][a-z0-9-]{1,63}$`; "custom" is reserved */
   id: string;
   /** Human-readable template name */

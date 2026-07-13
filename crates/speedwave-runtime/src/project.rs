@@ -685,6 +685,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,

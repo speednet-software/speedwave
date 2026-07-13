@@ -83,6 +83,56 @@ export function parseCategories(raw: unknown, context: string): Record<PIIType, 
 }
 
 /**
+ * Validate one category's `{tokenize, log}` flag pair (template YAML schema v2).
+ * @param raw - Value to validate
+ * @param context - Human-readable location for error messages
+ * @returns Just the `tokenize` flag — the only one today's boolean-only pipeline consumes
+ */
+function parseCategoryFlagPair(raw: unknown, context: string): boolean {
+  if (!isPlainObject(raw)) {
+    fail(context, 'must be an object');
+  }
+  const { tokenize, log, ...rest } = raw;
+  if (typeof tokenize !== 'boolean') {
+    fail(context, 'tokenize must be a boolean');
+  }
+  if (typeof log !== 'boolean') {
+    fail(context, 'log must be a boolean');
+  }
+  const unknown = Object.keys(rest);
+  if (unknown.length > 0) {
+    fail(context, `unknown key(s): ${unknown.sort().join(', ')}`);
+  }
+  return tokenize;
+}
+
+/**
+ * Validate an exhaustive template `categories` object of `{tokenize, log}` pairs (schema v2),
+ * mapping each category down to its `tokenize` flag.
+ * @param raw - Value to validate
+ * @param context - Human-readable location for error messages
+ * @returns The validated category-enablement map
+ */
+function parseTemplateCategories(raw: unknown, context: string): Record<PIIType, boolean> {
+  if (!isPlainObject(raw)) {
+    fail(context, 'must be an object');
+  }
+  const seen = new Set(Object.keys(raw));
+  const result = {} as Record<PIIType, boolean>;
+  for (const type of ALL_PII_TYPES) {
+    if (!(type in raw)) {
+      fail(context, `missing required key "${type}"`);
+    }
+    result[type] = parseCategoryFlagPair(raw[type], `${context}.${type}`);
+    seen.delete(type);
+  }
+  if (seen.size > 0) {
+    fail(context, `unknown key(s): ${[...seen].sort().join(', ')}`);
+  }
+  return result;
+}
+
+/**
  * Validate a single custom pattern rule's shape (not its regex safety — see pattern-lint.ts).
  * @param raw - Value to validate
  * @param context - Human-readable location for error messages
@@ -148,7 +198,7 @@ export function parseTemplate(raw: unknown): PolicyTemplate {
   }
   for (const deprecated of DEPRECATED_TEMPLATE_FIELDS) {
     if (deprecated in raw) {
-      fail('template', `field "${deprecated}" is not supported in schema version 1`);
+      fail('template', `field "${deprecated}" is not supported in schema version 2`);
     }
   }
   // Reject unknown top-level keys, matching Rust's deny_unknown_fields so the YAML SSOT can't drift TS-only.
@@ -156,8 +206,8 @@ export function parseTemplate(raw: unknown): PolicyTemplate {
   if (unknown.length > 0) {
     fail('template', `unknown key(s): ${unknown.sort().join(', ')}`);
   }
-  if (raw.version !== 1) {
-    fail('template', `unsupported version "${String(raw.version)}", expected 1`);
+  if (raw.version !== 2) {
+    fail('template', `unsupported version "${String(raw.version)}", expected 2`);
   }
   const { id, name, description } = raw;
   if (typeof id !== 'string' || !TEMPLATE_ID_RE.test(id)) {
@@ -172,7 +222,7 @@ export function parseTemplate(raw: unknown): PolicyTemplate {
   if (typeof description !== 'string') {
     fail(`template "${id}"`, 'description must be a string');
   }
-  const categories = parseCategories(raw.categories, `template "${id}" categories`);
+  const categories = parseTemplateCategories(raw.categories, `template "${id}" categories`);
   const customPatterns = parseCustomPatterns(
     raw.customPatterns ?? [],
     `template "${id}" customPatterns`
@@ -188,7 +238,7 @@ export function parseTemplate(raw: unknown): PolicyTemplate {
   );
 
   return {
-    version: 1,
+    version: 2,
     id,
     name,
     description,

@@ -1,16 +1,16 @@
-version: 1
+version: 2
 id: strict
 name: "Strict - All PII Categories"
 description: "Every built-in PII category enabled; no custom patterns or sensitive-key overrides. Matches the engine's compiled-in default."
 categories:
-  EMAIL: true
-  PHONE_PL: true
-  PESEL: true
-  NIP: true
-  IBAN: true
-  CARD: true
-  API_KEY: true
-  SENSITIVE_FIELD: true
+  EMAIL: { tokenize: true, log: false }
+  PHONE_PL: { tokenize: true, log: false }
+  PESEL: { tokenize: true, log: false }
+  NIP: { tokenize: true, log: false }
+  IBAN: { tokenize: true, log: false }
+  CARD: { tokenize: true, log: false }
+  API_KEY: { tokenize: true, log: false }
+  SENSITIVE_FIELD: { tokenize: true, log: false }
 customPatterns: []
 sensitiveKeys:
   add: []

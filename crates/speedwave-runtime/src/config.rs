@@ -2875,6 +2875,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5067,11 +5068,12 @@ mod tests {
         };
         let (claude, _) =
             resolve_project_config_in_with_managed(tmp.path(), tmp.path(), &user_config, "p", None);
-        assert!(!claude.pii_policy.categories.api_key);
+        assert!(!claude.pii_policy.categories.api_key.tokenize);
         assert_eq!(
             claude.pii_policy.source,
-            crate::pii_policy::PiiPolicySource::Template {
-                template_id: "gdpr-art32".to_string()
+            crate::pii_policy::ResolvedPiiPolicySource {
+                policies: vec!["gdpr-art32".to_string()],
+                forced: Vec::new(),
             }
         );
     }
@@ -5100,7 +5102,7 @@ mod tests {
         );
         assert_eq!(
             claude_with.pii_policy.categories,
-            crate::pii_policy::PiiCategoryFlags::ALL_ON
+            crate::pii_policy::PiiCategoryFlags::ALL_ON.into()
         );
     }
 
