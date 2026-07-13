@@ -2148,14 +2148,22 @@ EOF
     [ "$output" -eq 1 ]
 }
 
-# P0 regression: a write failure AFTER the log was created must not kill the start.
+# P0 regression: `set -e` turns a failing append into a dead container. The stub
+# revokes write access mid-start, so every later _diag write genuinely fails.
 @test "a write failure mid-start never fails the container start" {
-    _stub_claude_recording_plugin_installs
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+chmod 400 "$TEST_HOME/.speedwave-entrypoint.log" 2>/dev/null || true
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then exit 0; fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
     export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
-    export SPEEDWAVE_DIAG_FAIL_AFTER=1   # test hook: make the next append fail
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
+    chmod 600 "$TEST_HOME/.speedwave-entrypoint.log" 2>/dev/null || true
 }
 
 @test "the startup log is refused when claude-home holds a symlink in its place" {

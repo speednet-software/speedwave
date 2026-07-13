@@ -29,7 +29,7 @@ _diag() {
     local level="$1" tag="$2"; shift 2
     local msg; msg="$(_diag_redact "$*")"
     [ "${tag}" = "FAIL" ] && _DIAG_FAILURES=$((_DIAG_FAILURES + 1))
-    if [ -n "${_DIAG_LOG}" ] && [ -z "${SPEEDWAVE_DIAG_FAIL_AFTER:-}" ]; then
+    if [ -n "${_DIAG_LOG}" ]; then
         echo "$(date -Iseconds 2>/dev/null || date) ${level} ${tag} ${msg}" >> "${_DIAG_LOG}" 2>/dev/null || _DIAG_LOG=""
     fi
     return 0
