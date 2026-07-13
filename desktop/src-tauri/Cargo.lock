@@ -5203,7 +5203,7 @@ dependencies = [
  "hound",
  "log",
  "parking_lot",
- "rand 0.8.7",
+ "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
  "rustix",
