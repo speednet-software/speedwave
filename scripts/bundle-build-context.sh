@@ -10,26 +10,57 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 mkdir -p "$DEST"
 
-# Serialize concurrent runs on DEST (non-atomic body can bake a 0-byte package.json into a worker
-# image otherwise). `mkdir` is atomic cross-platform; a lock whose holder PID is dead is reclaimed.
 LOCK_DIR="$DEST/.bundle.lock"
-while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-  holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  # Reclaim only when we can prove the holder is gone; a blank PID means the owner is
-  # mid-acquiring — treat as alive and wait rather than delete it.
-  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-    rm -rf "$LOCK_DIR"  # holder process is dead — reclaim the stale lock
-    continue
-  fi
-  sleep 0.3
-done
-# Arm the release trap BEFORE writing the PID: if the `echo` fails (e.g. disk
-# full), `set -e` exits and the trap still removes the lock — no deadlock.
-trap 'rm -rf "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
-echo "$$" >"$LOCK_DIR/pid"
+# mcp-servers/policies/wasm-pkg is a single shared source-tree location (not under $DEST) —
+# a second lock guards it from concurrent writers across different $BUNDLE_DEST invocations.
+WASM_PKG_DIR="$REPO_ROOT/mcp-servers/policies/wasm-pkg"
+WASM_LOCK_DIR="$REPO_ROOT/mcp-servers/policies/.wasm-build.lock"
+
+# acquire_lock <dir>: mkdir-based mutex, atomic cross-platform; a lock whose holder PID is
+# dead is reclaimed. Arms trap before PID write to prevent deadlock if PID write fails.
+_LOCK_CLEANUP=""
+acquire_lock() {
+  local dir="$1" holder
+  while ! mkdir "$dir" 2>/dev/null; do
+    holder="$(cat "$dir/pid" 2>/dev/null || true)"
+    # Reclaim only when we can prove the holder is gone; a blank PID means the owner is
+    # mid-acquiring — treat as alive and wait rather than delete it.
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$dir"  # holder process is dead — reclaim the stale lock
+      continue
+    fi
+    sleep 0.3
+  done
+  # Trap exits before PID write: mkdir succeeded, lock is ours. Stack cleanup commands.
+  _LOCK_CLEANUP="rm -rf '$dir' 2>/dev/null || true; $_LOCK_CLEANUP"
+  trap 'eval "$_LOCK_CLEANUP"' EXIT INT TERM
+  echo "$$" >"$dir/pid"
+}
+
+# Serialize concurrent runs on DEST (non-atomic body can bake a 0-byte package.json into a worker
+# image otherwise). Acquire both locks; trap stacks cleanup in LIFO order.
+acquire_lock "$LOCK_DIR"
+acquire_lock "$WASM_LOCK_DIR"
 
 # Clean destination to prevent stale files from previous runs
 rm -rf "$DEST/build-context" "$DEST/mcp-os" "$DEST/oauth"
+
+# -- PII engine wasm artifact (crates/pii-engine-wasm) ------------------------
+# Built fresh on every run that stages policies — no prebuilt/placeholder fallback. A local
+# `make dev`/`make build` also builds the hub image from this same build-context, so this
+# cannot be gated behind --ci: whichever path stages policies must produce a real engine.
+if ! bash "$REPO_ROOT/crates/pii-engine-wasm/build-wasm.sh" "$WASM_PKG_DIR"; then
+  echo "ERROR: failed to build the PII engine wasm artifact (crates/pii-engine-wasm)." >&2
+  echo "Install the toolchain with 'make setup-dev' (rustup target wasm32-unknown-unknown + wasm-pack) and retry." >&2
+  exit 1
+fi
+shopt -s nullglob
+wasm_artifacts=("$WASM_PKG_DIR"/*_bg.wasm)
+shopt -u nullglob
+if [ "${#wasm_artifacts[@]}" -eq 0 ] || [ ! -s "${wasm_artifacts[0]}" ]; then
+  echo "ERROR: PII engine wasm artifact missing or empty in $WASM_PKG_DIR after build (expected *_bg.wasm)." >&2
+  exit 1
+fi
 
 # -- Build context (containers + MCP server sources) --------------------------
 
@@ -65,6 +96,11 @@ for svc in $MCP_SERVICES; do
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
   # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
   [ -d "$svc_src/templates" ] && cp -r "$svc_src/templates" "$svc_dest/"
+  # policies: wasm-pkg was just built fresh above — stage it as a real artifact, never a
+  # placeholder (the hub Containerfile's COPY policies/wasm-pkg expects real content).
+  if [ "$svc" = "policies" ]; then
+    cp -r "$svc_src/wasm-pkg" "$svc_dest/wasm-pkg"
+  fi
   # office: exclude test_*.py — not in runtime image; must match bundle-build-context.ps1.
   if [ -d "$svc_src/scripts" ]; then
     mkdir -p "$svc_dest/scripts"

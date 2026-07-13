@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "build:wasm": "bash ../../crates/pii-engine-wasm/build-wasm.sh",
     "watch": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "eslint src",

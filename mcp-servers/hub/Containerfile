@@ -33,6 +33,12 @@ COPY policies/tsconfig.json ./policies/
 COPY policies/templates ./policies/templates
 RUN cd policies && npm run build
 
+# Prebuilt on the host (build-wasm.sh, now mandatory in bundle-build-context) and staged by
+# bundle-build-context; alpine has no Rust/wasm-pack, so it is only copied here, never built.
+# Unused by policies' `npm run build` (plain tsc) — placed after it so a wasm content change
+# doesn't invalidate the tsc build layer's cache.
+COPY policies/wasm-pkg ./policies/wasm-pkg
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3: Build hub (imports from ../shared/dist and ../policies/dist)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,6 +68,9 @@ COPY --from=builder /build/shared/node_modules ../shared/node_modules
 # Copy built policies library (required at runtime for relative imports + template loading)
 COPY --from=builder /build/policies/dist ../policies/dist
 COPY --from=builder /build/policies/templates ../policies/templates
+# Unused by the hub yet (F3.4 wires the executor to it) — shipped so the image already
+# carries it once consumed, without a second image retag.
+COPY --from=builder /build/policies/wasm-pkg ../policies/wasm-pkg
 COPY --from=builder /build/policies/package.json ../policies/
 COPY --from=builder /build/policies/node_modules ../policies/node_modules
 

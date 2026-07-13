@@ -147,6 +147,19 @@ setup-dev:
 		echo "     Install: brew install bats-core"; \
 	fi; \
 	\
+	if command -v wasm-pack >/dev/null 2>&1; then \
+		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
+	else \
+		echo "  ⬚  wasm-pack not found (needed for: crates/pii-engine-wasm/build-wasm.sh)"; \
+		echo "     Install: cargo install wasm-pack   (or: npm i -g wasm-pack)"; \
+	fi; \
+	if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then \
+		echo "  ✅ rustup target wasm32-unknown-unknown"; \
+	else \
+		echo "  ⬚  rustup target wasm32-unknown-unknown not installed (needed for: build-wasm.sh)"; \
+		echo "     Install: rustup target add wasm32-unknown-unknown"; \
+	fi; \
+	\
 	echo ""; \
 	echo "── macOS system deps (Tauri) ──"; \
 	if [ "$$(uname)" = "Darwin" ]; then \

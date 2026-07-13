@@ -79,11 +79,15 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
+        // pii-engine(-wasm): the wasm-pkg artifact ships prebuilt (not a COPY source hashed
+        // above), so a source change must still retag the image that carries it.
         hash_inputs: &[
             "mcp-servers/hub",
             "mcp-servers/shared",
             "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
+            "crates/pii-engine",
+            "crates/pii-engine-wasm",
         ],
     },
     ImageDef {

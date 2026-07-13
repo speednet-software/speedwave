@@ -192,6 +192,14 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/src/package-lock.json
 
+      # This job (not the prepare-desktop-bundle composite action) is what runs
+      # bundle-build-context.bats against the real script — `make test-desktop-build` below
+      # invokes it ~20 times, each rebuilding the PII engine wasm artifact.
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
       - name: Install dependencies
         working-directory: desktop/src-tauri
         run: cargo fetch
