@@ -4,13 +4,7 @@
  */
 
 import { IToolResult } from './hub-types.js';
-import {
-  tokenizePII,
-  detokenizePII,
-  createPIIContext,
-  type PIIContext,
-} from '@speedwave/policy-engine';
-import { getCompiledPolicy } from './policy.js';
+import { getEngine } from './policy.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
 import { addAutoReturn } from './auto-return.js';
@@ -246,13 +240,11 @@ function logErrorDebug(context: string, error: unknown): void {
 
 /**
  * Create tool wrappers (PII tokenization, audit logging) for sandbox execution, per service.
- * @param piiContext - PII tokenization context for this execution.
  * @param auditContext - Audit logging context for tracking tool calls.
  * @param executionStartTime - Start time of execution (Date.now()).
  * @param timeoutMs - Total timeout for this execution in milliseconds.
  */
 function createToolWrappers(
-  piiContext: PIIContext,
   auditContext: AuditContext,
   executionStartTime: number,
   timeoutMs: number
@@ -289,7 +281,7 @@ function createToolWrappers(
     try {
       const result = await bridgeCall();
       // Tokenize result (replace sensitive data with tokens)
-      return tokenizePII(result, piiContext) as T;
+      return getEngine().tokenize(result).value as T;
     } catch (error) {
       logErrorDebug(serviceName, error);
       const message = formatErrorMessage(error);
@@ -303,7 +295,7 @@ function createToolWrappers(
    * @param params - Parameters containing tokenized PII data to be detokenized
    */
   const prepareParams: PrepareParamsFn = <T>(params: T): T => {
-    return detokenizePII(params, piiContext) as T;
+    return getEngine().detokenize(params) as T;
   };
 
   /**
@@ -451,14 +443,11 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     };
   }
 
-  // Create PII context for this execution, driven by the process-wide compiled policy
-  const piiContext = createPIIContext(getCompiledPolicy());
-
   // Create audit context for tracking tool executions
   const auditContext = createAuditContext();
 
   // Create tool wrappers with timeout context
-  const tools = createToolWrappers(piiContext, auditContext, startTime, timeoutMs);
+  const tools = createToolWrappers(auditContext, startTime, timeoutMs);
 
   // Prepare sandbox context — spread all service tools (built-in + plugins) dynamically
   const sandboxContext: Record<string, unknown> = {

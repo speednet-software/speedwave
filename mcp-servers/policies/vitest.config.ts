@@ -9,6 +9,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
+      // wasm-pkg is generated wasm-bindgen glue (crates/pii-engine-wasm), not our source.
+      exclude: ['wasm-pkg/**', 'coverage/**', 'dist/**', 'node_modules/**'],
       thresholds: {
         lines: 100,
         functions: 100,

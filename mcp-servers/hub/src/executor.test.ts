@@ -1492,4 +1492,121 @@ describe('executor', () => {
       delete mutableRegistry['my_service'];
     });
   });
+
+  describe('PII tokenization end-to-end (wasm engine wiring)', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+    const workerUrls: Record<string, string | undefined> = {};
+    let originalFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+      const services = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+      for (let i = 0; i < services.length; i++) {
+        const key = `WORKER_${services[i].toUpperCase()}_URL`;
+        workerUrls[key] = process.env[key];
+        process.env[key] = `http://mcp-${services[i]}:${3001 + i}`;
+      }
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      _setBridgesForTesting(createMockBridges());
+      originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      _setBridgesForTesting(null);
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      for (const [key, val] of Object.entries(workerUrls)) {
+        if (val === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = val;
+        }
+      }
+      resetServiceCaches();
+    });
+
+    /** Mock a single successful MCP tools/call response carrying `body` as its JSON text. */
+    function mockWorkerJsonResponse(body: unknown): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          result: { content: [{ type: 'text', text: JSON.stringify(body) }] },
+        }),
+        text: async () => '',
+      }) as unknown as typeof fetch;
+    }
+
+    it('tokenizes PII found in a bridge call result before it reaches the sandbox', async () => {
+      mockWorkerJsonResponse({ email: 'alice@example.com' });
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      const email = (result.data as { email: string }).email;
+      expect(email).not.toBe('alice@example.com');
+      expect(email).toMatch(/^\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]$/);
+    });
+
+    it('detokenizes a token in params before the value reaches the bridge call', async () => {
+      // Obtain a real token from this process's engine by round-tripping an email through a call
+      // whose mocked worker response echoes the same text back (so the result gets tokenized).
+      mockWorkerJsonResponse({ text: 'reach me at alice@example.com' });
+      const tokenizeCode = `return await slack.sendChannel({ channel: 'general', text: 'reach me at alice@example.com' });`;
+      const first = await executeCode({ code: tokenizeCode, timeoutMs: 5000 });
+      const token = (first.data as { text: string }).text.match(
+        /\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/
+      )?.[0];
+      expect(token).toBeTruthy();
+
+      let capturedBody = '';
+      globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        capturedBody = String((init as { body?: string } | undefined)?.body ?? '');
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: 'test',
+            result: { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] },
+          }),
+          text: async () => '',
+        };
+      }) as unknown as typeof fetch;
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: ${JSON.stringify(token)} });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(capturedBody).toContain('alice@example.com');
+      expect(capturedBody).not.toContain(token);
+    });
+
+    it('fails closed (EXECUTION_ERROR) when a tampered token is passed as a param', async () => {
+      mockWorkerJsonResponse({ text: 'reach me at alice@example.com' });
+
+      const tokenizeCode = `return await slack.sendChannel({ channel: 'general', text: 'reach me at alice@example.com' });`;
+      const first = await executeCode({ code: tokenizeCode, timeoutMs: 5000 });
+      const token = (first.data as { text: string }).text.match(
+        /\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/
+      )?.[0];
+      expect(token).toBeTruthy();
+      const tampered = (token as string).replace('TOKEN_', 'TOKEN_X');
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: ${JSON.stringify(tampered)} });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+    });
+  });
 });

@@ -5,16 +5,24 @@ import { join } from 'path';
 
 let dir: string | undefined;
 
-/**
- * Re-import `policy.js` and `@speedwave/policy-engine` together after `vi.resetModules()` so
- * both come from the same fresh instance (a stale instance fails `toEqual` on function fields).
- * @returns The freshly imported policy module and policy-engine exports
- */
-async function importFresh() {
-  const policy = await import('./policy.js');
-  const engine = await import('@speedwave/policy-engine');
-  return { ...policy, ...engine };
-}
+const VALID_POLICY_V2 = {
+  version: 2,
+  source: { policies: ['strict'], forced: [] },
+  categories: {
+    EMAIL: { tokenize: true, log: false },
+    PHONE_PL: { tokenize: true, log: false },
+    PESEL: { tokenize: true, log: false },
+    NIP: { tokenize: true, log: false },
+    IBAN: { tokenize: true, log: false },
+    CARD: { tokenize: true, log: false },
+    API_KEY: { tokenize: true, log: false },
+    SENSITIVE_FIELD: { tokenize: true, log: false },
+  },
+  customPatterns: [],
+  sensitiveKeys: ['password', 'token', 'secret'],
+};
+
+const VALID_KEY = 'ab'.repeat(32);
 
 beforeEach(() => {
   vi.resetModules();
@@ -29,82 +37,73 @@ afterEach(() => {
 });
 
 describe('loadPolicy', () => {
-  it('compiles the default policy when POLICY_FILE is unset', async () => {
+  it('loads the compiled-in default policy when POLICY_FILE is unset', async () => {
     vi.stubEnv('POLICY_FILE', undefined);
-    const { loadPolicy, getCompiledPolicy, compilePolicy, defaultResolvedPolicy } =
-      await importFresh();
+    const { loadPolicy, getEngine } = await import('./policy.js');
 
     loadPolicy();
 
-    expect(getCompiledPolicy()).toEqual(compilePolicy(defaultResolvedPolicy()));
+    const { value } = getEngine().tokenize({ note: 'contact a@b.com' });
+    expect((value as { note: string }).note).not.toContain('a@b.com');
   });
 
-  it('compiles the default policy when POLICY_FILE points at a missing file', async () => {
+  it('loads the default policy when POLICY_FILE points at a missing file', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     vi.stubEnv('POLICY_FILE', join(dir, 'missing.json'));
-    const { loadPolicy, getCompiledPolicy, compilePolicy, defaultResolvedPolicy } =
-      await importFresh();
+    const { loadPolicy, getEngine } = await import('./policy.js');
 
     loadPolicy();
 
-    expect(getCompiledPolicy()).toEqual(compilePolicy(defaultResolvedPolicy()));
+    const { value } = getEngine().tokenize({ note: 'a@b.com' });
+    expect((value as { note: string }).note).not.toContain('a@b.com');
   });
 
-  it('compiles a present, valid policy file', async () => {
+  it('loads a present, valid policy file and disables a category per its content', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
     writeFileSync(
       file,
       JSON.stringify({
-        version: 1,
-        source: { mode: 'custom' },
-        categories: {
-          EMAIL: false,
-          PHONE_PL: true,
-          PESEL: true,
-          NIP: true,
-          IBAN: true,
-          CARD: true,
-          API_KEY: true,
-          SENSITIVE_FIELD: true,
-        },
-        customPatterns: [],
-        sensitiveKeys: { add: [], remove: [], forcedAdd: [] },
-        forcedCategories: [],
+        ...VALID_POLICY_V2,
+        categories: { ...VALID_POLICY_V2.categories, EMAIL: { tokenize: false, log: false } },
       })
     );
+    writeFileSync(join(dir, 'key'), VALID_KEY);
     vi.stubEnv('POLICY_FILE', file);
-    const { loadPolicy, getCompiledPolicy } = await import('./policy.js');
+    const { loadPolicy, getEngine } = await import('./policy.js');
 
     loadPolicy();
 
-    expect(getCompiledPolicy().categories.EMAIL).toBe(false);
+    const { value } = getEngine().tokenize({ note: 'a@b.com' });
+    expect((value as { note: string }).note).toContain('a@b.com');
   });
 
   it('throws when the present file is not valid JSON', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
     writeFileSync(file, '{not json');
+    writeFileSync(join(dir, 'key'), VALID_KEY);
     vi.stubEnv('POLICY_FILE', file);
     const { loadPolicy } = await import('./policy.js');
 
-    expect(() => loadPolicy()).toThrow(/not valid JSON/);
+    expect(() => loadPolicy()).toThrow(/PII policy engine failed to initialize/);
   });
 
   it('throws when the present file is schema-invalid', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
-    writeFileSync(file, JSON.stringify({ version: 2 }));
+    writeFileSync(file, JSON.stringify({ version: 1 }));
+    writeFileSync(join(dir, 'key'), VALID_KEY);
     vi.stubEnv('POLICY_FILE', file);
     const { loadPolicy } = await import('./policy.js');
 
-    expect(() => loadPolicy()).toThrow(/unsupported version/);
+    expect(() => loadPolicy()).toThrow(/PII policy engine failed to initialize/);
   });
 
   it('throws when the present file is unreadable', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
-    writeFileSync(file, JSON.stringify({ version: 1 }));
+    writeFileSync(file, JSON.stringify(VALID_POLICY_V2));
     chmodSync(file, 0o000);
     vi.stubEnv('POLICY_FILE', file);
     const { loadPolicy } = await import('./policy.js');
@@ -116,33 +115,45 @@ describe('loadPolicy', () => {
     }
   });
 
+  it('throws when the present file has no sibling key', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
+    const file = join(dir, 'policy.json');
+    writeFileSync(file, JSON.stringify(VALID_POLICY_V2));
+    vi.stubEnv('POLICY_FILE', file);
+    const { loadPolicy } = await import('./policy.js');
+
+    expect(() => loadPolicy()).toThrow(/key ".*" not found/);
+  });
+
   it('never calls process.exit — the caller decides how to react to the throw', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
     writeFileSync(file, '{not json');
+    writeFileSync(join(dir, 'key'), VALID_KEY);
     vi.stubEnv('POLICY_FILE', file);
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit must not be called from policy.ts');
     });
     const { loadPolicy } = await import('./policy.js');
 
-    expect(() => loadPolicy()).toThrow(/not valid JSON/);
+    expect(() => loadPolicy()).toThrow(/PII policy engine failed to initialize/);
     expect(exitSpy).not.toHaveBeenCalled();
 
     exitSpy.mockRestore();
   });
 });
 
-describe('getCompiledPolicy', () => {
-  it('lazily compiles the default policy when loadPolicy was never called', async () => {
-    const { getCompiledPolicy, compilePolicy, defaultResolvedPolicy } = await importFresh();
+describe('getEngine', () => {
+  it('lazily loads the compiled-in default policy when loadPolicy was never called', async () => {
+    const { getEngine } = await import('./policy.js');
 
-    expect(getCompiledPolicy()).toEqual(compilePolicy(defaultResolvedPolicy()));
+    const { value } = getEngine().tokenize({ note: 'contact a@b.com' });
+    expect((value as { note: string }).note).not.toContain('a@b.com');
   });
 
   it('returns the same cached instance on repeated calls', async () => {
-    const { getCompiledPolicy } = await import('./policy.js');
+    const { getEngine } = await import('./policy.js');
 
-    expect(getCompiledPolicy()).toBe(getCompiledPolicy());
+    expect(getEngine()).toBe(getEngine());
   });
 });

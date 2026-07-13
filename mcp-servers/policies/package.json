@@ -1,12 +1,12 @@
 {
   "name": "@speedwave/policy-engine",
   "version": "0.15.0",
-  "description": "Policy-driven PII tokenization engine for Speedwave MCP workers",
+  "description": "Thin TS wrapper over the WASM PII tokenization engine, for the Speedwave MCP hub",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:wasm && tsc",
     "build:wasm": "bash ../../crates/pii-engine-wasm/build-wasm.sh",
     "watch": "tsc --watch",
     "clean": "rm -rf dist",
@@ -25,10 +25,6 @@
   ],
   "author": "Speednet",
   "license": "Apache-2.0",
-  "dependencies": {
-    "@speedwave/mcp-shared": "file:../shared",
-    "yaml": "^2.9.0"
-  },
   "devDependencies": {
     "@eslint/js": "^9.16.0",
     "@types/node": "^25.6.2",

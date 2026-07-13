@@ -736,6 +736,8 @@ check-proxy-clippy:
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
+	@echo "  Building PII engine wasm artifact (policies/src/engine.ts imports it)..."
+	@cd mcp-servers/policies && $(NPM) run build:wasm
 	@echo "  Building mcp-servers/policies (required by hub)..."
 	@cd mcp-servers/policies && $(NPX) tsc
 	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office os oauth; do \

@@ -3,8 +3,8 @@
 
 use serde::Serialize;
 use speedwave_pii_engine::{
-    compile_policy_v2, detokenize_json, scan_json, CompiledPolicy, Detection, DetectionAction,
-    EngineKey,
+    compile_policy_v2, default_sensitive_keys, detokenize_json, scan_json, CompiledPolicy,
+    Detection, DetectionAction, EngineKey, BUILTIN_CATEGORIES,
 };
 use wasm_bindgen::prelude::*;
 
@@ -75,5 +75,51 @@ impl PiiEngine {
             serde_json::from_str(value_json).map_err(|e| JsError::new(&e.to_string()))?;
         detokenize_json(&self.key, &mut value).map_err(|e| JsError::new(&e.to_string()))?;
         serde_json::to_string(&value).map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+/// Serializes the compiled-in default policy.json v2 (every built-in category tokenize-on, no
+/// custom patterns, engine's default sensitive-key list) — SSOT for the TS "no POLICY_FILE" path.
+#[wasm_bindgen]
+pub fn default_policy_json() -> String {
+    let categories: serde_json::Map<String, serde_json::Value> = BUILTIN_CATEGORIES
+        .iter()
+        .map(|&category| {
+            (
+                category.to_string(),
+                serde_json::json!({ "tokenize": true, "log": false }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "version": 2,
+        "source": { "policies": [], "forced": [] },
+        "categories": categories,
+        "customPatterns": [],
+        "sensitiveKeys": default_sensitive_keys(),
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panics on setup failure are acceptable"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_policy_json_compiles_and_covers_every_category() {
+        let json = default_policy_json();
+        let policy = compile_policy_v2(&json).expect("default policy.json v2 must compile");
+        assert_eq!(policy.rules().len(), BUILTIN_CATEGORIES.len() - 1);
+        assert!(policy.sensitive_field_flags().tokenize);
+        assert_eq!(policy.sensitive_keys(), default_sensitive_keys());
+    }
+
+    #[test]
+    fn default_policy_json_is_deterministic() {
+        assert_eq!(default_policy_json(), default_policy_json());
     }
 }

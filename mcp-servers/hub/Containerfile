@@ -28,16 +28,18 @@ RUN cd shared && npm run build
 COPY policies/package*.json ./policies/
 RUN --mount=type=cache,target=/root/.npm cd policies && npm install
 
+# Prebuilt on the host (build-wasm.sh, now mandatory in bundle-build-context) and staged by
+# bundle-build-context; alpine has no Rust/wasm-pack, so it is only copied here, never built.
+# Must land before the tsc build below: policies/src/engine.ts imports it directly, and tsc
+# needs the real .d.ts on disk to type-check the import, not just at container runtime.
+COPY policies/wasm-pkg ./policies/wasm-pkg
+
 COPY policies/src ./policies/src
 COPY policies/tsconfig.json ./policies/
 COPY policies/templates ./policies/templates
-RUN cd policies && npm run build
-
-# Prebuilt on the host (build-wasm.sh, now mandatory in bundle-build-context) and staged by
-# bundle-build-context; alpine has no Rust/wasm-pack, so it is only copied here, never built.
-# Unused by policies' `npm run build` (plain tsc) — placed after it so a wasm content change
-# doesn't invalidate the tsc build layer's cache.
-COPY policies/wasm-pkg ./policies/wasm-pkg
+# Direct tsc, not `npm run build`: that script also runs `build:wasm` (wasm-pack), unavailable
+# in this alpine builder — the real artifact was already staged above by bundle-build-context.
+RUN cd policies && npx tsc
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3: Build hub (imports from ../shared/dist and ../policies/dist)
@@ -68,8 +70,7 @@ COPY --from=builder /build/shared/node_modules ../shared/node_modules
 # Copy built policies library (required at runtime for relative imports + template loading)
 COPY --from=builder /build/policies/dist ../policies/dist
 COPY --from=builder /build/policies/templates ../policies/templates
-# Unused by the hub yet (F3.4 wires the executor to it) — shipped so the image already
-# carries it once consumed, without a second image retag.
+# policies/dist/engine.js requires this at runtime (../wasm-pkg/speedwave_pii_engine_wasm.js).
 COPY --from=builder /build/policies/wasm-pkg ../policies/wasm-pkg
 COPY --from=builder /build/policies/package.json ../policies/
 COPY --from=builder /build/policies/node_modules ../policies/node_modules
