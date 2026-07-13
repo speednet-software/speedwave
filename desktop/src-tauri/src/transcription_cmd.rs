@@ -122,34 +122,8 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick live model: the one model this build downloads if present, else any
-    // downloaded. Never download implicitly — error with a hint if none present.
     let store_arc = store.inner().clone();
-    let models_arc = models.inner().clone();
-    let recommended = transcription::best_model_for_this_build().key.to_string();
-    let live_key: String = {
-        let m = models_arc.clone();
-        let rec = recommended.clone();
-        tokio::task::spawn_blocking(move || pick_live_model(&m, &rec))
-            .await
-            .map_err(|e| format!("model pick task panicked: {e}"))??
-    };
-    let whisper_path = {
-        let key = live_key.clone();
-        let m = models_arc.clone();
-        tokio::task::spawn_blocking(move || m.ensure_model(&key, &mut |_| {}))
-            .await
-            .map_err(|e| format!("model path task panicked: {e}"))?
-            .map_err(|e| e.to_string())?
-    };
-    let transcriber = {
-        let path = whisper_path.clone();
-        let key = live_key.clone();
-        tokio::task::spawn_blocking(move || WhisperCppTranscriber::load(&path, key))
-            .await
-            .map_err(|e| format!("transcriber load task panicked: {e}"))?
-            .map_err(|e| e.to_string())?
-    };
+    let (live_key, transcriber) = load_live_transcriber(models.inner()).await?;
 
     // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
     // path is then correct from the first persisted write (no fragile post-create patch).
@@ -167,20 +141,36 @@ pub async fn start_transcription(
         audio_wav.clone(),
     );
     session.models_used.live = Some(live_key.clone());
-    store
-        .create(session)
-        .map_err(|e| format!("store create: {e}"))?;
+    // Register the driver entry before creating the session so the delete guard
+    // covers the whole start window (delete refuses while an entry is live).
+    let stop = StopSignal::new();
+    register_driver(drivers.inner(), session_id, &stop)?;
+    let unregister = |drivers: &DriversHandle| {
+        if let Ok(mut g) = drivers.lock() {
+            if g.get(&session_id).is_some_and(|s| s.same_as(&stop)) {
+                g.remove(&session_id);
+            }
+        }
+    };
+    if let Err(e) = store.create(session) {
+        unregister(drivers.inner());
+        return Err(format!("store create: {e}"));
+    }
 
-    let stream = capture.start(audio_source).map_err(|e| {
-        // Mark the session failed so the UI shows the error, not a hang.
-        let _ = store.set_status(
-            session_id,
-            TranscriptStatus::Failed {
-                reason: e.to_string(),
-            },
-        );
-        e.to_string()
-    })?;
+    let stream = match capture.start(audio_source) {
+        Ok(s) => s,
+        Err(e) => {
+            unregister(drivers.inner());
+            // Mark the session failed so the UI shows the error, not a hang.
+            let _ = store.set_status(
+                session_id,
+                TranscriptStatus::Failed {
+                    reason: e.to_string(),
+                },
+            );
+            return Err(e.to_string());
+        }
+    };
 
     // Wire the event forwarder before the driver mutates anything.
     spawn_event_forwarder(
@@ -190,23 +180,53 @@ pub async fn start_transcription(
         session_id,
     );
 
-    let stop = StopSignal::new();
-    drivers
-        .lock()
-        .map_err(|e| format!("drivers lock poisoned: {e}"))?
-        .insert(session_id, stop.clone());
+    spawn_driver(
+        DriverConfig {
+            id: session_id,
+            store: store_arc.clone(),
+            audio: stream,
+            transcriber: Box::new(transcriber),
+            transcribe_opts: TranscribeOptions::for_language(lang),
+            stop,
+            time_base: std::time::Duration::ZERO,
+        },
+        audio_wav,
+        drivers.inner().clone(),
+    );
 
-    let stop_for_cleanup = stop.clone();
-    let driver = TranscriptDriver::new(DriverConfig {
-        id: session_id,
-        store: store_arc.clone(),
-        audio: stream,
-        transcriber: Box::new(transcriber),
-        transcribe_opts: TranscribeOptions::for_language(lang),
-        stop,
-    });
+    let snapshot = store.get(session_id).map_err(|e| e.to_string())?;
+    Ok(StartAck {
+        session_id,
+        event_name: transcript_event_name(session_id),
+        snapshot,
+    })
+}
+
+/// Claims the driver-registry slot for `id`. Rejecting an occupied slot is the
+/// single-recording invariant per session — a blind insert would let a losing
+/// concurrent start/resume clobber the winner's live entry.
+fn register_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) -> Result<(), String> {
+    let mut g = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?;
+    match g.entry(id) {
+        std::collections::hash_map::Entry::Occupied(_) => {
+            Err("this session is already recording".to_string())
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(stop.clone());
+            Ok(())
+        }
+    }
+}
+
+/// Runs a built driver on a blocking task; cleans up the stop-signal registry
+/// and wakes `await_finished()` waiters when it winds down.
+fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: DriversHandle) {
+    let session_id = cfg.id;
+    let stop_for_cleanup = cfg.stop.clone();
+    let driver = TranscriptDriver::new(cfg);
     // The driver loop blocks on `next_chunk` — run it on a blocking task.
-    let drivers_for_cleanup = drivers.inner().clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = driver.run(&audio_wav) {
             // Log only the id's first chunk — CodeQL flags any "session_id"-looking variable;
@@ -216,18 +236,98 @@ pub async fn start_transcription(
                 short_id(session_id)
             );
         }
-        // Drop the stop-signal entry once the driver has wound down, then
-        // wake anyone waiting on `await_finished()` (e.g. `stop_transcription`).
-        if let Ok(mut g) = drivers_for_cleanup.lock() {
-            g.remove(&session_id);
+        if let Ok(mut g) = drivers.lock() {
+            // A wedged predecessor must not clobber a resumed recording's entry.
+            if g.get(&session_id)
+                .is_some_and(|s| s.same_as(&stop_for_cleanup))
+            {
+                g.remove(&session_id);
+            }
         }
         stop_for_cleanup.signal_finished();
     });
+}
 
-    let snapshot = store.get(session_id).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn resume_transcription(
+    session_id: String,
+    store: tauri::State<'_, TranscriptStoreHandle>,
+    models: tauri::State<'_, ModelStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
+    forwarders: tauri::State<'_, ForwardersHandle>,
+    app: AppHandle,
+) -> Result<StartAck, String> {
+    let id = parse_transcript_id(&session_id)?;
+    let session = store.get(id).map_err(|e| e.to_string())?;
+    if !matches!(session.status, TranscriptStatus::Done) {
+        return Err("only a finished recording can be resumed".to_string());
+    }
+    let lang = session.language;
+    let audio_source = session.audio_source.source.clone();
+
+    let capture = transcription::detect_audio_capture();
+    validate_source_against_caps(&audio_source, &capture.capabilities())?;
+
+    let store_arc = store.inner().clone();
+    let (_live_key, transcriber) = load_live_transcriber(models.inner()).await?;
+
+    // The new part records past the earlier ones on the session timeline.
+    let time_base: std::time::Duration = session
+        .all_audio_parts()
+        .iter()
+        .filter_map(|p| speedwave_runtime::transcription::wav_duration(p))
+        .sum();
+    let part_no = session.all_audio_parts().len() + 1;
+    let next_part = store.session_dir(id).join(format!("audio-{part_no}.wav"));
+
+    // Register the driver entry before mutating the session so the delete guard
+    // covers the whole resume window (delete refuses while an entry is live).
+    let stop = StopSignal::new();
+    register_driver(drivers.inner(), id, &stop)?;
+    let unregister = |drivers: &DriversHandle| {
+        if let Ok(mut g) = drivers.lock() {
+            if g.get(&id).is_some_and(|s| s.same_as(&stop)) {
+                g.remove(&id);
+            }
+        }
+    };
+    if let Err(e) = store.resume(id, next_part.clone()) {
+        unregister(drivers.inner());
+        return Err(e.to_string());
+    }
+    let stream = match capture.start(audio_source) {
+        Ok(s) => s,
+        Err(e) => {
+            unregister(drivers.inner());
+            let _ = store.set_status(
+                id,
+                TranscriptStatus::Failed {
+                    reason: e.to_string(),
+                },
+            );
+            return Err(e.to_string());
+        }
+    };
+
+    spawn_event_forwarder(app, store_arc.clone(), forwarders.inner().clone(), id);
+    spawn_driver(
+        DriverConfig {
+            id,
+            store: store_arc,
+            audio: stream,
+            transcriber: Box::new(transcriber),
+            transcribe_opts: TranscribeOptions::for_language(lang),
+            stop,
+            time_base,
+        },
+        next_part,
+        drivers.inner().clone(),
+    );
+
+    let snapshot = store.get(id).map_err(|e| e.to_string())?;
     Ok(StartAck {
-        session_id,
-        event_name: transcript_event_name(session_id),
+        session_id: id,
+        event_name: transcript_event_name(id),
         snapshot,
     })
 }
@@ -266,8 +366,11 @@ pub async fn stop_transcription(
     // live model) and mark Done; on failure the live transcript stays.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
-    let session_dir = store.session_dir(id);
-    let audio_wav = session_dir.join("audio.wav");
+    // Every recorded part goes through the offline pass (resumed sessions have several).
+    let audio_paths = store
+        .get(id)
+        .map(|s| s.all_audio_parts())
+        .unwrap_or_else(|_| vec![store.session_dir(id).join("audio.wav")]);
     tokio::task::spawn_blocking(move || {
         // Pick the offline model: `large-v3` if present, else fall back to any
         // downloaded Whisper model (the live one is guaranteed present).
@@ -294,7 +397,10 @@ pub async fn stop_transcription(
             }
         };
         let transcriber = match WhisperCppTranscriber::load(&path, key.clone()) {
-            Ok(t) => Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>,
+            Ok(mut t) => {
+                attach_vad(&mut t, &models_arc);
+                Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
+            }
             Err(e) => {
                 let _ = store_arc.set_status(
                     id,
@@ -308,7 +414,7 @@ pub async fn stop_transcription(
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
-            audio_path: audio_wav,
+            audio_paths,
             transcriber,
             transcribe_opts: TranscribeOptions::for_language(session_language(&store_arc, id)),
         };
@@ -388,6 +494,43 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .into_iter()
         .find(|m| m.downloaded)
         .map(|m| m.key)
+}
+
+/// Picks the live model (recommended → any downloaded), ensures it on disk,
+/// loads the transcriber, and attaches the VAD gate — shared by start and resume.
+async fn load_live_transcriber(
+    models: &ModelStoreHandle,
+) -> Result<(String, WhisperCppTranscriber), String> {
+    let m = models.clone();
+    let recommended = transcription::best_model_for_this_build().key.to_string();
+    tokio::task::spawn_blocking(move || -> Result<(String, WhisperCppTranscriber), String> {
+        let key = pick_live_model(&m, &recommended)?;
+        let path = m
+            .ensure_model(&key, &mut |_| {})
+            .map_err(|e| e.to_string())?;
+        let mut t = WhisperCppTranscriber::load(&path, key.clone()).map_err(|e| e.to_string())?;
+        attach_vad(&mut t, &m);
+        Ok((key, t))
+    })
+    .await
+    .map_err(|e| format!("transcriber load task panicked: {e}"))?
+}
+
+/// Attaches the Silero VAD gate when its model is on disk; otherwise kicks off a background
+/// download so this session's offline pass and later sessions get it. Never fails the caller.
+fn attach_vad(transcriber: &mut WhisperCppTranscriber, models: &ModelStoreHandle) {
+    if models.vad_is_present() {
+        if let Err(e) = transcriber.enable_vad(&models.vad_path()) {
+            log::warn!("failed to load the Silero VAD model: {e}");
+        }
+        return;
+    }
+    let m = models.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = m.ensure_vad_model(&mut |_| {}) {
+            log::warn!(target: "transcription::models", "background VAD model download failed: {e}");
+        }
+    });
 }
 
 /// Picks the model for the live pass: `override_key` (must be downloaded) → `recommended` (if
@@ -508,9 +651,21 @@ pub async fn get_transcript(
 pub async fn delete_transcript(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    store.delete(id).map_err(|e| e.to_string())
+    // A live driver writes into the session dir — deleting under it would orphan
+    // an unstoppable capture. The registry lock is held across the delete so a
+    // concurrent start/resume cannot register into the check→delete gap.
+    let guard = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?;
+    if guard.contains_key(&id) {
+        return Err("stop the recording before deleting it".to_string());
+    }
+    let result = store.delete(id).map_err(|e| e.to_string());
+    drop(guard);
+    result
 }
 
 #[tauri::command]
@@ -638,6 +793,11 @@ pub async fn download_transcription_model(
         // The slot lives inside the blocking task: the registry entry clears
         // exactly when the download work ends, even if this future is dropped.
         let _slot = slot;
+        // The Silero VAD gate rides along with every model download (~1 MB;
+        // ADR-056 Amendment 8). Non-fatal: recording degrades to signal gates.
+        if let Err(e) = models.ensure_vad_model(&mut |_| {}) {
+            log::warn!(target: "transcription::models", "VAD model download failed: {e}");
+        }
         models
             .ensure_model(&model_id, &mut |p| {
                 let _ = app.emit(MODEL_PROGRESS_EVENT, &p);
@@ -678,6 +838,22 @@ mod tests {
             PathBuf::from("/tmp/a.wav"),
         );
         store.create(s).unwrap()
+    }
+
+    #[test]
+    fn register_driver_rejects_an_occupied_slot_and_keeps_the_winner() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let id = Uuid::new_v4();
+        let winner = StopSignal::new();
+        register_driver(&drivers, id, &winner).unwrap();
+        // A concurrent second attempt for the same session is rejected...
+        let err = register_driver(&drivers, id, &StopSignal::new()).unwrap_err();
+        assert!(err.contains("already recording"), "got: {err}");
+        // ...and never clobbers the winner's live entry.
+        assert!(drivers.lock().unwrap().get(&id).unwrap().same_as(&winner));
+        // A different session registers independently.
+        register_driver(&drivers, Uuid::new_v4(), &StopSignal::new()).unwrap();
+        assert_eq!(drivers.lock().unwrap().len(), 2);
     }
 
     #[test]
@@ -755,6 +931,7 @@ mod tests {
                     end: std::time::Duration::from_secs(1),
                     text: "hi".to_string(),
                     words: vec![],
+                    source: None,
                 },
             )
             .unwrap();

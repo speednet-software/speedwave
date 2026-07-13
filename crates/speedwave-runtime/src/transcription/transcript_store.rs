@@ -111,6 +111,9 @@ pub enum StoreError {
     /// No such session id.
     #[error("no such transcript session: {0}")]
     NotFound(Uuid),
+    /// The session's current state forbids the requested transition.
+    #[error("invalid transcript state: {0}")]
+    InvalidState(String),
     /// Filesystem error.
     #[error("transcript store I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -381,6 +384,37 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
+    /// Reopens a `Done` session for more recording: the offline pass becomes the
+    /// live baseline and a new audio part is registered (ADR-056 Amendment 10).
+    pub fn resume(&self, id: Uuid, next_part: std::path::PathBuf) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        // The status gate runs under the session lock — a caller-side pre-check
+        // alone would race concurrent stop/start/delete (TOCTOU).
+        let mut resumable = false;
+        self.with_session_batch(id, |s, seq| {
+            if !matches!(s.status, TranscriptStatus::Done) {
+                return Vec::new();
+            }
+            resumable = true;
+            seq_out = seq;
+            if let Some(finals) = s.final_segments.take() {
+                s.live_segments = finals;
+            }
+            s.audio_parts.push(next_part.clone());
+            s.status = TranscriptStatus::Recording;
+            vec![TranscriptEvent::StatusChanged {
+                seq,
+                status: TranscriptStatus::Recording,
+            }]
+        })?;
+        if !resumable {
+            return Err(StoreError::InvalidState(
+                "only a finished recording can be resumed".to_string(),
+            ));
+        }
+        Ok(seq_out)
+    }
+
     /// Emits a capture-health warning event (session state is unchanged).
     pub fn capture_warning(
         &self,
@@ -493,6 +527,7 @@ mod tests {
             end: Duration::from_secs_f32(end_s),
             text: text.to_string(),
             words: vec![],
+            source: None,
         }
     }
 
@@ -934,6 +969,87 @@ mod tests {
         assert!(snap.final_segments.is_some());
         assert_eq!(snap.effective_segments().len(), 1);
         assert_eq!(snap.effective_segments()[0].text, "hi");
+    }
+
+    #[test]
+    fn resume_reopens_a_done_session_with_finals_as_the_live_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store.append_segment(id, seg(0.0, 1.0, "live v1")).unwrap();
+        store
+            .set_final_segments(id, vec![seg(0.0, 1.0, "final v1")])
+            .unwrap();
+        store.finish(id).unwrap();
+
+        let mut sub = store.subscribe(id).unwrap();
+        let part2 = dir.path().join("audio-2.wav");
+        store.resume(id, part2.clone()).unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Recording));
+        // The offline pass became the live baseline; finals cleared for the re-pass.
+        assert_eq!(snap.live_segments.len(), 1);
+        assert_eq!(snap.live_segments[0].text, "final v1");
+        assert!(snap.final_segments.is_none());
+        assert_eq!(snap.audio_parts, vec![part2.clone()]);
+        assert_eq!(
+            snap.all_audio_parts(),
+            vec![dir.path().join("a.wav"), part2]
+        );
+        // The transition streams as a StatusChanged event.
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::StatusChanged { status, .. } => {
+                assert!(matches!(status, TranscriptStatus::Recording));
+            }
+            other => panic!("expected StatusChanged, got {other:?}"),
+        }
+        // And it survives a reload from disk.
+        store.sessions.remove(&id);
+        let reloaded = store.get(id).unwrap();
+        assert_eq!(reloaded.audio_parts.len(), 1);
+        assert_eq!(reloaded.live_segments[0].text, "final v1");
+    }
+
+    #[test]
+    fn resume_on_a_session_without_finals_keeps_the_live_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .append_segment(id, seg(0.0, 1.0, "live only"))
+            .unwrap();
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+        store.resume(id, dir.path().join("audio-2.wav")).unwrap();
+        let snap = store.get(id).unwrap();
+        assert_eq!(snap.live_segments.len(), 1);
+        assert_eq!(snap.live_segments[0].text, "live only");
+    }
+
+    #[test]
+    fn resume_rejects_a_session_that_is_not_done_and_leaves_it_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        for status in [
+            TranscriptStatus::Recording,
+            TranscriptStatus::Finalizing { progress: 0.3 },
+            TranscriptStatus::Failed {
+                reason: "x".to_string(),
+            },
+        ] {
+            store.set_status(id, status.clone()).unwrap();
+            let err = store
+                .resume(id, dir.path().join("audio-2.wav"))
+                .unwrap_err();
+            assert!(
+                matches!(err, StoreError::InvalidState(_)),
+                "expected InvalidState for {status:?}, got {err:?}"
+            );
+            let snap = store.get(id).unwrap();
+            assert_eq!(snap.status, status, "a rejected resume must not mutate");
+            assert!(snap.audio_parts.is_empty(), "no phantom part registered");
+        }
     }
 
     #[test]

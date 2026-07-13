@@ -34,12 +34,16 @@ export interface Word {
   end: { secs: number; nanos: number };
 }
 
+/** Channel a segment was decoded from (absent on mono captures and old transcripts). */
+export type TranscriptSource = 'system' | 'mic';
+
 /** One transcript segment. */
 export interface Segment {
   start: { secs: number; nanos: number };
   end: { secs: number; nanos: number };
   text: string;
   words: Word[];
+  source?: TranscriptSource | null;
 }
 
 /** Which models were used for each pass of a session. */
@@ -66,12 +70,18 @@ export interface TranscriptSession {
   live_segments: Segment[];
   final_segments: Segment[] | null;
   audio_path: string | null;
+  /** Extra audio parts recorded by resumes (absent on never-resumed sessions). */
+  audio_parts?: string[];
   models_used: ModelsUsed;
   last_seq: number;
 }
 
 /** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */
-export type CaptureWarning = 'system_audio_silent' | 'microphone_stalled' | 'system_audio_stalled';
+export type CaptureWarning =
+  | 'system_audio_silent'
+  | 'microphone_stalled'
+  | 'system_audio_stalled'
+  | 'recording_part_missing';
 
 /** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
 export type MicPermission = 'granted' | 'denied' | 'previously_denied';

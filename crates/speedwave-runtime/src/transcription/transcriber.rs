@@ -59,6 +59,27 @@ pub struct Word {
     pub end: Duration,
 }
 
+/// Which captured channel a segment was decoded from. Deterministic channel
+/// attribution, not speaker diarization (ADR-075 stays in force).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSource {
+    /// The system loopback ("the meeting").
+    System,
+    /// The user's microphone ("you").
+    Mic,
+}
+
+impl TranscriptSource {
+    /// Reader-facing channel label (channel attribution, not speaker identity).
+    pub fn label(self) -> &'static str {
+        match self {
+            TranscriptSource::System => "Meeting",
+            TranscriptSource::Mic => "You",
+        }
+    }
+}
+
 /// One transcript segment: a span of audio, its text, and optional per-word
 /// timings. (Speaker diarization was removed — ADR-075.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -71,6 +92,10 @@ pub struct Segment {
     pub text: String,
     /// Per-word timings (empty unless requested).
     pub words: Vec<Word>,
+    /// Channel this was decoded from (`None` on single-channel captures and
+    /// pre-Amendment-9 transcripts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TranscriptSource>,
 }
 
 /// Transcriber errors.
@@ -117,10 +142,73 @@ pub trait Transcriber: Send {
     }
 }
 
+/// Tolerance when matching a decoded segment against VAD speech spans — VAD
+/// edges and Whisper timestamps disagree by up to a few hundred ms.
+const VAD_OVERLAP_TOLERANCE: Duration = Duration::from_millis(200);
+
+/// Standalone Silero VAD (whisper.cpp GGML build). Runs on the raw decode
+/// window, so Whisper timestamps are never remapped (ADR-056 Amendment 8).
+struct SileroVad {
+    ctx: whisper_rs::WhisperVadContext,
+}
+
+impl SileroVad {
+    /// Loads the GGML Silero model at `model_path`.
+    fn load(model_path: &Path) -> Result<Self, TranscribeError> {
+        let path = model_path
+            .to_str()
+            .ok_or_else(|| TranscribeError::ModelLoad {
+                model: "silero-vad".to_string(),
+                detail: "non-UTF-8 model path".to_string(),
+            })?;
+        if !model_path.is_file() {
+            return Err(TranscribeError::ModelMissing("silero-vad".to_string()));
+        }
+        let ctx = whisper_rs::WhisperVadContext::new(
+            path,
+            whisper_rs::WhisperVadContextParams::default(),
+        )
+        .map_err(|e| TranscribeError::ModelLoad {
+            model: "silero-vad".to_string(),
+            detail: e.to_string(),
+        })?;
+        Ok(Self { ctx })
+    }
+
+    /// Speech spans in `pcm` (16 kHz mono), window-relative. Whisper.cpp default
+    /// tuning: threshold 0.5, min speech 250 ms, min silence 100 ms, pad 30 ms.
+    fn speech_spans(&mut self, pcm: &[f32]) -> Result<Vec<(Duration, Duration)>, TranscribeError> {
+        let segments = self
+            .ctx
+            .segments_from_samples(whisper_rs::WhisperVadParams::default(), pcm)
+            .map_err(|e| TranscribeError::Inference(format!("silero vad: {e}")))?;
+        // whisper.cpp VAD timestamps are centiseconds.
+        Ok(segments
+            .map(|s| {
+                (
+                    Duration::from_secs_f32(s.start.max(0.0) / 100.0),
+                    Duration::from_secs_f32(s.end.max(0.0) / 100.0),
+                )
+            })
+            .collect())
+    }
+}
+
+/// `true` when `[start, end]` overlaps any VAD speech span, padded by
+/// [`VAD_OVERLAP_TOLERANCE`] on both edges.
+fn overlaps_speech(spans: &[(Duration, Duration)], start: Duration, end: Duration) -> bool {
+    spans
+        .iter()
+        .any(|(s, e)| start < *e + VAD_OVERLAP_TOLERANCE && *s < end + VAD_OVERLAP_TOLERANCE)
+}
+
 /// Whisper speech-to-text via whisper.cpp. Holds a loaded context for one
 /// model; create one per recording.
 pub struct WhisperCppTranscriber {
     ctx: whisper_rs::WhisperContext,
+    vad: Option<SileroVad>,
+    /// One-shot latch so a persistently failing VAD warns once, not per window.
+    vad_warned: bool,
     model_label: String,
 }
 
@@ -144,8 +232,17 @@ impl WhisperCppTranscriber {
         })?;
         Ok(Self {
             ctx,
+            vad: None,
+            vad_warned: false,
             model_label: label,
         })
+    }
+
+    /// Attaches the Silero VAD gate (ADR-056 Amendment 8). Without it the
+    /// transcriber falls back to the signal-only hallucination gates below.
+    pub fn enable_vad(&mut self, vad_model_path: &Path) -> Result<(), TranscribeError> {
+        self.vad = Some(SileroVad::load(vad_model_path)?);
+        Ok(())
     }
 
     /// Loads catalogue model `key` from `whisper_dir`; `ModelMissing` if absent.
@@ -172,6 +269,23 @@ impl WhisperCppTranscriber {
         if pcm.is_empty() || is_silent(pcm) {
             return Ok(Vec::new());
         }
+        // VAD gate: no speech in the window = no decode. A VAD failure degrades
+        // this window to the signal-only gates and retries next window (warn once).
+        let speech_spans = match self.vad.as_mut().map(|v| v.speech_spans(pcm)) {
+            Some(Ok(spans)) if spans.is_empty() => return Ok(Vec::new()),
+            Some(Ok(spans)) => Some(spans),
+            Some(Err(e)) => {
+                if !self.vad_warned {
+                    self.vad_warned = true;
+                    log::warn!(
+                        target: "transcription::transcriber",
+                        "silero vad failed ({e}) — decoding without the gate; retrying on later windows"
+                    );
+                }
+                None
+            }
+            None => None,
+        };
         let mut state = self
             .ctx
             .create_state()
@@ -215,12 +329,19 @@ impl WhisperCppTranscriber {
                 seg.start_timestamp(),
                 seg.end_timestamp()
             );
-            if is_hallucinated(no_speech, seg_rms) {
-                continue;
-            }
             // whisper_rs timestamps are centiseconds.
             let start = cs_to_duration(seg.start_timestamp());
             let end = cs_to_duration(seg.end_timestamp());
+            if is_hallucinated(no_speech, seg_rms) {
+                continue;
+            }
+            // A segment over a span VAD heard no speech in is a hallucination,
+            // whatever its text — drop it.
+            if let Some(spans) = &speech_spans {
+                if !overlaps_speech(spans, start, end) {
+                    continue;
+                }
+            }
             let text = format!("{seg}").trim().to_string();
             if text.is_empty() {
                 continue;
@@ -230,6 +351,7 @@ impl WhisperCppTranscriber {
                 end,
                 text,
                 words: Vec::new(),
+                source: None,
             });
         }
         if opts.word_timestamps {
@@ -346,6 +468,7 @@ impl Transcriber for MockTranscriber {
                 end: Duration::from_secs_f32(((i + 1) as f32 * self.seg_secs).min(total)),
                 text: self.text_template.replace("{n}", &i.to_string()),
                 words: Vec::new(),
+                source: None,
             })
             .collect())
     }
@@ -396,6 +519,79 @@ mod tests {
         // Thresholds are strict: exactly-at values are kept.
         assert!(!is_hallucinated(0.3, 0.001));
         assert!(!is_hallucinated(0.6, 0.0055));
+    }
+
+    #[test]
+    fn overlaps_speech_matches_within_tolerance_only() {
+        let spans = vec![
+            (Duration::from_secs(1), Duration::from_secs(3)),
+            (Duration::from_secs(10), Duration::from_secs(12)),
+        ];
+        // Fully inside a span.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_millis(1500),
+            Duration::from_millis(2500)
+        ));
+        // Straddling a span edge.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_millis(2500),
+            Duration::from_millis(4000)
+        ));
+        // Within the 200 ms tolerance before a span starts.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_millis(700),
+            Duration::from_millis(900)
+        ));
+        // In the silence gap, farther than the tolerance from both spans.
+        assert!(!overlaps_speech(
+            &spans,
+            Duration::from_millis(5000),
+            Duration::from_millis(8000)
+        ));
+        // Past the last span.
+        assert!(!overlaps_speech(
+            &spans,
+            Duration::from_secs(20),
+            Duration::from_secs(21)
+        ));
+        // No spans at all never matches.
+        assert!(!overlaps_speech(
+            &[],
+            Duration::ZERO,
+            Duration::from_secs(1)
+        ));
+        // A zero-length segment inside a span still matches.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_secs(2),
+            Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn silero_vad_load_reports_missing_and_corrupt_models() {
+        let err = match SileroVad::load(Path::new("/no/such/vad.bin")) {
+            Ok(_) => panic!("expected load to fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, TranscribeError::ModelMissing(ref m) if m == "silero-vad"),
+            "got {err}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vad.bin");
+        std::fs::write(&path, b"not a ggml vad model").unwrap();
+        let err = match SileroVad::load(&path) {
+            Ok(_) => panic!("expected load to fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, TranscribeError::ModelLoad { ref model, .. } if model == "silero-vad"),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -498,6 +694,7 @@ mod tests {
                 start: Duration::from_millis(1230),
                 end: Duration::from_millis(2000),
             }],
+            source: None,
         };
         assert_eq!(
             serde_json::from_str::<Segment>(&serde_json::to_string(&seg).unwrap()).unwrap(),
