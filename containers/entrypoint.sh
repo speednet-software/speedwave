@@ -5,6 +5,42 @@ set -euo pipefail
 # runtime Claude install) must exit promptly, not eat the 10s SIGKILL timeout.
 trap 'exit 0' TERM INT
 
+# Startup diagnostics: truncated each start, mirrored to stderr. Every write is
+# guarded — a read-only or symlinked claude-home degrades to stderr, never fails the start.
+_DIAG_LOG="${HOME}/.speedwave-entrypoint.log"
+_DIAG_FAILURES=0
+if [ -L "${_DIAG_LOG}" ] || { [ -e "${_DIAG_LOG}" ] && [ ! -f "${_DIAG_LOG}" ]; }; then
+    _DIAG_LOG=""
+elif ! : > "${_DIAG_LOG}" 2>/dev/null; then
+    _DIAG_LOG=""
+else
+    chmod 600 "${_DIAG_LOG}" 2>/dev/null || true
+    echo "=== speedwave entrypoint $(date -Iseconds 2>/dev/null || date) ===" >> "${_DIAG_LOG}" 2>/dev/null || _DIAG_LOG=""
+fi
+
+# Secrets must never reach disk: collapse newlines, redact token-shaped values, cap length.
+_diag_redact() {
+    printf '%s' "$*" | tr '\n' ' ' \
+        | sed -E 's/(sk-[A-Za-z0-9_-]{8,}|xox[a-z]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|Bearer +[A-Za-z0-9._-]{8,})/[REDACTED]/g' \
+        | cut -c1-500
+}
+
+_diag() {
+    local level="$1" tag="$2"; shift 2
+    local msg; msg="$(_diag_redact "$*")"
+    [ "${tag}" = "FAIL" ] && _DIAG_FAILURES=$((_DIAG_FAILURES + 1))
+    if [ -n "${_DIAG_LOG}" ] && [ -z "${SPEEDWAVE_DIAG_FAIL_AFTER:-}" ]; then
+        echo "$(date -Iseconds 2>/dev/null || date) ${level} ${tag} ${msg}" >> "${_DIAG_LOG}" 2>/dev/null || _DIAG_LOG=""
+    fi
+    return 0
+}
+
+_diag_footer() {
+    [ -n "${_DIAG_LOG}" ] || return 0
+    echo "=== entrypoint done (${_DIAG_FAILURES} failure(s)) ===" >> "${_DIAG_LOG}" 2>/dev/null || true
+    return 0
+}
+
 # Shared Node snippet for the JSON writers below (settings.json merge, hook
 # registration, .claude.json onboarding): fsync-before-rename is mandatory
 # (virtiofs/drvfs tear otherwise; see cross-platform rules). Each writer runs
@@ -42,7 +78,9 @@ else
     installed_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
     if [ -n "$installed_version" ] && [ "$installed_version" != "$CLAUDE_VERSION" ]; then
         echo "WARNING: image has Claude Code ${installed_version} but the pinned version is ${CLAUDE_VERSION} — run 'speedwave update' to rebuild the image" >&2
+        _diag WARN SKEW "image ${installed_version}, pinned ${CLAUDE_VERSION}"
     fi
+    _diag INFO CLAUDE "version ${installed_version} (pinned ${CLAUDE_VERSION})"
 fi
 
 # Symlink ~/.local/bin/claude → /usr/local/bin/claude so exec shells find it on PATH.
@@ -241,6 +279,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     _mp="${SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE:-claude-plugins-official}"
     if ! echo "${_mp}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
         echo "WARNING: invalid bundled-plugin marketplace, skipping install: ${_mp}" >&2
+        _diag WARN CONFIG "invalid bundled-plugin marketplace: ${_mp}"
         SPEEDWAVE_BUNDLED_PLUGINS=""
     fi
     # Skip listing/installing entirely once every configured plugin was recorded
@@ -257,7 +296,11 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ] && ! command -v jq &> /dev/null; then
         echo "WARNING: jq not found — skipping bundled-plugin install (cannot verify what is already installed)" >&2
+        _diag WARN CONFIG "jq not found — bundled-plugin install skipped"
         SPEEDWAVE_BUNDLED_PLUGINS=""
+    fi
+    if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 1 ]; then
+        _diag INFO SKIP "all bundled plugins already recorded"
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
@@ -268,6 +311,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
             if ! echo "${_plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
                 echo "WARNING: skipping invalid bundled-plugin name: ${_plugin}" >&2
+                _diag WARN CONFIG "invalid bundled-plugin name: ${_plugin}"
                 continue
             fi
             # Match a composite id ("name@marketplace") OR separate name+marketplace
@@ -278,12 +322,15 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                 2>/dev/null)" || _match=""
             if [ "${_match}" = "true" ]; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
+                _diag INFO SKIP "${_plugin}@${_mp} (already installed)"
                 continue
             fi
             if _err="$(timeout 60 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
+                _diag INFO OK "${_plugin}@${_mp}"
             else
                 echo "WARNING: failed to install bundled plugin ${_plugin}@${_mp}: ${_err} (continuing)" >&2
+                _diag ERROR FAIL "${_plugin}@${_mp}: ${_err}"
             fi
         done
         if [ -s "${_new_marker}" ]; then
@@ -317,6 +364,7 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
                 target="${HOME}/.claude/${resource_type}/$(basename "${entry}")"
                 if [ -L "${target}" ] && [ "$(readlink "${target}")" != "${entry}" ]; then
                     echo "WARNING: plugin '${plugin}' overwrites ${resource_type}/$(basename "${entry}") from another plugin" >&2
+                    _diag WARN PLUGIN "resource collision: ${plugin}"
                 fi
                 ln -sfn "${entry}" "${target}"
                 echo "${target}" >> "${new_state}"
@@ -512,6 +560,7 @@ if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
             sleep 1
         done
         echo "WARNING: MCP hub at ${host}:${port} did not respond within 30s — Claude will start without tools." >&2
+        _diag WARN HUB "hub did not respond within 30s"
         return 1
     }
     wait_for_hub || true
@@ -522,8 +571,10 @@ touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 
 # Execute the passed command (or keep container alive waiting for exec)
 if [ $# -gt 0 ]; then
+    _diag_footer
     exec "$@"
 else
+    _diag_footer
     # PID1 must trap TERM and kill the background sleep on exit.
     trap 'kill "$!" 2>/dev/null; exit 0' TERM INT
     while :; do sleep 86400 & wait $!; done

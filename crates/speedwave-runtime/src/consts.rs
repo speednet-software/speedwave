@@ -2767,4 +2767,11 @@ mod tests {
             crate::claude_home::claude_home_dir(data_dir, "proj").join(ENTRYPOINT_LOG_FILE)
         );
     }
+
+    /// SSOT guard: the Rust const and the shell producer must name the same file.
+    #[test]
+    fn entrypoint_log_file_matches_entrypoint_sh() {
+        let sh = include_str!("../../../containers/entrypoint.sh");
+        assert!(sh.contains(ENTRYPOINT_LOG_FILE));
+    }
 }
