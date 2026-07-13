@@ -30,6 +30,8 @@ function fmtTs(secs: number): string {
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
+  /** Channel label ('You' / 'Meeting') on paired captures, else null. */
+  speaker: string | null;
   text: string;
 }
 
@@ -70,13 +72,20 @@ interface TranscriptLine {
           <div class="mb-2">
             <div class="mb-0.5 flex items-center gap-1 text-[11px]">
               <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
+              @if (line.speaker) {
+                <span
+                  class="rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-mute)]"
+                  data-testid="line-speaker"
+                  >{{ line.speaker }}</span
+                >
+              }
             </div>
             <p class="text-[13px] leading-relaxed text-[var(--ink)]">{{ line.text }}</p>
           </div>
         }
         @if (draft()) {
           <p
-            class="mb-2 text-[13px] italic leading-relaxed text-[var(--ink-mute)]"
+            class="mb-2 whitespace-pre-line text-[13px] italic leading-relaxed text-[var(--ink-mute)]"
             data-testid="live-draft"
           >
             {{ draft() }}
@@ -125,12 +134,18 @@ export class LiveTranscriptComponent {
     return s.final_segments ?? s.live_segments;
   });
 
-  /** Segments rendered as plain timestamped lines. */
+  /**
+   * Segments as timestamped lines, chronological — per-channel decode cycles
+   * can append a mic segment after a later system one (or vice versa).
+   */
   readonly lines = computed<TranscriptLine[]>(() =>
-    this.segments().map((seg) => ({
-      startLabel: fmtTs(seg.start.secs),
-      text: seg.text.trim(),
-    }))
+    [...this.segments()]
+      .sort((a, b) => a.start.secs - b.start.secs || a.start.nanos - b.start.nanos)
+      .map((seg) => ({
+        startLabel: fmtTs(seg.start.secs),
+        speaker: seg.source === 'mic' ? 'You' : seg.source === 'system' ? 'Meeting' : null,
+        text: seg.text.trim(),
+      }))
   );
 
   /** Lifecycle state of the active session ('' if none). */

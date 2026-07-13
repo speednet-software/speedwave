@@ -59,6 +59,17 @@ pub struct Word {
     pub end: Duration,
 }
 
+/// Which captured channel a segment was decoded from. Deterministic channel
+/// attribution, not speaker diarization (ADR-075 stays in force).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSource {
+    /// The system loopback ("the meeting").
+    System,
+    /// The user's microphone ("you").
+    Mic,
+}
+
 /// One transcript segment: a span of audio, its text, and optional per-word
 /// timings. (Speaker diarization was removed — ADR-075.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -71,6 +82,10 @@ pub struct Segment {
     pub text: String,
     /// Per-word timings (empty unless requested).
     pub words: Vec<Word>,
+    /// Channel this was decoded from (`None` on single-channel captures and
+    /// pre-Amendment-9 transcripts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TranscriptSource>,
 }
 
 /// Transcriber errors.
@@ -321,6 +336,7 @@ impl WhisperCppTranscriber {
                 end,
                 text,
                 words: Vec::new(),
+                source: None,
             });
         }
         if opts.word_timestamps {
@@ -437,6 +453,7 @@ impl Transcriber for MockTranscriber {
                 end: Duration::from_secs_f32(((i + 1) as f32 * self.seg_secs).min(total)),
                 text: self.text_template.replace("{n}", &i.to_string()),
                 words: Vec::new(),
+                source: None,
             })
             .collect())
     }
@@ -662,6 +679,7 @@ mod tests {
                 start: Duration::from_millis(1230),
                 end: Duration::from_millis(2000),
             }],
+            source: None,
         };
         assert_eq!(
             serde_json::from_str::<Segment>(&serde_json::to_string(&seg).unwrap()).unwrap(),

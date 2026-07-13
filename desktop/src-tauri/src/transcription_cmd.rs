@@ -786,6 +786,7 @@ mod tests {
                     end: std::time::Duration::from_secs(1),
                     text: "hi".to_string(),
                     words: vec![],
+                    source: None,
                 },
             )
             .unwrap();

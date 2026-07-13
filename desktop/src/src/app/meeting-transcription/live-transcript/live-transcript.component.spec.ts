@@ -75,6 +75,28 @@ describe('LiveTranscriptComponent', () => {
     expect(lines[1].text).toBe('there');
   });
 
+  it('labels channel-tagged segments and sorts lines chronologically', () => {
+    const sys = { ...seg(2, 'ze spotkania'), source: 'system' as const };
+    const mic = { ...seg(0, 'moja wypowiedź'), source: 'mic' as const };
+    // Mic committed after system (per-lane cycles append out of order).
+    fixture.componentRef.setInput('session', session({ live_segments: [sys, mic] }));
+    fixture.detectChanges();
+    const lines = component.lines();
+    expect(lines[0].text).toBe('moja wypowiedź');
+    expect(lines[0].speaker).toBe('You');
+    expect(lines[1].speaker).toBe('Meeting');
+    const chips = fixture.nativeElement.querySelectorAll('[data-testid="line-speaker"]');
+    expect(chips.length).toBe(2);
+    expect(chips[0].textContent).toContain('You');
+  });
+
+  it('renders untagged segments without a speaker chip', () => {
+    fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hej')] }));
+    fixture.detectChanges();
+    expect(component.lines()[0].speaker).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="line-speaker"]')).toBeNull();
+  });
+
   it('prefers final_segments over live_segments', () => {
     fixture.componentRef.setInput(
       'session',

@@ -34,12 +34,16 @@ export interface Word {
   end: { secs: number; nanos: number };
 }
 
+/** Channel a segment was decoded from (absent on mono captures and old transcripts). */
+export type TranscriptSource = 'system' | 'mic';
+
 /** One transcript segment. */
 export interface Segment {
   start: { secs: number; nanos: number };
   end: { secs: number; nanos: number };
   text: string;
   words: Word[];
+  source?: TranscriptSource | null;
 }
 
 /** Which models were used for each pass of a session. */

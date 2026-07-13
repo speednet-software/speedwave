@@ -69,12 +69,15 @@ impl CaptureCapabilities {
     }
 }
 
-/// One chunk of captured PCM: 16 kHz mono `f32` samples in `[-1.0, 1.0]`, plus the offset of
-/// this chunk's first sample from recording start. `Mixed` sources are already backend-mixed.
+/// One chunk of captured PCM: 16 kHz `f32` samples in `[-1.0, 1.0]`, plus the offset of this
+/// chunk's first sample from recording start. `Mixed` sources deliver both channels, paired.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
-    /// 16 kHz mono samples, `[-1.0, 1.0]`.
+    /// 16 kHz mono samples: the only channel, or the system side when `mic` is set.
     pub samples: Vec<f32>,
+    /// Mic-side samples index-aligned with `samples` (`Mixed` captures only) —
+    /// decoded separately so quiet speech never competes with loud playback.
+    pub mic: Option<Vec<f32>>,
     /// Offset of `samples[0]` from the start of capture.
     pub offset: Duration,
 }
@@ -298,6 +301,7 @@ impl AudioStream for FilePlaybackStream {
         let end = (self.pos + self.frames_per_chunk).min(self.samples.len());
         let chunk = AudioChunk {
             samples: self.samples[self.pos..end].to_vec(),
+            mic: None,
             offset: Duration::from_micros(
                 (self.pos as u128 * 1_000_000 / SAMPLE_RATE_HZ as u128) as u64,
             ),
@@ -310,6 +314,23 @@ impl AudioStream for FilePlaybackStream {
 /// Parses a WAV file into mono `f32` samples (no resampling). Returns the downmixed samples and
 /// the file's sample rate so callers can choose to resample or trust it.
 pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureError> {
+    let (channels, rate) = parse_wav_to_channels_f32(path)?;
+    let mono = match channels.len() {
+        0 => Vec::new(),
+        1 => channels.into_iter().next().unwrap_or_default(),
+        n => {
+            let len = channels.iter().map(Vec::len).min().unwrap_or(0);
+            (0..len)
+                .map(|i| channels.iter().map(|ch| ch[i]).sum::<f32>() / n as f32)
+                .collect()
+        }
+    };
+    Ok((mono, rate))
+}
+
+/// Parses a WAV file into per-channel `f32` samples (no resampling, no downmix).
+/// Returns one `Vec` per channel plus the file's sample rate.
+pub fn parse_wav_to_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), CaptureError> {
     let mut reader = hound::WavReader::open(path)
         .map_err(|e| CaptureError::Failed(format!("open WAV {}: {e}", path.display())))?;
     let spec = reader.spec();
@@ -330,15 +351,13 @@ pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureErro
         }
     };
     let channels = spec.channels.max(1) as usize;
-    let mono = if channels == 1 {
-        interleaved
-    } else {
-        interleaved
-            .chunks(channels)
-            .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
-            .collect()
-    };
-    Ok((mono, spec.sample_rate))
+    let mut out = vec![Vec::with_capacity(interleaved.len() / channels); channels];
+    for frame in interleaved.chunks(channels) {
+        for (ch, &s) in frame.iter().enumerate() {
+            out[ch].push(s);
+        }
+    }
+    Ok((out, spec.sample_rate))
 }
 
 /// File-backed dev path: parse + resample to 16 kHz.

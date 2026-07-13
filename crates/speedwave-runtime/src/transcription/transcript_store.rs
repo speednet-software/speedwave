@@ -493,6 +493,7 @@ mod tests {
             end: Duration::from_secs_f32(end_s),
             text: text.to_string(),
             words: vec![],
+            source: None,
         }
     }
 

@@ -317,20 +317,21 @@ mod tests {
 
     #[test]
     fn vad_model_is_well_formed() {
+        let m = VAD_MODEL;
         assert!(
-            VAD_MODEL.file.starts_with("ggml-") && VAD_MODEL.file.ends_with(".bin"),
+            m.file.starts_with("ggml-") && m.file.ends_with(".bin"),
             "bad GGML filename: {}",
-            VAD_MODEL.file
+            m.file
         );
-        assert!(is_hex64(VAD_MODEL.sha256));
+        assert!(is_hex64(m.sha256));
         // Silero VAD is under 1 MiB — a jump above that means a wrong file was pinned.
-        assert!(VAD_MODEL.approx_bytes > 100_000 && VAD_MODEL.approx_bytes < 10_000_000);
-        assert!(!VAD_MODEL.license.is_empty());
-        let url = VAD_MODEL.url();
+        assert!(m.approx_bytes > 100_000 && m.approx_bytes < 10_000_000);
+        assert!(!m.license.is_empty());
+        let url = m.url();
         assert!(url.starts_with("https://huggingface.co/ggml-org/whisper-vad/resolve/main/"));
-        assert!(url.ends_with(VAD_MODEL.file));
+        assert!(url.ends_with(m.file));
         // The VAD file must not collide with a Whisper catalogue filename.
-        assert!(WHISPER_MODELS.iter().all(|m| m.file != VAD_MODEL.file));
+        assert!(WHISPER_MODELS.iter().all(|w| w.file != m.file));
     }
 
     #[test]
