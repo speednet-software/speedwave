@@ -78,6 +78,18 @@ pub(crate) fn extract_volume_for_target(
     None
 }
 
+/// Container target of a short-form `host:/target[:mode]` volume string. Splits
+/// at the first `:/` so a Windows drive-letter host (`C:\…`) is not mistaken for it.
+pub(crate) fn short_form_volume_target(vol: &str) -> Option<&str> {
+    let start = vol.find(":/")? + 1;
+    let rest = &vol[start..];
+    // Trim a trailing :ro/:rw/:z-style mode if present.
+    match rest.rfind(':') {
+        Some(pos) if pos > 0 && !rest[pos + 1..].contains('/') => Some(&rest[..pos]),
+        _ => Some(rest),
+    }
+}
+
 /// Validates a rendered compose file against Speedwave's security invariants.
 pub struct SecurityCheck;
 
@@ -295,6 +307,12 @@ pub enum SecurityRule {
     ))]
     ManagedSettingsMount,
 
+    /// The claude `/workspace` mount source is exactly the project dir and no
+    /// extra host root is mounted (guards path-injected volume entries).
+    #[strum(to_string = "CLAUDE_WORKSPACE_MOUNT")]
+    #[strum(props(description = "claude /workspace mount source is exactly the project dir"))]
+    ClaudeWorkspaceMount,
+
     // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
@@ -464,6 +482,8 @@ impl SecurityCheck {
                 project,
                 expected_paths.telemetry_locked,
             ),
+            // claude /workspace mount source == exact project dir
+            Self::check_claude_workspace_mount(&doc, expected_paths),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -1156,6 +1176,81 @@ impl SecurityCheck {
                     "MDM policy locks telemetry but the managed-settings.json mount is missing"
                         .into(),
                 remediation: "Re-render compose so the managed-settings.json mount is applied.",
+            });
+        }
+        violations
+    }
+
+    /// The claude `/workspace` mount must come from exactly the expected project
+    /// dir; extra volume entries injected via a control char in the path are rejected.
+    fn check_claude_workspace_mount(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
+            return violations;
+        };
+        let vols = claude
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        // Every target the renderer mounts on claude; anything else is injected.
+        // /home/speedwave/.claude/ide and the MDM managed-settings.json nest under
+        // an allowed prefix, so an exact-or-under-prefix check covers both.
+        const ALLOWED_TARGET_PREFIXES: &[&str] = &[
+            "/home/speedwave",
+            "/workspace",
+            "/speedwave/resources",
+            "/etc/claude-code",
+            "/usage",
+        ];
+        let expected = expected_paths.project_engine_path();
+        let mut matches = 0;
+        for vol in &vols {
+            let Some(s) = vol.as_str() else { continue };
+            let Some(target) = short_form_volume_target(s) else {
+                continue;
+            };
+            if !ALLOWED_TARGET_PREFIXES
+                .iter()
+                .any(|p| target == *p || target.starts_with(&format!("{p}/")))
+            {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: format!("claude mounts an unexpected target '{target}'"),
+                    remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
+                });
+                continue;
+            }
+            if target != "/workspace" {
+                continue;
+            }
+            matches += 1;
+            let Some((host, _mode)) = extract_volume_for_target(s, "/workspace") else {
+                continue;
+            };
+            if host != expected {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: format!("/workspace source '{host}' != expected '{expected}'"),
+                    remediation:
+                        "The claude /workspace mount must come from exactly the project directory.",
+                });
+            }
+        }
+        if matches != 1 {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!("claude must have exactly one /workspace mount, found {matches}"),
+                remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
             });
         }
         violations

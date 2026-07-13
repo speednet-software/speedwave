@@ -10,14 +10,18 @@
 
 param(
   [ValidateSet('full', 'runtime')]
-  [string]$Mode = 'full'
+  [string]$Mode = 'full',
+  # Params override env; the WiX CA passes paths as args (never interpolated
+  # into a -Command literal) while NSIS/Tauri callers still use env vars.
+  [string]$InstDir,
+  [string]$DataDir
 )
 
 $ErrorActionPreference = 'Stop'
 
-$instDir = $env:SPW_INSTDIR
+$instDir = if ($InstDir) { $InstDir } else { $env:SPW_INSTDIR }
 if (-not $instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }
-$dataDir = $env:SPW_DATA_DIR
+$dataDir = if ($DataDir) { $DataDir } else { $env:SPW_DATA_DIR }
 if (-not $dataDir) { Write-Error 'SPW_DATA_DIR not set'; exit 2 }
 
 $instDir = $instDir.TrimEnd('\')

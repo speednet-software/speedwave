@@ -25,6 +25,27 @@ interface RetryConfig extends InternalAxiosRequestConfig {
   __retryCount?: number;
 }
 
+/** HTTP methods safe to replay: reads with no server-side effect. */
+const IDEMPOTENT_METHODS = new Set(['get', 'head']);
+
+/**
+ * True when an Axios error is safe to retry: an idempotent method AND either a
+ * network error (no response) or a transient status (429 or 5xx).
+ * @param error - The Axios error to classify.
+ * @returns Whether the request may be replayed.
+ */
+export function isRetryable(error: AxiosError): boolean {
+  const method = (error.config?.method ?? 'get').toLowerCase();
+  if (!IDEMPOTENT_METHODS.has(method)) {
+    return false;
+  }
+  const status = error.response?.status;
+  if (status === undefined) {
+    return true; // Network error / no response.
+  }
+  return status === 429 || (status >= 500 && status < 600);
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────────────────────────
 
 /** Redmine client configuration. */
@@ -823,18 +844,22 @@ export class RedmineClient {
     this.client = axios.create({
       baseURL: config.url,
       timeout: TIMEOUTS.API_CALL_MS,
+      // No redirects: a malicious Redmine host could 3xx to another origin, and
+      // follow-redirects does not strip the X-Redmine-API-Key header cross-host.
+      maxRedirects: 0,
       headers: {
         'X-Redmine-API-Key': config.apiKey,
         'Content-Type': 'application/json',
       },
     });
 
-    // Add retry interceptor
+    // Retry only idempotent reads: replaying a POST/PUT/DELETE on a transient
+    // error can duplicate a mutation. 429/5xx/network retry for GET/HEAD only.
     this.client.interceptors.response.use(
       (response) => response,
       async (error: AxiosError) => {
         const config = error.config as RetryConfig | undefined;
-        if (!config || (config.__retryCount ?? 0) >= 3) {
+        if (!config || (config.__retryCount ?? 0) >= 3 || !isRetryable(error)) {
           return Promise.reject(error);
         }
 

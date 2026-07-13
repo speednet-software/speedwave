@@ -1458,6 +1458,68 @@ EOF
     [ ! -f "$TEST_HOME/installed-plugins.log" ]
 }
 
+# Stub: `plugin list --json` prints NOTHING with exit 0 — the real CLI does this
+# on a cold container start; `plugin install` records the target.
+_stub_claude_empty_plugin_list() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"
+    exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+}
+
+@test "an empty plugin list output means nothing installed, never everything" {
+    _stub_claude_empty_plugin_list
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+}
+
+@test "a whitespace-only plugin list output means nothing installed" {
+    _stub_claude_empty_plugin_list
+    sed -i.bak 's|then exit 0; fi|then printf "\\n  \\n"; exit 0; fi|' "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+}
+
+@test "a malformed plugin list output means nothing installed" {
+    _stub_claude_empty_plugin_list
+    sed -i.bak 's|then exit 0; fi|then echo "not json"; exit 0; fi|' "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+}
+
+@test "a pre-fix marker poisoned by the empty-list bug does not skip installs" {
+    _stub_claude_empty_plugin_list
+    mkdir -p "$TEST_HOME/.claude"
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
+    [ ! -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed" ]
+}
+
 @test "a failing plugin install is non-fatal and surfaces the error reason" {
     cat > "$STUBS_DIR/claude" << EOF
 #!/bin/bash
@@ -2037,4 +2099,80 @@ fs.writeFileSync(p,JSON.stringify(s,null,2));
     [ "$status" -eq 0 ]
 
     rm -rf "$plugins_dir" "$patched"
+}
+
+# ── Persistent startup diagnostics log (${HOME}/.speedwave-entrypoint.log) ──────────────────────────
+
+@test "startup log records a failed bundled-plugin install with reason and level" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "Failed to clone repository" >&2
+    exit 1
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    # stderr contract unchanged (existing bats depend on it)
+    [[ "$output" == *"failed to install bundled plugin"* ]]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"ERROR FAIL"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"Failed to clone repository"* ]]
+    [[ "$output" == *"entrypoint done (1 failure"* ]]
+}
+
+@test "startup log lines carry a parseable timestamp and a known level" {
+    _stub_claude_recording_plugin_installs
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run bash -c "grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[^ ]* (INFO|WARN|ERROR) ' '$TEST_HOME/.speedwave-entrypoint.log'"
+    [ "$output" -ge 2 ]
+}
+
+@test "startup log is truncated on each start, not appended" {
+    _stub_claude_recording_plugin_installs
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run bash -c "grep -c 'speedwave entrypoint' '$TEST_HOME/.speedwave-entrypoint.log'"
+    [ "$output" -eq 1 ]
+}
+
+# P0 regression: `set -e` turns a failing append into a dead container. The stub
+# revokes write access mid-start, so every later _diag write genuinely fails.
+@test "a write failure mid-start never fails the container start" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+chmod 400 "$TEST_HOME/.speedwave-entrypoint.log" 2>/dev/null || true
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then exit 0; fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    chmod 600 "$TEST_HOME/.speedwave-entrypoint.log" 2>/dev/null || true
+}
+
+@test "the startup log is refused when claude-home holds a symlink in its place" {
+    _stub_claude_recording_plugin_installs
+    mkdir -p "$TEST_HOME"
+    ln -sf /etc/passwd "$TEST_HOME/.speedwave-entrypoint.log"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    # producer must not write through the symlink
+    run bash -c "grep -o 'speedwave entrypoint' /etc/passwd 2>/dev/null | wc -l | tr -d ' '"
+    [ "$output" -eq 0 ]
 }

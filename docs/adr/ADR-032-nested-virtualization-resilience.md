@@ -3,20 +3,22 @@
 > **Status:** Accepted
 > **Context:** On Windows inside a VM (VMware, VirtualBox, QEMU/KVM), WSL2's Hyper-V layer[^1] creates nested virtualization, where `fsync()` must flush through two hypervisors — stalling or failing container image builds during package extraction.
 
+> **Amendment (2026-07-13):** `--force-unsafe-io` was removed from the claude image. Its premise here — "safe because layers are disposable" — was wrong: a BuildKit layer snapshot can commit a dpkg-unpacked file before its data is flushed, so a crash is not needed to bake a torn binary into the image. Field case: `/usr/bin/git` shipped as a 0-byte executable, every `git` call silently no-opped with exit 0, and external bundled plugins could never install. The image now runs `apt-get install` with default fsync behavior plus a build-time smoke check on the core binaries; the rest of this ADR (retry ladder, VM-host warning, bounded worker pool) still applies and still covers the nested-virt I/O failures the flag was meant to dodge.
+
 ## Decision
 
 Apply a four-layer strategy so image builds survive nested-virt I/O degradation: relax `dpkg` fsync during the build, retry transient build errors with backoff, proactively warn when a VM host is detected, and build images in parallel with a bounded worker pool.
 
 ## Why
 
-- The `apt-get install` phase in the claude image calls `dpkg`, which uses `fsync()` heavily for crash-safe installs. Under nested virt those calls time out, failing the build with "Input/output error". `--force-unsafe-io` skips the fsync on unpacked files[^2] — safe here because image layers are disposable (a crashed build just rebuilds).
+- The `apt-get install` phase in the claude image calls `dpkg`, which uses `fsync()` heavily for crash-safe installs. Under nested virt those calls time out, failing the build with "Input/output error". `--force-unsafe-io` skips the fsync on unpacked files[^2]; it was originally adopted here on the premise that image layers are disposable, which the 2026-07-13 amendment above retracts (a layer snapshot, not a crash, is what bakes in a torn file). The transient-retry ladder below now carries this failure mode alone.
 - Transient I/O and boot-time DNS-fallback hiccups are usually one-off; a short backed-off retry clears them without user action. The same recovery ladder (`with_build_recovery`, shared by bundle and plugin builds) also covers disk-full and containerd snapshotter corruption — each prunes the relevant cache (`builder prune` for the BuildKit cache, plus `system prune` for snapshotter) and retries.
 - Detecting a VM host up front lets `speedwave check` warn the user before a long build fails.
 - Parallel builds cut wall-clock setup time, but the pool is **bounded** to avoid amplifying disk-I/O contention and the BuildKit overlayfs snapshotter race window on VM hosts.
 
 ## How it works
 
-- **apt hardening** — `Acquire::Retries=3`[^3] on `apt-get update` plus `--force-unsafe-io` on install, set in the claude image (`containers/Containerfile.claude`).
+- **apt hardening** — `Acquire::Retries=3`[^3] on `apt-get update` in the claude image (`containers/Containerfile.claude`), followed by a build-time smoke check (`git`, `jq`, `python3`, `curl`) that fails the build on a torn binary. `--force-unsafe-io` was dropped here (see the amendment above).
 - **Transient retry** — after the first build attempt fails with a transient error, it retries up to `TRANSIENT_BUILD_RETRIES = 2` times with a per-attempt backoff (so **3 total attempts**: 1 initial + 2 retries). Matched strings (case-insensitive) include `i/o timeout`, `input/output error`, `connection reset`, `temporary failure`, `resource temporarily unavailable`, plus DNS-shaped errors only when they name a base-image registry. If all attempts fail, the error is enriched with VM troubleshooting guidance (increase VM memory, enable nested VT-x/EPT).
 - **Worker pool** — images build concurrently via `std::thread::scope`[^4], worker count capped at `min(available_parallelism, IMAGES.len())`, falling back to `DEFAULT_BUILD_WORKER_FALLBACK` (4) when CPU count is unknown.
 - **Error classification** — every worker's error is collected and one is returned by priority: snapshotter (needs `system_prune` first) > transient (plain retry) > lowest image-index. Outcomes are sorted by image index so the choice is deterministic regardless of thread scheduling.
@@ -30,7 +32,7 @@ Apply a four-layer strategy so image builds survive nested-virt I/O degradation:
 
 ## Consequences
 
-- `--force-unsafe-io` relaxes crash-safety only during the build — accepted, layers are disposable.
+- Builds pay the dpkg fsync cost again (seconds on a multi-hundred-MB image), in exchange for never shipping a torn binary.
 - The VM check adds ~2-3s of PowerShell startup on Windows, only on explicit `speedwave check` and before container start, never on hot paths.
 - The first pass always builds all images before returning an error; each retry costs roughly one more pass. The bounded pool limits, but does not eliminate, I/O pressure on VM hosts.
 - No new container mounts, ports, env vars, credential flows, or frontend changes.

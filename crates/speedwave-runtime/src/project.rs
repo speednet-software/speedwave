@@ -105,6 +105,9 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
     if !dir_path.is_absolute() {
         anyhow::bail!("Project directory must be an absolute path: {}", dir);
     }
+    // A newline/CR/NUL in the path would inject extra volume entries when the
+    // path is spliced into the unquoted compose scalar (macOS allows them).
+    validation::reject_control_chars(dir, "Project directory")?;
 
     // WSL UNC: bypass canonicalize (undocumented behavior on Windows — see ADR-064).
     let (canonical, canonical_str) = match runtime::wsl::is_wsl_unc_path(dir) {
@@ -357,6 +360,28 @@ mod tests {
             result.unwrap_err().to_string().contains("absolute"),
             "should mention 'absolute'"
         );
+    }
+
+    #[test]
+    fn rejects_control_chars_in_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        for injected in [
+            "/tmp/project\n      - /:/host:ro\n      - /tmp/payload",
+            "/tmp/pro\rject",
+            "/tmp/pro\0ject",
+        ] {
+            let result = add_project_with_data_dir("myproject", injected, &data_dir);
+            assert!(result.is_err(), "must reject control char in {injected:?}");
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("control characters"),
+                "should mention 'control characters'"
+            );
+        }
     }
 
     #[test]
