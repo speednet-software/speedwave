@@ -111,6 +111,9 @@ pub enum StoreError {
     /// No such session id.
     #[error("no such transcript session: {0}")]
     NotFound(Uuid),
+    /// The session's current state forbids the requested transition.
+    #[error("invalid transcript state: {0}")]
+    InvalidState(String),
     /// Filesystem error.
     #[error("transcript store I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -381,23 +384,34 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Reopens a session for more recording (ADR-056 Amendment 10): the offline pass
-    /// (the best text so far) becomes the live baseline and a new audio part is
-    /// registered. The caller must have verified the session is `Done`.
+    /// Reopens a `Done` session for more recording: the offline pass becomes the
+    /// live baseline and a new audio part is registered (ADR-056 Amendment 10).
     pub fn resume(&self, id: Uuid, next_part: std::path::PathBuf) -> Result<u64, StoreError> {
         let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
+        // The status gate runs under the session lock — a caller-side pre-check
+        // alone would race concurrent stop/start/delete (TOCTOU).
+        let mut resumable = false;
+        self.with_session_batch(id, |s, seq| {
+            if !matches!(s.status, TranscriptStatus::Done) {
+                return Vec::new();
+            }
+            resumable = true;
             seq_out = seq;
             if let Some(finals) = s.final_segments.take() {
                 s.live_segments = finals;
             }
             s.audio_parts.push(next_part.clone());
             s.status = TranscriptStatus::Recording;
-            TranscriptEvent::StatusChanged {
+            vec![TranscriptEvent::StatusChanged {
                 seq,
                 status: TranscriptStatus::Recording,
-            }
+            }]
         })?;
+        if !resumable {
+            return Err(StoreError::InvalidState(
+                "only a finished recording can be resumed".to_string(),
+            ));
+        }
         Ok(seq_out)
     }
 
@@ -1005,10 +1019,37 @@ mod tests {
         store
             .append_segment(id, seg(0.0, 1.0, "live only"))
             .unwrap();
+        store.set_status(id, TranscriptStatus::Done).unwrap();
         store.resume(id, dir.path().join("audio-2.wav")).unwrap();
         let snap = store.get(id).unwrap();
         assert_eq!(snap.live_segments.len(), 1);
         assert_eq!(snap.live_segments[0].text, "live only");
+    }
+
+    #[test]
+    fn resume_rejects_a_session_that_is_not_done_and_leaves_it_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        for status in [
+            TranscriptStatus::Recording,
+            TranscriptStatus::Finalizing { progress: 0.3 },
+            TranscriptStatus::Failed {
+                reason: "x".to_string(),
+            },
+        ] {
+            store.set_status(id, status.clone()).unwrap();
+            let err = store
+                .resume(id, dir.path().join("audio-2.wav"))
+                .unwrap_err();
+            assert!(
+                matches!(err, StoreError::InvalidState(_)),
+                "expected InvalidState for {status:?}, got {err:?}"
+            );
+            let snap = store.get(id).unwrap();
+            assert_eq!(snap.status, status, "a rejected resume must not mutate");
+            assert!(snap.audio_parts.is_empty(), "no phantom part registered");
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ const LIVE_WINDOW_SECS: f32 = 12.0;
 const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
 /// Log a `warn` for every multiple of this many seconds of accumulated audio — long meetings
-/// keep the whole PCM buffer in RAM (`~115 MB / hour` at 16 kHz mono f32), worth a hint.
+/// keep every lane's PCM in RAM (~115 MB/hour per lane; paired captures hold two), worth a hint.
 const PCM_WARN_STEP_SECS: f32 = 30.0 * 60.0;
 
 /// A stop signal shared with the driver task; flip to `true` to wind down at the next chunk
@@ -62,6 +62,12 @@ impl StopSignal {
     /// timeout (`tokio::time::timeout`) so a wedged driver can't hang them.
     pub async fn await_finished(&self) {
         self.finished.notified().await;
+    }
+
+    /// `true` when both handles belong to the same signal instance — registry
+    /// cleanups must only remove their own entry (session ids recur on resume).
+    pub fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.stopped, &other.stopped)
     }
 }
 
@@ -113,6 +119,15 @@ struct Lane {
     /// Text of the last committed segment — a wordless jittered re-decode
     /// repeating it verbatim at the horizon is a duplicate, not new speech.
     last_committed_text: String,
+}
+
+/// Channel→source tagging shared by the live and offline passes: a stereo
+/// capture is [system, mic]; anything else stays untagged.
+fn lane_sources(channel_count: usize) -> Vec<Option<TranscriptSource>> {
+    match channel_count {
+        2 => vec![Some(TranscriptSource::System), Some(TranscriptSource::Mic)],
+        n => vec![None; n],
+    }
 }
 
 impl Lane {
@@ -225,13 +240,11 @@ impl TranscriptDriver {
                 Err(e) => return Err(DriverError::Capture(e.to_string())),
             };
             if self.lanes.is_empty() {
-                self.lanes = match &chunk.mic {
-                    Some(_) => vec![
-                        Lane::new(Some(TranscriptSource::System)),
-                        Lane::new(Some(TranscriptSource::Mic)),
-                    ],
-                    None => vec![Lane::new(None)],
-                };
+                let channel_count = if chunk.mic.is_some() { 2 } else { 1 };
+                self.lanes = lane_sources(channel_count)
+                    .into_iter()
+                    .map(Lane::new)
+                    .collect();
             }
             let writer = match wav {
                 Some(w) => w,
@@ -295,10 +308,15 @@ impl TranscriptDriver {
         let mut batch = Vec::new();
         let mut drafts = Vec::new();
         for lane_idx in 0..self.lanes.len() {
+            let source = self.lanes[lane_idx].source;
             let (mut lane_batch, draft) = self.decode_lane_window(lane_idx, flush, horizon)?;
             batch.append(&mut lane_batch);
             if !draft.is_empty() {
-                drafts.push(draft);
+                // Label paired-capture drafts like committed lines and markdown.
+                drafts.push(match source {
+                    Some(src) => format!("{}: {draft}", src.label()),
+                    None => draft,
+                });
             }
         }
         // Cross-lane commits interleave chronologically within the cycle; on a
@@ -494,26 +512,54 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     }
     let mut parts: Vec<PartLanes> = Vec::new();
     let mut part_base = Duration::ZERO;
+    let mut skipped = 0usize;
+    let mut first_read_error: Option<String> = None;
     for path in &audio_paths {
-        if !path.exists() {
-            continue;
-        }
-        let channels = match super::audio::parse_wav_to_channels_f32(path) {
-            Ok((chs, _rate)) if chs.iter().any(|c| !c.is_empty()) => chs,
-            Ok(_) => continue,
-            // A 0-byte / truncated WAV fails the hound header read — same cause.
-            Err(_) if wav_has_no_samples(path) => continue,
-            Err(e) => return Err(fail(&store, format!("read audio: {e}"))),
+        // A lost part must not discard the good ones, but it must never vanish
+        // silently either: warn + a RecordingPartMissing event below.
+        let reason = match super::audio::parse_wav_to_channels_f32(path) {
+            Ok((chs, rate)) if rate > 0 && chs.iter().any(|c| !c.is_empty()) => {
+                let secs = chs.iter().map(Vec::len).max().unwrap_or(0) as f64 / f64::from(rate);
+                parts.push(PartLanes {
+                    channels: chs,
+                    part_base,
+                });
+                part_base += Duration::from_secs_f64(secs);
+                continue;
+            }
+            Ok(_) => "carries no samples".to_string(),
+            Err(e) => {
+                // ≤44 bytes = a header-only/empty capture, not a corrupt file.
+                let header_only = std::fs::metadata(path)
+                    .map(|m| m.len() <= 44)
+                    .unwrap_or(false);
+                if !path.exists() {
+                    "was never recorded".to_string()
+                } else if header_only {
+                    "carries no samples".to_string()
+                } else {
+                    first_read_error.get_or_insert_with(|| format!("read audio: {e}"));
+                    format!("is unreadable: {e}")
+                }
+            }
         };
-        let secs = channels.iter().map(Vec::len).max().unwrap_or(0) as f64 / 16_000.0;
-        parts.push(PartLanes {
-            channels,
-            part_base,
-        });
-        part_base += Duration::from_secs_f64(secs);
+        skipped += 1;
+        log::warn!(
+            "transcript {id} audio part {} {reason} — skipping it in the offline pass",
+            path.display()
+        );
     }
     if parts.is_empty() {
-        return Err(fail(&store, NO_AUDIO.to_string()));
+        return Err(fail(
+            &store,
+            first_read_error.unwrap_or_else(|| NO_AUDIO.to_string()),
+        ));
+    }
+    if skipped > 0 {
+        let _ = store.capture_warning(
+            id,
+            crate::transcription::audio::CaptureWarning::RecordingPartMissing,
+        );
     }
 
     // 2) + 3) Transcribe each part's lanes in ~30 s windows with overlap, stitching +
@@ -526,13 +572,10 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
     let mut final_segs: Vec<Segment> = Vec::new();
     let mut done_samples = 0usize;
     for part in &parts {
-        let lanes: Vec<(Option<TranscriptSource>, &[f32])> = match part.channels.as_slice() {
-            [sys, mic] => vec![
-                (Some(TranscriptSource::System), sys.as_slice()),
-                (Some(TranscriptSource::Mic), mic.as_slice()),
-            ],
-            chs => chs.iter().map(|c| (None, c.as_slice())).collect(),
-        };
+        let lanes: Vec<(Option<TranscriptSource>, &[f32])> = lane_sources(part.channels.len())
+            .into_iter()
+            .zip(part.channels.iter().map(Vec::as_slice))
+            .collect();
         for (source, pcm) in lanes {
             let lane_share = pcm.len() as f32 / total_samples.max(1) as f32;
             let done_frac = done_samples as f32 / total_samples.max(1) as f32;
@@ -636,16 +679,6 @@ fn transcribe_chunked(
         start += step;
     }
     Ok(out)
-}
-
-/// `true` when the file is too small to hold any PCM (0-byte or header-only).
-/// `false` when the size can't even be read, so that failure isn't masked as "no audio captured".
-fn wav_has_no_samples(path: &Path) -> bool {
-    // A canonical 16 kHz mono int16 WAV header is 44 bytes; anything at or
-    // below that carries no samples.
-    std::fs::metadata(path)
-        .map(|m| m.len() <= 44)
-        .unwrap_or(false)
 }
 
 /// Tiny `hound`-backed WAV writer (16 kHz int16; mono, or stereo with
@@ -889,6 +922,15 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].end <= w[1].start + Duration::from_secs(1)));
         }
+    }
+
+    #[test]
+    fn stop_signal_same_as_distinguishes_instances_from_clones() {
+        let a = StopSignal::new();
+        let a2 = a.clone();
+        let b = StopSignal::new();
+        assert!(a.same_as(&a2), "a clone shares the instance");
+        assert!(!a.same_as(&b), "distinct signals never match");
     }
 
     #[test]
@@ -1816,23 +1858,6 @@ mod tests {
             !reason.contains("no audio was captured"),
             "must not mask a corrupt-file error as the empty-capture message: {reason}"
         );
-    }
-
-    #[test]
-    fn wav_has_no_samples_is_true_for_a_small_file_and_false_when_unreadable() {
-        let dir = tempfile::tempdir().unwrap();
-        let small = dir.path().join("small.wav");
-        std::fs::write(&small, vec![0u8; 10]).unwrap();
-        assert!(wav_has_no_samples(&small));
-
-        let big = dir.path().join("big.wav");
-        std::fs::write(&big, vec![0u8; 200]).unwrap();
-        assert!(!wav_has_no_samples(&big));
-
-        // A path whose metadata can't be read must not be reported as "no samples" —
-        // the caller falls through to the real I/O error instead.
-        let missing = dir.path().join("missing.wav");
-        assert!(!wav_has_no_samples(&missing));
     }
 
     /// A transcriber that always errors — to exercise the offline-decode failure

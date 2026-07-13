@@ -189,8 +189,7 @@ export class SessionListComponent implements OnInit, OnDestroy {
       this.cdr.markForCheck();
       return;
     }
-    this.selectedId.set(s.id);
-    this.opened.emit(s);
+    this.open(s);
     await this.refresh();
   }
 

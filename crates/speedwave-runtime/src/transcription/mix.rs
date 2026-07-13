@@ -43,9 +43,17 @@ impl LevelBalancer {
                 Some(prev) => prev + alpha * (level - prev),
             });
         }
-        match self.active_rms {
+        let boost = match self.active_rms {
             Some(est) => (LEVEL_TARGET_RMS / est).clamp(1.0, LEVEL_MAX_BOOST),
             None => 1.0,
+        };
+        // Peak limit: never boost a chunk past full scale — a boosted transient
+        // would otherwise hard-clip at the pop-side clamp (audible distortion).
+        let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        if peak > 0.0 {
+            boost.min((1.0 / peak).max(1.0))
+        } else {
+            boost
         }
     }
 }
@@ -713,6 +721,37 @@ mod tests {
             mic.iter().all(|&s| (s - 0.4).abs() < 1e-4),
             "got {:?}",
             &mic[..3]
+        );
+    }
+
+    #[test]
+    fn a_near_full_scale_transient_limits_the_boost_instead_of_clipping() {
+        let mut b = MixBuffer::new();
+        // Quiet speech seeds a 5x boost.
+        b.push(MixSource::Mic, 0, &[0.02; 1600]);
+        // Next chunk carries a 0.9 transient — boosting 5x would clip at ±1.
+        let mut transient = [0.02f32; 1600];
+        transient[100] = 0.9;
+        b.push(MixSource::Mic, 100_000_000, &transient);
+        b.push(MixSource::System, 0, &[0.0; 3200]);
+        let (_, mic) = b.pop_pair(1, usize::MAX).unwrap();
+        assert!(mic.iter().all(|&s| s.abs() <= 1.0));
+        // The whole chunk's gain is peak-limited to 1/0.9 ≈ 1.11, not 5x:
+        // the transient lands just under full scale, unclipped.
+        assert!(
+            (mic[1700] - 0.9 * (1.0 / 0.9)).abs() < 2e-3,
+            "got {}",
+            mic[1700]
+        );
+        // A quiet sample of the same chunk shares the limited gain.
+        assert!(
+            (mic[1701] - 0.02 * (1.0 / 0.9)).abs() < 2e-3,
+            "got {}",
+            mic[1701]
+        );
+        assert!(
+            mic[1701] < 0.05,
+            "the transient chunk must not get the full boost"
         );
     }
 

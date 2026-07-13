@@ -116,6 +116,9 @@ pub enum CaptureWarning {
     MicrophoneStalled,
     /// System audio stopped delivering; recording continues with the mic only.
     SystemAudioStalled,
+    /// A registered audio part contributed nothing to the offline pass — the
+    /// finalized transcript is missing that span (resumed parts, ADR-056 Am. 10).
+    RecordingPartMissing,
 }
 
 /// A capture-health transition: a warning raised, or a prior one recovered.
@@ -360,16 +363,15 @@ pub fn parse_wav_to_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), Ca
     Ok((out, spec.sample_rate))
 }
 
-/// Duration of a WAV file from its header (`None` when unreadable).
+/// Decoded duration of a WAV file (`None` when unreadable). Counts actual
+/// samples, never the header, so it always matches what a decode pass sees.
 pub fn wav_duration(path: &Path) -> Option<Duration> {
-    let reader = hound::WavReader::open(path).ok()?;
-    let spec = reader.spec();
-    if spec.sample_rate == 0 {
+    let (channels, rate) = parse_wav_to_channels_f32(path).ok()?;
+    if rate == 0 {
         return None;
     }
-    Some(Duration::from_secs_f64(
-        reader.duration() as f64 / spec.sample_rate as f64,
-    ))
+    let frames = channels.iter().map(Vec::len).max()?;
+    Some(Duration::from_secs_f64(frames as f64 / rate as f64))
 }
 
 /// File-backed dev path: parse + resample to 16 kHz.
@@ -490,6 +492,10 @@ mod tests {
             (CaptureWarning::SystemAudioSilent, "system_audio_silent"),
             (CaptureWarning::MicrophoneStalled, "microphone_stalled"),
             (CaptureWarning::SystemAudioStalled, "system_audio_stalled"),
+            (
+                CaptureWarning::RecordingPartMissing,
+                "recording_part_missing",
+            ),
         ] {
             assert_eq!(
                 serde_json::to_string(&variant).unwrap(),

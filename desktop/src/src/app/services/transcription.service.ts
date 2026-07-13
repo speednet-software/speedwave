@@ -113,6 +113,29 @@ export class TranscriptionService {
     const ack = await this.tauri.invoke<StartAck>('start_transcription', {
       params: { source, language },
     });
+    return this.applyStartAck(ack, source, language);
+  }
+
+  /**
+   * Resumes a finished recording: a new part appends to the same transcript.
+   * @param sessionId - the Done session to reopen.
+   */
+  async resumeRecording(sessionId: string): Promise<StartAck> {
+    const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId });
+    return this.applyStartAck(ack, ack.snapshot.audio_source.source, ack.snapshot.language);
+  }
+
+  /**
+   * Applies a start/resume ack: snapshot, live listener, recording signals.
+   * @param ack - the backend acknowledgement to apply.
+   * @param source - the capture source now recording.
+   * @param language - the forced language now recording.
+   */
+  private async applyStartAck(
+    ack: StartAck,
+    source: AudioSource,
+    language: Language
+  ): Promise<StartAck> {
     this.activateSnapshot(ack.snapshot);
     try {
       await this.attachListener(ack.event_name);
@@ -132,31 +155,6 @@ export class TranscriptionService {
     this.recordingSessionIdSignal.set(ack.session_id);
     this.recordingSourceSignal.set(source);
     this.recordingLanguageSignal.set(language);
-    return ack;
-  }
-
-  /**
-   * Resumes a finished recording: a new part appends to the same transcript.
-   * @param sessionId - the Done session to reopen.
-   */
-  async resumeRecording(sessionId: string): Promise<StartAck> {
-    const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId });
-    this.activateSnapshot(ack.snapshot);
-    try {
-      await this.attachListener(ack.event_name);
-    } catch (e) {
-      // The backend capture already runs; stop it rather than orphan it.
-      try {
-        await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
-        this.recordingSessionIdSignal.set(null);
-      } catch {
-        this.recordingSessionIdSignal.set(ack.session_id);
-      }
-      throw e;
-    }
-    this.recordingSessionIdSignal.set(ack.session_id);
-    this.recordingSourceSignal.set(ack.snapshot.audio_source.source);
-    this.recordingLanguageSignal.set(ack.snapshot.language);
     return ack;
   }
 

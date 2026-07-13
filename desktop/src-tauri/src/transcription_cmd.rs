@@ -122,40 +122,8 @@ pub async fn start_transcription(
     // Defend at the boundary (the UI should already hide unsupported choices).
     validate_source_against_caps(&audio_source, &caps)?;
 
-    // Pick live model: the one model this build downloads if present, else any
-    // downloaded. Never download implicitly — error with a hint if none present.
     let store_arc = store.inner().clone();
-    let models_arc = models.inner().clone();
-    let recommended = transcription::best_model_for_this_build().key.to_string();
-    let live_key: String = {
-        let m = models_arc.clone();
-        let rec = recommended.clone();
-        tokio::task::spawn_blocking(move || pick_live_model(&m, &rec))
-            .await
-            .map_err(|e| format!("model pick task panicked: {e}"))??
-    };
-    let whisper_path = {
-        let key = live_key.clone();
-        let m = models_arc.clone();
-        tokio::task::spawn_blocking(move || m.ensure_model(&key, &mut |_| {}))
-            .await
-            .map_err(|e| format!("model path task panicked: {e}"))?
-            .map_err(|e| e.to_string())?
-    };
-    let transcriber = {
-        let path = whisper_path.clone();
-        let key = live_key.clone();
-        let m = models_arc.clone();
-        tokio::task::spawn_blocking(move || {
-            WhisperCppTranscriber::load(&path, key).map(|mut t| {
-                attach_vad(&mut t, &m);
-                t
-            })
-        })
-        .await
-        .map_err(|e| format!("transcriber load task panicked: {e}"))?
-        .map_err(|e| e.to_string())?
-    };
+    let (live_key, transcriber) = load_live_transcriber(models.inner()).await?;
 
     // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
     // path is then correct from the first persisted write (no fragile post-create patch).
@@ -173,20 +141,39 @@ pub async fn start_transcription(
         audio_wav.clone(),
     );
     session.models_used.live = Some(live_key.clone());
-    store
-        .create(session)
-        .map_err(|e| format!("store create: {e}"))?;
+    // Register the driver entry before creating the session so the delete guard
+    // covers the whole start window (delete refuses while an entry is live).
+    let stop = StopSignal::new();
+    drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .insert(session_id, stop.clone());
+    let unregister = |drivers: &DriversHandle| {
+        if let Ok(mut g) = drivers.lock() {
+            if g.get(&session_id).is_some_and(|s| s.same_as(&stop)) {
+                g.remove(&session_id);
+            }
+        }
+    };
+    if let Err(e) = store.create(session) {
+        unregister(drivers.inner());
+        return Err(format!("store create: {e}"));
+    }
 
-    let stream = capture.start(audio_source).map_err(|e| {
-        // Mark the session failed so the UI shows the error, not a hang.
-        let _ = store.set_status(
-            session_id,
-            TranscriptStatus::Failed {
-                reason: e.to_string(),
-            },
-        );
-        e.to_string()
-    })?;
+    let stream = match capture.start(audio_source) {
+        Ok(s) => s,
+        Err(e) => {
+            unregister(drivers.inner());
+            // Mark the session failed so the UI shows the error, not a hang.
+            let _ = store.set_status(
+                session_id,
+                TranscriptStatus::Failed {
+                    reason: e.to_string(),
+                },
+            );
+            return Err(e.to_string());
+        }
+    };
 
     // Wire the event forwarder before the driver mutates anything.
     spawn_event_forwarder(
@@ -195,12 +182,6 @@ pub async fn start_transcription(
         forwarders.inner().clone(),
         session_id,
     );
-
-    let stop = StopSignal::new();
-    drivers
-        .lock()
-        .map_err(|e| format!("drivers lock poisoned: {e}"))?
-        .insert(session_id, stop.clone());
 
     spawn_driver(
         DriverConfig {
@@ -241,7 +222,12 @@ fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: Drive
             );
         }
         if let Ok(mut g) = drivers.lock() {
-            g.remove(&session_id);
+            // A wedged predecessor must not clobber a resumed recording's entry.
+            if g.get(&session_id)
+                .is_some_and(|s| s.same_as(&stop_for_cleanup))
+            {
+                g.remove(&session_id);
+            }
         }
         stop_for_cleanup.signal_finished();
     });
@@ -268,31 +254,7 @@ pub async fn resume_transcription(
     validate_source_against_caps(&audio_source, &capture.capabilities())?;
 
     let store_arc = store.inner().clone();
-    let models_arc = models.inner().clone();
-    let recommended = transcription::best_model_for_this_build().key.to_string();
-    let live_key: String = {
-        let m = models_arc.clone();
-        tokio::task::spawn_blocking(move || pick_live_model(&m, &recommended))
-            .await
-            .map_err(|e| format!("model pick task panicked: {e}"))??
-    };
-    let transcriber = {
-        let key = live_key;
-        let m = models_arc.clone();
-        tokio::task::spawn_blocking(move || {
-            let path = m.ensure_model(&key, &mut |_| {})?;
-            Ok::<_, speedwave_runtime::transcription::ModelStoreError>(
-                WhisperCppTranscriber::load(&path, key).map(|mut t| {
-                    attach_vad(&mut t, &m);
-                    t
-                }),
-            )
-        })
-        .await
-        .map_err(|e| format!("transcriber load task panicked: {e}"))?
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?
-    };
+    let (_live_key, transcriber) = load_live_transcriber(models.inner()).await?;
 
     // The new part records past the earlier ones on the session timeline.
     let time_base: std::time::Duration = session
@@ -300,28 +262,42 @@ pub async fn resume_transcription(
         .iter()
         .filter_map(|p| speedwave_runtime::transcription::wav_duration(p))
         .sum();
-    let part_no = 2 + session.audio_parts.len();
+    let part_no = session.all_audio_parts().len() + 1;
     let next_part = store.session_dir(id).join(format!("audio-{part_no}.wav"));
 
-    store
-        .resume(id, next_part.clone())
-        .map_err(|e| e.to_string())?;
-    let stream = capture.start(audio_source).map_err(|e| {
-        let _ = store.set_status(
-            id,
-            TranscriptStatus::Failed {
-                reason: e.to_string(),
-            },
-        );
-        e.to_string()
-    })?;
-
-    spawn_event_forwarder(app, store_arc.clone(), forwarders.inner().clone(), id);
+    // Register the driver entry before mutating the session so the delete guard
+    // covers the whole resume window (delete refuses while an entry is live).
     let stop = StopSignal::new();
     drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?
         .insert(id, stop.clone());
+    let unregister = |drivers: &DriversHandle| {
+        if let Ok(mut g) = drivers.lock() {
+            if g.get(&id).is_some_and(|s| s.same_as(&stop)) {
+                g.remove(&id);
+            }
+        }
+    };
+    if let Err(e) = store.resume(id, next_part.clone()) {
+        unregister(drivers.inner());
+        return Err(e.to_string());
+    }
+    let stream = match capture.start(audio_source) {
+        Ok(s) => s,
+        Err(e) => {
+            unregister(drivers.inner());
+            let _ = store.set_status(
+                id,
+                TranscriptStatus::Failed {
+                    reason: e.to_string(),
+                },
+            );
+            return Err(e.to_string());
+        }
+    };
+
+    spawn_event_forwarder(app, store_arc.clone(), forwarders.inner().clone(), id);
     spawn_driver(
         DriverConfig {
             id,
@@ -508,6 +484,26 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .map(|m| m.key)
 }
 
+/// Picks the live model (recommended → any downloaded), ensures it on disk,
+/// loads the transcriber, and attaches the VAD gate — shared by start and resume.
+async fn load_live_transcriber(
+    models: &ModelStoreHandle,
+) -> Result<(String, WhisperCppTranscriber), String> {
+    let m = models.clone();
+    let recommended = transcription::best_model_for_this_build().key.to_string();
+    tokio::task::spawn_blocking(move || -> Result<(String, WhisperCppTranscriber), String> {
+        let key = pick_live_model(&m, &recommended)?;
+        let path = m
+            .ensure_model(&key, &mut |_| {})
+            .map_err(|e| e.to_string())?;
+        let mut t = WhisperCppTranscriber::load(&path, key.clone()).map_err(|e| e.to_string())?;
+        attach_vad(&mut t, &m);
+        Ok((key, t))
+    })
+    .await
+    .map_err(|e| format!("transcriber load task panicked: {e}"))?
+}
+
 /// Attaches the Silero VAD gate when its model is on disk; otherwise kicks off a background
 /// download so this session's offline pass and later sessions get it. Never fails the caller.
 fn attach_vad(transcriber: &mut WhisperCppTranscriber, models: &ModelStoreHandle) {
@@ -643,8 +639,18 @@ pub async fn get_transcript(
 pub async fn delete_transcript(
     session_id: String,
     store: tauri::State<'_, TranscriptStoreHandle>,
+    drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
+    // A live driver writes into the session dir — deleting under it would orphan
+    // an unstoppable capture (its stop signal dies with the session entry).
+    let live = drivers
+        .lock()
+        .map_err(|e| format!("drivers lock poisoned: {e}"))?
+        .contains_key(&id);
+    if live {
+        return Err("stop the recording before deleting it".to_string());
+    }
     store.delete(id).map_err(|e| e.to_string())
 }
 

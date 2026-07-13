@@ -70,6 +70,16 @@ pub enum TranscriptSource {
     Mic,
 }
 
+impl TranscriptSource {
+    /// Reader-facing channel label (channel attribution, not speaker identity).
+    pub fn label(self) -> &'static str {
+        match self {
+            TranscriptSource::System => "Meeting",
+            TranscriptSource::Mic => "You",
+        }
+    }
+}
+
 /// One transcript segment: a span of audio, its text, and optional per-word
 /// timings. (Speaker diarization was removed — ADR-075.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -197,6 +207,8 @@ fn overlaps_speech(spans: &[(Duration, Duration)], start: Duration, end: Duratio
 pub struct WhisperCppTranscriber {
     ctx: whisper_rs::WhisperContext,
     vad: Option<SileroVad>,
+    /// One-shot latch so a persistently failing VAD warns once, not per window.
+    vad_warned: bool,
     model_label: String,
 }
 
@@ -221,6 +233,7 @@ impl WhisperCppTranscriber {
         Ok(Self {
             ctx,
             vad: None,
+            vad_warned: false,
             model_label: label,
         })
     }
@@ -257,16 +270,18 @@ impl WhisperCppTranscriber {
             return Ok(Vec::new());
         }
         // VAD gate: no speech in the window = no decode. A VAD failure degrades
-        // to the signal-only gates rather than killing the recording.
+        // this window to the signal-only gates and retries next window (warn once).
         let speech_spans = match self.vad.as_mut().map(|v| v.speech_spans(pcm)) {
             Some(Ok(spans)) if spans.is_empty() => return Ok(Vec::new()),
             Some(Ok(spans)) => Some(spans),
             Some(Err(e)) => {
-                log::warn!(
-                    target: "transcription::transcriber",
-                    "silero vad failed ({e}) — continuing without the VAD gate"
-                );
-                self.vad = None;
+                if !self.vad_warned {
+                    self.vad_warned = true;
+                    log::warn!(
+                        target: "transcription::transcriber",
+                        "silero vad failed ({e}) — decoding without the gate; retrying on later windows"
+                    );
+                }
                 None
             }
             None => None,

@@ -103,6 +103,18 @@ pub struct ModelStatusEntry {
 /// A no-op progress callback for callers that don't care about progress.
 pub fn no_progress(_p: DownloadProgress) {}
 
+/// Accepted on-disk size window for a verified model of estimated size
+/// `approx_bytes`: rejects truncated/oversized leftovers, tolerates drift.
+fn size_window(approx_bytes: u64) -> (u64, u64) {
+    (approx_bytes / 10 * 9, download_cap(approx_bytes))
+}
+
+/// Per-download byte cap: the estimate plus 5% headroom (guards a wildly-wrong
+/// `Content-Length` from writing gigabytes; the file itself is a fixed size).
+fn download_cap(approx_bytes: u64) -> u64 {
+    approx_bytes + approx_bytes / 20 + 1024
+}
+
 /// Downloads, verifies, and caches transcription models under a root directory.
 pub struct ModelStore {
     root: PathBuf,
@@ -131,13 +143,12 @@ impl ModelStore {
         self.whisper_dir().join(info.file)
     }
 
-    /// `true` if the file size is within `[90%, 105%]` of the catalogue estimate (SHA-verified
-    /// before rename; the window rejects truncated/oversized leftovers, tolerates size drift).
+    /// `true` if the file size is within the [`size_window`] of the catalogue
+    /// estimate (SHA-verified before rename put it there).
     fn whisper_is_present(&self, info: &WhisperModelInfo) -> bool {
         match std::fs::metadata(self.whisper_path(info)) {
             Ok(m) => {
-                let floor = info.approx_bytes / 10 * 9;
-                let ceil = info.approx_bytes + info.approx_bytes / 20 + 1024;
+                let (floor, ceil) = size_window(info.approx_bytes);
                 m.len() >= floor && m.len() <= ceil
             }
             Err(_) => false,
@@ -167,9 +178,7 @@ impl ModelStore {
         }
         std::fs::create_dir_all(self.whisper_dir())?;
         restrict_dir_perms(&self.whisper_dir());
-        // Per-model cap = catalogue approx_bytes + 5% headroom; just guards against a
-        // wildly-wrong Content-Length writing gigabytes (the file itself is a fixed size).
-        let per_model_cap = info.approx_bytes + info.approx_bytes / 20 + 1024;
+        let per_model_cap = download_cap(info.approx_bytes);
         // Total-storage check.
         let current_total = self.total_bytes_used();
         let would_be = current_total + info.approx_bytes;
@@ -233,8 +242,7 @@ impl ModelStore {
     pub fn vad_is_present(&self) -> bool {
         match std::fs::metadata(self.vad_path()) {
             Ok(m) => {
-                let floor = VAD_MODEL.approx_bytes / 10 * 9;
-                let ceil = VAD_MODEL.approx_bytes + VAD_MODEL.approx_bytes / 20 + 1024;
+                let (floor, ceil) = size_window(VAD_MODEL.approx_bytes);
                 m.len() >= floor && m.len() <= ceil
             }
             Err(_) => false,
@@ -253,7 +261,7 @@ impl ModelStore {
         }
         std::fs::create_dir_all(self.whisper_dir())?;
         restrict_dir_perms(&self.whisper_dir());
-        let cap = VAD_MODEL.approx_bytes + VAD_MODEL.approx_bytes / 20 + 1024;
+        let cap = download_cap(VAD_MODEL.approx_bytes);
         log::info!(
             target: "transcription::models",
             "downloading the Silero VAD model (~{} bytes)",
@@ -367,12 +375,18 @@ fn download_verified(
     cap: u64,
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<String, ModelStoreError> {
+    // The temp name is unique per attempt: the SHA256 is computed over the network
+    // stream, so a second concurrent writer on a shared temp could install a
+    // corrupt file whose hash check passed.
+    static DOWNLOAD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let attempt = DOWNLOAD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join(format!(
-        ".{}.part",
+        ".{}.{}-{attempt}.part",
         dest.file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("download")
+            .unwrap_or("download"),
+        std::process::id()
     ));
     let hash = stream_to_path(url, &tmp, model_key, cap, progress)?;
     // Atomic rename into place.
@@ -626,10 +640,40 @@ mod tests {
         let hash = download_verified(&url, &dest, "t", 10_000, &mut no_progress).unwrap();
         assert_eq!(hash, sha256_hex(&body));
         assert!(dest.is_file(), "final file in place");
-        assert!(
-            !dir.path().join(".final.bin.part").exists(),
-            "temp gone after rename"
-        );
+        assert!(no_part_files(dir.path()), "temp gone after rename");
+    }
+
+    /// `true` when `dir` holds no leftover `.part` temp files.
+    fn no_part_files(dir: &Path) -> bool {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".part"))
+    }
+
+    #[test]
+    fn concurrent_downloads_to_the_same_dest_never_share_a_temp_file() {
+        // Two writers on one temp path could install a corrupt file whose
+        // stream-hash check passed — unique temps make both installs valid.
+        let body = b"model-bytes".repeat(400);
+        let (_srv, url) = serve_bytes(&body);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.bin");
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let url = url.clone();
+                    let dest = dest.clone();
+                    s.spawn(move || download_verified(&url, &dest, "t", 100_000, &mut no_progress))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in results {
+            assert_eq!(r.unwrap(), sha256_hex(&body));
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "installed file intact");
+        assert!(no_part_files(dir.path()));
     }
 
     #[test]
@@ -807,10 +851,7 @@ mod tests {
             other => panic!("expected HashMismatch, got {other:?}"),
         }
         assert!(!dest.exists(), "the bad file is removed after the mismatch");
-        assert!(
-            !store.whisper_dir().join(".m.bin.part").exists(),
-            "no temp left behind"
-        );
+        assert!(no_part_files(&store.whisper_dir()), "no temp left behind");
     }
 
     #[test]

@@ -27,6 +27,26 @@ function fmtTs(secs: number): string {
   return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
+/**
+ * Chronological comparator on segment start times.
+ * @param a - left segment
+ * @param b - right segment
+ */
+function bySegmentStart(a: Segment, b: Segment): number {
+  return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
+}
+
+/**
+ * `true` when `segs` is already in chronological order.
+ * @param segs - segments in storage order
+ */
+function isChronological(segs: Segment[]): boolean {
+  for (let i = 1; i < segs.length; i++) {
+    if (bySegmentStart(segs[i - 1], segs[i]) > 0) return false;
+  }
+  return true;
+}
+
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
@@ -138,15 +158,16 @@ export class LiveTranscriptComponent {
    * Segments as timestamped lines, chronological — per-channel decode cycles
    * can append a mic segment after a later system one (or vice versa).
    */
-  readonly lines = computed<TranscriptLine[]>(() =>
-    [...this.segments()]
-      .sort((a, b) => a.start.secs - b.start.secs || a.start.nanos - b.start.nanos)
-      .map((seg) => ({
-        startLabel: fmtTs(seg.start.secs),
-        speaker: seg.source === 'mic' ? 'You' : seg.source === 'system' ? 'Meeting' : null,
-        text: seg.text.trim(),
-      }))
-  );
+  readonly lines = computed<TranscriptLine[]>(() => {
+    const segs = this.segments();
+    // Segments are almost always already chronological — sort only on disorder.
+    const ordered = isChronological(segs) ? segs : [...segs].sort(bySegmentStart);
+    return ordered.map((seg) => ({
+      startLabel: fmtTs(seg.start.secs),
+      speaker: seg.source === 'mic' ? 'You' : seg.source === 'system' ? 'Meeting' : null,
+      text: seg.text.trim(),
+    }));
+  });
 
   /** Lifecycle state of the active session ('' if none). */
   readonly status = computed(() => this.session()?.status.state ?? '');

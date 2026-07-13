@@ -137,13 +137,16 @@ impl TranscriptSession {
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
         s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
-        for seg in self.effective_segments() {
+        // Live segments interleave across per-channel decode cycles — render chronologically.
+        let mut segments: Vec<&Segment> = self.effective_segments().iter().collect();
+        segments.sort_by_key(|seg| seg.start);
+        for seg in segments {
             let text = seg.text.trim();
             if text.is_empty() {
                 continue;
             }
             let label = match seg.source {
-                Some(src) => format!(" {}:", source_label(src)),
+                Some(src) => format!(" {}:", src.label()),
                 None => String::new(),
             };
             s.push_str(&format!("**({}){label}** {text}\n\n", fmt_ts(seg.start)));
@@ -176,14 +179,6 @@ fn fmt_ts(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     let cs = d.subsec_millis() / 10;
     format!("{:02}:{:02}.{:02}", secs / 60, secs % 60, cs)
-}
-
-/// Reader-facing channel label (channel attribution, not speaker identity).
-fn source_label(src: crate::transcription::transcriber::TranscriptSource) -> &'static str {
-    match src {
-        crate::transcription::transcriber::TranscriptSource::System => "Meeting",
-        crate::transcription::transcriber::TranscriptSource::Mic => "You",
-    }
 }
 
 fn status_label(s: &TranscriptStatus) -> &'static str {
@@ -352,6 +347,34 @@ mod tests {
         assert!(md.contains("**(00:02.00) You:** Cześć."));
         // An untagged segment renders exactly as before.
         assert!(md.contains("**(00:03.00)** bez kanału"));
+    }
+
+    #[test]
+    fn to_markdown_renders_live_segments_chronologically() {
+        use crate::transcription::transcriber::TranscriptSource;
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        // Cross-lane commits can land out of order in storage.
+        let mut late = seg(5.0, 6.0, "później");
+        late.source = Some(TranscriptSource::System);
+        let mut early = seg(1.0, 2.0, "wcześniej");
+        early.source = Some(TranscriptSource::Mic);
+        s.live_segments = vec![late, early];
+        let md = s.to_markdown();
+        let early_at = md.find("wcześniej").unwrap();
+        let late_at = md.find("później").unwrap();
+        assert!(
+            early_at < late_at,
+            "markdown must follow start time, not storage order"
+        );
+    }
+
+    #[test]
+    fn audio_parts_field_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("audio_parts?: string[]"),
+            "models/transcript.ts TranscriptSession must carry the optional audio_parts field"
+        );
     }
 
     #[test]
