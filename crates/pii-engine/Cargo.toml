@@ -12,6 +12,8 @@ homepage.workspace = true
 aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
 base64 = "0.22"
 regex = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 zeroize = "1"
 
 [lints]

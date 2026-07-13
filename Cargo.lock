@@ -2647,6 +2647,8 @@ dependencies = [
  "aes-siv",
  "base64",
  "regex",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
