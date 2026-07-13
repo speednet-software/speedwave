@@ -2095,6 +2095,31 @@ networks:
     }
 
     #[test]
+    fn test_claude_workspace_mount_flags_injected_non_workspace_target() {
+        // An injected mount to a DIFFERENT target (host root -> /host) must also
+        // fire, not just a second /workspace: nothing else allowlists claude volumes.
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = valid_compose_yaml().replace(
+            "      - /test/project:/workspace:rw\n",
+            "      - /test/project:/workspace:rw\n      - /:/host:ro\n",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("unexpected target '/host'")),
+            "an injected /host mount must fire CLAUDE_WORKSPACE_MOUNT: {violations:?}"
+        );
+    }
+
+    #[test]
     fn test_security_check_missing_cap_drop() {
         let data_dir = tempfile::tempdir().unwrap();
         let yaml = r#"

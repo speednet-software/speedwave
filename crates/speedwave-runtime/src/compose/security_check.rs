@@ -78,6 +78,18 @@ pub(crate) fn extract_volume_for_target(
     None
 }
 
+/// Container target of a short-form `host:/target[:mode]` volume string. Splits
+/// at the first `:/` so a Windows drive-letter host (`C:\…`) is not mistaken for it.
+pub(crate) fn short_form_volume_target(vol: &str) -> Option<&str> {
+    let start = vol.find(":/")? + 1;
+    let rest = &vol[start..];
+    // Trim a trailing :ro/:rw/:z-style mode if present.
+    match rest.rfind(':') {
+        Some(pos) if pos > 0 && !rest[pos + 1..].contains('/') => Some(&rest[..pos]),
+        _ => Some(rest),
+    }
+}
+
 /// Validates a rendered compose file against Speedwave's security invariants.
 pub struct SecurityCheck;
 
@@ -1187,14 +1199,42 @@ impl SecurityCheck {
             .and_then(|v| v.as_sequence())
             .cloned()
             .unwrap_or_default();
+        // Every target the renderer mounts on claude; anything else is injected.
+        // /home/speedwave/.claude/ide and the MDM managed-settings.json nest under
+        // an allowed prefix, so an exact-or-under-prefix check covers both.
+        const ALLOWED_TARGET_PREFIXES: &[&str] = &[
+            "/home/speedwave",
+            "/workspace",
+            "/speedwave/resources",
+            "/etc/claude-code",
+            "/usage",
+        ];
         let expected = expected_paths.project_engine_path();
         let mut matches = 0;
         for vol in &vols {
             let Some(s) = vol.as_str() else { continue };
+            let Some(target) = short_form_volume_target(s) else {
+                continue;
+            };
+            if !ALLOWED_TARGET_PREFIXES
+                .iter()
+                .any(|p| target == *p || target.starts_with(&format!("{p}/")))
+            {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: format!("claude mounts an unexpected target '{target}'"),
+                    remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
+                });
+                continue;
+            }
+            if target != "/workspace" {
+                continue;
+            }
+            matches += 1;
             let Some((host, _mode)) = extract_volume_for_target(s, "/workspace") else {
                 continue;
             };
-            matches += 1;
             if host != expected {
                 violations.push(SecurityViolation {
                     container: "claude".into(),
