@@ -12,6 +12,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::audit;
+use crate::pii::{self, PiiEngineState};
 use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
@@ -164,8 +166,8 @@ fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStat
 /// stream unbuffered while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
     // Parse the body once: the model selects the backend route, the same
-    // parsed value is reused to strip the route prefix before forwarding.
-    let parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
+    // parsed value is reused (now PII-scanned) to strip the route prefix before forwarding.
+    let mut parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
         Err(_) => {
             return (
@@ -175,6 +177,45 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
+
+    // Fail-closed (ADR-073 F4): a broken PII engine must never let cleartext forward.
+    let (policy, key) = match cfg.pii.as_ref() {
+        PiiEngineState::Ready { policy, key } => (policy, key),
+        PiiEngineState::Failed(reason) => {
+            log::error!("PII engine unavailable, rejecting /v1/messages: {reason}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "PII policy engine unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    let detections = match pii::scan_request(policy, key, &mut parsed) {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("PII scan failed, rejecting /v1/messages: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "PII scan failed"})),
+            )
+                .into_response();
+        }
+    };
+    audit::write_pii_audit(cfg.audit_dir.as_deref(), &detections);
+
+    // Re-serialize the scanned value: this, not the original raw bytes, is what forwards.
+    let scanned_body = match serde_json::to_vec(&parsed) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("failed to serialize scanned request body: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "failed to serialize scanned request"})),
+            )
+                .into_response();
+        }
+    };
+
     let model = parsed
         .get("model")
         .and_then(|m| m.as_str())
@@ -207,7 +248,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let upstream_url = format!("{}/v1/messages", route.base_url);
     // Strip the route prefix so the backend sees its own model name (the
     // anthropic passthrough has no prefix and is untouched).
-    let outbound_body = strip_model_prefix(&body, &parsed, &model);
+    let outbound_body = strip_model_prefix(&scanned_body, &parsed, &model);
     // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();

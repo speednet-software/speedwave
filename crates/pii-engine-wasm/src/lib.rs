@@ -3,8 +3,8 @@
 
 use serde::Serialize;
 use speedwave_pii_engine::{
-    compile_policy_v2, default_sensitive_keys, detokenize_json, scan_json, CompiledPolicy,
-    Detection, DetectionAction, EngineKey, BUILTIN_CATEGORIES,
+    compile_policy_v2, default_policy_json as core_default_policy_json, detokenize_json, scan_json,
+    CompiledPolicy, Detection, DetectionAction, EngineKey,
 };
 use wasm_bindgen::prelude::*;
 
@@ -78,27 +78,11 @@ impl PiiEngine {
     }
 }
 
-/// Serializes the compiled-in default policy.json v2 (every built-in category tokenize-on, no
-/// custom patterns, engine's default sensitive-key list) — SSOT for the TS "no POLICY_FILE" path.
+/// Thin re-export of the core's compiled-in default policy.json v2 — SSOT for the TS
+/// "no POLICY_FILE" path; the proxy (native) calls the core function directly.
 #[wasm_bindgen]
 pub fn default_policy_json() -> String {
-    let categories: serde_json::Map<String, serde_json::Value> = BUILTIN_CATEGORIES
-        .iter()
-        .map(|&category| {
-            (
-                category.to_string(),
-                serde_json::json!({ "tokenize": true, "log": false }),
-            )
-        })
-        .collect();
-    serde_json::json!({
-        "version": 2,
-        "source": { "policies": [], "forced": [] },
-        "categories": categories,
-        "customPatterns": [],
-        "sensitiveKeys": default_sensitive_keys(),
-    })
-    .to_string()
+    core_default_policy_json()
 }
 
 #[cfg(test)]
@@ -108,6 +92,7 @@ pub fn default_policy_json() -> String {
 )]
 mod tests {
     use super::*;
+    use speedwave_pii_engine::{default_sensitive_keys, BUILTIN_CATEGORIES};
 
     #[test]
     fn default_policy_json_compiles_and_covers_every_category() {

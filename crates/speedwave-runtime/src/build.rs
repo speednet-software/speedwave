@@ -71,8 +71,14 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.proxy",
         build_args: &[],
-        // Everything the Containerfile COPYies lives under containers/proxy.
-        hash_inputs: &["containers/Containerfile.proxy", "containers/proxy"],
+        // Everything the Containerfile COPYies lives under containers/proxy, plus the
+        // vendored crates/pii-engine (staged into the build context by the bundle scripts so
+        // the proxy's `../../crates/pii-engine` path dependency resolves inside the container).
+        hash_inputs: &[
+            "containers/Containerfile.proxy",
+            "containers/proxy",
+            "crates/pii-engine",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
@@ -1206,7 +1212,14 @@ mod tests {
                 }
                 for src in &args[..args.len() - 1] {
                     let src = src.trim_start_matches("./");
-                    sources.push(format!("{}/{src}", img.context_dir));
+                    // `crates/...` sources are vendored into the context by the bundle scripts
+                    // from the repo root (not native to context_dir), so they map to a
+                    // repo-root-relative hash input rather than a context_dir-prefixed one.
+                    if src.starts_with("crates/") {
+                        sources.push(src.to_string());
+                    } else {
+                        sources.push(format!("{}/{src}", img.context_dir));
+                    }
                 }
             }
             for src in sources {

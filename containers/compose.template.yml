@@ -61,6 +61,9 @@ services:
       - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
       - POLICY_FILE=/policy/policy.json
       - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
+      # Mirrors the /audit:rw mount below; the proxy's audit writer reads this to place
+      # audit-proxy.jsonl (mcp-hub already carries the equivalent AUDIT_DIR).
+      - AUDIT_DIR=/audit
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:

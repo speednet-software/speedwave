@@ -67,6 +67,12 @@ fi
 mkdir -p "$DEST/build-context"
 cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
 
+# Vendor crates/pii-engine into the context: Containerfile.proxy COPYs it to recreate the
+# repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4) since the
+# proxy image builds from the `containers/` context alone.
+mkdir -p "$DEST/build-context/containers/crates"
+cp -r "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
+
 # Host build outputs (e.g. a dirty containers/proxy/target) are never image
 # content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced).
 find "$DEST/build-context/containers" -type d \

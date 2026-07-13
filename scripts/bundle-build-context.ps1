@@ -83,6 +83,12 @@ if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 }
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
 Copy-Item -Recurse containers "$dest\build-context\containers"
 
+# Vendor crates/pii-engine into the context (mirrors the .sh): Containerfile.proxy COPYs it to
+# recreate the repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4)
+# since the proxy image builds from the `containers/` context alone.
+New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
+Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
+
 # Host build outputs are never image content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS
 # (alignment test-enforced). Recursion stops at a match, mirroring the .sh `find -prune`.
 function Remove-BuildOutputs {

@@ -12,10 +12,12 @@ use axum::{
     Router,
 };
 
+mod audit;
 mod config;
 mod count_tokens;
 mod forward;
 mod keys;
+mod pii;
 mod router;
 pub(crate) mod usage;
 
@@ -153,6 +155,37 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         addr
+    }
+
+    /// Mock backend that captures the raw request body it received (for asserting what the
+    /// proxy actually forwards) and replies with a minimal SSE-shaped 200.
+    async fn spawn_capturing_backend() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    ) {
+        use axum::response::IntoResponse;
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured_for_handler = captured.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/v1/messages",
+                axum::routing::post(move |body: Bytes| {
+                    let captured = captured_for_handler.clone();
+                    async move {
+                        *captured.lock().await = body.to_vec();
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            "data: [DONE]\n\n",
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, captured)
     }
 
     fn config_pointing_at(addr: &std::net::SocketAddr, usage_path: std::path::PathBuf) -> Config {
@@ -325,5 +358,185 @@ mod tests {
         let body: Bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["input_tokens"], 0);
+    }
+
+    #[tokio::test]
+    async fn v1_messages_scans_and_tokenizes_before_forwarding() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let cfg = Arc::new(config_pointing_at(
+            &addr,
+            usage_dir.path().join("usage.jsonl"),
+        ));
+        let app = build_router(cfg);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"local/x","system":"contact bob@example.com","messages":[{"role":"user","content":"hi alice@example.com"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let body_sent = captured.lock().await.clone();
+        let parsed: serde_json::Value = serde_json::from_slice(&body_sent).unwrap();
+        assert!(!parsed["system"]
+            .as_str()
+            .unwrap()
+            .contains("bob@example.com"));
+        assert!(parsed["system"].as_str().unwrap().contains("[EMAIL:TOKEN_"));
+        assert!(!parsed["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("alice@example.com"));
+        assert_eq!(
+            parsed["model"], "x",
+            "route prefix must still be stripped after scanning"
+        );
+    }
+
+    /// Regression guard: the anthropic passthrough leg (bare model, no route prefix) rebuilds
+    /// its outbound body from `parsed`/`scanned_body`, not the raw inbound `body` — swapping
+    /// `forward.rs::strip_model_prefix`'s first argument back to `&body` must turn this red.
+    #[tokio::test]
+    async fn v1_messages_anthropic_passthrough_scans_and_tokenizes_before_forwarding() {
+        use crate::router::{Auth, BareAuth, Route};
+        let usage_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        // Bare "claude-opus-4-8" has no "/" prefix, so router.rs::resolve maps it to "anthropic".
+        cfg.routes.push(Route {
+            prefix: "anthropic".to_string(),
+            base_url: format!("http://{addr}"),
+            auth: Auth::Bare(BareAuth::Passthrough),
+            provider_kind: "anthropic_oauth".to_string(),
+            provider_id: "anthropic".to_string(),
+        });
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"claude-opus-4-8","system":"PESEL 44051401359, contact bob@example.com","messages":[{"role":"user","content":"hi alice@example.com"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let body_sent = captured.lock().await.clone();
+        let parsed: serde_json::Value = serde_json::from_slice(&body_sent).unwrap();
+        assert_eq!(
+            parsed["model"], "claude-opus-4-8",
+            "anthropic passthrough has no prefix to strip"
+        );
+        let system = parsed["system"].as_str().unwrap();
+        assert!(
+            !system.contains("bob@example.com"),
+            "system email leaked: {system}"
+        );
+        assert!(
+            !system.contains("44051401359"),
+            "system PESEL leaked: {system}"
+        );
+        assert!(
+            system.contains("[EMAIL:TOKEN_"),
+            "system not tokenized: {system}"
+        );
+        assert!(
+            system.contains("[PESEL:TOKEN_"),
+            "system not tokenized: {system}"
+        );
+        let content = parsed["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            !content.contains("alice@example.com"),
+            "message content leaked: {content}"
+        );
+        assert!(
+            content.contains("[EMAIL:TOKEN_"),
+            "message content not tokenized: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_messages_rejects_with_5xx_when_pii_engine_failed_and_never_calls_upstream() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let (addr, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.pii = Arc::new(crate::pii::PiiEngineState::Failed("boom".to_string()));
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"local/x","system":"secret@example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_server_error());
+        assert!(
+            captured.lock().await.is_empty(),
+            "engine failure must never reach the upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_messages_audits_detections_to_audit_dir() {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (addr, _captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.audit_dir = Some(audit_dir.path().to_path_buf());
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"local/x","system":"contact bob@example.com"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let audit_path = audit_dir.path().join("audit-proxy.jsonl");
+        let contents = std::fs::read_to_string(&audit_path).unwrap();
+        let line: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(line["layer"], "A-in");
+        assert_eq!(line["category"], "EMAIL");
+        assert_eq!(line["action"], "tokenized");
+        assert_eq!(line["session"], serde_json::Value::Null);
+        assert_eq!(line["tool"], serde_json::Value::Null);
     }
 }

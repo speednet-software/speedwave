@@ -40,6 +40,14 @@ teardown() {
     [ -f "$DEST/build-context/containers/Containerfile.claude" ]
 }
 
+@test "bundle script vendors crates/pii-engine into containers/crates for the proxy build context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/build-context/containers/crates/pii-engine/src" ]
+    [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
+    [ ! -d "$DEST/build-context/containers/crates/pii-engine/target" ]
+}
+
 @test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
     # Plant a dirty source tree; the trap removes it even on assertion failure.
     local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"

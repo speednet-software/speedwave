@@ -2576,8 +2576,10 @@ mod tests {
         );
     }
 
-    // desktop/proxy are standalone workspaces (cannot inherit root `[workspace.lints]`); their
-    // `[lints]` tables must stay byte-equal (mod. whitespace) or one binary runs weaker lints.
+    // desktop/proxy are standalone workspaces, and pii-engine is vendored standalone into the
+    // proxy image's isolated build context (cannot inherit root `[workspace.lints]` in any of
+    // the three cases); their `[lints]` tables must stay byte-equal (mod. whitespace) or one
+    // binary runs weaker lints.
     #[test]
     fn lint_tables_are_aligned() {
         fn lint_table(src: &str, header: &str) -> Vec<String> {
@@ -2600,6 +2602,7 @@ mod tests {
         let root = include_str!("../../../Cargo.toml");
         let desktop = include_str!("../../../desktop/src-tauri/Cargo.toml");
         let proxy = include_str!("../../../containers/proxy/Cargo.toml");
+        let pii_engine = include_str!("../../pii-engine/Cargo.toml");
 
         let root_clippy = lint_table(root, "[workspace.lints.clippy]");
         assert!(
@@ -2625,6 +2628,16 @@ mod tests {
             lint_table(root, "[workspace.lints.rust]"),
             lint_table(proxy, "[lints.rust]"),
             "root [workspace.lints.rust] must equal proxy [lints.rust]"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(pii_engine, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal pii-engine [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(pii_engine, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal pii-engine [lints.rust]"
         );
     }
 

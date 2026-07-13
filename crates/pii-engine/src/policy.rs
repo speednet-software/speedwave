@@ -196,6 +196,28 @@ pub fn compile_policy_v2(json: &str) -> Result<CompiledPolicy, PolicyError> {
     })
 }
 
+/// Serializes the compiled-in default policy.json v2 (every category tokenize-on, engine's
+/// default sensitive-key list) — the SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
+pub fn default_policy_json() -> String {
+    let categories: serde_json::Map<String, serde_json::Value> = BUILTIN_CATEGORIES
+        .iter()
+        .map(|&category| {
+            (
+                category.to_string(),
+                serde_json::json!({ "tokenize": true, "log": false }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "version": 2,
+        "source": { "policies": [], "forced": [] },
+        "categories": categories,
+        "customPatterns": [],
+        "sensitiveKeys": patterns::default_sensitive_keys(),
+    })
+    .to_string()
+}
+
 /// Every built-in category must be present exactly once; any other key is unknown.
 fn validate_categories(categories: &HashMap<String, CategoryConfig>) -> Result<(), PolicyError> {
     for expected in BUILTIN_CATEGORIES {
@@ -578,6 +600,20 @@ mod tests {
             Ok(_) => panic!("expected an error, got Ok"),
             Err(e) => panic!("expected a parse error, got {e:?}"),
         }
+    }
+
+    #[test]
+    fn default_policy_json_compiles_and_covers_every_category() {
+        let json = default_policy_json();
+        let policy = compile_policy_v2(&json).expect("default policy.json v2 must compile");
+        assert_eq!(policy.rules().len(), BUILTIN_CATEGORIES.len() - 1);
+        assert!(policy.sensitive_field_flags().tokenize);
+        assert_eq!(policy.sensitive_keys(), patterns::default_sensitive_keys());
+    }
+
+    #[test]
+    fn default_policy_json_is_deterministic() {
+        assert_eq!(default_policy_json(), default_policy_json());
     }
 
     #[test]
