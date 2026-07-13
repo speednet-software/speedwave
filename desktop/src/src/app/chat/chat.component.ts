@@ -385,8 +385,15 @@ export class ChatComponent implements OnInit, OnDestroy {
     const href = target.getAttribute('href');
     if (!href) return;
 
-    if (href.startsWith('http://') || href.startsWith('https://')) {
-      event.preventDefault();
+    // Fragments/relative links are same-origin; let the WebView handle them.
+    const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(href);
+    if (!schemeMatch) return;
+
+    // Absolute URL: open http(s) externally, block every other scheme
+    // (data:/vbscript:/javascript:) from navigating the main WebView.
+    event.preventDefault();
+    const scheme = schemeMatch[1].toLowerCase();
+    if (scheme === 'http' || scheme === 'https') {
       this.tauri.invoke('open_url', { url: href });
     }
   }

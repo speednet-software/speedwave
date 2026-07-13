@@ -871,6 +871,40 @@ describe('ChatComponent', () => {
       expect(preventSpy).toHaveBeenCalled();
       expect(invokeSpy).toHaveBeenCalledWith('open_url', { url: 'https://example.com/docs' });
     });
+
+    it('blocks dangerous schemes without navigating or opening', () => {
+      for (const href of [
+        'data:text/html,<script>alert(1)</script>',
+        'vbscript:msgbox(1)',
+        'javascript:alert(1)',
+        'file:///etc/passwd',
+      ]) {
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+        const anchor = document.createElement('a');
+        anchor.setAttribute('href', href);
+        const event = new MouseEvent('click', { bubbles: true });
+        Object.defineProperty(event, 'target', { value: anchor });
+        const preventSpy = vi.spyOn(event, 'preventDefault');
+
+        component.onLinkClick(event);
+
+        expect(preventSpy).toHaveBeenCalled();
+        expect(invokeSpy).not.toHaveBeenCalled();
+        invokeSpy.mockRestore();
+      }
+    });
+
+    it('treats scheme case-insensitively (uppercase HTTPS opens externally)', () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', 'HTTPS://example.com/x');
+      const event = new MouseEvent('click', { bubbles: true });
+      Object.defineProperty(event, 'target', { value: anchor });
+
+      component.onLinkClick(event);
+
+      expect(invokeSpy).toHaveBeenCalledWith('open_url', { url: 'HTTPS://example.com/x' });
+    });
   });
 
   // ── project_switch_succeeded event ──────────────────────────────────────────
