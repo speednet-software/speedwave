@@ -107,9 +107,7 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
     }
     // A newline/CR/NUL in the path would inject extra volume entries when the
     // path is spliced into the unquoted compose scalar (macOS allows them).
-    if dir.chars().any(|c| c.is_control()) {
-        anyhow::bail!("Project directory must not contain control characters");
-    }
+    validation::reject_control_chars(dir, "Project directory")?;
 
     // WSL UNC: bypass canonicalize (undocumented behavior on Windows — see ADR-064).
     let (canonical, canonical_str) = match runtime::wsl::is_wsl_unc_path(dir) {
