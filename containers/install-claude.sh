@@ -2,9 +2,7 @@
 set -euo pipefail
 
 # Claude Code installer — SSOT for both Containerfile and entrypoint.sh.
-#
-# Usage: install-claude.sh <version>
-#   version: a semver like "2.1.76" (required, no default)
+# Usage: install-claude.sh <version>  (semver, e.g. "2.1.76"; required, no default)
 
 CLAUDE_VERSION="${1:?Usage: install-claude.sh <version>}"
 INSTALLER_URL="https://claude.ai/install.sh"

@@ -2,16 +2,27 @@
  * Repo Tools - 3 tools for GitHub repositories
  */
 
-import { Tool, ToolDefinition, jsonResult, READ_ONLY_ANNOTATIONS } from '@speedwave/mcp-shared';
+import {
+  Tool,
+  ToolDefinition,
+  jsonResult,
+  READ_ONLY_ANNOTATIONS,
+  META_KEYS,
+} from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const listReposTool: Tool = {
   name: 'listRepos',
   description:
-    'List repositories accessible to the authenticated user, or search repositories when a search query is given.',
+    'List repositories accessible to the authenticated user, or search repositories when a search query is given. With no search term, results are scoped to whichever account owns the mounted token.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: false },
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: false,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
   keywords: ['github', 'repos', 'repositories', 'list', 'search'],
   example:
     'const { repos, count } = await github.listRepos({ search: "language:rust org:speednet" })',
@@ -23,7 +34,10 @@ const listReposTool: Tool = {
         type: 'string',
         description: 'owner | collaborator | organization_member; comma-separated',
       },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
   },
   outputSchema: {
@@ -59,10 +73,10 @@ const listReposTool: Tool = {
 };
 
 const getRepoTool: Tool = {
-  name: 'getRepo',
+  name: TOOL_NAMES.GET_REPO,
   description: 'Get detailed information about a specific repository.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'repo', 'repository', 'get', 'show', 'detail'],
   example: 'const repo = await github.getRepo({ owner: "octocat", repo: "hello-world" })',
   inputSchema: {
@@ -98,14 +112,18 @@ const searchCodeTool: Tool = {
   name: 'searchCode',
   description: 'Search code across GitHub, optionally scoped to a single repository.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'code', 'search', 'grep', 'find'],
   example:
     'const { results, count } = await github.searchCode({ query: "createMCPServer", owner: "octocat", repo: "hello" })',
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Code search query (GitHub code-search syntax)' },
+      query: {
+        type: 'string',
+        description:
+          "Code search query (GitHub code-search syntax). Supports qualifiers, e.g. 'language:rust', 'user:octocat', 'org:speednet', 'path:src'.",
+      },
       owner: {
         type: 'string',
         description: 'Repository owner to scope the search to (requires repo)',
@@ -114,7 +132,10 @@ const searchCodeTool: Tool = {
         type: 'string',
         description: 'Repository name to scope the search to (requires owner)',
       },
-      limit: { type: 'number', description: 'Max results, default 100' },
+      limit: {
+        type: 'number',
+        description: 'Max results (default 100 when omitted; any positive value honored)',
+      },
     },
     required: ['query'],
   },

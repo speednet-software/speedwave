@@ -10,14 +10,8 @@ import {
 import type { AskUserQuestionBlock, AskUserQuestionItem } from '../../models/chat';
 
 /**
- * Interactive AskUserQuestion prompt — supports 1–4 questions per block
- * Walks the user through each question sequentially: only the
- * `current_index` slot is interactive; previously-answered slots are locked
- * and show their chosen-label badge.
- *
- * Pure Tailwind — no inline `<style>` blocks. Emits `answered` once per
- * confirmation with the per-slot value (multi-select labels joined with
- * `, ` per the SDK contract).
+ * Interactive AskUserQuestion prompt — supports 1-4 questions per block, walking the user through
+ * each sequentially: only `current_index` is interactive; answered slots lock and show a chosen-label badge.
  */
 @Component({
   selector: 'app-ask-user-block',
@@ -242,26 +236,24 @@ export class AskUserBlockComponent {
 
   /**
    * Legend rendered for previously-answered (locked) slots.
-   * @param q The already-answered question item.
-   * @param i Zero-based index of the locked slot in the questions array.
+   * @param q - The already-answered question item.
+   * @param i - Zero-based index of the locked slot in the questions array.
    */
   legendForLocked(q: AskUserQuestionItem, i: number): string {
     return `${this.progressPrefix(i)}✓ answered${q.header ? ` · ${q.header}` : ''}`;
   }
 
   /**
-   * Checks whether a given option value is currently selected for the
-   * active question.
-   * @param value Option value to test against the active selection set.
+   * Checks whether a given option value is currently selected for the active question.
+   * @param value - Option value to test against the active selection set.
    */
   isSelected(value: string): boolean {
     return this.selected().has(value);
   }
 
   /**
-   * Toggles selection of an option value (single or multi-select) for the
-   * active question.
-   * @param value Option value to add or remove from the active selection set.
+   * Toggles selection of an option value (single or multi-select) for the active question.
+   * @param value - Option value to add or remove from the active selection set.
    */
   toggleOption(value: string): void {
     const q = this.activeQuestion();
@@ -282,11 +274,7 @@ export class AskUserBlockComponent {
     });
   }
 
-  /**
-   * Emits the user's answer for the active question. For multi-select the
-   * chosen labels are joined with `", "` per the Agent SDK contract.
-   * Selection wins over freeform when both are populated.
-   */
+  /** Emits the user's answer for the active question; multi-select labels join with `", "` (Agent SDK contract). Selection wins over freeform when both are populated. */
   submit(): void {
     const q = this.activeQuestion();
     if (!q) return;

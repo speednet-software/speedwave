@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use image::{ColorType, ImageEncoder};
 use speedwave_runtime::consts::DATA_DIR;
+use speedwave_runtime::fs_perms::set_owner_only;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -55,7 +56,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
     let target = clip_path(project_dir);
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("paste_watcher: cannot create {}: {e}", parent.display());
+            log::warn!("cannot create paste directory {}: {e}", parent.display());
             return;
         }
     }
@@ -63,7 +64,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
     let mut clipboard = match Clipboard::new() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("paste_watcher: clipboard unavailable: {e} — CLI paste disabled");
+            log::warn!("clipboard unavailable: {e} — CLI paste disabled");
             return;
         }
     };
@@ -75,14 +76,9 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                 let h = hash_image(&img);
                 if Some(h) != last_hash {
                     if let Err(e) = write_png(&target, &img) {
-                        log::warn!("paste_watcher: write {} failed: {e}", target.display());
+                        log::warn!("failed to write {}: {e}", target.display());
                     } else {
-                        log::debug!(
-                            "paste_watcher: wrote {} ({}x{})",
-                            target.display(),
-                            img.width,
-                            img.height
-                        );
+                        log::debug!("wrote {} ({}x{})", target.display(), img.width, img.height);
                     }
                     last_hash = Some(h);
                 }
@@ -91,7 +87,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                 // No image in clipboard — keep the last file (or absence) as is.
             }
             Err(e) => {
-                log::trace!("paste_watcher: get_image error: {e}");
+                log::trace!("failed to get clipboard image: {e}");
             }
         }
         thread::sleep(Duration::from_millis(POLL_MS));
@@ -123,26 +119,30 @@ fn write_png(target: &Path, img: &arboard::ImageData<'_>) -> Result<()> {
             .context("png encode")?;
     }
     // Owner-only perm BEFORE rename so the final inode never appears world-readable.
-    set_owner_only(&tmp)?;
+    restrict_paste_perms(&tmp)?;
     std::fs::rename(&tmp, target).with_context(|| format!("rename → {}", target.display()))?;
     Ok(())
 }
 
+/// Unix: a chmod failure aborts the paste. Windows: DACL calls can transiently
+/// fail under AV/EDR, so it degrades to warn-and-continue instead.
 #[cfg(unix)]
-fn set_owner_only(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 600 {}", path.display()))
+fn restrict_paste_perms(tmp: &Path) -> Result<()> {
+    set_owner_only(tmp)
+        .map_err(|e| anyhow::anyhow!(e))
+        .with_context(|| format!("owner-only perms {}", tmp.display()))
 }
 
 #[cfg(not(unix))]
-fn set_owner_only(_path: &Path) -> Result<()> {
-    // Windows: NTFS ACLs handled by parent dir creation; no per-file chmod.
+fn restrict_paste_perms(tmp: &Path) -> Result<()> {
+    if let Err(e) = set_owner_only(tmp) {
+        log::warn!("owner-only perms failed for {}: {e}", tmp.display());
+    }
     Ok(())
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
 
@@ -218,6 +218,25 @@ mod tests {
         write_png(&target, &img).unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_paste_perms_fails_on_nonexistent_path_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.png.tmp");
+        assert!(restrict_paste_perms(&missing).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn restrict_paste_perms_degrades_to_ok_on_failure_non_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.png.tmp");
+        assert!(
+            restrict_paste_perms(&missing).is_ok(),
+            "a DACL failure must warn-and-continue, not fail the paste"
+        );
     }
 
     #[test]

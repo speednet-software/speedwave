@@ -1,6 +1,5 @@
-//! Per-project compose transaction lock — in-process Mutex + cross-process
-//! file lock (`<data_dir>/compose/<project>/compose.lock`). Innermost layer of
-//! `LockedRuntime::transaction()`.
+//! Per-project compose transaction lock — in-process Mutex + cross-process file lock
+//! (`<data_dir>/compose/<project>/compose.lock`). Innermost layer of `LockedRuntime` transaction.
 
 use anyhow::Context;
 use std::collections::HashMap;
@@ -50,9 +49,8 @@ where
     with_file_lock_in(&inner_arc, &lock_path, f)
 }
 
-/// Holds `in_process` + an exclusive file lock at `lock_path`, runs `f`,
-/// releases in reverse. Shared by the per-project compose lock and the
-/// global image-build lock (`build::with_build_lock`, ADR-072).
+/// Holds `in_process` + an exclusive file lock at `lock_path`, runs `f`, releases in reverse.
+/// Shared by the per-project compose lock and `build::with_build_lock` (ADR-072).
 pub(crate) fn with_file_lock_in<F, T>(
     in_process: &Mutex<()>,
     lock_path: &std::path::Path,
@@ -79,7 +77,10 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createBranchTools } from './branch-tools.js';
+import { expectNotFoundTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 // Mock client type with all branch-related methods
@@ -235,10 +236,7 @@ describe('createBranchTools', () => {
 
       const result = await handler!({ project_id: 'project-1', branch: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {
@@ -447,10 +445,7 @@ describe('createBranchTools', () => {
 
       const result = await handler!({ project_id: 'project-1', branch: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {
@@ -596,10 +591,7 @@ describe('createBranchTools', () => {
 
       const result = await handler!({ project_id: 'project-1', from: 'main', to: 'nonexistent' });
 
-      expect(result).toEqual({
-        content: [{ type: 'text', text: 'Error: Resource not found in GitLab.' }],
-        isError: true,
-      });
+      expectNotFoundTeachingError(result);
     });
 
     it('should accept numeric project_id', async () => {

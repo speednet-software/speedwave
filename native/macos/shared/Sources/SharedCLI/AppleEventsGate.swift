@@ -2,9 +2,8 @@ import AppKit
 import CoreServices
 import Foundation
 
-/// Permission gate for AppleEvents-based integrations (Mail, Notes).
-/// Two-stage authorization (NSWorkspace pid → `typeKernelProcessID` AEAddressDesc).
-/// See docs/adr/ADR-070-appleevents-kernel-process-id-gate.md.
+/// Permission gate for AppleEvents-based integrations (Mail, Notes). Two-stage authorization
+/// (NSWorkspace pid → `typeKernelProcessID` AEAddressDesc). See ADR-070.
 public struct AppleEventsGate: PermissionGate {
     public let targetBundleId: String
     public let dataAccessScript: String?
@@ -52,9 +51,8 @@ public struct AppleEventsGate: PermissionGate {
         }
     }
 
-    /// Two-stage authorization status check with optional auto-launch.
-    /// `askUserIfNeeded=true` (toggle click) auto-launches the target app
-    /// if it is not running; `false` (startup validator) does not.
+    /// Two-stage authorization status check with optional auto-launch. `askUserIfNeeded=true`
+    /// (toggle click) auto-launches the target app if not running; `false` (startup validator) does not.
     func determineStatus(askUserIfNeeded: Bool) -> RawAuthorizationStatus {
         logTrace("AEDETERMINE start target=\(targetBundleId) askUserIfNeeded=\(askUserIfNeeded)")
 
@@ -129,9 +127,8 @@ public protocol PidResolver {
     func pid(for bundleId: String) -> pid_t?
 }
 
-/// Production resolver. Uses `NSRunningApplication.runningApplications(withBundleIdentifier:)`
-/// (per-call snapshot — `NSWorkspace.shared.runningApplications` would cache
-/// until the next NSRunLoop turn, which never happens in a CLI process).
+/// Production resolver. Uses `NSRunningApplication.runningApplications(withBundleIdentifier:)` (per-call
+/// snapshot — `NSWorkspace.shared.runningApplications` would cache until the next NSRunLoop turn, which never happens in a CLI process).
 public struct NSWorkspacePidResolver: PidResolver {
     public init() {}
 
@@ -216,11 +213,8 @@ private func describeRaw(_ raw: RawAuthorizationStatus) -> String {
 
 // MARK: - OSStatus mapping
 
-/// SSOT mapping for AEDeterminePermissionToAutomateTarget OSStatus → RawAuthorizationStatus.
-/// - `noErr (0)`: granted
-/// - `errAEEventNotPermitted (-1743)`: denied
-/// - `errAEEventWouldRequireUserConsent (-1744)`: not yet prompted (askUserIfNeeded=false)
-/// - `procNotFound (-600)`: target app not running
+/// SSOT mapping for AEDeterminePermissionToAutomateTarget OSStatus → RawAuthorizationStatus:
+/// noErr(0)=granted, errAEEventNotPermitted(-1743)=denied, errAEEventWouldRequireUserConsent(-1744)=notDetermined, procNotFound(-600)=targetNotRunning.
 public func mapAEStatusToRaw(_ status: OSStatus, targetBundleId: String) -> RawAuthorizationStatus {
     switch Int(status) {
     case 0:                                       // noErr

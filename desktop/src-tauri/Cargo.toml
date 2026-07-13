@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-desktop"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 publish = false
 description = "Speedwave desktop application — Tauri backend"
@@ -48,6 +48,18 @@ ctrlc = { version = "3", features = ["termination"] }
 # MIT-licensed; transitive deps already in the tree (regex, url, fancy-regex).
 jsonschema = { version = "0.46", default-features = false }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# In-process AVCaptureDevice mic-consent prompt (mic_permission_cmd.rs); the
+# objc2 family is already pinned transitively by tauri — no version bumps.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVCaptureDevice",
+    "AVMediaFormat",
+    "block2",
+] }
+
 [target.'cfg(windows)'.dependencies]
 # SSOT-alignment with crates/speedwave-runtime/Cargo.toml — version must
 # stay in sync across the two workspaces (separate Cargo.lock files
@@ -85,6 +97,8 @@ print_stderr = "deny"
 todo = "deny"
 unimplemented = "deny"
 wildcard_imports = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 [lints.rust]
 unsafe_code = "deny"

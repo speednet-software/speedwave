@@ -1,14 +1,12 @@
-//! Child-process environment policy shared by every host MCP worker.
-//! `apply_child_env` clears the inherited environment, then re-adds only
-//! the variables the child needs.
+//! Child-process environment policy shared by every host MCP worker. `apply_child_env` clears
+//! the inherited environment, then re-adds only the variables the child needs.
 
 use std::process::Command;
 
 use crate::consts;
 
-/// Windows system environment variables required for Node.js OpenSSL
-/// CSPRNG (BCryptGenRandom) initialization. Without these, `node.exe`
-/// aborts with "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
+/// Windows system env vars required for Node.js OpenSSL CSPRNG (BCryptGenRandom) init. Without
+/// these, `node.exe` aborts with "Assertion failed: ncrypto::CSPRNG(nullptr, 0)".
 #[cfg(target_os = "windows")]
 pub const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
     "SystemRoot",
@@ -26,9 +24,8 @@ pub const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[
 #[cfg(not(target_os = "windows"))]
 pub const WINDOWS_SYSTEM_ENV_VARS: &[&str] = &[];
 
-/// Source of environment values. Production reads `std::env`; tests
-/// provide a `FakeEnv` so they don't race with each other or with
-/// concurrent Speedwave instances on the host.
+/// Source of environment values. Production reads `std::env`; tests provide a `FakeEnv` so
+/// they don't race with each other or with concurrent Speedwave instances on the host.
 pub trait EnvSource {
     /// Looks up an environment value by key.
     fn var(&self, key: &str) -> Option<String>;
@@ -43,9 +40,8 @@ impl EnvSource for CurrentProcessEnv {
     }
 }
 
-/// Apply the child-process environment policy to `cmd`: clear inherited
-/// env, then re-add PATH, HOME, optional Windows CSPRNG vars, and the
-/// bundle `SPEEDWAVE_RESOURCES_DIR`/`SPEEDWAVE_PROD` pair.
+/// Apply the child-process environment policy to `cmd`: clear inherited env, then re-add PATH,
+/// HOME, optional Windows CSPRNG vars, and the bundle resources-dir/prod env pair.
 pub fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
     cmd.env_clear();
 
@@ -74,14 +70,12 @@ pub fn apply_child_env(cmd: &mut Command, env: &dyn EnvSource) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 pub(crate) mod test_support {
     use super::EnvSource;
     use std::collections::HashMap;
 
-    /// Test-only [`EnvSource`] that returns canned values without
-    /// reading `std::env`. Used by every worker's env-policy tests so
-    /// they don't race with each other or with the host shell.
+    /// Test-only [`EnvSource`] that returns canned values without reading `std::env`. Used by
+    /// every worker's env-policy tests so they don't race with each other or the host shell.
     pub struct FakeEnv {
         pub vars: HashMap<String, String>,
     }
@@ -107,7 +101,6 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::test_support::FakeEnv;
     use super::*;

@@ -11,9 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 const PROGRESS_EVENT: &str = "sharepoint_oauth_progress";
 
-// ---------------------------------------------------------------------------
-// Serde DTOs — Microsoft identity platform responses
-// ---------------------------------------------------------------------------
+// ── Serde DTOs — Microsoft identity platform responses ──────────────────────────────────
 
 #[derive(Deserialize)]
 struct MsDeviceCodeResponse {
@@ -49,9 +47,7 @@ struct MsTokenErrorResponse {
 
 static FLOW_STATE: FlowRegistry = FlowRegistry::new(PROGRESS_EVENT);
 
-// ---------------------------------------------------------------------------
-// Validation helpers
-// ---------------------------------------------------------------------------
+// ── Validation helpers ──────────────────────────────────────────────────────────────────
 
 fn validate_tenant_id(tenant_id: &str) -> Result<(), String> {
     if tenant_id.is_empty() {
@@ -272,9 +268,7 @@ impl DeviceCodeProvider for SharepointProvider {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tauri commands
-// ---------------------------------------------------------------------------
+// ── Tauri commands ──────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn start_sharepoint_oauth(
@@ -382,7 +376,7 @@ pub fn cancel_sharepoint_oauth() {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
     use serial_test::serial;

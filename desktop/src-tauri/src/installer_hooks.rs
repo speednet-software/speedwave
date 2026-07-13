@@ -414,9 +414,8 @@ mod tests {
         &after[..end]
     }
 
-    /// Re-derives the expected `installer-hooks.nsh` from the template +
-    /// the two `.ps1` sources, mirroring `scripts/generate-installer-nsh.sh`.
-    /// Drift between the committed file and this derivation fails the test.
+    /// Re-derives the expected `installer-hooks.nsh` from the template + the two `.ps1` sources,
+    /// mirroring `scripts/generate-installer-nsh.sh`; drift from the committed file fails the test.
     fn render_expected_hooks(
         template: &str,
         sweep_ps1: &str,

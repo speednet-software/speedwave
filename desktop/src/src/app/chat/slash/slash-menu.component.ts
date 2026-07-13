@@ -14,10 +14,8 @@ import { SlashService, type SlashCommand } from './slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 
 /**
- * Popover listing every slash command Claude Code exposes for the active
- * session. Filters the list by the `query` input using a "startsWith
- * above substring" ranking, and exposes keyboard navigation via CDK
- * Listbox primitives.
+ * Popover listing every slash command Claude Code exposes for the active session. Filters by the
+ * `query` input ("startsWith above substring" ranking), exposes keyboard navigation via CDK Listbox.
  */
 @Component({
   selector: 'app-slash-menu',
@@ -279,10 +277,9 @@ export class SlashMenuComponent {
   }
 
   /**
-   * Keyboard navigation while the search input has focus. Drives the
-   * highlighted index without giving up focus, then commits a selection on
-   * Enter/Tab.
-   * @param event - Native keyboard event.
+   * Keyboard navigation while the search input has focus: drives the highlighted index without
+   * giving up focus, then commits a selection on Enter/Tab.
+   * @param event - Keydown event from the search input.
    */
   onSearchKeydown(event: KeyboardEvent): void {
     const list = this.filtered();
@@ -315,9 +312,8 @@ export class SlashMenuComponent {
   }
 
   /**
-   * CdkListbox change handler — emits the picked command when the user
-   * activates an option via space/click.
-   * @param event - CDK listbox value-change payload (single-select).
+   * CdkListbox change handler — emits the picked command when the user activates an option via space/click.
+   * @param event - Listbox value-change event carrying the picked command.
    */
   onListboxChange(event: ListboxValueChangeEvent<unknown>): void {
     const value = event.value[0];

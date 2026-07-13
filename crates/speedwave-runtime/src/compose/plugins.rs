@@ -1,6 +1,5 @@
-//! Plugin compose injection: generates MCP service definitions for enabled
-//! plugins, wires `WORKER_<PLUGIN>_URL` into the hub, mounts claude-resources,
-//! and injects declared host-bridge env vars (ADR-063).
+//! Plugin compose injection: generates MCP service definitions for enabled plugins, wires
+//! `WORKER_<PLUGIN>_URL` into the hub, mounts claude-resources, injects host-bridge vars (ADR-063).
 
 use super::{
     add_claude_env_var, add_claude_volume, add_service_env_var, ensure_host_gateway_extra_host,
@@ -11,17 +10,15 @@ use crate::consts;
 use crate::engine_path::to_engine_path;
 use crate::plugin;
 
-/// Applies installed+enabled plugins to compose YAML: generates MCP services,
-/// injects WORKER_*_URL, mounts resources, sets SPEEDWAVE_PLUGINS.
-/// Manifests are re-validated at render time (ADR-051).
+/// Applies installed+enabled plugins to compose YAML: generates MCP services, injects WORKER_*_URL,
+/// mounts resources, sets SPEEDWAVE_PLUGINS. Manifests are re-validated at render time (ADR-051).
 pub(crate) fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
     let plugins = plugin::list_verified_plugins()?;
     apply_plugins_from_verified(yaml, ctx, &plugins)
 }
 
-/// Per-call inputs shared by `apply_plugins` and `apply_plugins_from_verified`.
-/// Bundled together so each new plugin-injection knob lives in one struct
-/// instead of growing the function signature.
+/// Per-call inputs shared by `apply_plugins` and `apply_plugins_from_verified`. Bundled together
+/// so each new plugin-injection knob lives in one struct instead of growing the function signature.
 pub(crate) struct ApplyPluginsCtx<'a> {
     pub project_name: &'a str,
     pub project_dir: &'a str,

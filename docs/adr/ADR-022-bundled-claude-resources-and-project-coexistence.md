@@ -7,7 +7,7 @@
 
 ## Context
 
-Speedwave ships its own Claude Code resources — skills, a status line, an output style, a `CLAUDE.md`, and a `settings.json` — mounted read-only into the container at `/speedwave/resources/`. (`commands`, `agents`, and `hooks` are resource buckets the wiring supports but the bundle does not currently fill; they come from plugins or a team's own `.claude/`. Note that for `hooks`, symlinking files is not enough — Claude Code executes only hooks registered under a settings `hooks` key, which the entrypoint generates from `hooks/hooks.json` declarations; see [ADR-078](ADR-078-claude-hook-registration.md).)
+Speedwave ships its own Claude Code resources — skills, a status line, an output style, a `CLAUDE.md`, and a `settings.json` — mounted read-only into the container at `/speedwave/resources/`. (`commands`, `agents`, and `hooks` are resource buckets the wiring supports but the bundle does not currently fill; they come from plugins or a team's own `.claude/`. Note that for `hooks`, symlinking files is not enough — Claude Code executes only hooks registered under a settings `hooks` key,[^1] which the entrypoint generates from `hooks/hooks.json` declarations; see [ADR-078](ADR-078-claude-hook-registration.md).)
 
 Teams independently commit their own `.claude/` directory to their repo (project-specific agents, commands, instructions). It arrives in the container as `/workspace/.claude/`.
 
@@ -15,20 +15,20 @@ The question: how do the two coexist without conflicts, and without Speedwave to
 
 ## Decision
 
-Speedwave places its resources at the **user scope** (`~/.claude/`); the team's resources stay at the **project scope** (`/workspace/.claude/`). Claude Code resolves project over user, so a team overrides a Speedwave resource by committing a same-named file (array-valued settings like `hooks` and `permissions.allow` merge rather than replace — see Settings scopes below). `entrypoint.sh` wires up the user scope on every container start; the mechanics live there, not in this ADR.[^1]
+Speedwave places its resources at the **user scope** (`~/.claude/`); the team's resources stay at the **project scope** (`/workspace/.claude/`). Claude Code resolves project over user, so a team overrides a Speedwave resource by committing a same-named file (array-valued settings like `hooks` and `permissions.allow` merge rather than replace — see Settings scopes below). `entrypoint.sh` wires up the user scope on every container start; the mechanics live there, not in this ADR.[^2]
 
 Resources are linked, not copied — each one is a symlink into the read-only mount, so it auto-updates when Speedwave ships a new version and wastes no disk space. Integration-bound resources (e.g. an Office skill) are linked only when their integration is enabled; the entrypoint tracks every link it owns so toggling an integration off removes it cleanly.
 
 Two resources are not symlinks:
 
 - **`mcp-config.json`** is generated on each start, because it embeds the runtime MCP hub port.
-- **`settings.json`** is a writable copy, seeded from the bundle only when absent. Claude Code persists to it at runtime — `/effort` and `/model` save the user's choice there — and a symlink into the read-only mount made those writes fail with `EROFS`. Seeding only-when-absent means a user's choice survives restarts; a stale symlink from an older build is replaced on the next start.
+- **`settings.json`** is a writable copy, seeded from the bundle only when absent. Claude Code persists to it at runtime — `/effort` and `/model` save the user's choice there — and a symlink into the read-only mount made those writes fail with `EROFS`.[^3] Seeding only-when-absent means a user's choice survives restarts; a stale symlink from an older build is replaced on the next start.
 
 Everything runs inside the hardened container (read-only root, `cap_drop: ALL`, `no-new-privileges`; see [ADR-009]). The user scope is the container's `~/.claude/` — never the developer's real one.
 
 ## Settings scopes
 
-Claude Code has five settings scopes, highest precedence first:[^2]
+Claude Code has five settings scopes, highest precedence first:[^4]
 
 1. **Managed** — `/etc/claude-code/managed-settings.json`, cannot be overridden by anything
 2. **CLI flags**
@@ -52,14 +52,18 @@ Speedwave uses only **User** (its defaults) and leaves **Project** to teams. Bec
 
 ## See also
 
-- [Bundled Resources](../architecture/bundled-resources.md) — the reference for this design: full resource catalog (source path, target, mechanism, overridable?), the container filesystem layout, and the volume mounts with their read-only / read-write access levels.
+- The Bundled Resources reference at <https://speedwave.dev/docs>: full resource catalog (source path, target, mechanism, overridable?), the container filesystem layout, and the volume mounts with their read-only / read-write access levels.
 - [ADR-009](ADR-009-per-project-isolation-preserved.md) — container hardening and per-project isolation.
 - [ADR-015](ADR-015-plugin-system.md) — how plugin-provided resources layer onto the same user scope.
 
 ---
 
-[^1]: [`containers/entrypoint.sh`](https://github.com/speednet-software/speedwave/blob/main/containers/entrypoint.sh) — the implementation; see also [Bundled Resources](../architecture/bundled-resources.md) for the full catalog and filesystem layout.
+[^1]: [Automate actions with hooks - Claude Code Docs](https://code.claude.com/docs/en/hooks-guide) - hooks must be registered under a `hooks` block in a settings file; a hook script is not auto-discovered.
 
-[^2]: [Claude Code Settings — Scopes and Precedence](https://code.claude.com/docs/en/settings)
+[^2]: [`containers/entrypoint.sh`](https://github.com/speednet-software/speedwave/blob/main/containers/entrypoint.sh) - the implementation.
+
+[^3]: [`errno(3)` - Linux manual page](https://man7.org/linux/man-pages/man3/errno.3.html) - `EROFS`: "Read-only filesystem (POSIX.1-2001)".
+
+[^4]: [Claude Code Settings - Scopes and Precedence](https://code.claude.com/docs/en/settings)
 
 [ADR-009]: ADR-009-per-project-isolation-preserved.md

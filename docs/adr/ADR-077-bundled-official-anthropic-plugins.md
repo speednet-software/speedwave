@@ -41,18 +41,18 @@ The official `php-lsp` plugin's language server is Intelephense, which is propri
 - The pre-baked TypeScript server is version-pinned via `ARG`; bumping it edits the Containerfile and rebuilds the image.
 - This mechanism is independent of the Speedwave sibling-repo plugin system (`SPEEDWAVE_PLUGINS`); the two do not interact.
 
-[^1]: Claude Code plugins overview — https://code.claude.com/docs/en/plugins
+[^1]: Claude Code plugins overview - https://code.claude.com/docs/en/plugins
 
-[^2]: Discover and install plugins — https://code.claude.com/docs/en/discover-plugins
+[^2]: Discover and install plugins - https://code.claude.com/docs/en/discover-plugins
 
-[^3]: Plugin settings and default enablement — https://code.claude.com/docs/en/settings
+[^3]: Plugin settings and default enablement - https://code.claude.com/docs/en/settings
 
-[^4]: `claude-plugins-official` marketplace (plugins carry Apache-2.0 LICENSE files) — https://github.com/anthropics/claude-plugins-official
+[^4]: `claude-plugins-official` marketplace (plugins carry Apache-2.0 LICENSE files) - https://github.com/anthropics/claude-plugins-official
 
-[^5]: superpowers plugin (MIT) — https://github.com/obra/superpowers
+[^5]: superpowers plugin (MIT) - https://github.com/obra/superpowers
 
-[^6]: `typescript-language-server` (Apache-2.0) — https://www.npmjs.com/package/typescript-language-server
+[^6]: `typescript-language-server` (Apache-2.0) - https://www.npmjs.com/package/typescript-language-server
 
-[^7]: TypeScript (Apache-2.0) — https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt
+[^7]: TypeScript (Apache-2.0) - https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt
 
-[^8]: Intelephense end-user licence (personal, non-transferable; no redistribution) — https://intelephense.com/
+[^8]: Intelephense end-user licence (personal, non-transferable; no redistribution) - https://intelephense.com/

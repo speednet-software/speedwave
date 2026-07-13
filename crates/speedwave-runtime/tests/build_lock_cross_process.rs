@@ -1,8 +1,11 @@
-//! Cross-process build-lock test (ADR-072) — re-execs the test binary as
-//! parent+child per `tests/compose_lock_cross_process.rs` pattern, asserts the
-//! second process blocks on `<data_dir>/build.lock` until the first releases.
+//! Cross-process build-lock test (ADR-072) — re-execs the test binary as parent+child per
+//! `compose_lock_cross_process.rs`; asserts child blocks on `build.lock` until parent releases.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+#![expect(
+    clippy::expect_used,
+    clippy::print_stderr,
+    reason = "test child process reports failure on stderr and asserts on setup calls"
+)]
 
 use std::process::Command;
 use std::time::Duration;

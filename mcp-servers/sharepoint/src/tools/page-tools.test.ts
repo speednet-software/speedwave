@@ -1,22 +1,5 @@
-/**
- * Tests for SharePoint page tools (PR4 / ADR-060).
- *
- * Web part write tools (addWebPart / updateWebPart / removeWebPart) target the
- * real Microsoft Graph endpoints under
- *   /sites/{site-id}/pages/{page-id}/microsoft.graph.sitePage/canvasLayout/...
- *
- * MVP scope: only `#microsoft.graph.textWebPart` (with `innerHtml`). Other web
- * part types — image, link, standardWebPart — require per-type Graph payloads
- * with GUID-typed discriminators (see standardWebPart resource) and are out of
- * scope for PR4.
- *
- * Covers:
- * - Metadata: tool names + critical schema invariants.
- * - Site-policy by omission: NO tool's input schema accepts `site_id`. The
- *   worker always derives it from `/tokens/site_id` (`client.getSiteId()`).
- * - Happy path for each of the 8 handlers (mocked Graph responses).
- * - Error paths: range errors, INVALID_ID, NOT_CONFIGURED for null client.
- */
+/** Tests for SharePoint page tools (PR4 / ADR-060). Web part writes target `/sites/{site-id}/pages/{page-id}/microsoft.graph.sitePage/canvasLayout/...`; MVP scope is `#microsoft.graph.textWebPart` only (other types need per-type GUID-discriminated payloads, out of scope for PR4).
+ * Covers: metadata/schema invariants, site-policy by omission (no tool accepts `site_id` — always derived via `client.getSiteId()`), happy path for all 8 handlers, and error paths (range, INVALID_ID, NOT_CONFIGURED). */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolsCallResult } from '@speedwave/mcp-shared';
 import { SharePointClient } from '../client.js';
@@ -527,6 +510,29 @@ describe('page-tools handlers — happy paths', () => {
     expect(method).toBe('DELETE');
     expect(url).toBe(`/sites/${MOCK_SITE_ID}/pages/p1/microsoft.graph.sitePage/webParts/wp-1`);
   });
+
+  // A swapped sourceTool would point the model at the wrong follow-up tool.
+  it.each([
+    [
+      'updateWebPart',
+      { pageId: 'bad/../path', webPartId: 'wp-x', innerHtml: '<p>x</p>' },
+      'listPages',
+    ],
+    ['updateWebPart', { pageId: 'p1', webPartId: 'bad/../path', innerHtml: '<p>x</p>' }, 'getPage'],
+    ['removeWebPart', { pageId: 'bad/../path', webPartId: 'wp-1' }, 'listPages'],
+    ['removeWebPart', { pageId: 'p1', webPartId: 'bad/../path' }, 'getPage'],
+  ] as const)(
+    '%s INVALID_ID message names the sourceTool that supplies a valid id',
+    async (toolName, params, sourceTool) => {
+      const tools = createPageTools(client);
+      const result = await tools.find((t) => t.tool.name === toolName)!.handler(params);
+      expect(result.isError).toBe(true);
+      const parsed = parseContent(result) as { code: string; message: string };
+      expect(parsed.code).toBe('INVALID_ID');
+      expect(parsed.message).toContain(sourceTool);
+      expect(graph).not.toHaveBeenCalled();
+    }
+  );
 
   it('publishPage POSTs to the publish endpoint', async () => {
     graph.mockResolvedValueOnce(undefined);

@@ -30,8 +30,8 @@ export const MODE_STORAGE_KEY = 'speedwave-theme-mode';
 
 /**
  * Persists a value to localStorage, tolerating private-mode / quota failures.
- * @param key localStorage key to write.
- * @param value Value to store.
+ * @param key - localStorage key to write.
+ * @param value - Value to store.
  */
 function safePersist(key: string, value: string): void {
   try {
@@ -43,9 +43,9 @@ function safePersist(key: string, value: string): void {
 
 /**
  * Reads a persisted choice, validating it against an allowlist.
- * @param key localStorage key to read.
- * @param allowlist Permitted values; anything else falls back.
- * @param fallback Value returned for missing / unknown / unreadable entries.
+ * @param key - localStorage key to read.
+ * @param allowlist - Permitted values; anything else falls back.
+ * @param fallback - Returned for missing / unknown / unreadable entries.
  */
 function readStoredChoice<T extends string>(key: string, allowlist: readonly T[], fallback: T): T {
   let saved: string | null;
@@ -106,15 +106,8 @@ function applyModeClass(effective: EffectiveMode): void {
 }
 
 /**
- * SSOT for the active accent theme and appearance mode.
- *
- * Two orthogonal axes:
- * - **Accent** ({@link theme}) — six named variants selected by `[data-theme]`
- *   on <html>, chosen from the Appearance picker.
- * - **Mode** ({@link mode}) — light/dark/auto, toggling `.dark` on <html>.
- *   `auto` reacts to `prefers-color-scheme` changes at runtime.
- *
- * Native window chrome sync is delegated to {@link NativeThemeAdapter}.
+ * SSOT for the active accent theme ({@link theme}, six variants via `[data-theme]`) and
+ * appearance mode ({@link mode}, light/dark/auto); native chrome sync via {@link NativeThemeAdapter}.
  */
 @Injectable({ providedIn: 'root' })
 export class ThemeService implements OnDestroy {
@@ -195,7 +188,7 @@ export class ThemeService implements OnDestroy {
   /**
    * Resolves effective mode, applies DOM class, syncs native chrome.
    * Does NOT persist; persistence is in {@link setMode} (explicit user intent only).
-   * @param mode Mode to apply (light/dark/auto).
+   * @param mode - Mode to apply (light/dark/auto).
    */
   private applyMode(mode: ThemeMode): void {
     const effective = resolveEffectiveMode(mode);

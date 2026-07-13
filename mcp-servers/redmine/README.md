@@ -118,7 +118,14 @@ Update an existing issue.
 **Parameters**:
 
 - `issue_id` (number, required): Issue ID to update
-- All optional: `subject`, `description`, `tracker_id`, `status_id`, `priority_id`, `assigned_to_id`, `parent_issue_id`, `estimated_hours`, `notes`
+- `subject` (string, optional): New subject
+- `description` (string, optional): New description (Textile markup)
+- `status_id` (number, optional): New status ID
+- `status` (string, optional): New status name, resolved via the project's configured mappings
+- `priority_id` (number, optional): New priority ID
+- `assigned_to_id` (number, optional): New assigned user ID
+- `assigned_to` (string, optional): Assignee name, or `'me'` to assign to the current authenticated user (resolved via `resolveUser`)
+- `notes` (string, optional): Update notes/comment (Textile markup)
 
 #### 6. commentIssue
 
@@ -237,6 +244,56 @@ Get project-specific Redmine ID mappings.
   ...
 }
 ```
+
+### Project Operations
+
+#### listProjectIds
+
+List project IDs with optional filters. Returns only IDs for efficiency. If this
+Redmine integration is scoped to a single project, this always returns just that
+one project regardless of `limit`/`offset`.
+
+**Parameters**:
+
+- `status` (string, optional): `active`, `closed`, `archived`, or `all`
+- `limit` (number, optional): Max results (default 100)
+- `offset` (number, optional): Pagination offset
+
+#### getProjectFull
+
+Get complete project data including trackers, categories, and modules. No
+truncation. If scoped to a single project, requesting a different `project_id`
+fails with a scope error.
+
+**Parameters**:
+
+- `project_id` (string or number, required): Project ID or identifier, obtained from `listProjectIds` or `searchProjectIds`
+- `include` (array, optional): `trackers`, `issue_categories`, `enabled_modules`, `time_entry_activities`, `issue_custom_fields`
+
+#### searchProjectIds
+
+Search projects by name, identifier, or description. Returns matching IDs only.
+If scoped to a single project, only that project is searched.
+
+**Parameters**:
+
+- `query` (string, required): Search query
+- `limit` (number, optional): Max results (default 25)
+
+### Relation Operations
+
+#### listRelations, createRelation, deleteRelation
+
+List, create, and delete relations (`relates`, `blocks`, `precedes`, etc.)
+between issues. See `getIssueFull`'s `relations` include for reading relations
+inline on an issue.
+
+### Identity Operations
+
+#### getCurrentUser
+
+Get the current authenticated user's profile (id, login, email, name). Use this
+to resolve `'me'` for tools that only accept a numeric or username assignee.
 
 ## File Structure
 

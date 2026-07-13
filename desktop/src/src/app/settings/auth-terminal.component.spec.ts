@@ -51,9 +51,9 @@ describe('AuthTerminalComponent', () => {
   });
 
   /**
-   * Replace the CDK `Clipboard.copy` implementation with the supplied
-   * spy/return value. Returns the spy for assertions.
-   * @param returns - Boolean to return from `Clipboard.copy`.
+   * Replace the CDK `Clipboard.copy` implementation with a spy returning `returns`; the spy is
+   * returned for assertions.
+   * @param returns - the boolean the spy should return when invoked
    */
   function mockClipboard(returns: boolean): ReturnType<typeof vi.fn> {
     const spy = vi.fn().mockReturnValue(returns);

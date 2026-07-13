@@ -15,6 +15,7 @@ function stubClient(projectKeys: string[] = []) {
     post: vi.fn(),
     put: vi.fn(),
     del: vi.fn(),
+    uploadAttachment: vi.fn(),
     jiraProjectKeys: projectKeys,
     confluenceSpaceKeys: [] as string[],
   } as unknown as AtlassianClient & {
@@ -22,6 +23,7 @@ function stubClient(projectKeys: string[] = []) {
     post: ReturnType<typeof vi.fn>;
     put: ReturnType<typeof vi.fn>;
     del: ReturnType<typeof vi.fn>;
+    uploadAttachment: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -87,13 +89,24 @@ describe('search (enhanced JQL)', () => {
     expect(res.next_page_token).toBeNull();
   });
 
-  it('floors maxResults at 1', async () => {
+  it('floors a fractional maxResults at 1', async () => {
+    client.post.mockResolvedValueOnce({ issues: [] });
+    const c = createJiraIssuesClient(client);
+    await c.search({ jql: 'x', maxResults: 0.5 });
+    expect(client.post).toHaveBeenCalledWith(
+      '/rest/api/3/search/jql',
+      expect.objectContaining({ maxResults: 1 }),
+      { retryable: true }
+    );
+  });
+
+  it('defaults maxResults to 50 when given 0 (not a floor to 1)', async () => {
     client.post.mockResolvedValueOnce({ issues: [] });
     const c = createJiraIssuesClient(client);
     await c.search({ jql: 'x', maxResults: 0 });
     expect(client.post).toHaveBeenCalledWith(
       '/rest/api/3/search/jql',
-      expect.objectContaining({ maxResults: 1 }),
+      expect.objectContaining({ maxResults: 50 }),
       { retryable: true }
     );
   });
@@ -124,6 +137,62 @@ describe('search (enhanced JQL)', () => {
     });
     const c = createJiraIssuesClient(client);
     expect((await c.search({ jql: 'x' })).issues).toHaveLength(2);
+  });
+
+  it('does not re-page when unrestricted, even if the single page filters to zero (no allowlist configured)', async () => {
+    client.post.mockResolvedValueOnce({ issues: [], nextPageToken: 'tok2', isLast: false });
+    const c = createJiraIssuesClient(client);
+    const res = await c.search({ jql: 'x' });
+    expect(client.post).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ issues: [], next_page_token: 'tok2', is_last: false });
+  });
+
+  it('skips past an all-excluded page instead of leaking its is_last/cursor to the caller', async () => {
+    client = stubClient(['PROJ']);
+    client.post
+      .mockResolvedValueOnce({
+        issues: [rawIssue({ key: 'OTHER-9' }, { project: { key: 'OTHER' } })],
+        nextPageToken: 'tok2',
+        isLast: false,
+      })
+      .mockResolvedValueOnce({ issues: [rawIssue()], nextPageToken: null, isLast: true });
+    const c = createJiraIssuesClient(client);
+    const res = await c.search({ jql: 'project in (PROJ, OTHER)' });
+    expect(client.post).toHaveBeenCalledTimes(2);
+    expect(client.post).toHaveBeenNthCalledWith(
+      2,
+      '/rest/api/3/search/jql',
+      expect.objectContaining({ nextPageToken: 'tok2' }),
+      { retryable: true }
+    );
+    expect(res.issues.map((i) => i.key)).toEqual(['PROJ-1']);
+    expect(res.is_last).toBe(true);
+    expect(res.next_page_token).toBeNull();
+  });
+
+  it('hides the existence of out-of-allowlist-only matches once the upstream stream truly ends', async () => {
+    client = stubClient(['PROJ']);
+    client.post.mockResolvedValueOnce({
+      issues: [rawIssue({ key: 'OTHER-9' }, { project: { key: 'OTHER' } })],
+      nextPageToken: null,
+      isLast: true,
+    });
+    const c = createJiraIssuesClient(client);
+    const res = await c.search({ jql: 'project = OTHER' });
+    expect(res).toEqual({ issues: [], next_page_token: null, is_last: true });
+  });
+
+  it('bounds re-paging at MAX_SEARCH_CONTINUATION_PAGES worth of all-excluded pages', async () => {
+    client = stubClient(['PROJ']);
+    client.post.mockImplementation(async () => ({
+      issues: [rawIssue({ key: 'OTHER-9' }, { project: { key: 'OTHER' } })],
+      nextPageToken: 'tok-more',
+      isLast: false,
+    }));
+    const c = createJiraIssuesClient(client);
+    const res = await c.search({ jql: 'project = OTHER' });
+    expect(client.post).toHaveBeenCalledTimes(5);
+    expect(res).toEqual({ issues: [], next_page_token: 'tok-more', is_last: false });
   });
 });
 
@@ -267,6 +336,24 @@ describe('update', () => {
     const c = createJiraIssuesClient(client);
     await expect(c.update('10001', { summary: 'x' })).rejects.toThrow(ScopeError);
   });
+
+  it('sends an assignee field when assigneeAccountId is provided', async () => {
+    client.put.mockResolvedValueOnce(undefined);
+    client.get.mockResolvedValueOnce(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.update('PROJ-1', { assigneeAccountId: 'u9' });
+    const sent = client.put.mock.calls[0][1] as { fields: Record<string, unknown> };
+    expect(sent.fields).toMatchObject({ assignee: { accountId: 'u9' } });
+  });
+
+  it('omits the assignee field when assigneeAccountId is not provided', async () => {
+    client.put.mockResolvedValueOnce(undefined);
+    client.get.mockResolvedValueOnce(rawIssue());
+    const c = createJiraIssuesClient(client);
+    await c.update('PROJ-1', { summary: 'x' });
+    const sent = client.put.mock.calls[0][1] as { fields: Record<string, unknown> };
+    expect(sent.fields).not.toHaveProperty('assignee');
+  });
 });
 
 describe('transitions & assignment', () => {
@@ -403,5 +490,104 @@ describe('normalisation edge cases', () => {
     client.post.mockResolvedValueOnce({ issues: [{ key: 'NOHYPHEN' }] });
     const c = createJiraIssuesClient(client);
     expect((await c.search({ jql: 'x' })).issues[0].project_key).toBe('NOHYPHEN');
+  });
+});
+
+describe('addAttachment', () => {
+  const rawAttachment = {
+    id: '20001',
+    filename: 'bug.png',
+    size: 1234,
+    mimeType: 'image/png',
+    created: '2026-07-02T00:00:00.000+0000',
+    content: 'https://acme.atlassian.net/secure/attachment/20001/bug.png',
+    author: { accountId: 'u1', displayName: 'Alice', active: true },
+  };
+
+  it('uploads via client.uploadAttachment and normalises the first returned attachment', async () => {
+    client.uploadAttachment.mockResolvedValueOnce([rawAttachment]);
+    const c = createJiraIssuesClient(client);
+    const data = Buffer.from('png-bytes');
+    const res = await c.addAttachment('PROJ-1', {
+      filename: 'bug.png',
+      data,
+      contentType: 'image/png',
+    });
+    expect(client.uploadAttachment).toHaveBeenCalledWith('PROJ-1', 'bug.png', data, 'image/png');
+    expect(res).toEqual({
+      id: '20001',
+      filename: 'bug.png',
+      size: 1234,
+      mime_type: 'image/png',
+      created: '2026-07-02T00:00:00.000+0000',
+      url: 'https://acme.atlassian.net/secure/attachment/20001/bug.png',
+      author: { account_id: 'u1', display_name: 'Alice', email_address: undefined, active: true },
+    });
+  });
+
+  it('accepts a non-array response (defensive) and normalises it', async () => {
+    client.uploadAttachment.mockResolvedValueOnce(rawAttachment);
+    const c = createJiraIssuesClient(client);
+    const res = await c.addAttachment('PROJ-1', {
+      filename: 'bug.png',
+      data: Buffer.from('x'),
+      contentType: 'image/png',
+    });
+    expect(res.id).toBe('20001');
+  });
+
+  it('normalises an empty attachment payload to safe defaults', async () => {
+    client.uploadAttachment.mockResolvedValueOnce([]);
+    const c = createJiraIssuesClient(client);
+    const res = await c.addAttachment('PROJ-1', {
+      filename: 'x',
+      data: Buffer.from('x'),
+      contentType: 'application/octet-stream',
+    });
+    expect(res).toEqual({
+      id: '',
+      filename: '',
+      size: undefined,
+      mime_type: undefined,
+      created: undefined,
+      url: undefined,
+      author: null,
+    });
+  });
+
+  it('enforces the project allowlist and does not upload for a disallowed issue key', async () => {
+    const restricted = stubClient(['ALLOWED']);
+    const c = createJiraIssuesClient(restricted);
+    await expect(
+      c.addAttachment('OTHER-9', {
+        filename: 'x',
+        data: Buffer.from('x'),
+        contentType: 'image/png',
+      })
+    ).rejects.toBeInstanceOf(ScopeError);
+    expect(restricted.uploadAttachment).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteAttachment', () => {
+  it('DELETEs the attachment endpoint by ID', async () => {
+    client.del.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.deleteAttachment('10475');
+    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/10475');
+  });
+
+  it('URL-encodes the attachment ID', async () => {
+    client.del.mockResolvedValueOnce(undefined);
+    const c = createJiraIssuesClient(client);
+    await c.deleteAttachment('a/b');
+    expect(client.del).toHaveBeenCalledWith('/rest/api/3/attachment/a%2Fb');
+  });
+
+  it('fails closed (ScopeError) when a project allowlist is configured and does not call the API', async () => {
+    const restricted = stubClient(['ALLOWED']);
+    const c = createJiraIssuesClient(restricted);
+    await expect(c.deleteAttachment('10475')).rejects.toBeInstanceOf(ScopeError);
+    expect(restricted.del).not.toHaveBeenCalled();
   });
 });

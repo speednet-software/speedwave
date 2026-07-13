@@ -1,6 +1,5 @@
 /**
- * Type definitions for the Context7 REST API responses.
- * Mirrors `/api/v2/libs/search` and `/api/v2/context` payloads.
+ * Type definitions for the Context7 REST API responses (`/api/v2/libs/search`, `/api/v2/context`).
  * @module mcp-context7/types
  */
 

@@ -35,9 +35,8 @@ pub(crate) fn global_plugin_bridges() -> Option<&'static SharedPluginBridges> {
     GLOBAL_PLUGIN_BRIDGES.get()
 }
 
-/// Collect compose-injection registrations for every running plugin
-/// bridge. Returns an empty `HostBridgesInfo` when nothing is registered
-/// yet (e.g. CLI-only contexts).
+/// Collect compose-injection registrations for every running plugin bridge.
+/// Returns an empty `HostBridgesInfo` when nothing is registered (e.g. CLI-only).
 pub(crate) fn current_bridges_info() -> HostBridgesInfo {
     let registrations = global_plugin_bridges()
         .and_then(|handle| handle.lock().ok())
@@ -84,8 +83,7 @@ pub(crate) struct ExitCleanupContext {
 }
 
 /// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
-/// Generic per-project host-worker teardown (best-effort) — one body for
-/// every `HashMap<project, HostMcpProcess<S>>` registry.
+/// Generic best-effort teardown — one body for every `HashMap<project, HostMcpProcess<S>>`.
 fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
     map: &Arc<Mutex<HashMap<String, speedwave_runtime::host_mcp_process::HostMcpProcess<S>>>>,
     project: &str,
@@ -94,14 +92,14 @@ fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpe
     let proc = match map.lock() {
         Ok(mut map) => map.remove(project),
         Err(e) => {
-            log::warn!("teardown {label}[{project}]: map mutex poisoned: {e}");
+            log::warn!("map mutex poisoned during {label}[{project}] teardown: {e}");
             return;
         }
     };
     if let Some(mut proc) = proc {
-        log::info!("{label}[{project}]: tearing down worker");
+        log::info!("tearing down {label}[{project}] worker");
         if let Err(e) = proc.stop() {
-            log::warn!("{label}[{project}]: stop error during teardown: {e}");
+            log::warn!("stop error tearing down {label}[{project}]: {e}");
         }
         proc.cleanup_files();
     }
@@ -121,9 +119,8 @@ const RECONCILE_REBUILDING: u8 = 2;
 
 static BUNDLE_RECONCILE_PHASE: AtomicU8 = AtomicU8::new(RECONCILE_IDLE);
 
-/// Tracks whether container images are ready for use. `Checking` covers the
-/// short bundle-manifest comparison at reconcile start; waiters treat it like
-/// `Building` so container starts cannot race a rebuild decision.
+/// Tracks whether container images are ready. `Checking` covers the bundle-manifest
+/// comparison at reconcile start; waiters treat it like `Building` to avoid a rebuild race.
 #[derive(Clone, Debug)]
 enum ImageReadiness {
     Ready,
@@ -135,11 +132,8 @@ enum ImageReadiness {
 static IMAGES_READY: std::sync::LazyLock<(Mutex<ImageReadiness>, Condvar)> =
     std::sync::LazyLock::new(|| (Mutex::new(ImageReadiness::Ready), Condvar::new()));
 
-/// Blocks the calling thread until container images are ready (or timeout).
-///
-/// - `Ready` → returns `Ok(())` immediately
-/// - `Checking`/`Building` → waits on Condvar until signaled, then re-checks
-/// - `Failed(msg)` → returns `Err(msg)` immediately
+/// Blocks the calling thread until container images are ready (or timeout): `Ready`
+/// returns immediately, `Checking`/`Building` wait on the Condvar, `Failed(msg)` errors.
 pub(crate) fn wait_for_images_ready(timeout: Duration) -> Result<(), String> {
     let (lock, cvar) = &*IMAGES_READY;
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -270,7 +264,7 @@ fn list_running_projects_with(
         // project cannot be running — compose_ps would fatally error on it.
         if !has_compose_file(&project.name) {
             log::debug!(
-                "list_running_projects: no compose.yml for '{}' — not running",
+                "no compose.yml for '{}' — treating as not running",
                 project.name
             );
             continue;
@@ -360,11 +354,11 @@ fn restore_batch(
     for project in projects {
         match skip_of(project) {
             Some(RestoreSkip::Permanent(reason)) => {
-                log::warn!("restore_projects: dropping '{project}' — {reason}");
+                log::warn!("dropping project '{project}' from restore — {reason}");
                 continue;
             }
             Some(RestoreSkip::Deferred(reason)) => {
-                log::warn!("restore_projects: deferring '{project}' — {reason}");
+                log::warn!("deferring restore of project '{project}' — {reason}");
                 retained.push(project.clone());
                 continue;
             }
@@ -373,7 +367,7 @@ fn restore_batch(
         // Substitute CloudStorage TCC prefix before the error escapes this function.
         if let Err(e) = restore_one(project) {
             if e.starts_with(speedwave_runtime::consts::CLOUDSTORAGE_TCC_PREFIX) {
-                log::warn!("restore_projects: CloudStorage TCC required (raw prefix): {e}");
+                log::warn!("CloudStorage TCC permission required (raw prefix): {e}");
                 return Err(
                     speedwave_runtime::cloudstorage::TCC_USER_REMEDIATION_MESSAGE.to_string(),
                 );
@@ -389,14 +383,12 @@ pub(crate) fn restore_projects(
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Result<Vec<String>, String> {
     let data_dir = speedwave_runtime::consts::data_dir();
-    // Fresh config per probe: a project removed mid-batch drops out instead
-    // of aborting the remaining restores.
+    // One load for the whole batch: restore_skip_reason still re-checks each
+    // project's dir on disk, so a mid-batch directory deletion is still caught.
+    let cfg = config::load_user_config().unwrap_or_default();
     restore_batch(
         projects,
-        |p| {
-            let cfg = config::load_user_config().unwrap_or_default();
-            restore_skip_reason(&cfg, data_dir, p)
-        },
+        |p| restore_skip_reason(&cfg, data_dir, p),
         |p| restore_one_project(p, rt),
     )
 }
@@ -427,13 +419,13 @@ fn prepare_rebuild(
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
     log::info!(
-        "reconcile_bundle: rebuild needed, starting reconcile (phase={:?})",
+        "rebuild needed, starting reconcile (phase={:?})",
         state.phase,
     );
     // New bundle = full reconciliation from scratch. Reset phase so all
     // is_before() gates evaluate to true and every step executes.
     if state.phase != bundle::BundleReconcilePhase::Pending {
-        log::info!("reconcile_bundle: resetting phase to Pending for new bundle");
+        log::info!("resetting reconcile phase to Pending for new bundle");
         state.phase = bundle::BundleReconcilePhase::Pending;
         bundle::save_bundle_state(state).map_err(|e| e.to_string())?;
     }
@@ -453,17 +445,17 @@ fn reconcile_id_changed(state: &bundle::BundleState, manifest: &bundle::BundleMa
 /// INVARIANT: `ensure_ready()` must NOT be gated behind `is_available()`.
 /// Behavioral test: `lima.rs` → `test_ensure_ready_stopped_vm_starts_it`.
 fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    log::info!("reconcile_bundle: loading current bundle manifest");
+    log::info!("loading current bundle manifest");
     let manifest = bundle::load_current_bundle_manifest().map_err(|e| {
         let msg = format!("Failed to load bundle manifest: {e}");
-        log::error!("reconcile_bundle: {msg}");
+        log::error!("{msg}");
         msg
     })?;
 
     let mut state = bundle::load_bundle_state();
 
     log::info!(
-        "reconcile_bundle: current={} applied={}",
+        "reconciling bundle: current={} applied={}",
         manifest.bundle_id,
         state.applied_bundle_id.as_deref().unwrap_or("(none)"),
     );
@@ -478,7 +470,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 name,
             ),
             None => {
-                log::warn!("reconcile: active_project '{name}' not in config — building core only");
+                log::warn!("active_project '{name}' not in config — building core only");
                 config::ResolvedIntegrationsConfig::default()
             }
         },
@@ -503,7 +495,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Previous reconcile was interrupted; resources on disk may reflect a
         // different app version, so force a full re-reconcile (ADR-072).
         log::warn!(
-            "reconcile_bundle: bundle id unchanged but phase={:?} — \
+            "bundle id unchanged but phase={:?} — \
              previous reconcile was interrupted, forcing re-reconcile",
             state.phase,
         );
@@ -523,19 +515,19 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 Ok(()) => {
                     let pending = state.pending_running_projects.clone();
                     log::info!(
-                        "reconcile_bundle: bundle unchanged, restoring {} stopped project(s)",
+                        "bundle unchanged, restoring {} stopped project(s)",
                         pending.len()
                     );
                     retained = restore_projects(&pending, &rt).map_err(|e| {
                         let msg = format!("Project restore failed: {e}");
-                        log::error!("reconcile_bundle: {msg}");
+                        log::error!("{msg}");
                         set_bundle_error(&mut state, msg)
                     })?;
                 }
                 Err(e) => {
                     // Keep pending_running_projects so the next launch retries.
                     log::warn!(
-                        "reconcile_bundle: {} project(s) pending restore but runtime not ready \
+                        "{} project(s) pending restore but runtime not ready \
                          ({e}) — will retry next launch",
                         state.pending_running_projects.len()
                     );
@@ -548,14 +540,14 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // Persist the deferred remainder (e.g. unmounted volume) so the next
         // launch retries it; drop the rest along with any stale error.
         if state.last_error.is_some() || state.pending_running_projects != retained {
-            log::info!("reconcile_bundle: bundle matches but state dirty, cleaning up");
+            log::info!("bundle matches but reconcile state dirty, cleaning up");
             state.last_error = None;
             state.pending_running_projects = retained;
             bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         }
         // Open the gate immediately: nothing needs rebuilding, and auth/chat
         // callers must not wait behind a VM start.
-        log::info!("reconcile_bundle: no changes needed, setting Ready");
+        log::info!("no reconcile changes needed, setting images Ready");
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
 
@@ -569,18 +561,14 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                         // an interrupted teardown converges via that idempotent up.
                         continue;
                     }
-                    log::info!(
-                        "reconcile_bundle: converging crash-interrupted teardown of '{project}'"
-                    );
+                    log::info!("converging crash-interrupted teardown of '{project}'");
                     crate::containers_cmd::spawn_background_teardown(project);
                 }
             }
             // Unknown active project — a teardown could race the post-reconcile
             // start. Intents persist, so the next launch retries convergence.
             Err(e) => {
-                log::warn!(
-                    "reconcile_bundle: skipping teardown convergence, config unreadable: {e}"
-                );
+                log::warn!("skipping teardown convergence, config unreadable: {e}");
             }
         }
 
@@ -591,11 +579,11 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 if build::images_exist(&rt, &active_integrations) {
                     return Ok(());
                 }
-                log::warn!("reconcile: bundle unchanged but images missing, forcing rebuild");
+                log::warn!("bundle unchanged but images missing, forcing rebuild");
                 prepare_rebuild(&mut state, app_handle)?;
             }
             Err(e) => {
-                log::warn!("reconcile: runtime not ready: {e}");
+                log::warn!("runtime not ready for reconcile: {e}");
                 return Ok(());
             }
         }
@@ -603,10 +591,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
 
     let build_root = build::resolve_build_root().map_err(|e| {
         let msg = format!("Failed to resolve build root: {e}");
-        log::error!("reconcile_bundle: {msg}");
+        log::error!("{msg}");
         msg
     })?;
-    log::info!("reconcile_bundle: build_root={}", build_root.display());
+    log::info!("resolved build_root={}", build_root.display());
 
     if state
         .phase
@@ -626,24 +614,24 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                         state.pending_running_projects.dedup();
                         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
                         log::info!(
-                            "reconcile_bundle: stopping {} running project(s) before resources sync",
+                            "stopping {} running project(s) before resources sync",
                             running.len()
                         );
                         if let Err(e) = stop_projects(&running, &rt) {
-                            log::warn!("reconcile_bundle: pre-sync stop incomplete: {e}");
+                            log::warn!("pre-sync project stop incomplete: {e}");
                         }
                     }
                 }
             }
         }
-        log::info!("reconcile_bundle: syncing claude-resources");
+        log::info!("syncing claude-resources");
         bundle::sync_claude_resources(&build_root).map_err(|e| {
             set_bundle_error(&mut state, format!("Claude resources sync failed: {e}"))
         })?;
         state.phase = bundle::BundleReconcilePhase::ResourcesSynced;
         state.last_error = None;
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
-        log::info!("reconcile_bundle: resources synced");
+        log::info!("claude-resources synced");
         emit_bundle_status(app_handle);
     }
 
@@ -651,10 +639,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ImagesBuilt)
     {
-        log::info!(
-            "reconcile_bundle: building images for bundle {}",
-            manifest.bundle_id,
-        );
+        log::info!("building images for bundle {}", manifest.bundle_id,);
         // Old-bundle prune runs at the end of reconcile (after ProjectsRestored)
         // for atomicity (ADR-072). On failure: restart engine, retry build.
         let enabled = build::enabled_images(&active_integrations);
@@ -665,7 +650,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 let skipped = enabled.len() as u32 - built;
                 if skipped > 0 {
                     log::info!(
-                        "reconcile_bundle: built {built} image(s), \
+                        "built {built} image(s), \
                          {skipped} already present for bundle {}",
                         manifest.bundle_id
                     );
@@ -675,32 +660,32 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 if e.downcast_ref::<build::SnapshotterRecoveryFailed>()
                     .is_some() =>
             {
-                log::warn!("reconcile_bundle: snapshotter recovery failed, restarting engine");
+                log::warn!("snapshotter recovery failed, restarting engine");
                 rt.restart_container_engine().map_err(|re| {
                     let msg = format!("Engine restart failed: {re}");
-                    log::error!("reconcile_bundle: {msg}");
+                    log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
                 build::build_missing_images_locked(&rt, &enabled, &manifest).map_err(|e| {
                     let msg = format!("Image rebuild failed after engine restart: {e}");
-                    log::error!("reconcile_bundle: {msg}");
+                    log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
             }
             Err(e) => {
                 let msg = format!("Image rebuild failed: {e}");
-                log::error!("reconcile_bundle: {msg}");
+                log::error!("{msg}");
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
         // Plugin images enabled in the active project (warn-only).
         let enabled_plugins: Vec<&str> = active_integrations.enabled_plugin_service_ids();
         if let Err(e) = plugin::ensure_plugin_images(&rt, &enabled_plugins) {
-            log::warn!("reconcile_bundle: failed to rebuild some plugin images: {e}");
+            log::warn!("failed to rebuild some plugin images: {e}");
         }
         // Drop tags from this bundle that no longer belong to enabled set (warn-only).
         if let Err(e) = build::prune_orphan_current_bundle_images_locked(&rt, &manifest, &enabled) {
-            log::warn!("reconcile_bundle: orphan-tag prune failed: {e}");
+            log::warn!("orphan-tag prune failed: {e}");
         }
 
         state.phase = bundle::BundleReconcilePhase::ImagesBuilt;
@@ -708,14 +693,14 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
 
         set_image_readiness(ImageReadiness::Ready);
-        log::info!("reconcile_bundle: all images built, waiters unblocked");
+        log::info!("all images built, waiters unblocked");
         emit_bundle_status(app_handle);
 
         // After heavy image builds, containerd may be degraded. Re-check readiness
         // before querying running containers.
         rt.ensure_ready().map_err(|e| {
             let msg = format!("Runtime not ready after image build: {e}");
-            log::error!("reconcile_bundle: {msg}");
+            log::error!("{msg}");
             set_bundle_error(&mut state, msg)
         })?;
     }
@@ -723,9 +708,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     let user_config = match config::load_user_config() {
         Ok(config) => config,
         Err(e) => {
-            log::warn!(
-                "reconcile_bundle: failed to load user config, using pending list only: {e}"
-            );
+            log::warn!("failed to load user config, using pending list only: {e}");
             config::SpeedwaveUserConfig::default()
         }
     };
@@ -738,9 +721,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         if state.pending_running_projects.contains(&project) {
             continue; // about to restore it — teardown would race the restore
         }
-        log::info!(
-            "reconcile_bundle: converging crash-interrupted teardown of '{project}' (id-changed path)"
-        );
+        log::info!("converging crash-interrupted teardown of '{project}' (id-changed path)");
         crate::containers_cmd::spawn_background_teardown(project);
     }
 
@@ -753,7 +734,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     }
     projects.sort();
     projects.dedup();
-    log::info!("reconcile_bundle: projects to restore: {:?}", projects,);
+    log::info!("projects to restore: {:?}", projects,);
 
     let mut deferred: Vec<String> = Vec::new();
     if state
@@ -764,17 +745,17 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         // already-downed project from the next attempt's list.
         state.pending_running_projects = projects.clone();
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
-        log::info!("reconcile_bundle: restoring {} project(s)", projects.len());
+        log::info!("restoring {} project(s)", projects.len());
         deferred = restore_projects(&projects, &rt).map_err(|e| {
             let msg = format!("Project restore failed: {e}");
-            log::error!("reconcile_bundle: {msg}");
+            log::error!("{msg}");
             set_bundle_error(&mut state, msg)
         })?;
         state.phase = bundle::BundleReconcilePhase::ProjectsRestored;
         state.pending_running_projects = projects;
         state.last_error = None;
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
-        log::info!("reconcile_bundle: projects restored");
+        log::info!("projects restored");
         emit_bundle_status(app_handle);
     }
 
@@ -795,7 +776,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
     emit_bundle_status(app_handle);
 
-    log::info!("reconcile_bundle: complete, applied={}", manifest.bundle_id,);
+    log::info!("reconcile complete, applied={}", manifest.bundle_id,);
     Ok(())
 }
 
@@ -809,12 +790,12 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
         )
         .is_err()
     {
-        log::debug!("reconcile_bundle: already running, skipping");
+        log::debug!("bundle reconcile already running, skipping");
         emit_bundle_status(app_handle);
         return;
     }
 
-    log::info!("reconcile_bundle: starting");
+    log::info!("starting bundle reconcile");
 
     // Close the gate before the spawn so start_containers cannot race the
     // rebuild decision; no status emit — UI shows overlay only for Building.
@@ -834,15 +815,15 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
 
         match result {
             Ok(Ok(())) => {
-                log::info!("reconcile_bundle: thread finished successfully");
+                log::info!("bundle reconcile thread finished successfully");
             }
             Ok(Err(e)) => {
-                log::error!("reconcile_bundle: failed: {e}");
+                log::error!("bundle reconcile failed: {e}");
                 set_image_readiness(ImageReadiness::Failed(e));
             }
             Err(panic_info) => {
                 let msg = speedwave_runtime::log_sanitizer::panic_payload_to_string(&*panic_info);
-                log::error!("reconcile_bundle: panicked: {msg}");
+                log::error!("bundle reconcile panicked: {msg}");
                 set_image_readiness(ImageReadiness::Failed(format!("reconcile panicked: {msg}")));
             }
         }
@@ -852,9 +833,8 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
     });
 }
 
-/// When running containers have a stale `WORKER_OS_URL`, regenerate compose and
-/// recreate them so the hub connects to the new mcp-os port. Runs in a background
-/// thread; serialised per-project by the compose lock.
+/// When running containers have a stale `WORKER_OS_URL`, regenerate compose and recreate
+/// them so the hub connects to the new mcp-os port. Background thread, per-project lock.
 pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
     let handle = app_handle.clone();
     std::thread::spawn(move || {
@@ -864,14 +844,14 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         {
             Some(p) => p,
             None => {
-                log::debug!("reconcile_compose_port: no active project");
+                log::debug!("no active project, skipping compose port reconcile");
                 return;
             }
         };
 
         let rt = speedwave_runtime::runtime::detect_runtime();
         if !rt.is_available() {
-            log::debug!("reconcile_compose_port: runtime not available");
+            log::debug!("runtime not available, skipping compose port reconcile");
             return;
         }
 
@@ -879,12 +859,12 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         let containers = match rt.compose_ps(&project) {
             Ok(c) => c,
             Err(e) => {
-                log::debug!("reconcile_compose_port: compose_ps failed: {e}");
+                log::debug!("compose_ps failed while reconciling compose port: {e}");
                 return;
             }
         };
         if containers.is_empty() {
-            log::debug!("reconcile_compose_port: no containers running");
+            log::debug!("no containers running, skipping compose port reconcile");
             return;
         }
 
@@ -897,7 +877,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         ) {
             Some(lock) => lock.port,
             None => {
-                log::debug!("reconcile_compose_port: lock.json missing/invalid");
+                log::debug!("mcp-os lock.json missing or invalid, skipping compose port reconcile");
                 return;
             }
         };
@@ -907,7 +887,7 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
         let compose_content = match std::fs::read_to_string(&compose_path) {
             Ok(c) => c,
             Err(e) => {
-                log::debug!("reconcile_compose_port: compose file read error: {e}");
+                log::debug!("compose file read error, skipping compose port reconcile: {e}");
                 return;
             }
         };
@@ -926,21 +906,19 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
                 "compose WORKER_OS_URL is stale (mcp-os port is {current_port}), regenerating"
             );
         } else {
-            log::debug!(
-                "reconcile_compose_port: no WORKER_OS_URL in compose, OS integration not enabled"
-            );
+            log::debug!("no WORKER_OS_URL in compose, OS integration not enabled");
             return;
         }
 
         // ensure_images_ready runs outside the transaction — long-running and idempotent.
         if let Err(e) = crate::containers_cmd::ensure_images_ready() {
-            log::warn!("reconcile_compose_port: images not ready: {e}");
+            log::warn!("images not ready, skipping compose port reconcile: {e}");
             return;
         }
 
         // Build OUTSIDE the lock (ADR-066): plugin images for this project.
         if let Err(e) = crate::integrations_cmd::ensure_project_images_built(&rt, &project) {
-            log::warn!("reconcile_compose_port: project images not built: {e}");
+            log::warn!("project images not built, skipping compose port reconcile: {e}");
             return;
         }
 
@@ -954,50 +932,71 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             Ok(())
         });
         if let Err(e) = result {
-            log::error!("reconcile_compose_port: {e}");
+            log::error!("compose port reconcile failed: {e}");
             return;
         }
 
-        log::info!("reconcile_compose_port: containers recreated with mcp-os port {current_port}");
+        log::info!("containers recreated with mcp-os port {current_port}");
 
         use tauri::Emitter;
         let _ = handle.emit("containers_reconciled", current_port);
     });
 }
 
-/// Stop containers for all projects (best-effort). Windows-only (ADR-062);
-/// on macOS the VM poweroff reaps containers instead.
+/// Stop containers for all projects (best-effort), aborting early if a CLI
+/// session appears mid-loop. Windows-only (ADR-062); macOS reaps via VM poweroff.
 #[cfg(target_os = "windows")]
 fn stop_all_containers(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
-) {
+    data_dir: &std::path::Path,
+) -> bool {
     for project in projects {
-        log::info!("exit cleanup: stopping containers for '{}'", project.name);
+        if speedwave_runtime::session::any_cli_session_active(data_dir) {
+            log::info!(
+                "live speedwave CLI session appeared mid-cleanup — \
+                 aborting remaining teardown, leaving the VM running"
+            );
+            return false;
+        }
+        log::info!("stopping containers for '{}' on exit", project.name);
         if let Err(e) = rt.compose_down(&project.name) {
             log::warn!(
-                "exit cleanup: compose_down failed for '{}': {e}",
+                "compose_down failed for '{}' during exit cleanup: {e}",
                 project.name
             );
         }
     }
+    true
 }
 
-/// Stops all containers and the VM. Platform-specific: macOS skips per-project
-/// compose_down; Windows requires it (ADR-062). Best-effort per project.
+/// Stops all containers and the VM (best-effort). Re-probes the CLI session lock
+/// immediately before `stop_vm()`, catching one that starts mid-cleanup.
 pub(crate) fn run_container_cleanup(
     rt: &speedwave_runtime::runtime::LockedRuntime,
     projects: &[config::ProjectUserEntry],
+    data_dir: &std::path::Path,
 ) {
+    if speedwave_runtime::session::any_cli_session_active(data_dir) {
+        log::info!("live speedwave CLI session — leaving containers and VM running on exit");
+        return;
+    }
     #[cfg(target_os = "windows")]
-    stop_all_containers(rt, projects);
+    if !stop_all_containers(rt, projects, data_dir) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     log::info!(
-        "exit cleanup: skipping per-project compose_down for {} project(s) — VM shutdown below will kill all containers",
+        "skipping per-project compose_down for {} project(s) on exit \
+         — VM shutdown below will kill all containers",
         projects.len()
     );
+    if speedwave_runtime::session::any_cli_session_active(data_dir) {
+        log::info!("live speedwave CLI session appeared mid-cleanup — leaving the VM running");
+        return;
+    }
     if let Err(e) = rt.stop_vm() {
-        log::warn!("exit cleanup: stop_vm failed: {e}");
+        log::warn!("stop_vm failed during exit cleanup: {e}");
     }
 }
 
@@ -1029,11 +1028,11 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         let projects = match config::load_user_config() {
             Ok(user_config) => user_config.projects,
             Err(e) => {
-                log::warn!("exit cleanup: failed to load config, skipping container stop: {e}");
+                log::warn!("failed to load config on exit, skipping container stop: {e}");
                 Vec::new()
             }
         };
-        run_container_cleanup(&rt, &projects);
+        run_container_cleanup(&rt, &projects, speedwave_runtime::consts::data_dir());
 
         // Host process cleanup
         match ide_bridge.lock() {
@@ -1044,17 +1043,17 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                     }
                 }
             }
-            Err(e) => log::warn!("IDE Bridge cleanup skipped: mutex poisoned: {e}"),
+            Err(e) => log::warn!("IDE Bridge cleanup skipped, mutex poisoned: {e}"),
         }
         match plugin_bridges.lock() {
             Ok(mut map) => {
                 for (slug, mut bridge) in map.drain() {
                     if let Err(e) = bridge.stop() {
-                        log::warn!("plugin bridge[{slug}] stop error: {e}");
+                        log::warn!("plugin bridge '{slug}' stop error: {e}");
                     }
                 }
             }
-            Err(e) => log::warn!("plugin bridges cleanup skipped: mutex poisoned: {e}"),
+            Err(e) => log::warn!("plugin bridges cleanup skipped, mutex poisoned: {e}"),
         }
         match mcp_os.lock() {
             Ok(mut guard) => {
@@ -1064,7 +1063,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                     crate::mirror_relay::remove_relay_for_port(port);
                 }
             }
-            Err(e) => log::warn!("mcp-os cleanup skipped: mutex poisoned: {e}"),
+            Err(e) => log::warn!("mcp-os cleanup skipped, mutex poisoned: {e}"),
         }
         match oauth.lock() {
             Ok(mut map) => {
@@ -1074,7 +1073,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                     crate::mirror_relay::remove_relay_for_port(port);
                 }
             }
-            Err(e) => log::warn!("oauth cleanup skipped: map mutex poisoned: {e}"),
+            Err(e) => log::warn!("oauth cleanup skipped, map mutex poisoned: {e}"),
         }
         match auto_check.lock() {
             Ok(mut guard) => {
@@ -1083,7 +1082,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
                     log::info!("auto-update check task cancelled on exit");
                 }
             }
-            Err(e) => log::warn!("auto-check cleanup skipped: mutex poisoned: {e}"),
+            Err(e) => log::warn!("auto-update check cleanup skipped, mutex poisoned: {e}"),
         }
     });
     Some(handle)
@@ -1131,14 +1130,32 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
     })
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_cleanup_skips_teardown_while_cli_session_live() {
+        // A separate CLI terminal session shares the VM; exit cleanup must not
+        // power it off out from under it (shared-lock probe, session::cli_lock).
+        let source = include_str!("reconcile.rs");
+        let fn_start = source
+            .find("fn run_container_cleanup(")
+            .expect("run_container_cleanup must exist");
+        let body = &source[fn_start..fn_start + 1200];
+        let probe = body
+            .find("any_cli_session_active(")
+            .expect("cleanup must probe for live CLI sessions");
+        let stop = body.find("stop_vm()").expect("cleanup must stop the VM");
+        assert!(probe < stop, "CLI-session probe must gate the VM stop");
+    }
 
     #[test]
     fn running_projects_are_stopped_before_resources_sync() {
@@ -1147,7 +1164,7 @@ mod tests {
             .find("stopping {} running project(s) before resources sync")
             .expect("pre-sync stop must exist");
         let sync_pos = source
-            .find("reconcile_bundle: syncing claude-resources")
+            .find("syncing claude-resources")
             .expect("sync log must exist");
         assert!(
             stop_pos < sync_pos,
@@ -1397,16 +1414,19 @@ mod tests {
         fn calls_compose_down_for_each_project() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta"), project("gamma")];
+            let tmp = tempfile::tempdir().unwrap();
 
-            stop_all_containers(&rt, &projects);
+            let completed = stop_all_containers(&rt, &projects, tmp.path());
 
+            assert!(completed, "no CLI session must run the full batch");
             assert_eq!(handles.down_projects(), vec!["alpha", "beta", "gamma"]);
         }
 
         #[test]
         fn empty_projects_is_noop() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
-            stop_all_containers(&rt, &[]);
+            let tmp = tempfile::tempdir().unwrap();
+            assert!(stop_all_containers(&rt, &[], tmp.path()));
             assert!(handles.down_projects().is_empty());
         }
 
@@ -1416,13 +1436,38 @@ mod tests {
                 .with_fail_on_down(&["beta"])
                 .build();
             let projects = vec![project("alpha"), project("beta"), project("gamma")];
+            let tmp = tempfile::tempdir().unwrap();
 
-            stop_all_containers(&rt, &projects);
+            let completed = stop_all_containers(&rt, &projects, tmp.path());
 
+            assert!(completed);
             assert_eq!(
                 handles.down_projects(),
                 vec!["alpha", "beta", "gamma"],
                 "all projects should be attempted even when one fails"
+            );
+        }
+
+        /// A CLI session that appears between two compose_down calls must
+        /// abort the remaining teardown.
+        #[test]
+        fn cli_session_appearing_mid_batch_aborts_remaining_teardown() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let projects = vec![project("alpha"), project("beta"), project("gamma")];
+            let tmp = tempfile::tempdir().unwrap();
+            // No guard yet for "alpha"; acquire it right after, simulating a
+            // CLI session starting while "alpha" is being torn down.
+            let _cli = speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap();
+
+            let completed = stop_all_containers(&rt, &projects, tmp.path());
+
+            assert!(
+                !completed,
+                "mid-batch session must abort the remaining loop"
+            );
+            assert!(
+                handles.down_projects().is_empty(),
+                "the probe runs before the first compose_down too"
             );
         }
     }
@@ -1448,7 +1493,8 @@ mod tests {
             // Runs on any non-macOS target.
             let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta")];
-            run_container_cleanup(&rt, &projects);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &projects, tmp.path());
             assert_eq!(
                 handles.down_projects(),
                 vec!["alpha", "beta"],
@@ -1470,7 +1516,8 @@ mod tests {
             // compose_down is skipped.
             let (rt, handles) = MockRuntimeBuilder::new().build();
             let projects = vec![project("alpha"), project("beta")];
-            run_container_cleanup(&rt, &projects);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &projects, tmp.path());
             assert!(
                 handles.down_projects().is_empty(),
                 "on macOS compose_down must NOT be called; the Lima VM poweroff reaps \
@@ -1490,7 +1537,8 @@ mod tests {
             let (rt, handles) = MockRuntimeBuilder::new()
                 .with_stop_vm_error("mock stop_vm error")
                 .build();
-            run_container_cleanup(&rt, &[]);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &[], tmp.path());
             assert_eq!(
                 handles
                     .stop_vm_calls
@@ -1503,7 +1551,8 @@ mod tests {
         #[test]
         fn empty_projects_still_calls_stop_vm() {
             let (rt, handles) = MockRuntimeBuilder::new().build();
-            run_container_cleanup(&rt, &[]);
+            let tmp = tempfile::tempdir().unwrap();
+            run_container_cleanup(&rt, &[], tmp.path());
             assert!(handles.down_projects().is_empty());
             assert_eq!(
                 handles
@@ -1511,6 +1560,89 @@ mod tests {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 1,
                 "stop_vm must run even with no projects"
+            );
+        }
+
+        #[test]
+        fn live_cli_session_skips_all_teardown() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let tmp = tempfile::tempdir().unwrap();
+            let _cli = speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap();
+            run_container_cleanup(&rt, &[project("alpha")], tmp.path());
+            assert!(
+                handles.down_projects().is_empty(),
+                "no compose_down while a CLI session is live"
+            );
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the shared VM must keep running under a live CLI session"
+            );
+        }
+
+        #[test]
+        fn released_cli_session_allows_teardown() {
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let tmp = tempfile::tempdir().unwrap();
+            drop(speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap());
+            run_container_cleanup(&rt, &[], tmp.path());
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "teardown must proceed once the CLI session ended"
+            );
+        }
+
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn cli_session_appearing_during_compose_down_loop_skips_stop_vm() {
+            // The entry probe passes (no guard yet); one appears before the
+            // per-project loop can run — stop_vm must never fire under it.
+            let (rt, handles) = MockRuntimeBuilder::new().build();
+            let tmp = tempfile::tempdir().unwrap();
+            let _cli = speedwave_runtime::session::CliSessionGuard::acquire(tmp.path()).unwrap();
+            run_container_cleanup(&rt, &[project("alpha"), project("beta")], tmp.path());
+            assert!(
+                handles.down_projects().is_empty(),
+                "the mid-loop probe must abort before any compose_down"
+            );
+            assert_eq!(
+                handles
+                    .stop_vm_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "stop_vm must not run when the abort path was taken"
+            );
+        }
+
+        /// Wiring: the session probe must be re-run immediately before
+        /// stop_vm(), not only once at function entry.
+        #[test]
+        fn run_container_cleanup_reprobes_session_before_stop_vm() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn run_container_cleanup(")
+                .expect("run_container_cleanup must exist");
+            let body = &source[fn_start..fn_start + 1500];
+            let probe_count = body.matches("any_cli_session_active(data_dir)").count();
+            assert!(
+                probe_count >= 2,
+                "run_container_cleanup must probe the CLI session more than once \
+                 (entry + immediately before stop_vm)"
+            );
+            let stop_vm_pos = body
+                .find("rt.stop_vm()")
+                .expect("run_container_cleanup must call stop_vm");
+            let last_probe_pos = body
+                .rfind("any_cli_session_active(data_dir)")
+                .expect("probe must exist");
+            assert!(
+                last_probe_pos < stop_vm_pos,
+                "the last session probe must run before stop_vm()"
             );
         }
     }
@@ -1752,6 +1884,36 @@ mod tests {
                 "skip guard must run before restore_one_project"
             );
         }
+
+        /// The user config is loaded once for the whole batch, not once per
+        /// project — N projects must not mean N config file reads.
+        #[test]
+        fn restore_projects_loads_config_once_before_the_batch() {
+            let source = include_str!("reconcile.rs");
+            let fn_start = source
+                .find("pub(crate) fn restore_projects(")
+                .expect("restore_projects must exist");
+            let fn_end = source[fn_start..]
+                .find("\npub(crate) fn stop_projects(")
+                .map(|end| fn_start + end)
+                .expect("stop_projects must follow restore_projects");
+            let body = &source[fn_start..fn_end];
+            let load_count = body.matches("load_user_config()").count();
+            assert_eq!(
+                load_count, 1,
+                "restore_projects must call load_user_config() exactly once"
+            );
+            let load_pos = body
+                .find("load_user_config()")
+                .expect("restore_projects must load the user config");
+            let batch_pos = body
+                .find("restore_batch(")
+                .expect("restore_projects must call restore_batch");
+            assert!(
+                load_pos < batch_pos,
+                "config load must happen once before the restore_batch call, not inside its closure"
+            );
+        }
     }
 
     mod restore_batch_tests {
@@ -1887,9 +2049,8 @@ mod tests {
             ));
         }
 
-        /// Structural: the bundle-unchanged branch must restore pending projects
-        /// BEFORE clearing them from state — clearing first would strand them
-        /// stopped after a no-op update (ADR-072).
+        /// Structural: bundle-unchanged branch must restore pending projects BEFORE clearing
+        /// them from state — clearing first strands them stopped after a no-op update (ADR-072).
         #[test]
         fn unchanged_bundle_branch_restores_before_clearing_pending() {
             let source = include_str!("reconcile.rs");
@@ -2440,9 +2601,8 @@ mod tests {
         }
     }
 
-    /// Verifies that `run_exit_cleanup` is idempotent: the first call returns
-    /// `Some(JoinHandle)` and the second `None` (the `CLEANUP_ONCE` guard).
-    /// Process-wide `static`, so `#[serial]` must order it after other callers.
+    /// Verifies `run_exit_cleanup` is idempotent: first call returns `Some(JoinHandle)`, second
+    /// `None` (`CLEANUP_ONCE` guard). Process-wide `static` — `#[serial]` orders it after others.
     #[test]
     #[serial]
     fn cleanup_once_idempotency() {

@@ -107,6 +107,25 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'generic', raw_json: '' });
   });
 
+  it('does not warn on partial JSON while input is still streaming', () => {
+    const partial = '{"command":"ls -';
+    const result = service.normalize('Bash', partial, false);
+    expect(result).toEqual({ kind: 'generic', raw_json: partial });
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it('still normalizes valid JSON while input is still streaming', () => {
+    const result = service.normalize('Bash', '{"command":"ls"}', false);
+    expect(result).toEqual({ kind: 'bash', command: 'ls' });
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it('warns on invalid JSON once input is complete', () => {
+    const result = service.normalize('Bash', '{"command":', true);
+    expect(result).toEqual({ kind: 'generic', raw_json: '{"command":' });
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+  });
+
   it('handles missing fields with defaults', () => {
     const result = service.normalize('Bash', '{}');
     expect(result).toEqual({ kind: 'bash', command: '' });

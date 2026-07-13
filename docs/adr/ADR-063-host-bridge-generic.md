@@ -10,10 +10,10 @@ Extract the shared bridge skeleton — loopback TCP listener, `0o600` lock file 
 ## Why
 
 - One place to get the security model right: every hand-rolled `0o600` lock file is a place to get permissions wrong, so the skeleton (TCP + lock file + UUID + Origin/subprotocol + watchdog) lives in a single audited module. Adding a third bridge is handler logic only, not a re-implementation of the relay.
-- Two auth transports are needed: a request **header** for worker/Node clients that can set arbitrary upgrade headers, and a `?token=` **query parameter** for browser clients, which the WebSocket API forbids from setting custom upgrade headers (per the WHATWG HTML spec).
-- Origin policy follows from the transport: `RejectIfPresent` (the historical IDE Bridge rule — Claude Code and the `ws` Node client never send Origin, so its presence implies a browser CSRF attempt) versus `AcceptIfAuthIsQueryParam` (a browser client is allowed only when it authenticated via query param; a header-auth worker that also carries Origin is a forged combo and is rejected).
+- Two auth transports are needed: a request **header** for worker/Node clients that can set arbitrary upgrade headers, and a `?token=` **query parameter** for browser clients, which the WebSocket API forbids from setting custom upgrade headers[^1].
+- Origin policy follows from the transport: `RejectIfPresent` (the historical IDE Bridge rule — Claude Code and the `ws` Node client never send Origin, so its presence implies a browser CSRF attempt (unverified)) versus `AcceptIfAuthIsQueryParam` (a browser client is allowed only when it authenticated via query param; a header-auth worker that also carries Origin is a forged combo and is rejected).
 - The lock file uses an atomic create-temp-then-rename write, which closes the short window where a partial write could expose the file if directory permissions were ever weakened. A watchdog re-creates the lock file (default every 5 s) if it is deleted, mirroring the IDE Bridge's behaviour.
-- Pairing collisions are refused at the HTTP layer with 409 Conflict before the upgrade, because WebSocket Close frames are only meaningful after a successful opening handshake (RFC 6455 §4.4) — so a third or same-role connection cannot be refused with a close code.
+- Pairing collisions are refused at the HTTP layer with 409 Conflict[^2] before the upgrade, because WebSocket Close frames are only meaningful after a successful opening handshake[^3] — so a third or same-role connection cannot be refused with a close code.
 - A `pair_id` generation counter prevents a race where a very fast pair disconnect would clear the active slot after the main loop had already recorded a new pair.
 
 ## Manifest options (stable port and persistent token)
@@ -28,7 +28,6 @@ For plugins that pair a worker with an external app the user configures once, th
 - Manifest schema (`HostBridgeManifest`: `roles`, `collision_policy`, `preferred_port`, `persistent_token`) and validation — `crates/speedwave-runtime/src/plugin.rs`
 - Owner-only `0o700` directory helper added for the bridge lock dirs — `set_owner_only_dir` in `desktop/src-tauri/src/fs_perms.rs`
 - Module index and bridge manager wiring — `desktop/src-tauri/src/bridges/mod.rs`, imports in `desktop/src-tauri/src/main.rs` and `desktop/src-tauri/src/reconcile.rs`
-- User-facing flow — "Bridge plugins — dev UX" in `docs/guides/integrations.md`
 
 ## Rejected alternatives
 
@@ -38,3 +37,9 @@ For plugins that pair a worker with an external app the user configures once, th
 ## Related
 
 - ADR-062 — Playwright host-gateway access, which uses the same `host.docker.internal` canonical alias the bridges expose to containers (`docs/adr/ADR-062-playwright-host-gateway-access.md`).
+
+[^1]: The WebSocket `constructor(url, protocols)` accepts only a URL and an optional subprotocol list - no mechanism to set arbitrary request headers such as `Origin` or auth headers: https://websockets.spec.whatwg.org/
+
+[^2]: HTTP 409 Conflict - "the request could not be completed due to a conflict with the current state of the target resource": https://www.rfc-editor.org/rfc/rfc9110.html#name-409-conflict
+
+[^3]: RFC 6455 defines the Closing Handshake and Close frame status codes as part of an already-established connection (Sections 1.4, 5.5.1, 7): https://www.rfc-editor.org/rfc/rfc6455.html

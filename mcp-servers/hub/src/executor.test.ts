@@ -4,6 +4,7 @@ import {
   _setBridgesForTesting,
   _formatErrorMessage,
   _deriveAuditCategory,
+  closestMatches,
 } from './executor.js';
 import {
   TOOL_REGISTRY,
@@ -17,9 +18,7 @@ import {
   createMockBridges,
 } from './test-helpers.js';
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Tests for Code Executor (sandbox security and basic validation)
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Tests for Code Executor (sandbox security and basic validation) ──────────────────────────
 
 describe('executor', () => {
   beforeAll(() => {
@@ -386,6 +385,15 @@ describe('executor', () => {
       expect(result.error?.message).toContain('updateIssue');
     });
 
+    it('should suggest the closest real method name (Did you mean) for a near-miss call', async () => {
+      const code = `await redmine.listProjects()`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      // listProjectIds is the closest real method to the attempted listProjects
+      expect(result.error?.message).toContain('Did you mean:');
+      expect(result.error?.message).toContain('listProjectIds');
+    });
+
     it('should show available methods for gitlab when calling non-existent function', async () => {
       const code = `await gitlab.getRepositories()`;
       const result = await executeCode({ code, timeoutMs: 5000 });
@@ -405,6 +413,82 @@ describe('executor', () => {
       expect(result.error?.message).toContain('slack_nonExistentMethod is not defined');
       expect(result.error?.message).toContain('Use dot notation');
       expect(result.error?.message).toContain('Available methods');
+    });
+  });
+
+  describe('closestMatches', () => {
+    it('ranks candidates by ascending edit distance', () => {
+      const result = closestMatches('listProjects', ['listProjectIds', 'listIssueIds', 'getFile']);
+      expect(result[0]).toBe('listProjectIds');
+    });
+
+    it('returns an exact match first with distance 0', () => {
+      const result = closestMatches('getIssue', ['getIssue', 'getIssueFull', 'listIssues']);
+      expect(result[0]).toBe('getIssue');
+    });
+
+    it('respects the limit parameter', () => {
+      const result = closestMatches('foo', ['fob', 'foc', 'fod', 'foe'], 2);
+      expect(result).toHaveLength(2);
+    });
+
+    it('defaults to 3 suggestions when limit is not provided', () => {
+      const result = closestMatches('foo', ['fob', 'foc', 'fod', 'foe']);
+      expect(result).toHaveLength(3);
+    });
+
+    it('returns fewer than limit when candidate list is shorter than limit', () => {
+      const result = closestMatches('foo', ['fob']);
+      expect(result).toEqual(['fob']);
+    });
+
+    it('returns empty array for an empty candidate list', () => {
+      expect(closestMatches('foo', [])).toEqual([]);
+    });
+
+    it('skips suggestion computation entirely for an oversized attempted name', () => {
+      // Bounds the DP cost against attacker-sized property names from execute_code bodies.
+      const huge = 'a'.repeat(100_000);
+      const start = Date.now();
+      expect(closestMatches(huge, ['listIssues', 'getIssue'])).toEqual([]);
+      expect(Date.now() - start).toBeLessThan(100);
+    });
+
+    it('skips candidates whose length difference alone exceeds the distance cap', () => {
+      expect(closestMatches('ab', ['abcdefghijklmnop'])).toEqual([]);
+    });
+
+    it('is case-insensitive', () => {
+      const result = closestMatches('GETISSUE', ['getIssue', 'unrelatedName']);
+      expect(result[0]).toBe('getIssue');
+    });
+
+    it('breaks ties alphabetically', () => {
+      // Both 'aaa' and 'aab' are distance 1 from 'aax'
+      const result = closestMatches('aax', ['aab', 'aaa']);
+      expect(result).toEqual(['aaa', 'aab']);
+    });
+
+    it('returns no suggestions when every candidate is too far from the attempted name', () => {
+      const result = closestMatches('getIssue', ['listProjects', 'unrelatedName']);
+      expect(result).toEqual([]);
+    });
+
+    it('suggests a distance-1 candidate for a 1-character attempted name', () => {
+      // maxDistance floors to 1 for a 1-char name, so an adjacent single char still matches.
+      expect(closestMatches('a', ['b', 'c'])).toEqual(['b', 'c']);
+    });
+
+    it('rejects a distance-2 candidate for a 1-character attempted name', () => {
+      expect(closestMatches('a', ['xy'])).toEqual([]);
+    });
+
+    it('suggests a distance-1 candidate for a 2-character attempted name', () => {
+      expect(closestMatches('ab', ['ax'])).toEqual(['ax']);
+    });
+
+    it('rejects a distance-2 candidate for a 2-character attempted name', () => {
+      expect(closestMatches('ab', ['xy'])).toEqual([]);
     });
   });
 
@@ -804,6 +888,23 @@ describe('executor', () => {
       _setBridgesForTesting(null);
     });
 
+    it('marks bridges initialized after a successful init and skips re-init on the next call', async () => {
+      const { initializeBridges, _setBridgesForTesting } = await import('./executor.js');
+      const httpBridgeModule = await import('./http-bridge.js');
+
+      _setBridgesForTesting(null);
+      const spy = vi
+        .spyOn(httpBridgeModule, 'initializeAllBridges')
+        .mockResolvedValue(createMockBridges() as never);
+
+      await initializeBridges();
+      await initializeBridges();
+
+      expect(spy).toHaveBeenCalledTimes(1);
+      spy.mockRestore();
+      _setBridgesForTesting(null);
+    });
+
     it('returns immediately when bridges are already initialized (early-return branch)', async () => {
       const { initializeBridges, _setBridgesForTesting } = await import('./executor.js');
       const httpBridgeModule = await import('./http-bridge.js');
@@ -1123,6 +1224,108 @@ describe('executor', () => {
       expect(result.error?.code).toBe('EXECUTION_ERROR');
       // Generic sanitized error (no "Available methods" suggestion because service unknown)
       expect(result.error?.message).not.toContain('Available');
+    });
+  });
+
+  describe('error sanitization — host paths redacted, user-code positions kept', () => {
+    it('strips positions attached to redacted file paths', async () => {
+      const code = `throw new Error('boom at /repo/src/executor.ts:10:5 in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain(':10:5');
+    });
+
+    it('keeps line:column that points into the user snippet', async () => {
+      const code = `throw new Error('Unexpected token at <anonymous>:3:7');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain(':3:7');
+    });
+
+    it('redacts an .mjs host path and strips its position', async () => {
+      const code = `throw new Error('boom at /repo/build/loader.mjs:42:9 in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/repo/build/loader.mjs');
+      expect(result.error?.message).not.toContain(':42:9');
+    });
+
+    it('redacts an absolute path whose extension is not a code extension', async () => {
+      const code = `throw new Error('boom at /repo/config/settings.yaml:7:3 in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/repo/config/settings.yaml');
+      expect(result.error?.message).not.toContain(':7:3');
+    });
+
+    it('redacts an absolute path with no extension at all', async () => {
+      const code = `throw new Error('boom at /etc/secrets/token in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/etc/secrets/token');
+    });
+
+    it('redacts a path preceded by a colon', async () => {
+      const code = `throw new Error('path:/home/user/.speedwave/tokens/proj/slack/token not found');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/home/user/.speedwave/tokens');
+    });
+
+    it('redacts a path preceded by an equals sign', async () => {
+      const code = `throw new Error('failed value=/etc/secrets/some/path here');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/etc/secrets/some/path');
+    });
+
+    it('redacts a path preceded by a semicolon', async () => {
+      const code = `throw new Error('failed;/home/user/.speedwave/tokens/proj/slack/token not found');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/home/user/.speedwave/tokens');
+    });
+
+    it('redacts a single-segment sensitive path like /tokens', async () => {
+      const code = `throw new Error('mount /tokens missing');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('/tokens missing');
+    });
+
+    it('redacts a Windows drive-letter path', async () => {
+      const code = String.raw`throw new Error('boom at C:\\Users\\bob\\.speedwave\\tokens\\proj\\slack\\token in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('C:\\Users\\bob');
+    });
+
+    it('redacts a Windows UNC path', async () => {
+      const code = String.raw`throw new Error('boom at \\\\host\\share\\file.txt in handler');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('[file]');
+      expect(result.error?.message).not.toContain('\\\\host\\share');
     });
   });
 

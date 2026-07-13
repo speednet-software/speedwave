@@ -184,7 +184,7 @@ fn retry_on_eof_with_delays<T>(
             Err(e) if is_eof_error(&e) && attempt < RETRY_MAX_ATTEMPTS => {
                 let delay = delays.get(attempt - 1).copied().unwrap_or_default();
                 log::info!(
-                    "{label}: transient EOF on attempt {attempt}/{RETRY_MAX_ATTEMPTS}, \
+                    "{label} hit a transient EOF on attempt {attempt}/{RETRY_MAX_ATTEMPTS}, \
                      retrying after {:?} ({e})",
                     delay
                 );
@@ -212,7 +212,7 @@ fn compose_down_and_cleanup_with_retry(
         runner.run(cmd, compose_down_args).map(|_| ())
     });
     if let Err(ref e) = down_result {
-        log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
+        log::warn!("compose down failed for {project}: {e}");
     }
 
     force_remove_project_containers_with_retry(runner, cmd, project, nerdctl_prefix);
@@ -317,7 +317,7 @@ impl ContainerRuntime for LimaRuntime {
         // No compose.yml → nothing was ever started (deferred no-provider
         // project); skip so nerdctl doesn't fatally error and retry for ~70s.
         if super::compose_down_is_noop(&compose_file) {
-            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            log::info!("no compose.yml for '{project}' — nothing to stop, skipping compose down");
             return Ok(());
         }
         compose_down_and_cleanup_with_retry(
@@ -404,7 +404,7 @@ impl ContainerRuntime for LimaRuntime {
         };
 
         let lima_host = format!("lima-{}", vm);
-        let mut command = Command::new("ssh");
+        let mut command = crate::binary::interactive_command("ssh");
         command.args([
             "-F",
             &ssh_config.to_string_lossy(),
@@ -997,7 +997,11 @@ impl LimaRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_support::MockRunner;
@@ -1018,9 +1022,7 @@ mod tests {
         assert_eq!(LimaRuntime::parse_version("garbage"), None);
     }
 
-    // -----------------------------------------------------------------------
-    // retry_on_eof tests
-    // -----------------------------------------------------------------------
+    // ── retry_on_eof tests ──────────────────────────────────────────────────
 
     /// Backoff schedule used in retry tests — zero so the suite stays fast.
     const TEST_NO_DELAYS: [std::time::Duration; 3] = [
@@ -1117,9 +1119,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // run_rm_force --time=0 escalation (shared SSOT argv builder in mod.rs)
-    // -----------------------------------------------------------------------
+    // ── run_rm_force --time=0 escalation (shared SSOT argv builder in mod.rs) ──
 
     #[test]
     fn test_run_rm_force_appends_time_zero_only_when_force_kill() {
@@ -1133,9 +1133,8 @@ mod tests {
         crate::runtime::run_rm_force(&runner, "nerdctl", &[], &["a".to_string()], true).unwrap();
     }
 
-    /// End-to-end check that `force_remove_project_containers_with_retry`
-    /// (a) retries on EOF, (b) escalates to `--time=0` on the **last** attempt
-    /// rather than giving up. This is the actual production fix.
+    /// End-to-end check that `force_remove_project_containers_with_retry` (a) retries on EOF,
+    /// (b) escalates to `--time=0` on the **last** attempt rather than giving up.
     #[test]
     fn test_force_remove_with_retry_escalates_to_time_zero_on_last_attempt() {
         struct ScriptedRunner {
@@ -1449,9 +1448,8 @@ mod tests {
         );
     }
 
-    /// Creates a recording runner that reports the VM as "Running" for
-    /// `require_running()` / `is_available()` checks, while recording all
-    /// other commands for inspection.
+    /// Creates a recording runner that reports the VM as "Running" for `require_running()` /
+    /// `is_available()` checks, while recording all other commands for inspection.
     fn make_recording_runner() -> (Arc<Mutex<Vec<String>>>, Box<dyn CommandRunner>) {
         let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -1721,9 +1719,8 @@ mod tests {
         );
     }
 
-    /// A Stopped VM returns `is_available() == false`, but `ensure_ready()`
-    /// must succeed by starting it. Callers must use `ensure_ready()`, not
-    /// `is_available()`, when they need the runtime to be operational.
+    /// A Stopped VM returns `is_available() == false`, but `ensure_ready()` must succeed by
+    /// starting it. Callers need `ensure_ready()`, not `is_available()`, for operational.
     #[test]
     fn test_ensure_ready_stopped_vm_starts_it() {
         let runner = MockRunner::new()
@@ -1931,9 +1928,8 @@ mod tests {
         );
     }
 
-    /// ADR-073: single-service recreate targets exactly the named service,
-    /// keeps --force-recreate, and never removes orphans (the rest of the
-    /// stack must stay untouched).
+    /// ADR-073: single-service recreate targets exactly the named service, keeps
+    /// --force-recreate, and never removes orphans — the rest of the stack stays untouched.
     #[test]
     fn test_compose_up_service_targets_one_service() {
         let (recorded, runner) = make_recording_runner();
@@ -2525,9 +2521,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // stop_vm() tests
-    // -----------------------------------------------------------------------
+    // ── stop_vm() tests ─────────────────────────────────────────────────────
 
     #[test]
     fn test_stop_vm_running_vm_stops_it() {
@@ -2678,11 +2672,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // ensure_ready_inner() "Stopping" arm tests
-    //
-    // Uses a SequencedRunner that returns responses in order for the same key.
-    // -----------------------------------------------------------------------
+    // ── ensure_ready_inner() "Stopping" arm tests — SequencedRunner returns in order ──
 
     /// A CommandRunner that returns a sequence of responses for a given key.
     /// Once all responses are exhausted it returns the last one repeatedly.

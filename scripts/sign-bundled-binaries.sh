@@ -23,9 +23,8 @@ REMINDERS_ENTITLEMENTS="$SRC_TAURI/entitlements/reminders.plist"
 APPLE_EVENTS_ENTITLEMENTS="$SRC_TAURI/entitlements/apple-events.plist"
 AUDIO_CAPTURE_ENTITLEMENTS="$SRC_TAURI/entitlements/audio-capture.plist"
 
-# Paths tauri.macos.conf.json copies to .app/Contents/Resources/.
-# Source: desktop/src-tauri/tauri.macos.conf.json → bundle.resources (keep in sync).
-# Format: "<source-path>:<entitlements-path>" (entitlements optional; see ADR-037).
+# Paths tauri.macos.conf.json copies to .app/Contents/Resources/ (keep bundle.resources
+# in sync). Format: "<source-path>:<entitlements-path>" (entitlements optional; ADR-037).
 SIGN_TARGETS=(
   "$SRC_TAURI/cli/speedwave:"
   "$SRC_TAURI/reminders-cli:$REMINDERS_ENTITLEMENTS"

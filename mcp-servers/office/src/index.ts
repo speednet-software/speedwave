@@ -1,11 +1,5 @@
 /**
- * MCP Office Worker
- *
- * Built-in MCP server for office documents — read/write/create/edit Word, Excel,
- * PowerPoint; generate PDF (Markdown/HTML→PDF, Office→PDF); manipulate PDF
- * (merge/split/rotate/watermark/forms); convert Office↔Office (LibreOffice
- * headless); render charts (matplotlib). A pure file processor: no service
- * credentials, no network egress, only `/workspace:rw` mounted. See ADR-055.
+ * MCP Office Worker — built-in server for office documents: read/write/create/edit Word/Excel/PowerPoint; PDF generation/manipulation; Office↔Office conversion (LibreOffice headless); chart rendering (matplotlib). Pure file processor: no service credentials, no network egress, only `/workspace:rw` mounted. See ADR-055.
  * @module mcp-office
  */
 

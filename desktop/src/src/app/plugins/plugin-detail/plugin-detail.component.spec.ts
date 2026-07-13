@@ -382,10 +382,8 @@ describe('PluginDetailComponent', () => {
   });
 
   it('escapes quotes in markdown link href and title (no attribute breakout)', async () => {
-    // A manifest author writing `[x](url "It's a \"quote\"")` should not produce
-    // structurally malformed HTML where the embedded `"` breaks out of the
-    // attribute. esc() collapses `"` → &quot; and `&` → &amp; before
-    // interpolating into the template literal.
+    // A manifest author writing `[x](url "It's a \"quote\"")` should not break the attribute.
+    // esc() collapses `"` → &quot; and `&` → &amp; before interpolating into the template literal.
     const { component, fixture } = setupWithPlugin({
       instructions: '[click](http://example.com/?a="b"&c=d "It\'s a \\"quote\\"")',
     });
@@ -419,10 +417,8 @@ describe('PluginDetailComponent', () => {
   });
 
   it('sanitises malicious markdown on the verified path (Angular DomSanitizer)', async () => {
-    // The unverified-path test above exercises the @if gate, which short-
-    // circuits before marked.parse() runs. This one exercises the verified
-    // path so the sanitizer actually applies: <script>, <img onerror>, and
-    // javascript: link must not produce live HTML that could execute.
+    // The unverified-path test above short-circuits before marked.parse() runs; this exercises
+    // the verified path so the sanitizer actually applies to <script>, <img onerror>, javascript:.
     const { component, fixture } = setupWithPlugin({
       instructions:
         '## Setup\n\n' +
@@ -435,11 +431,8 @@ describe('PluginDetailComponent', () => {
     const el = fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]');
     expect(el).not.toBeNull();
     const html = el.innerHTML.toLowerCase();
-    // Angular's DomSanitizer:
-    //   - strips <script> entirely,
-    //   - drops on* event-handler attributes (onerror, onclick, …),
-    //   - rewrites `javascript:` URLs to `unsafe:javascript:` so the browser
-    //     refuses to navigate (the literal string survives but is inert).
+    // Angular's DomSanitizer strips <script>, drops on* handler attributes, and rewrites
+    // `javascript:` URLs to `unsafe:javascript:` (literal string survives but is inert).
     expect(html).not.toContain('<script');
     expect(html).not.toContain('onerror');
     expect(html).not.toMatch(/href="javascript:/);
@@ -724,9 +717,8 @@ describe('PluginDetailComponent', () => {
     });
 
     it('does NOT show the changelog tab or content for an unverified plugin (XSS trust boundary)', async () => {
-      // Defence-in-depth mirroring the instructions gate: even if the backend
-      // (buggily) shipped a changelog for an unverified plugin, the frontend
-      // must withhold the [innerHTML] surface.
+      // Defence-in-depth mirroring the instructions gate: withhold [innerHTML] even if the
+      // backend (buggily) shipped a changelog for an unverified plugin.
       const { component, fixture } = setupWithPlugin({
         changelog: '## Evil\n\n<img src=x onerror=alert(1)>',
         verification_status: 'signature_invalid',
@@ -1061,14 +1053,9 @@ describe('PluginDetailComponent', () => {
     });
   });
 
-  // ───────────────────────────────────────────────────────────────────────
-  // Credentials in Settings tab
-  // ───────────────────────────────────────────────────────────────────────
+  // ── Credentials in Settings tab ───────────────────────────────────────────────────────────────
   describe('credentials section in Settings tab', () => {
-    /**
-     * Mock plugin entry with two auth_fields — one required PAT, one
-     * optional OAuth token. Mirrors a host-bridged plugin manifest shape.
-     */
+    /** Mock plugin entry with two auth_fields (required PAT, optional OAuth token); mirrors a host-bridged plugin manifest shape. */
     const PLUGIN_WITH_AUTH = {
       plugins: [
         {

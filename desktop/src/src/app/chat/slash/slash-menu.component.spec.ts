@@ -82,8 +82,8 @@ describe('SlashMenuComponent', () => {
 
   /**
    * Writes the protected `activeIndex` signal directly for assertion setup.
-   * @param c - Component instance whose `activeIndex` signal to update.
-   * @param v - New active-index value.
+   * @param c - Component instance whose `activeIndex` signal to write.
+   * @param v - New index value.
    */
   const writeActive = (c: SlashMenuComponent, v: number): void =>
     (c as unknown as { activeIndex: { (): number; set(v: number): void } }).activeIndex.set(v);

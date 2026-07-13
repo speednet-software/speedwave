@@ -1,6 +1,6 @@
 [package]
 name = "speedwave-cli"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 publish = false
 description = "CLI client for Speedwave — interactive Claude Code in a terminal"
@@ -26,6 +26,11 @@ env_logger = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+# Safe SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_PROCESSING) probe for
+# `terminal_restore` (already in-tree via env_logger -> anstream).
+anstyle-query = "1.1"
 
 [dev-dependencies]
 tempfile = "3"

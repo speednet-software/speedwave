@@ -3,10 +3,11 @@
  * @module mcp-atlassian/domains/confluence-pages
  */
 
-import { ts } from '@speedwave/mcp-shared';
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { resolveBodyPayload, type StorageBodyInput } from '../adf.js';
 import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
+import { resolveConfluenceSpaceKey } from './confluence-space-resolver.js';
 import type { ConfluencePage } from '../types.js';
 
 /** A full Confluence page — like {@link ConfluencePage} but with a known version. */
@@ -15,8 +16,8 @@ type FullPage = ConfluencePage & { version: number };
 /** Client for Confluence page operations. */
 export interface ConfluencePagesClient {
   /**
-   * Search content with CQL via the v1 search API. Returns matched pages
-   * normalised to v2 shape (best-effort — search results omit version/body).
+   * Search content with CQL (v1 API); results are best-effort normalised to v2 shape,
+   * omitting version/body.
    */
   search(params: { cql: string; limit?: number }): Promise<ConfluencePage[]>;
   /** Get a page by ID (v2), optionally including the storage-format body. */
@@ -35,8 +36,8 @@ export interface ConfluencePagesClient {
     parentId?: string;
   }): Promise<ConfluencePage>;
   /**
-   * Update a page (v2). The current version is fetched automatically and
-   * incremented. Only provided fields change.
+   * Update a page (v2); the current version is fetched and incremented automatically.
+   * Only provided fields change.
    */
   update(
     pageId: string,
@@ -47,33 +48,25 @@ export interface ConfluencePagesClient {
 }
 
 /**
- * Create a Confluence pages client.
+ * Create a {@link ConfluencePagesClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
  * @returns A {@link ConfluencePagesClient}.
  */
 export function createConfluencePagesClient(client: AtlassianClient): ConfluencePagesClient {
   /** Resolve a space ID → space key, caching within the client instance. */
   const spaceKeyCache = new Map<string, string>();
-  const resolveSpaceKey = async (spaceId: string): Promise<string | undefined> => {
+  /**
+   * Resolve a space ID → key via the cache or {@link resolveConfluenceSpaceKey}; `pageId`
+   * is included in error context.
+   * @param spaceId - The Confluence space ID from a page payload.
+   * @param pageId - Optional page ID, included in error context.
+   */
+  const resolveSpaceKey = async (spaceId: string, pageId?: string): Promise<string | undefined> => {
     if (!spaceId) return undefined;
     if (spaceKeyCache.has(spaceId)) return spaceKeyCache.get(spaceId);
-    try {
-      const sp = await client.get<{ key?: string }>(
-        `/wiki/api/v2/spaces/${encodeURIComponent(spaceId)}`
-      );
-      const key = sp.key ? String(sp.key) : undefined;
-      if (key) spaceKeyCache.set(spaceId, key);
-      return key;
-    } catch (error) {
-      // 404 means the space isn't visible (unresolvable); other errors are logged.
-      const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status !== 404) {
-        console.warn(
-          `${ts()} [mcp-atlassian] Failed to resolve Confluence space id '${spaceId}': ${error}`
-        );
-      }
-      return undefined;
-    }
+    const key = await resolveConfluenceSpaceKey(client, spaceId, pageId);
+    if (key) spaceKeyCache.set(spaceId, key);
+    return key;
   };
 
   /**
@@ -91,9 +84,11 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     return String(id);
   };
 
-  // Resolve the page's space key, enforce the allowlist, and return the enriched page.
+  // Resolve the page's space key and enforce the allowlist. Skips the lookup
+  // entirely when no allowlist is configured: nothing to enforce.
   const enrich = async <T extends ConfluencePage>(page: T): Promise<T> => {
-    const key = page.space_key ?? (await resolveSpaceKey(page.space_id));
+    if (client.confluenceSpaceKeys.length === 0) return page;
+    const key = page.space_key ?? (await resolveSpaceKey(page.space_id, page.id));
     const enriched = { ...page, space_key: key };
     assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
     return enriched;
@@ -103,7 +98,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
     async search({ cql, limit = 25 }) {
       const res = await client.get<{ results?: unknown[] }>('/wiki/rest/api/content/search', {
         cql,
-        limit: Math.min(Math.max(limit, 1), 100),
+        limit: clampPageSize(limit, 25, 100),
       });
       const pages = (res.results ?? [])
         .map(mapV1SearchResult)
@@ -152,8 +147,11 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       // Fetch current page (need version + status + existing title/space).
       const current = await client.get<unknown>(`/wiki/api/v2/pages/${encodeURIComponent(pageId)}`);
       const page = mapV2Page(current);
-      const key = page.space_key ?? (await resolveSpaceKey(page.space_id));
-      assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
+      let key = page.space_key;
+      if (client.confluenceSpaceKeys.length > 0) {
+        key = key ?? (await resolveSpaceKey(page.space_id, pageId));
+        assertConfluenceSpaceAllowed(key, client.confluenceSpaceKeys);
+      }
       const data: Record<string, unknown> = {
         id: pageId,
         status: page.status || 'current',
@@ -177,7 +175,7 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
       }
       const res = await client.get<{ results?: unknown[] }>(
         `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/children`,
-        { limit: Math.min(Math.max(options.limit ?? 25, 1), 100) }
+        { limit: clampPageSize(options.limit, 25, 100) }
       );
       // Children come back without spaceId/version detail; map best-effort.
       return (res.results ?? []).map(mapV2ChildPage);
@@ -185,13 +183,11 @@ export function createConfluencePagesClient(client: AtlassianClient): Confluence
   };
 }
 
-//═══════════════════════════════════════════════════════════════════════════════
-// Normalisers
-//═══════════════════════════════════════════════════════════════════════════════
+// ── Normalisers ──────────────────────────────────────────────────────────────
 
 /**
- * Map a v2 page object to {@link ConfluencePage}. A full page response always
- * carries a version, so the result type narrows `version` to `number`.
+ * Map a v2 page object to {@link ConfluencePage}. A full page response always carries a version,
+ * so the result type narrows `version` to `number`.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised page.
  */
@@ -214,9 +210,8 @@ export function mapV2Page(raw: unknown): FullPage {
 }
 
 /**
- * Map a v2 child-page object to {@link ConfluencePage}. Child-listing responses
- * carry no `spaceId` or `version` detail, so `version` is `null` ("unknown") —
- * callers must re-fetch the page via `getPage` before updating it.
+ * Map a v2 child-page object to {@link ConfluencePage}. Child-listing responses carry no `spaceId`
+ * or `version` detail (`version` is `null`) — callers must re-fetch via `getPage` before updating.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised (partial) page.
  */
@@ -233,8 +228,8 @@ export function mapV2ChildPage(raw: unknown): ConfluencePage {
 }
 
 /**
- * Map a v1 `/content/search` result to {@link ConfluencePage} (best-effort).
- * Search results omit version detail, so `version` is `null` ("unknown").
+ * Map a v1 `/content/search` result to {@link ConfluencePage} (best-effort, `version` is `null`).
+ * Returns `null` if the result isn't a page.
  * @param raw - The raw object as returned by the Atlassian REST API.
  * @returns The normalised (partial) page, or `null` if the result isn't a page.
  */

@@ -120,7 +120,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
 
     for entry in &llm.providers {
         if !crate::plugin::is_valid_slug(&entry.id) {
-            log::warn!("proxy config: skipping provider with invalid id");
+            log::warn!("skipping provider with invalid id");
             continue;
         }
         match entry.kind {
@@ -140,10 +140,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
             }
             LlmProviderKind::Local => {
                 let Some(base_url) = entry.base_url.as_deref() else {
-                    log::warn!(
-                        "proxy config: provider '{}' has no base_url — skipped",
-                        entry.id
-                    );
+                    log::warn!("provider '{}' has no base_url — skipped", entry.id);
                     continue;
                 };
                 // Normalize BEFORE validating — v1 configs persisted the raw form
@@ -151,7 +148,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
                 let base_url = super::llm::strip_trailing_v1(base_url);
                 if let Err(e) = super::llm::validate_base_url(&base_url) {
                     log::warn!(
-                        "proxy config: provider '{}' has invalid base_url — skipped: {e}",
+                        "provider '{}' has invalid base_url — skipped: {e}",
                         entry.id
                     );
                     continue;
@@ -245,9 +242,8 @@ pub(crate) fn proxy_state_digest_in(data_dir: &Path, project: &str) -> String {
     crate::bundle::bytes_to_hex(&hasher.finalize())
 }
 
-/// v1→v2 key-file migration: copies legacy `local-llm/api_key` into the llm
-/// token namespace once when the target is missing. Gated on the legacy file,
-/// not `has_api_key` — see ADR-073 §upgrade-path for the chicken-and-egg.
+/// v1→v2 key-file migration: copies legacy `local-llm/api_key` into the llm token namespace once
+/// when the target is missing. Gated on the legacy file, not `has_api_key` (ADR-073 upgrade path).
 pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &LlmConfig) {
     let has_local_entry = llm
         .providers
@@ -264,13 +260,13 @@ pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &
     }
     // Source of truth for "is there a legacy key to migrate": the legacy file.
     let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
-        log::debug!("proxy: no legacy local-llm api_key to migrate (missing or unreadable)");
+        log::debug!("no legacy local-llm api_key to migrate (missing or unreadable)");
         return;
     };
     if let Err(e) = write_llm_provider_key_in(data_dir, project, "local", &value) {
-        log::warn!("proxy: legacy local key migration failed: {e}");
+        log::warn!("legacy local key migration failed: {e}");
     } else {
-        log::info!("proxy: migrated legacy local-llm api_key into the llm token namespace");
+        log::info!("migrated legacy local-llm api_key into the llm token namespace");
     }
 }
 
@@ -315,7 +311,7 @@ pub fn remove_llm_provider_key_in(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
     use crate::config::{LlmActive, LlmProviderEntry};
@@ -634,11 +630,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
     }
 
-    /// Regression: the migration must run even when `has_api_key == false`.
-    /// On a fresh upgrade `sync_has_api_key_from_disk_in` re-derives the flag
-    /// from the (empty) new path → false; gating the migration on that flag
-    /// would skip the very copy that creates the new file (chicken-and-egg),
-    /// leaving the proxy route at `auth:none` for a keyed local LLM.
+    /// Regression: migration must run even when `has_api_key == false` (a fresh upgrade re-derives
+    /// the flag from the empty new path); gating on it would skip the copy, leaving `auth:none`.
     #[test]
     fn migrate_legacy_local_key_runs_when_flag_is_false() {
         let dir = tempfile::tempdir().unwrap();
@@ -702,11 +695,8 @@ mod tests {
         assert!(!target.exists(), "no local entry → migration must not run");
     }
 
-    /// End-to-end ordering: migrate the legacy key, THEN re-derive the flag from
-    /// disk — `has_api_key` must end up `true` so the renderer emits a bearer
-    /// auth route, not `auth:none`. This is the sequence
-    /// `resolve_project_config` runs (migrate_legacy_local_key_in →
-    /// sync_has_api_key_from_disk_in).
+    /// End-to-end ordering: migrate the legacy key, THEN re-derive the flag — `has_api_key` must
+    /// end up `true`, matching `resolve_project_config`'s sequence (migrate then sync).
     #[test]
     fn migrate_then_sync_yields_has_api_key_true() {
         let dir = tempfile::tempdir().unwrap();
@@ -849,9 +839,8 @@ mod tests {
         );
     }
 
-    /// `migrate_legacy_local_key_in` is non-fatal when the legacy file is
-    /// unreadable (e.g. permission-denied on the source). The function returns
-    /// without writing a target key and without panicking.
+    /// `migrate_legacy_local_key_in` is non-fatal when the legacy file is unreadable (e.g.
+    /// permission-denied): it returns without writing a target key and without panicking.
     #[cfg(unix)]
     #[test]
     fn migrate_legacy_local_key_noop_when_legacy_file_unreadable() {

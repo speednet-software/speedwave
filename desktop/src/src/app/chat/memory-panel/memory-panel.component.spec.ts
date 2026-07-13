@@ -60,11 +60,8 @@ describe('MemoryPanelComponent', () => {
     });
 
     it('detaches the overlay when open transitions back to false', () => {
-      // Drive the child input directly to bypass OnPush propagation issues
-      // when mutating the host wrapper's plain fields. Verifies that the
-      // CDK overlay portal attaches/detaches in lockstep with the open input.
-      // Destroy the shared host fixture first so the overlay container is
-      // empty before we attach the dedicated child fixture.
+      // Drives the child input directly (bypasses OnPush on the host's plain fields) to verify the
+      // CDK overlay attaches/detaches in lockstep with `open`; destroys the shared host fixture first.
       fixture.destroy();
       const childFixture = TestBed.createComponent(MemoryPanelComponent);
       childFixture.componentRef.setInput('open', true);

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createLabelTools } from './label-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -41,10 +41,10 @@ describe('label-tools', () => {
   it('eagerly loads listLabels and defers createLabel', () => {
     const tools = createLabelTools(null);
     expect(tools.find((t) => t.tool.name === 'listLabels')!.tool._meta).toEqual({
-      deferLoading: false,
+      [META_KEYS.DEFER_LOADING]: false,
     });
     expect(tools.find((t) => t.tool.name === 'createLabel')!.tool._meta).toEqual({
-      deferLoading: true,
+      [META_KEYS.DEFER_LOADING]: true,
     });
   });
 

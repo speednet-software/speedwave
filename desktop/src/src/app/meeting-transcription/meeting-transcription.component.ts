@@ -19,11 +19,8 @@ import { LiveTranscriptComponent } from './live-transcript/live-transcript.compo
 import { SessionListComponent } from './session-list/session-list.component';
 
 /**
- * Meeting transcription tab (beta-gated by the route guard). Left pane =
- * recordings list; right pane = recording controls + the live transcript. Audio
- * is transcribed locally; the speech model is downloaded in Settings. "Send to
- * Claude" uses the network — the banner says so. When no model is downloaded
- * yet, a gate (like the Claude auth gate) points the user to Settings.
+ * Meeting transcription tab (beta-gated): recordings list + controls/live transcript. Transcription
+ * is local; only "Send to Claude" uses the network. No model yet → gate points to Settings.
  */
 @Component({
   selector: 'app-meeting-transcription',
@@ -57,7 +54,7 @@ import { SessionListComponent } from './session-list/session-list.component';
           <div>
             <h1 class="text-lg font-semibold">Meeting transcription</h1>
             <p class="text-sm text-[var(--ink-mute)]">
-              Audio is transcribed locally on this machine. "Send to Claude" uses the network.
+              Audio is transcribed locally on this machine. "Send to chat" uses the network.
             </p>
             <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
               Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
@@ -78,6 +75,25 @@ import { SessionListComponent } from './session-list/session-list.component';
                 type="button"
                 class="mono ml-2 underline"
                 data-testid="open-mic-settings"
+                (click)="openMicrophoneSettings()"
+              >
+                Open Privacy settings →
+              </button>
+            }
+          </div>
+        }
+        @if (captureWarningText(); as warning) {
+          <div
+            class="mx-6 mt-3 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
+            role="alert"
+            data-testid="capture-warning"
+          >
+            {{ warning }}
+            @if (captureWarning() === 'system_audio_silent') {
+              <button
+                type="button"
+                class="mono ml-2 underline"
+                data-testid="open-audio-settings"
                 (click)="openMicrophoneSettings()"
               >
                 Open Privacy settings →
@@ -126,6 +142,21 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     const e = this.error().toLowerCase();
     return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
   });
+  /** Capture-health warning for the active session (from the live event stream). */
+  readonly captureWarning = this.transcription.captureWarning;
+  /** Banner copy for the active capture warning. */
+  readonly captureWarningText = computed(() => {
+    switch (this.captureWarning()) {
+      case 'system_audio_silent':
+        return 'No system audio captured so far — the meeting voice may be missing. Check the System Audio Recording permission.';
+      case 'microphone_stalled':
+        return 'The microphone stopped delivering audio — recording continues with system audio only.';
+      case 'system_audio_stalled':
+        return 'System audio stopped delivering — recording continues with the microphone only.';
+      default:
+        return null;
+    }
+  });
 
   /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */
   constructor() {
@@ -146,10 +177,17 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
 
   /** Checks model availability on first paint and re-checks on re-activation. */
   async ngOnInit(): Promise<void> {
-    await this.refreshModelReady();
-    // Clear the gate after a download in Settings without recreating the tab.
+    // Registered before any await so a rejected resume below can never skip them.
     window.addEventListener('focus', this.onActivate);
     document.addEventListener('visibilitychange', this.onActivate);
+    await this.refreshModelReady();
+    try {
+      // Re-attach the live stream if a recording was left running while this tab
+      // was destroyed on navigation (the backend driver never stopped).
+      await this.transcription.resumeActiveRecording();
+    } catch (err) {
+      this.log.warn(`resume active recording failed: ${String(err)}`);
+    }
   }
 
   /** Detaches the live-stream listener and removes activation listeners. */

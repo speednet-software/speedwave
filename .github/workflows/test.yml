@@ -41,7 +41,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
+            containers/proxy/target/
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock', 'containers/proxy/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-lint-
 
       - name: Setup Node
@@ -61,6 +62,11 @@ jobs:
 
       - name: Rust clippy
         run: cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+
+      # containers/proxy is its own Cargo workspace (separate lockfile) — its
+      # deny-level [lints.clippy] table needs its own clippy invocation.
+      - name: Proxy clippy
+        run: make check-proxy-clippy
 
       # `make check-fmt` covers all three Rust workspaces (root, desktop/src-tauri,
       # containers/proxy) plus Prettier — the same gate pre-push runs.
@@ -413,6 +419,8 @@ jobs:
 
       # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
       # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.
+      # `_tests/ci/windows-only-test-list.bats` fails CI if a Windows-cfg test
+      # is added to the crate without a matching name added here.
       - name: cargo test speedwave-desktop (windows-only)
         working-directory: desktop/src-tauri
         env:
@@ -424,6 +432,23 @@ jobs:
           validate_os_integrations_returns_empty_on_windows
           resolve_cli_source_finds_resources_path
           full_cleanup_calls_in_order_on_windows
+          calls_compose_down_for_each_project
+          empty_projects_is_noop
+          failure_does_not_abort_remaining_projects
+          cli_session_appearing_during_compose_down_loop_skips_stop_vm
+          cli_session_appearing_mid_batch_aborts_remaining_teardown
+          windows_nsis_resolves_exe_parent_when_resources_alongside
+          windows_fallback_to_resources_subdir
+          windows_exe_parent_takes_priority_over_resources_subdir
+          windows_returns_none_when_no_markers
+          windows_dev_mode_returns_none
+          windows_detects_mcp_os_marker
+          windows_detects_build_context_marker
+          options_derive_metadata_and_container_uid_from_ssot
+          watched_dir_cannot_be_removed_until_watcher_drops
+          wipe_data_dir_names_deep_undeletable_path_on_final_failure
+          wipe_data_dir_names_failing_path_on_error
+          wipe_data_dir_partial_failure_still_removes_deletable_sibling
 
       # installer_hooks tests run on macOS; cargo check above already validates
       # the Windows compile of every target.

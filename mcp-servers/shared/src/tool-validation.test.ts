@@ -76,6 +76,55 @@ describe('withResultValidation (Family A)', () => {
     const res = await wrapped({});
     expect(res.content[0].text).toContain('async');
   });
+
+  it('short-circuits with a MISSING_PARAM teaching error when a required param is absent', async () => {
+    const handler = vi.fn();
+    const wrapped = withResultValidation(handler, 2, {
+      required: ['channel'],
+      toolName: 'sendChannel',
+    });
+    const res = await wrapped({ text: 'hi' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('MISSING_PARAM');
+    expect(res.content[0].text).toContain('channel');
+    expect(res.content[0].text).toContain('sendChannel');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('treats null and empty-string required params as missing', async () => {
+    const handler = vi.fn();
+    const nullRes = await withResultValidation(handler, 2, { required: ['channel'] })({
+      channel: null,
+    });
+    const emptyRes = await withResultValidation(handler, 2, { required: ['channel'] })({
+      channel: '',
+    });
+    expect(nullRes.isError).toBe(true);
+    expect(emptyRes.isError).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('reports the first missing required param when several are absent', async () => {
+    const wrapped = withResultValidation(vi.fn(), 2, { required: ['channel', 'ts'] });
+    const res = await wrapped({});
+    expect(res.content[0].text).toContain('channel');
+    expect(res.content[0].text).not.toContain('Invalid ts');
+  });
+
+  it('invokes the handler when all required params are present', async () => {
+    const handler = vi.fn().mockReturnValue({ success: true, data: 'ok' });
+    const wrapped = withResultValidation(handler, 2, { required: ['channel'] });
+    const res = await wrapped({ channel: 'C1' });
+    expect(handler).toHaveBeenCalledWith({ channel: 'C1' });
+    expect(res.content[0].text).toContain('ok');
+  });
+
+  it('does not treat a numeric 0 required value as missing', async () => {
+    const handler = vi.fn().mockReturnValue({ success: true, data: 'ok' });
+    const wrapped = withResultValidation(handler, 2, { required: ['count'] });
+    await wrapped({ count: 0 });
+    expect(handler).toHaveBeenCalled();
+  });
 });
 
 describe('withClientValidation (Family B)', () => {

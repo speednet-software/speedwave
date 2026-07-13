@@ -79,11 +79,30 @@ describe('addComment', () => {
     await expect(c.addComment('123', { text: 'ok' })).resolves.toMatchObject({ id: '52' });
   });
 
-  it('rejects when the page space cannot be resolved and an allowlist is set', async () => {
+  it('rejects with ScopeError when the space 404s (genuinely unresolvable) and an allowlist is set', async () => {
     client = stubClient(['DEV']);
-    client.get.mockResolvedValueOnce({ spaceId: '900' }).mockRejectedValueOnce(new Error('boom'));
+    const notFound = Object.assign(new Error('not found'), { response: { status: 404 } });
+    client.get.mockResolvedValueOnce({ spaceId: '900' }).mockRejectedValueOnce(notFound);
     const c = createConfluenceContentClient(client);
     await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(ScopeError);
+  });
+
+  it('rethrows a non-404 space lookup failure instead of conflating it with scope denial', async () => {
+    client = stubClient(['DEV']);
+    client.get
+      .mockResolvedValueOnce({ spaceId: '900' })
+      .mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    const c = createConfluenceContentClient(client);
+    await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(/space lookup failed/i);
+  });
+
+  it('includes the page and space IDs in a rethrown non-404 space lookup failure', async () => {
+    client = stubClient(['DEV']);
+    client.get
+      .mockResolvedValueOnce({ spaceId: '900' })
+      .mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    const c = createConfluenceContentClient(client);
+    await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(/'900'.*'123'/s);
   });
 
   it('rejects when the page has no spaceId and an allowlist is set', async () => {

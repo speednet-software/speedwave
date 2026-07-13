@@ -111,21 +111,21 @@ pub(crate) trait ContainerRuntime: Send + Sync {
     /// `prune_old_bundle_images` and plugin-uninstall).
     fn remove_images(&self, tags: &[String], force: bool) -> anyhow::Result<()> {
         let _ = (tags, force);
-        log::debug!("remove_images: not implemented for this runtime, skipping");
+        log::debug!("removing images is not implemented for this runtime, skipping");
         Ok(())
     }
 
     /// Removes BuildKit build cache; only from the `with_build_recovery` ladder
     /// (disk-full/corruption) — routine prunes keep the cache (ADR-072).
     fn prune_buildkit_cache(&self) -> anyhow::Result<()> {
-        log::debug!("prune_buildkit_cache: not implemented for this runtime, skipping");
+        log::debug!("pruning the BuildKit cache is not implemented for this runtime, skipping");
         Ok(())
     }
 
     /// Disk-full recovery: removes ALL tagged images not backing a running container
     /// (`nerdctl system prune`); BuildKit cache is cleared via `prune_buildkit_cache`.
     fn prune_unused_images(&self) -> anyhow::Result<()> {
-        log::debug!("prune_unused_images: not implemented for this runtime, skipping");
+        log::debug!("pruning unused images is not implemented for this runtime, skipping");
         Ok(())
     }
 
@@ -330,7 +330,7 @@ pub trait CommandRunner: Send + Sync {
                 None => {
                     if start.elapsed() >= timeout {
                         if let Err(e) = child.kill() {
-                            log::warn!("run_with_timeout: kill failed: {e}");
+                            log::warn!("failed to kill timed-out command: {e}");
                         }
                         let _ = child.wait();
                         anyhow::bail!(
@@ -459,9 +459,8 @@ pub fn project_has_compose_file(project: &str) -> bool {
     project_has_compose_file_in(consts::data_dir(), project)
 }
 
-/// True when a host-side compose file is absent — a `compose_down` on it is a
-/// no-op (deferred no-provider project never rendered one), so skip the engine
-/// call that would fatally error and retry.
+/// True when a host-side compose file is absent — `compose_down` on it is a no-op (deferred
+/// no-provider project never rendered one), so skip the engine call that would fatally error.
 pub(crate) fn compose_down_is_noop(host_compose_file: &str) -> bool {
     !std::path::Path::new(host_compose_file).exists()
 }
@@ -486,9 +485,7 @@ pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
     let compose_file = match compose_file_path(project) {
         Ok(path) => path,
         Err(e) => {
-            log::debug!(
-                "configured_project_container_names: compose path unavailable for {project}: {e}"
-            );
+            log::debug!("compose path unavailable for project {project}: {e}");
             return Vec::new();
         }
     };
@@ -496,9 +493,7 @@ pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
     let compose_yml = match std::fs::read_to_string(&compose_file) {
         Ok(yaml) => yaml,
         Err(e) => {
-            log::debug!(
-                "configured_project_container_names: compose file unreadable for {project}: {e}"
-            );
+            log::debug!("compose file unreadable for project {project}: {e}");
             return Vec::new();
         }
     };
@@ -510,7 +505,7 @@ fn container_names_from_compose_yaml(compose_yml: &str) -> Vec<String> {
     let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(compose_yml) {
         Ok(doc) => doc,
         Err(e) => {
-            log::debug!("container_names_from_compose_yaml: invalid compose YAML: {e}");
+            log::debug!("invalid compose YAML: {e}");
             return Vec::new();
         }
     };
@@ -614,9 +609,7 @@ pub(crate) fn shell_quote_argv(argv: &[&str]) -> String {
             // `try_quote` only fails on null bytes (OS rejects them at execve);
             // if one slips through, strip and log rather than truncate silently.
             Err(_) => {
-                log::error!(
-                    "shell_quote_argv: argv token contains a null byte; stripping nulls before quoting"
-                );
+                log::error!("argv token contains a null byte; stripping nulls before quoting");
                 let stripped = a.replace('\0', "");
                 shlex::try_quote(stripped.as_str())
                     .map(|s| s.into_owned())
@@ -657,12 +650,9 @@ fn log_container_states(runtime: &LockedRuntime, project: &str, when: &str) {
                     format!("{name}={state}")
                 })
                 .collect();
-            log::info!(
-                "ensure_exec_healthy[{when}]: states=[{}]",
-                states.join(", ")
-            );
+            log::info!("container states at {when}: [{}]", states.join(", "));
         }
-        Err(e) => log::info!("ensure_exec_healthy[{when}]: compose_ps failed: {e}"),
+        Err(e) => log::info!("compose_ps failed at {when}: {e}"),
     }
 }
 
@@ -672,10 +662,10 @@ pub fn ensure_exec_healthy(
     project: &str,
     container: &str,
 ) -> anyhow::Result<()> {
-    log::info!("ensure_exec_healthy: probing '{container}'");
+    log::info!("probing container '{container}'");
     match probe_container_exec(runtime, container) {
         Ok(()) => {
-            log::info!("ensure_exec_healthy: '{container}' is healthy");
+            log::info!("container '{container}' is healthy");
             return Ok(());
         }
         Err(e) => {
@@ -744,7 +734,7 @@ pub fn compose_validate_with_retry(runtime: &LockedRuntime, project: &str) -> an
                     return Err(e);
                 }
                 log::warn!(
-                    "compose_validate attempt {}: {e} — retrying after {} ms",
+                    "compose validate attempt {} failed: {e} — retrying after {} ms",
                     attempt + 1,
                     delay_ms
                 );
@@ -855,7 +845,7 @@ pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
     let id_targets = match runner.run(cmd, &ps_args) {
         Ok(output) => cleanup_targets_from_ps_output(&output),
         Err(e) => {
-            log::debug!("force_remove_project_containers: ps failed for {project}: {e}");
+            log::debug!("ps failed while listing containers to remove for {project}: {e}");
             Vec::new()
         }
     };
@@ -867,11 +857,11 @@ pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
 
     if !id_targets.is_empty() {
         log::info!(
-            "force_remove_project_containers: removing {} stale container id(s) for {project}",
+            "removing {} stale container id(s) for {project}",
             id_targets.len()
         );
         if let Err(e) = rm(&id_targets) {
-            log::warn!("force_remove_project_containers: rm -f by id failed for {project}: {e}");
+            log::warn!("rm -f by id failed for {project}: {e}");
         }
     }
 
@@ -880,14 +870,10 @@ pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
         match rm(&single_target) {
             Ok(()) => {}
             Err(e) if is_missing_container_error(&e) => {
-                log::debug!(
-                    "force_remove_project_containers: {project} target '{container_name}' already gone: {e}"
-                );
+                log::debug!("{project} target '{container_name}' already gone: {e}");
             }
             Err(e) => {
-                log::warn!(
-                    "force_remove_project_containers: rm -f by name failed for {project} target '{container_name}': {e}"
-                );
+                log::warn!("rm -f by name failed for {project} target '{container_name}': {e}");
             }
         }
     }
@@ -924,7 +910,7 @@ pub(crate) fn force_remove_project_networks_with_run_fn<F>(
         Ok(output) => cleanup_targets_from_ps_output(&output),
         Err(e) => {
             log::warn!(
-                "force_remove_project_networks: ls failed for {project}: {e} \
+                "network ls failed for {project}: {e} \
                  — orphan networks may block next compose_up"
             );
             return;
@@ -934,17 +920,12 @@ pub(crate) fn force_remove_project_networks_with_run_fn<F>(
         return;
     }
 
-    log::info!(
-        "force_remove_project_networks: removing {} network(s) for {project}",
-        net_ids.len()
-    );
+    log::info!("removing {} network(s) for {project}", net_ids.len());
     for net_id in &net_ids {
         let mut rm_args: Vec<&str> = nerdctl_prefix.to_vec();
         rm_args.extend_from_slice(&["network", "rm", net_id]);
         if let Err(e) = run(cmd, &rm_args) {
-            log::warn!(
-                "force_remove_project_networks: network rm {net_id} failed for {project}: {e}"
-            );
+            log::warn!("network rm {net_id} failed for {project}: {e}");
         }
     }
 }
@@ -976,7 +957,7 @@ pub(crate) fn parallel_stop_project_containers(
     let ids = match runner.run(cmd, &ps_args) {
         Ok(output) => cleanup_targets_from_ps_output(&output),
         Err(e) => {
-            log::debug!("parallel_stop: ps failed for {project} (down will handle): {e}");
+            log::debug!("ps failed for {project} (down will handle): {e}");
             return;
         }
     };
@@ -984,7 +965,7 @@ pub(crate) fn parallel_stop_project_containers(
         return;
     }
     log::info!(
-        "parallel_stop: stopping {} container(s) for {project}",
+        "stopping {} container(s) in parallel for {project}",
         ids.len()
     );
     // Chunked fan-out: each stop is its own ssh/wsl session; OpenSSH's
@@ -997,7 +978,7 @@ pub(crate) fn parallel_stop_project_containers(
                     let mut stop_args: Vec<&str> = nerdctl_prefix.to_vec();
                     stop_args.extend_from_slice(&["stop", id]);
                     if let Err(e) = runner.run(cmd, &stop_args) {
-                        log::debug!("parallel_stop: stop {id} failed (down will handle): {e}");
+                        log::debug!("stop {id} failed (down will handle): {e}");
                     }
                 });
             }
@@ -1018,7 +999,7 @@ pub(crate) fn compose_down_and_cleanup(
     parallel_stop_project_containers(runner, cmd, project, nerdctl_prefix);
     let down_result = runner.run(cmd, compose_down_args);
     if let Err(ref e) = down_result {
-        log::warn!("compose_down_and_cleanup: compose down failed for {project}: {e}");
+        log::warn!("compose down failed for {project}: {e}");
     }
 
     force_remove_project_containers(runner, cmd, project, nerdctl_prefix);
@@ -1083,7 +1064,7 @@ impl Drop for TermGuard {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 pub(crate) mod test_support {
     use super::CommandRunner;
 
@@ -1223,7 +1204,11 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
     use crate::runtime::mock_runtime::MockRuntimeBuilder;
@@ -2454,7 +2439,10 @@ services:
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)] // SSOT guard: asserts COMPOSE_VALIDATE_MAX_ATTEMPTS stays sane
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "SSOT guard: asserts COMPOSE_VALIDATE_MAX_ATTEMPTS stays sane"
+    )]
     fn compose_validate_retry_window_is_long_enough_for_virtiofs_lag() {
         // Regression: 3 attempts / 300 ms total was too short — the guest saw a
         // stale compose.yml past the window. Pin the wider window + capped delay.

@@ -7,6 +7,7 @@ paths:
   - 'containers/Containerfile.proxy'
   - 'containers/proxy/**'
   - 'desktop/src-tauri/src/llm_cmd.rs'
+  - 'desktop/src-tauri/src/llm_cmd/**'
   - 'desktop/src-tauri/src/containers_cmd.rs'
   - 'desktop/src-tauri/src/http_util.rs'
   - 'desktop/src/src/app/settings/llm-provider/**'
@@ -36,6 +37,7 @@ Every session routes through the per-project Rust forwarder `proxy` (port 4000, 
 - **Provenance:** the routing model comes from the active provider entry (`LlmConfig::effective_active_model`), never a foreign `active.model`. A `provider/model`-shaped id under an Anthropic entry falls back to the account default.
 - A `local` provider with custom headers falls back to the direct path — the proxy would consume headers addressed to the LLM server.
 - **Windows mirrored-mode limitation (ADR-079):** host-side local LLM listeners (user-run Ollama/LM Studio/llama.cpp) are NOT relayed — `compose/llm.rs` emits `host.docker.internal:<raw port>` and no Speedwave process supervises those ports, so under WSL2 mirrored mode the proxy cannot reach them. Workarounds: switch WSL to NAT, run the LLM inside the distro, or hand-run a `socat` unit (see ADR-079 "Known limitations"). A supervised relay for configured provider ports is future work.
+- **Local-only CLI flags (config.rs resolver, not compose):** an active `Local` kind adds `--exclude-dynamic-system-prompt-sections` (KV-cache prefix reuse) and `--append-system-prompt` with `prompts::local_llm_skills_nudge()` (static copy — never interpolate config values into it without a sanitizer; the v0.10-removed `local_llm_identity` shows the injection risk). Prompt **replacement** (`--system-prompt-file`) stays banned — removed in v0.10.0, do not reintroduce. Test-guarded (`resolve_injects_skills_nudge_*`, `resolve_never_replaces_prompt_*`).
 
 ## URLs, aliases, auth
 

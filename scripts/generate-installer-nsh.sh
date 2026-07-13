@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
-# generate-installer-nsh.sh — Build a single installer-hooks.nsh by inlining
-# materialize macros for sweep.ps1 and firewall.ps1 into a hand-written template.
-#
-# SSOT inputs (hand-written):
-#   desktop/src-tauri/windows/installer-hooks-template.nsh
-#   desktop/src-tauri/windows/sweep.ps1
-#   desktop/src-tauri/windows/firewall.ps1
-#
-# Output (generated, committed):
-#   desktop/src-tauri/windows/installer-hooks.nsh
-#
-# Single-file .nsh required: Tauri does not copy sibling .nsh files to the bundle temp dir.
-#
-# Drift detector: installer_hooks.rs pins installer-hooks.nsh byte-for-byte. After editing any .ps1, run:
-#
-#   make generate-installer-nsh
-#
-# and commit installer-hooks.nsh alongside the .ps1 changes.
+# generate-installer-nsh.sh — Inlines sweep.ps1/firewall.ps1 macros into the template (Tauri
+# won't copy .nsh siblings); pinned by installer_hooks.rs — rerun after editing a .ps1.
 
 set -euo pipefail
 

@@ -1,14 +1,11 @@
-// Auth commands — extracted from main.rs
-//
-// Tauri command wrappers for API-key management and CLI auth command generation.
+// Auth commands — extracted from main.rs. Tauri command wrappers for API-key management and
+// CLI auth command generation.
 
 use crate::types::{check_project, AuthStatusResponse};
 
 use super::{auth, setup_wizard};
 
-// ---------------------------------------------------------------------------
-// Authentication commands (API key only — OAuth is done via CLI)
-// ---------------------------------------------------------------------------
+// ── Authentication commands (API key only — OAuth is done via CLI) ─────────
 
 #[tauri::command]
 pub async fn save_api_key(project: String, api_key: String) -> Result<(), String> {
@@ -17,9 +14,9 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<(), String
         return Err("API key too long".to_string());
     }
     tokio::task::spawn_blocking(move || {
-        log::info!("save_api_key: project={project}");
+        log::info!("saving API key for project {project}");
         auth::save_api_key(&project, &api_key).map_err(|e| {
-            log::error!("save_api_key: error: {e}");
+            log::error!("failed to save API key: {e}");
             e.to_string()
         })
     })
@@ -31,9 +28,9 @@ pub async fn save_api_key(project: String, api_key: String) -> Result<(), String
 pub async fn delete_api_key(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("delete_api_key: project={project}");
+        log::info!("deleting API key for project {project}");
         auth::delete_api_key(&project).map_err(|e| {
-            log::error!("delete_api_key: error: {e}");
+            log::error!("failed to delete API key: {e}");
             e.to_string()
         })
     })
@@ -45,14 +42,14 @@ pub async fn delete_api_key(project: String) -> Result<(), String> {
 pub async fn anthropic_logout(project: String) -> Result<(), String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("anthropic_logout: project={project}");
+        log::info!("logging out of Anthropic for project {project}");
         speedwave_runtime::claude_home::remove_claude_credentials(
             speedwave_runtime::consts::data_dir().as_path(),
             &project,
         )
         .map(|_| ())
         .map_err(|e| {
-            log::error!("anthropic_logout: error: {e}");
+            log::error!("failed to remove Anthropic credentials: {e}");
             e.to_string()
         })
     })
@@ -92,7 +89,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
         crate::containers_cmd::ensure_images_ready()?;
-        log::info!("get_auth_status: project={project}");
+        log::info!("resolving auth status for project {project}");
         let api_key_configured = auth::has_api_key(&project);
         // Real OAuth state = credentials file present (provider-independent).
         let oauth_authenticated = speedwave_runtime::claude_home::has_anthropic_oauth_credentials(
@@ -127,9 +124,7 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
-// CLI auth command generation
-// ---------------------------------------------------------------------------
+// ── CLI auth command generation ─────────────────────────────────────────────
 
 /// Shell-escape a string for use inside single quotes (POSIX standard).
 /// Each embedded single-quote becomes: close-quote, backslash-escaped quote, open-quote.
@@ -140,16 +135,14 @@ pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
 /// `\\?\` prefix stripper — re-export of the runtime SSOT.
 pub(crate) use speedwave_runtime::engine_path::strip_extended_length_prefix as strip_windows_extended_length_prefix;
 
-/// Escapes a string for safe interpolation inside a PowerShell single-quoted
-/// literal. PowerShell single-quote literals are literal — only embedded
-/// single quotes need doubling.
+/// Escapes a string for safe interpolation inside a PowerShell single-quoted literal — only
+/// embedded single quotes need doubling.
 pub(crate) fn ps_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Pure command assembly. `is_windows` selects PowerShell-shaped output
-/// (Set-Location, `;`, $env:, '' escape, \\?\ stripping) vs POSIX (cd, &&,
-/// export, '\'' escape).
+/// Pure command assembly. `is_windows` selects PowerShell-shaped output (Set-Location, `;`, $env:,
+/// '' escape, \\?\ stripping) vs POSIX (cd, &&, export, '\'' escape).
 pub(crate) fn build_auth_command_for_platform(
     project: &str,
     project_dir: &str,
@@ -205,9 +198,8 @@ pub(crate) fn build_auth_command_for_platform(
     }
 }
 
-/// Production entry point. Reads the host platform once via `cfg!()` and
-/// delegates to `build_auth_command_for_platform`. Keeping this wrapper
-/// preserves the existing call-site in `get_auth_command` unchanged.
+/// Production entry point. Reads the host platform once via `cfg!()` and delegates to
+/// `build_auth_command_for_platform`, keeping the `get_auth_command` call-site unchanged.
 fn build_auth_command(
     project: &str,
     project_dir: &str,
@@ -269,18 +261,13 @@ fn ensure_cli_installed_at(install: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Returns a CLI command string for the user to copy into their terminal
-/// to authenticate with Claude Code.
-///
-/// When the Desktop app's data directory differs from the default
-/// (`~/.speedwave`), the command includes a data-directory prefix:
-/// `export SPEEDWAVE_DATA_DIR=...` on POSIX shells, or
-/// `$env:SPEEDWAVE_DATA_DIR = '...'` on Windows PowerShell.
+/// Returns a CLI command to authenticate with Claude Code. Non-default data dir prefixes
+/// `export SPEEDWAVE_DATA_DIR=...` (POSIX) or `$env:SPEEDWAVE_DATA_DIR = '...'` (PowerShell).
 #[tauri::command]
 pub async fn get_auth_command(project: String) -> Result<String, String> {
     check_project(&project)?;
     tokio::task::spawn_blocking(move || {
-        log::info!("get_auth_command: project={project}");
+        log::info!("building auth command for project {project}");
         let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         ensure_cli_installed()?;
         Ok(build_auth_command(
@@ -296,7 +283,11 @@ pub async fn get_auth_command(project: String) -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
 
@@ -311,8 +302,7 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("pub async fn ")
-            .or_else(|| fn_tail.find("pub fn "))
+            .find("// ── CLI auth command generation")
             .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
@@ -335,10 +325,10 @@ mod tests {
         // skip for non-anthropic providers.
         let source = include_str!("auth_commands.rs");
         let fn_start = source.find("pub async fn get_auth_status(").unwrap();
-        // End at the next item after the command (avoids matching test names
-        // below that mention check_claude_auth by design).
+        // Scan production code only — the test module below mentions
+        // check_claude_auth by design.
         let fn_end = source[fn_start..]
-            .find("// ----")
+            .find("#[cfg(test)]")
             .map(|i| fn_start + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
@@ -356,9 +346,10 @@ mod tests {
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
-        let fn_end = source[fn_start..]
-            .find("// ----")
-            .map(|i| fn_start + i)
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
@@ -379,9 +370,10 @@ mod tests {
         let fn_start = source
             .find("pub async fn get_auth_status(")
             .expect("get_auth_status Tauri command must exist");
-        let fn_end = source[fn_start..]
-            .find("// ----")
-            .map(|i| fn_start + i)
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("// ── CLI auth command generation")
+            .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(
@@ -594,9 +586,11 @@ mod tests {
         let fn_start = source
             .find("pub async fn anthropic_logout(")
             .expect("anthropic_logout Tauri command must exist");
-        let fn_end = source[fn_start..]
-            .find("// ----")
-            .map(|i| fn_start + i)
+        let fn_tail = &source[fn_start + 1..];
+        let fn_end = fn_tail
+            .find("pub async fn ")
+            .or_else(|| fn_tail.find("pub fn "))
+            .map(|i| fn_start + 1 + i)
             .unwrap_or(source.len());
         let fn_body = &source[fn_start..fn_end];
         assert!(

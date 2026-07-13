@@ -173,7 +173,7 @@ async fn fetch_openrouter_gen_cost(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test-only assertions")]
 mod tests {
     use super::*;
 

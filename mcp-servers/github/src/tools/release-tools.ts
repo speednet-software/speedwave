@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -17,7 +18,7 @@ const createTagTool: Tool = {
   description:
     'Creates a Git tag pointing at a commit. If a message is given, an annotated tag is created.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'tag', 'create', 'release', 'version', 'git'],
   example:
     'const { tag, ref } = await github.createTag({ owner: "octocat", repo: "hello", tag: "v1.2.0", sha: "abc123" })',
@@ -72,7 +73,7 @@ const deleteTagTool: Tool = {
   name: 'deleteTag',
   description: 'Deletes a Git tag from the repository.',
   annotations: DESTRUCTIVE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'tag', 'delete', 'remove', 'version', 'git'],
   example: 'await github.deleteTag({ owner: "octocat", repo: "hello", tag: "v1.0.0" })',
   inputSchema: {
@@ -114,7 +115,7 @@ const createReleaseTool: Tool = {
   name: 'createRelease',
   description: 'Creates a release associated with a tag (creating the tag if it does not exist).',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'release', 'create', 'changelog', 'version', 'publish'],
   example:
     'const release = await github.createRelease({ owner: "octocat", repo: "hello", tag_name: "v1.0.0", name: "First release" })',

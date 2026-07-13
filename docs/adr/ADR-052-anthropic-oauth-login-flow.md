@@ -14,7 +14,7 @@
 > the active provider. The credential-lifecycle and clipboard-bridge decisions below
 > are unchanged.
 
-> **Naming clarification:** an earlier draft called this "Speedwave-native OAuth login flow". That name is wrong and was deliberately dropped: Speedwave does **not** perform OAuth and does **not** handle Anthropic tokens — Claude Code's `/login` owns the entire credential lifecycle. A literally Speedwave-native flow (Speedwave opening `console.anthropic.com/oauth/authorize`, running its own loopback callback, capturing the token) would violate Anthropic's Consumer Terms, which reserve OAuth for Claude Code and Claude.ai (clarified Feb 2026 — see [^1]). This ADR is about a _launch surface_ + a _clipboard bridge_, nothing more.
+> **Naming clarification:** an earlier draft called this "Speedwave-native OAuth login flow". That name is wrong and was deliberately dropped: Speedwave does **not** perform OAuth and does **not** handle Anthropic tokens — Claude Code's `/login` owns the entire credential lifecycle. A literally Speedwave-native flow (Speedwave opening `console.anthropic.com/oauth/authorize`, running its own loopback callback, capturing the token) would violate Anthropic's Consumer Terms, which reserve OAuth for Claude Code and Claude.ai (clarified Feb 2026 — see [^5]). This ADR is about a _launch surface_ + a _clipboard bridge_, nothing more.
 
 ## Context
 
@@ -38,11 +38,11 @@ We need a login surface reachable from both the CLI (`speedwave login`) and the 
 
 ### Windows: the `metadata` automount requirement
 
-On Windows the `CLAUDE_HOME` bind-mount resolves to a path under `C:\` (`~/.speedwave/claude-home/<project>`), exposed inside the WSL2 distro via the drvfs/9p automount of `/mnt/c`. By default that mount is `uid=0;gid=0` and **rejects `chmod`** (`Operation not permitted`). Claude Code writes `.credentials.json` and then `chmod 0600`s it; on a non-`metadata` mount that chmod fails and the login does not persist — the TUI may report "Login successful" yet the next session shows "Not logged in". The container itself is fine (verified: uid 1000, `HOME=/home/speedwave`); only the chmod-on-9p step fails.
+On Windows the `CLAUDE_HOME` bind-mount resolves to a path under `C:\` (`~/.speedwave/claude-home/<project>`), exposed inside the WSL2 distro via the drvfs/9p automount of `/mnt/c`. By default that mount is `uid=0;gid=0` and **rejects `chmod`** (`Operation not permitted`)[^6]. Claude Code writes `.credentials.json` and then `chmod 0600`s it; on a non-`metadata` mount that chmod fails and the login does not persist — the TUI may report "Login successful" yet the next session shows "Not logged in". The container itself is fine (verified: uid 1000, `HOME=/home/speedwave`); only the chmod-on-9p step fails.
 
 Fix — two parts, because the mount ownership cannot be set by the automount option alone:
 
-1. **`metadata` automount** — `setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange)` sets `[automount].options = "metadata,uid=1000,gid=1000,umask=022"` in `/etc/wsl.conf` (uid/gid derived from the `consts::CONTAINER_USER_UNPRIVILEGED` SSOT via `container_uid_gid()`). `metadata` makes drvfs honor Linux mode bits so `chmod 0600` works. The `uid=`/`gid=` part is **best-effort, not load-bearing**: the imported distro has no `[user]` default → WSL prepends the default-user uid (root → 0) ahead of our option, and the prepended uid wins, so the mount stays uid 0. The actual EACCES fix is the per-project `chown` in `ensure_claude_home_owner`.
+1. **`metadata` automount** — `setup_wizard::ensure_wsl_distro_metadata(TerminateOnChange)` sets `[automount].options = "metadata,uid=1000,gid=1000,umask=022"` in `/etc/wsl.conf` (uid/gid derived from the `consts::CONTAINER_USER_UNPRIVILEGED` SSOT via `container_uid_gid()`). `metadata` makes drvfs honor Linux mode bits so `chmod 0600` works[^7]. The `uid=`/`gid=` part is **best-effort, not load-bearing**: the imported distro has no `[user]` default → WSL prepends the default-user uid (root → 0) ahead of our option, and the prepended uid wins, so the mount stays uid 0. The actual EACCES fix is the per-project `chown` in `ensure_claude_home_owner`.
 
    The edit reads `/etc/wsl.conf` (via `wsl.exe … cat`), mutates it with a pure-Rust INI transform (`merge_wsl_conf_automount` — section-aware, CRLF-aware, dedups duplicate `[automount]` sections, anchored key match, fully unit-tested on real bytes; mirrors `merge_wslconfig_vpn_keys` for `.wslconfig`), then writes it back (via `tee`). **Write verification:** the file is re-read and the `[automount].options` line is parsed; if `uid=` is not present as a whole token, the function returns `Err` — a silently-failed write (e.g. a read-only `wsl.conf`) is surfaced, not assumed successful. Because the verification parses the options line (not a substring grep), `uid=10000` and a commented `# uid=1000` never produce a false success.
 
@@ -137,8 +137,7 @@ channels**:
 
 Both channels are **write-only by design**: OSC 52 paste/query would require a
 terminal-side response handshake most emulators reject and would leak host
-clipboard contents into the container. Out of scope. See
-`docs/architecture/security.md` "Authentication Gate".
+clipboard contents into the container. Out of scope.
 
 On macOS the Desktop spawn path additionally **prefers iTerm2** over
 Terminal.app (`oauth_login_cmd::open_terminal_with_command` probes
@@ -166,10 +165,16 @@ Implementation: `containers/osc52-copy.sh`, `containers/Containerfile.claude`
 
 ## References
 
-[^1]: Anthropic Claude Code authentication docs — token validity period and `setup-token` behavior. <https://code.claude.com/docs/en/authentication>
+[^1]: Anthropic Claude Code authentication docs - token validity period and `setup-token` behavior. <https://code.claude.com/docs/en/authentication>
 
-[^2]: GitHub issue tfvchow/field-notes-public#10 — both `.credentials.json` and `.claude.json` are required for Claude Code to skip onboarding in a devcontainer. <https://github.com/tfvchow/field-notes-public/issues/10>
+[^2]: GitHub issue tfvchow/field-notes-public#10 - both `.credentials.json` and `.claude.json` are required for Claude Code to skip onboarding in a devcontainer. <https://github.com/tfvchow/field-notes-public/issues/10>
 
-[^3]: OSC 52 terminal-emulator support data — survey of which terminals honor the sequence by default and which require an opt-in setting. <https://github.com/ojroques/vim-oscyank#which-terminals-support-osc-52>
+[^3]: OSC 52 terminal-emulator support data - survey of which terminals honor the sequence by default and which require an opt-in setting. <https://github.com/ojroques/vim-oscyank#which-terminals-support-osc-52>
 
-[^4]: Claude Code CHANGELOG 2.1.160/2.1.161 — copy-on-select moved to PowerShell interop on WSL and the fullscreen clipboard probe gained `wl-copy`/`xclip`/`xsel` with PRIMARY-selection writes; verified against the published 2.1.154 vs 2.1.173 `linux-x64` binaries (the linux probe is gated on `WAYLAND_DISPLAY`/`DISPLAY`; platform `wsl` execs `powershell.exe … Set-Clipboard`). <https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md>
+[^4]: Claude Code CHANGELOG 2.1.160/2.1.161 - copy-on-select moved to PowerShell interop on WSL and the fullscreen clipboard probe gained `wl-copy`/`xclip`/`xsel` with PRIMARY-selection writes; verified against the published 2.1.154 vs 2.1.173 `linux-x64` binaries (the linux probe is gated on `WAYLAND_DISPLAY`/`DISPLAY`; platform `wsl` execs `powershell.exe … Set-Clipboard`). <https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md>
+
+[^5]: Anthropic, "Updates to Consumer Terms and Privacy Policy" (Feb 2026) - OAuth credentials from Claude Free/Pro/Max/Team/Enterprise are reserved for Claude Code and Claude.ai; using them in another product or service violates the Consumer Terms. <https://www.anthropic.com/news/updates-to-our-consumer-terms>
+
+[^6]: Microsoft Learn, "File Permissions for WSL" - without the `metadata` mount option, DrvFs-mounted Windows drives do not track Linux file permissions and `chmod`/`chown` calls fail. <https://learn.microsoft.com/en-us/windows/wsl/file-permissions>
+
+[^7]: Microsoft Learn, "Advanced settings configuration in WSL" - the `[automount].options` `metadata` flag projects Linux permission bits onto DrvFs-mounted files, enabling `chmod`/`chown`. <https://learn.microsoft.com/en-us/windows/wsl/wsl-config>

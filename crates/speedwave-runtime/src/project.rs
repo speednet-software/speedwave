@@ -94,9 +94,8 @@ fn add_project_inner(name: &str, dir: &str) -> anyhow::Result<()> {
     add_project_with_data_dir(name, dir, data_dir)
 }
 
-/// Core implementation of project registration, parameterized by `data_dir`
-/// so that tests can redirect all I/O to a temporary directory without
-/// modifying process-global state (e.g. `HOME`).
+/// Core implementation of project registration, parameterized by `data_dir` so tests can redirect
+/// all I/O to a temporary directory without modifying process-global state (e.g. `HOME`).
 fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::Result<()> {
     // ── Phase 1a: dir-class validation (canonical path + existence check) ──
 
@@ -169,11 +168,14 @@ fn add_project_with_validated_dir(
         anyhow::bail!("Project '{}' already exists", name);
     }
 
-    // Duplicate path check: exact-string fast path (catches UNC, which canonicalize
-    // can't resolve), then canonicalize fallback for drive-letter/Unix paths.
+    // Duplicate path check: exact-string fast path (the only comparison for WSL UNC
+    // paths — canonicalize on them is undefined), canonicalize fallback otherwise.
     if let Some(existing) = user_config.projects.iter().find(|p| {
         if p.dir == canonical_str {
             return true;
+        }
+        if crate::runtime::wsl::is_wsl_unc_path(&p.dir).is_some() {
+            return false;
         }
         std::fs::canonicalize(&p.dir)
             .map(|c| c == canonical)
@@ -201,11 +203,8 @@ fn add_project_with_validated_dir(
     user_config.projects.push(entry);
     user_config.active_project = Some(name.to_string());
 
-    // Resolve config and render compose (still no I/O). A brand-new project
-    // has no LLM provider yet — that is a valid, first-class state (the
-    // Desktop "no_provider" screen), so registration must not fail just
-    // because compose can't route an LLM yet; `start_containers` renders
-    // compose again once a provider is chosen.
+    // Resolve config and render compose (no I/O yet). A brand-new project has no LLM provider yet —
+    // a valid state (Desktop "no_provider" screen); `start_containers` re-renders once chosen.
     let (resolved, integrations) = config::resolve_project_config(&canonical, &user_config, name);
     let yaml = if resolved.llm.is_unconfigured() {
         None
@@ -283,12 +282,14 @@ fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code: panics on failure are the expected fixture behavior"
+)]
 mod tests {
     use super::*;
     use crate::config::{save_user_config_to, SpeedwaveUserConfig};
@@ -371,9 +372,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// A brand-new project has no LLM provider chosen yet — that must not
-    /// block registration (the "no_provider" state is first-class); compose
-    /// generation is deferred to `start_containers`.
+    /// A brand-new project has no LLM provider chosen yet — that must not block registration (the
+    /// "no_provider" state is first-class); compose generation is deferred to `start_containers`.
     #[test]
     fn add_project_succeeds_without_llm_provider_and_defers_compose() {
         let tmp = tempfile::tempdir().unwrap();
@@ -411,9 +411,8 @@ mod tests {
         cleanup_project_dirs_in("nonexistent-test-project-xyz", &data_dir);
     }
 
-    /// Newly-created project directories must already be `0o700` so
-    /// `fs_security::ensure_data_dir_permissions` does not have to chmod
-    /// them on every launch (it logs a `[WARN]` per fix-up).
+    /// Newly-created project dirs must already be `0o700` so `ensure_data_dir_permissions` does
+    /// not have to chmod them on every launch (it logs `[WARN]` per fix-up).
     #[cfg(unix)]
     #[test]
     fn init_project_dirs_creates_with_mode_0o700() {
@@ -666,6 +665,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stored_wsl_unc_dir_is_never_canonicalized_and_does_not_false_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let new_dir = tmp.path().join("fresh-project");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        let canonical_new = std::fs::canonicalize(&new_dir).unwrap();
+
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "unc-project".to_string(),
+                dir: r"\\wsl.localhost\Speedwave\home\user\repo".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
+
+        let result =
+            add_project_with_data_dir("fresh", &canonical_new.to_string_lossy(), &data_dir);
+        assert!(result.is_ok(), "UNC entry must not false-match: {result:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn rollback_cleans_up_dirs_on_config_save_failure() {
@@ -753,12 +781,8 @@ mod tests {
         assert_eq!(final_val, 2, "both threads should have incremented");
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // WSL UNC path handling — Windows-only branch in add_project_with_data_dir.
-    // `Path::is_absolute` returns false for `\\...` on Unix, so the early
-    // `must be an absolute path` check would short-circuit before reaching
-    // our UNC classification. On Windows, `\\wsl.localhost\...` IS absolute.
-    // ──────────────────────────────────────────────────────────────────────
+    // ── WSL UNC path handling (Windows-only branch in add_project_with_data_dir) ──
+    // `Path::is_absolute` is false for `\\...` on Unix, true on Windows for `\\wsl.localhost\...`
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -856,9 +880,8 @@ mod tests {
             err.contains("absolute path"),
             "expected 'absolute path' bail on Unix for UNC input, got: {err}"
         );
-        // The UNC dispatch must NOT have fired (no "WSL distribution" or
-        // "Malformed WSL UNC" in the error — that would mean we reached
-        // the UNC branch on a non-Windows host).
+        // The UNC dispatch must NOT have fired (no "WSL distribution" or "Malformed WSL UNC" in the
+        // error — that would mean we reached the UNC branch on a non-Windows host).
         assert!(
             !err.contains("WSL distribution"),
             "UNC dispatch must not fire on Unix, got: {err}"
@@ -894,9 +917,8 @@ mod tests {
         );
     }
 
-    /// Happy path for a UNC-style stored `dir`: feeds
-    /// `add_project_with_validated_dir` a tempdir-backed canonical PathBuf plus
-    /// a `\\wsl.localhost\...` canonical string and asserts Phase 1b+2 succeed.
+    /// Happy path for a UNC-style `dir`: feeds `add_project_with_validated_dir` a tempdir-backed
+    /// canonical PathBuf and a `\\wsl.localhost\...` string; asserts Phase 1b+2 succeed.
     #[test]
     fn add_project_with_validated_dir_accepts_unc_style_canonical() {
         let tmp = tempfile::tempdir().unwrap();
@@ -932,9 +954,8 @@ mod tests {
         assert_eq!(entry.dir, unc_canonical_str);
         assert_eq!(cfg.active_project.as_deref(), Some("luke-helm"));
 
-        // No LLM provider was ever chosen for this fixture — compose.yml is
-        // deferred to `start_containers` (a fresh project is a valid,
-        // provider-less state; see `add_project_with_validated_dir`).
+        // No LLM provider was ever chosen for this fixture — compose.yml is deferred to
+        // `start_containers` (a fresh project is a valid, provider-less state).
         let compose_path = data_dir
             .join("compose")
             .join("luke-helm")
@@ -1205,9 +1226,8 @@ mod tests {
 
     #[test]
     fn remove_project_cleans_dirs_before_saving_config() {
-        // Structural guard: a crash between the two ops must leave orphaned
-        // config entries (harmless, reconcile-tolerated), never orphaned
-        // credential-bearing dirs with no config entry (invisible, never cleaned).
+        // Structural guard: a crash between the two ops must leave orphaned config entries
+        // (harmless, reconcile-tolerated), never orphaned credential dirs with no config entry.
         let source = include_str!("project.rs");
         let fn_start = source
             .find("fn remove_project_with_data_dir(")

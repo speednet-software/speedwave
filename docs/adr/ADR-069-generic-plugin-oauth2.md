@@ -59,18 +59,18 @@ Manifest-declared URLs are dialed by the host, so every endpoint goes through th
 - ADR-060 — [host-side OAuth refresh worker](ADR-060-host-side-oauth-refresh-worker.md)
 - ADR-051 — [plugin signature runtime verification](ADR-051-plugin-signature-runtime-verification.md)
 
-[^1]: OAuth 2.0 authorization code grant — the resource owner authenticates at the authorization server and the issued token represents that user: <https://datatracker.ietf.org/doc/html/rfc6749#section-4.1>
+[^1]: OAuth 2.0 authorization code grant - the resource owner authenticates at the authorization server and the issued token represents that user: <https://datatracker.ietf.org/doc/html/rfc6749#section-4.1>
 
-[^2]: OAuth 2.0 client credentials grant — used when the client acts on its own behalf, not for a user: <https://datatracker.ietf.org/doc/html/rfc6749#section-4.4>
+[^2]: OAuth 2.0 client credentials grant - used when the client acts on its own behalf, not for a user: <https://datatracker.ietf.org/doc/html/rfc6749#section-4.4>
 
 [^3]: GLPI REST API supports `authorization_code`, `password`, and `client_credentials` grants at `/api.php/token`: <https://github.com/glpi-project/glpi/blob/11.0/bugfixes/resources/api_doc.MD>
 
 [^4]: PKCE (Proof Key for Code Exchange), S256 challenge method: <https://datatracker.ietf.org/doc/html/rfc7636#section-4.2>
 
-[^5]: OAuth 2.0 for Native Apps — loopback interface redirection and arbitrary-port allowance: <https://datatracker.ietf.org/doc/html/rfc8252#section-7.3>
+[^5]: OAuth 2.0 for Native Apps - loopback interface redirection and arbitrary-port allowance: <https://datatracker.ietf.org/doc/html/rfc8252#section-7.3>
 
-[^6]: OWASP SSRF prevention — validate and restrict outbound request targets: <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>
+[^6]: OWASP SSRF prevention - validate and restrict outbound request targets: <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>
 
-[^7]: SharePoint's device-code flow is user-delegated — a specific human authenticates at Microsoft and the issued token represents that user (ADR-060 §"Decision"): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
+[^7]: SharePoint's device-code flow is user-delegated - a specific human authenticates at Microsoft and the issued token represents that user (ADR-060 §"Decision"): <https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code>
 
 [^8]: GLPI 11 is self-hosted; its High-Level REST API v2 OAuth endpoints are `<instance>/api.php/authorize` and `<instance>/api.php/token`, derived from the user's instance URL: <https://help.glpi-project.org/documentation/modules/configuration/general/api/restful-api-v2>

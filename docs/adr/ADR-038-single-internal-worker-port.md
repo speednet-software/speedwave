@@ -32,7 +32,7 @@ None of these pillars references a port. The hub's SSRF protection layer (`valid
 
 ### Why port uniqueness stops paying rent
 
-Each container runs in its own network namespace. Two containers listening on the same port is only a conflict when those ports share a namespace (same host, same bridge without NAT). On Speedwave's compose networks, `mcp-slack` and `mcp-playwright` can both bind `:3000` and there is no ambiguity — the hub reaches them as `http://mcp-slack:3000` vs `http://mcp-playwright:3000`. The port number carries no information that the DNS service name does not already carry.
+Each container runs in its own network namespace[^9]. Two containers listening on the same port is only a conflict when those ports share a namespace (same host, same bridge without NAT). On Speedwave's compose networks, `mcp-slack` and `mcp-playwright` can both bind `:3000` and there is no ambiguity — the hub reaches them as `http://mcp-slack:3000` vs `http://mcp-playwright:3000`. The port number carries no information that the DNS service name does not already carry.
 
 Keeping unique ports therefore costs complexity (template variables, emitter branches, reserved ranges, plugin contract drift) for a benefit (port-based network policies) that Speedwave does not implement and has no roadmap to implement[^8].
 
@@ -94,14 +94,16 @@ Rejected because it adds a discovery mechanism (the hub needs to learn which por
 
 [^2]: Plugin contract table in `CLAUDE.md`: https://github.com/speednet-software/speedwave/blob/dev/CLAUDE.md#plugins
 
-[^3]: Security architecture overview: https://github.com/speednet-software/speedwave/blob/dev/docs/architecture/security.md
+[^3]: Security invariants: https://github.com/speednet-software/speedwave/blob/dev/.claude/rules/security.md
 
-[^4]: Container hardening reference: https://github.com/speednet-software/speedwave/blob/dev/docs/architecture/containers.md
+[^4]: Container hardening invariants: https://github.com/speednet-software/speedwave/blob/dev/.claude/rules/security.md
 
 [^5]: `mcp-servers/shared/src/security.ts`, function `validateWorkerUrl`: https://github.com/speednet-software/speedwave/blob/dev/mcp-servers/shared/src/security.ts
 
-[^6]: `containers/compose.template.yml` — no worker has a `ports:` mapping to the host: https://github.com/speednet-software/speedwave/blob/dev/containers/compose.template.yml
+[^6]: `containers/compose.template.yml` - no worker has a `ports:` mapping to the host: https://github.com/speednet-software/speedwave/blob/dev/containers/compose.template.yml
 
 [^7]: ADR-036, Self-Declaring Worker Policy: https://github.com/speednet-software/speedwave/blob/dev/docs/adr/ADR-036-self-declaring-worker-policy.md
 
-[^8]: OWASP container security guidance — network segmentation operates at the network/namespace level, not per-port within a shared bridge: https://owasp.org/www-project-docker-top-10/
+[^8]: OWASP container security guidance - network segmentation operates at the network/namespace level, not per-port within a shared bridge: https://owasp.org/www-project-docker-top-10/
+
+[^9]: Docker Engine networking - each container gets its own network namespace with its own interfaces and port space when attached to a bridge network: https://docs.docker.com/engine/network/drivers/bridge/

@@ -11,8 +11,8 @@ Use a **dev + main** branching model with **release-please** for automated versi
 
 - `dev` is the default integration branch — every feature/fix PR merges there and runs full CI before anything reaches `main`. Without it, broken cross-language integrations could block release prep.
 - Draft GitHub Releases provide a review gate (artifacts built and uploaded, published manually) without the overhead of a staging branch.
-- release-please derives the version from conventional commits, so the version is never manually chosen and stays tied to commit history.
-- GitHub Releases give free CDN hosting plus automatic stable/pre-release filtering, so no custom update server is needed.
+- release-please derives the version from conventional commits[^1], so the version is never manually chosen and stays tied to commit history.
+- GitHub Releases give free CDN hosting plus automatic stable/pre-release filtering[^2], so no custom update server is needed.
 
 ## How releases flow
 
@@ -29,12 +29,12 @@ Use a **dev + main** branching model with **release-please** for automated versi
 - **Outputs:** macOS `.dmg` + `.app.tar.gz`; Windows `.msi` + `.msi.zip` + NSIS `-setup.exe` + `.nsis.zip`. Updater bundles are minisign-signed; `.sig` files accompany the signed assets.
 - **Asset verification** is exact named-asset matching, not a numeric threshold: 6 signed + 6 unsigned (one being `latest.json`) + 6 `.sig` files, each checked by name — `scripts/verify-release-assets.sh`.
 - **`latest.json` platform keys required by the verifier:** `darwin-aarch64`, `darwin-aarch64-app`, `darwin-x86_64`, `darwin-x86_64-app`, `windows-x86_64`, `windows-x86_64-msi`, `windows-x86_64-nsis` (each must have a non-empty signature and a URL under the releases path).
-- **macOS notarization is wired in.** `desktop-release.yml` consumes `APPLE_ID`/`APPLE_PASSWORD` for notarization, and `scripts/sign-bundled-binaries.sh` signs every bundled Mach-O so the bundle passes the Apple Notary Service.
+- **macOS notarization is wired in.** `desktop-release.yml` consumes `APPLE_ID`/`APPLE_PASSWORD` for notarization, and `scripts/sign-bundled-binaries.sh` signs every bundled Mach-O so the bundle passes the Apple Notary Service[^3].
 
 ## Update channels
 
-- **Desktop:** Tauri's updater checks `https://github.com/speednet-software/speedwave/releases/latest/download/latest.json` on startup and on manual check — `desktop/src-tauri/src/updater.rs` (`STABLE_ENDPOINT`, `build_updater`). It uses strict semver comparison (remote > current), so downgrades are blocked, and verifies the minisign signature before applying any update.
-- **CLI:** `speedwave self-update` downloads the latest GitHub release and replaces the binary in place — `crates/speedwave-cli/src/main.rs` (`run_self_update`, via the `self_update` crate). On macOS the CLI is bundled inside `Speedwave.app` (`Contents/Resources/cli/speedwave`) and copied to `~/.local/bin/speedwave` by `desktop/src-tauri/src/setup_wizard.rs` (`link_cli` → `copy_cli_binary`), so updating the Desktop app re-copies the fresh CLI; a binary that detects it is itself running from inside an `.app` bundle (`is_app_bundle`) refuses self-update and points the user at the Desktop app instead.
+- **Desktop:** Tauri's updater checks `https://github.com/speednet-software/speedwave/releases/latest/download/latest.json` on startup and on manual check — `desktop/src-tauri/src/updater.rs` (`STABLE_ENDPOINT`, `build_updater`). It uses strict semver comparison (remote > current), so downgrades are blocked, and verifies the minisign signature before applying any update[^4].
+- **CLI:** `speedwave self-update` downloads the latest GitHub release and replaces the binary in place — `crates/speedwave-cli/src/main.rs` (`run_self_update`, via the `self_update` crate[^5]). On macOS the CLI is bundled inside `Speedwave.app` (`Contents/Resources/cli/speedwave`) and copied to `~/.local/bin/speedwave` by `desktop/src-tauri/src/setup_wizard.rs` (`link_cli` → `copy_cli_binary`), so updating the Desktop app re-copies the fresh CLI; a binary that detects it is itself running from inside an `.app` bundle (`is_app_bundle`) refuses self-update and points the user at the Desktop app instead.
 
 ## Version synchronization
 
@@ -58,3 +58,13 @@ For a critical bug in the latest release while `dev` holds unshippable work: bra
 - [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/) and [signature verification](https://v2.tauri.app/plugin/updater/#security)
 - [tauri-apps/tauri-action](https://github.com/tauri-apps/tauri-action)
 - ADR-059 (drop Linux support), ADR-066 (LockedRuntime per-project compose lock)
+
+[^1]: [release-please: how commits map to version bumps](https://github.com/googleapis/release-please#how-should-i-write-my-commits) - `fix:`/`feat:`/breaking-change commits drive patch/minor/major bumps from conventional commit history.
+
+[^2]: [GitHub Docs - Managing releases in a repository](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) - releases can be marked pre-release, and GitHub auto-assigns the "latest" label by semantic version.
+
+[^3]: [Apple Developer - Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution) - Apple's Notary Service scans submitted binaries and issues a notarization ticket required for Gatekeeper to accept software distributed outside the Mac App Store.
+
+[^4]: [Tauri Updater Plugin](https://v2.tauri.app/plugin/updater/) - the updater compares semver (update version must be greater than the current version) and requires a signature, generated with Tauri's Minisign-based signer, before an update is applied.
+
+[^5]: [`self_update` crate documentation](https://docs.rs/self_update/latest/self_update/) - provides updaters that replace a Rust executable in place from release-distribution backends, including GitHub releases.

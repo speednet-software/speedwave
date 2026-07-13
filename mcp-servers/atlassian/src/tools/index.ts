@@ -1,12 +1,5 @@
 /**
- * Atlassian tools aggregator — 33 tools (camelCase names) across:
- * - Jira issues (8): searchIssues, getIssue, createIssue, updateIssue, getTransitions, transitionIssue, assignIssue, getMyself
- * - Jira comments (3): addComment, getComments, addWorklog
- * - Jira projects (3): listProjects, getProject, listIssueTypes
- * - Jira Agile (6): listBoards, getBoard, getBoardConfiguration, listSprints, getSprint, moveIssuesToSprint
- * - Confluence spaces (2): listSpaces, getSpace
- * - Confluence pages (6): searchPages, getPage, getPageByTitle, createPage, updatePage, getPageChildren
- * - Confluence content (5): addPageComment, getPageComments, addPageLabels, getPageLabels, listAttachments
+ * Atlassian tools aggregator — 35 tools: Jira issues/comments/projects/Agile, Confluence pages.
  * @module mcp-atlassian/tools
  */
 
@@ -22,9 +15,7 @@ import { createConfluenceContentTools } from './confluence-content-tools.js';
 
 /**
  * Build the full list of Atlassian tool definitions.
- * @param client - The Atlassian client (`null` when the service is not configured —
- *   tools are still listed, but every handler returns a "not configured" error).
- * @returns All tool definitions for the worker.
+ * @param client - The Atlassian client (`null` when not configured — every handler then errors).
  */
 export function createToolDefinitions(client: AtlassianClient | null): ToolDefinition[] {
   return [

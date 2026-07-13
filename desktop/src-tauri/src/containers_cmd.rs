@@ -124,7 +124,7 @@ pub(crate) fn teardown_only(
     rt: &speedwave_runtime::runtime::LockedRuntime,
 ) -> Option<String> {
     rt.compose_down(new_project).err().map(|e| {
-        log::warn!("teardown new '{new_project}' failed: {e}");
+        log::warn!("failed to tear down new project '{new_project}': {e}");
         format!("teardown of '{new_project}' failed: {e}")
     })
 }
@@ -166,18 +166,12 @@ fn record_teardown_intent(project: &str) {
         .unwrap_or_default();
     if !entries.iter().any(|e| e == project) {
         entries.push(project.to_string());
-        if let Err(e) = write_intents_atomic(&path, &entries) {
-            log::warn!("could not record teardown intent for '{project}': {e}");
+        if let Err(e) =
+            speedwave_runtime::fs_perms::write_shared_file_atomic(&path, &entries.join("\n"))
+        {
+            log::warn!("failed to record teardown intent for '{project}': {e}");
         }
     }
-}
-
-/// tmp + rename: this file exists ONLY for crash recovery, so a torn write
-/// (fs::write truncates first on Windows) would defeat its purpose.
-fn write_intents_atomic(path: &std::path::Path, entries: &[String]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, entries.join("\n"))?;
-    std::fs::rename(&tmp, path)
 }
 
 fn clear_teardown_intent(project: &str) {
@@ -187,23 +181,29 @@ fn clear_teardown_intent(project: &str) {
         return;
     };
     let entries: Vec<&str> = content.lines().filter(|l| *l != project).collect();
-    let entries: Vec<String> = entries.into_iter().map(str::to_string).collect();
     let result = if entries.is_empty() {
-        std::fs::remove_file(&path)
+        std::fs::remove_file(&path).map_err(anyhow::Error::from)
     } else {
-        write_intents_atomic(&path, &entries)
+        speedwave_runtime::fs_perms::write_shared_file_atomic(&path, &entries.join("\n"))
     };
     if let Err(e) = result {
-        log::warn!("could not clear teardown intent for '{project}': {e}");
+        log::warn!("failed to clear teardown intent for '{project}': {e}");
     }
 }
 
-/// Projects whose background teardown a previous process never finished.
+/// A `write-*` atomic-write tempfile older than this was orphaned by a crash
+/// between tempfile creation and rename, never an in-flight write.
+const STALE_ATOMIC_WRITE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Projects whose background teardown a previous process never finished. Also
+/// sweeps orphaned atomic-write tempfiles left in the data dir by a crash
+/// between tempfile creation and rename — no other path cleans those up.
 pub(crate) fn crashed_teardown_intents() -> Vec<String> {
+    speedwave_runtime::fs_perms::sweep_stale_atomic_write_temp_files(
+        speedwave_runtime::consts::data_dir(),
+        STALE_ATOMIC_WRITE_TEMP_AGE,
+    );
     let path = teardown_intents_path();
-    // write_intents_atomic writes to .tmp then renames; a crash between those
-    // two steps leaves the .tmp behind permanently — clean it up now.
-    let _ = std::fs::remove_file(path.with_extension("tmp"));
     std::fs::read_to_string(&path)
         .map(|c| c.lines().map(str::to_string).collect())
         .unwrap_or_default()
@@ -216,13 +216,13 @@ fn spawn_background_teardown_with(
     record_teardown_intent(&prev);
     let project = prev.clone();
     let handle = std::thread::spawn(move || {
-        log::info!("background teardown: stopping previous project '{project}'");
+        log::info!("stopping previous project '{project}' in the background");
         match down(&project) {
             Ok(()) => {
-                log::info!("background teardown: '{project}' stopped");
+                log::info!("background teardown of '{project}' stopped");
                 clear_teardown_intent(&project);
             }
-            Err(e) => log::warn!("background teardown: compose_down('{project}') failed: {e}"),
+            Err(e) => log::warn!("background compose_down('{project}') failed: {e}"),
         }
     });
     if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
@@ -231,7 +231,7 @@ fn spawn_background_teardown_with(
     }
 }
 
-/// Joins every in-flight background teardown — exit path only.
+/// Joins every in-flight background teardown — callers: exit path and factory reset.
 pub(crate) fn drain_pending_teardowns() {
     let handles: Vec<(String, std::thread::JoinHandle<()>)> =
         pending_teardowns_lock().drain().collect();
@@ -343,7 +343,8 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     });
     let expected_paths =
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_telemetry_locked(resolved.telemetry.any_locked);
     // OS prerequisite check
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
@@ -418,18 +419,18 @@ pub async fn run_system_check() -> Result<(), String> {
 #[tauri::command]
 pub async fn check_runtime() -> Result<String, String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("check_runtime: starting");
+        log::info!("checking runtime status");
         let status = setup_wizard::check_runtime().map_err(|e| {
-            log::error!("check_runtime: error: {e}");
+            log::error!("failed to check runtime status: {e}");
             e.to_string()
         })?;
         match status {
             setup_wizard::RuntimeStatus::Ready => {
-                log::info!("check_runtime: Ready");
+                log::info!("runtime status is Ready");
                 Ok("Ready".to_string())
             }
             setup_wizard::RuntimeStatus::NotInstalled => {
-                log::info!("check_runtime: NotInstalled");
+                log::info!("runtime status is NotInstalled");
                 Ok("NotInstalled".to_string())
             }
         }
@@ -441,9 +442,9 @@ pub async fn check_runtime() -> Result<String, String> {
 #[tauri::command]
 pub async fn init_vm() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("init_vm: starting");
+        log::info!("initializing VM");
         setup_wizard::init_vm().map_err(|e| {
-            log::error!("init_vm: error: {e}");
+            log::error!("failed to initialize VM: {e}");
             e.to_string()
         })
     })
@@ -454,9 +455,9 @@ pub async fn init_vm() -> Result<(), String> {
 #[tauri::command]
 pub async fn create_project(name: String, dir: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        log::info!("create_project: name={name}, dir={dir}");
+        log::info!("creating project name={name}, dir={dir}");
         setup_wizard::create_project(&name, &dir).map_err(|e| {
-            log::error!("create_project: error: {e}");
+            log::error!("failed to create project: {e}");
             e.to_string()
         })
     })
@@ -467,9 +468,9 @@ pub async fn create_project(name: String, dir: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn link_cli() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("link_cli: starting");
+        log::info!("linking CLI");
         setup_wizard::link_cli().map_err(|e| {
-            log::error!("link_cli: error: {e}");
+            log::error!("failed to link CLI: {e}");
             e.to_string()
         })
     })
@@ -522,9 +523,9 @@ pub async fn add_project(
         let name = name.clone();
         let dir = dir.clone();
         move || {
-            log::info!("add_project: name={name}, dir={dir}");
+            log::info!("adding project name={name}, dir={dir}");
             speedwave_runtime::project::add_project(&name, &dir).map_err(|e| {
-                log::error!("add_project: error: {e}");
+                log::error!("failed to add project: {e}");
                 e.to_string()
             })
         }
@@ -560,15 +561,15 @@ pub async fn add_project(
             // No provider is a valid state ("choose a provider" screen) —
             // skip starting containers rather than let render_compose bail.
             if project_llm_is_unconfigured(proj)? {
-                log::info!("add_project: '{proj}' has no LLM provider — skipping container start");
+                log::info!("'{proj}' has no LLM provider — skipping container start");
                 return Ok(());
             }
             // Eager-start host workers before compose render — live WORKER_*_URLs
             // prevent the first-message container recreate.
             crate::ensure_oauth_running(&oauth_arc, proj);
-            log::info!("add_project: starting containers for project={proj}");
+            log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
-                log::error!("add_project: start_containers failed: {e}");
+                log::error!("failed to start containers: {e}");
                 e.to_string()
             })
         })
@@ -591,7 +592,7 @@ pub async fn add_project(
     // Rebind chat session
     if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
         // Containers running but chat failed — transient, still emit succeeded
-        log::warn!("add_project: rebind_chat failed: {e}");
+        log::warn!("rebind_chat failed after adding project: {e}");
     }
 
     // Previous project is stopped in the background.
@@ -615,11 +616,11 @@ pub(crate) fn remove_project_core(
 ) -> Result<(), String> {
     if rt.is_available() {
         rt.compose_down(name).map_err(|e| {
-            log::error!("remove_project: compose_down('{name}') failed: {e}");
+            log::error!("compose_down('{name}') failed: {e}");
             format!("Failed to stop containers for '{name}': {e}")
         })?;
     }
-    log::info!("remove_project: name={name}");
+    log::info!("removing project name={name}");
     remove_fn(name)
 }
 
@@ -631,7 +632,7 @@ pub async fn remove_project(name: String) -> Result<(), String> {
         let rt = speedwave_runtime::runtime::detect_runtime();
         remove_project_core(&name, &rt, &|n| {
             speedwave_runtime::project::remove_project(n).map_err(|e| {
-                log::error!("remove_project: error: {e}");
+                log::error!("failed to remove project: {e}");
                 e.to_string()
             })
         })
@@ -651,9 +652,9 @@ pub async fn is_setup_complete() -> Result<bool, String> {
 #[tauri::command]
 pub async fn build_images() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
-        log::info!("build_images: starting");
+        log::info!("building images");
         setup_wizard::build_images().map_err(|e| {
-            log::error!("build_images: error: {e}");
+            log::error!("failed to build images: {e}");
             e.to_string()
         })
     })
@@ -687,9 +688,9 @@ pub async fn start_containers(
                 )?;
             }
         }
-        log::info!("start_containers: project={project}");
+        log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
-            log::error!("start_containers: error: {e}");
+            log::error!("failed to start containers: {e}");
             e.to_string()
         })
     })
@@ -709,7 +710,7 @@ pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Re
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         setup_wizard::defer_container_start(&project).map_err(|e| {
-            log::error!("defer_container_start: error: {e}");
+            log::error!("failed to defer container start: {e}");
             e.to_string()
         })
     })
@@ -724,25 +725,25 @@ pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Re
 pub async fn check_containers_running(project: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
-        log::info!("check_containers_running: project={project}");
+        log::info!("checking whether containers are running for project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
         // Intentional double check: is_available() gives a clean "no
         // containers" signal where compose_ps() would Err (confusing UX).
         if !rt.is_available() {
-            log::warn!("check_containers_running: runtime not available");
+            log::warn!("runtime not available");
             return Ok(false);
         }
         // A deferred-start project (no LLM provider yet) has no compose.yml
         // at all — compose_ps would Err rather than report "not running".
         if !speedwave_runtime::runtime::project_has_compose_file(&project) {
-            log::info!("check_containers_running: no compose.yml yet for '{project}'");
+            log::info!("no compose.yml yet for '{project}'");
             return Ok(false);
         }
         let containers = rt.compose_ps(&project).map_err(|e| {
-            log::error!("check_containers_running: error: {e}");
+            log::error!("failed to check containers running: {e}");
             e.to_string()
         })?;
-        log::info!("check_containers_running: {} containers", containers.len());
+        log::info!("found {} running containers", containers.len());
         Ok(!containers.is_empty())
     })
     .await
@@ -758,40 +759,34 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
         .ok()
         .and_then(|c| c.active_project);
     if active.as_deref() != Some(project) {
-        log::debug!(
-            "recreate_project_containers_if_running: '{project}' is not the active project — skipping"
-        );
+        log::debug!("'{project}' is not the active project — skipping recreate");
         return;
     }
     // Bundle reconcile may be rebuilding images. compose_up_recreate against a
     // missing image tag emits "image not available" to the user. Wait first.
     if let Err(e) = ensure_images_ready() {
-        log::warn!("recreate_project_containers_if_running: images not ready for '{project}': {e}");
+        log::warn!("images not ready for '{project}' — skipping recreate: {e}");
         return;
     }
     let rt = speedwave_runtime::runtime::detect_runtime();
     if !rt.is_available() {
-        log::debug!("recreate_project_containers_if_running: runtime not available — skipping");
+        log::debug!("runtime not available — skipping recreate");
         return;
     }
     let running = match rt.compose_ps(project) {
         Ok(c) => !c.is_empty(),
         Err(e) => {
-            log::debug!(
-                "recreate_project_containers_if_running: compose_ps failed ({e}) — skipping"
-            );
+            log::debug!("compose_ps failed ({e}) — skipping recreate");
             return;
         }
     };
     if !running {
-        log::debug!("recreate_project_containers_if_running: '{project}' not running — skipping");
+        log::debug!("'{project}' not running — skipping recreate");
         return;
     }
     // Build OUTSIDE the compose lock (ADR-066).
     if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
-        log::warn!(
-            "recreate_project_containers_if_running: pre-build failed for '{project}': {sanitized}"
-        );
+        log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
         return;
     }
     use crate::types::IntoAnyhow;
@@ -806,7 +801,7 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
             log::info!("recreated containers for '{project}' so the hub re-discovers");
         }
         Err(e) => {
-            log::warn!("recreate_project_containers_if_running: failed for '{project}': {e}");
+            log::warn!("failed to recreate containers for '{project}': {e}");
         }
     }
 }
@@ -826,14 +821,14 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
                 )?;
             }
         }
-        log::info!("recreate_project_containers: project={project}");
+        log::info!("recreating containers for project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
         // Lazy build (ADR-057).
         if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, &project)
         {
-            log::error!("recreate_project_containers: image build failed: {sanitized}");
+            log::error!("image build failed: {sanitized}");
             return Err(format!("Image build failed: {sanitized}"));
         }
 
@@ -847,7 +842,7 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         })
         .map_err(|e| e.to_string())?;
 
-        log::info!("recreate_project_containers: done for project={project}");
+        log::info!("finished recreating containers for project={project}");
         Ok(())
     })
     .await
@@ -862,31 +857,67 @@ pub async fn factory_reset(
     app: tauri::AppHandle,
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
     mcp_os: tauri::State<'_, SharedMcpOs>,
+    oauth: tauri::State<'_, SharedOauth>,
+    clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
     // 1. Stop mcp-os watchdog
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // 2. Take the subsystems out of their guards; the actual stops run inside the blocking
-    //    wipe below. IDE Bridge stop() does synchronous relay teardown (ADR-079) that would
-    //    otherwise block this async command — and it's pointless here, since the VM wipe
-    //    kills the transient relay units anyway (same reason mcp-os skips remove_relay).
-    let ide_bridge_to_stop = ide_bridge.lock().ok().and_then(|mut guard| guard.take());
-    let mcp_os_to_stop = mcp_os.lock().ok().and_then(|mut guard| guard.take());
+    // 1b. Stop the oauth watchdog too, so it cannot respawn workers mid-wipe.
+    crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // 3. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
-    let result = tokio::task::spawn_blocking(move || {
-        if let Some(mut bridge) = ide_bridge_to_stop {
+    // 2. Stop IDE Bridge
+    if let Ok(mut guard) = ide_bridge.lock() {
+        if let Some(mut bridge) = guard.take() {
             if let Err(e) = bridge.stop() {
-                log::warn!("factory_reset: IDE Bridge stop: {e}");
+                log::warn!("failed to stop IDE Bridge during factory reset: {e}");
             }
         }
-        // Kill child, join drain threads, release log handles — parity with run_exit_cleanup.
-        if let Some(proc) = mcp_os_to_stop {
-            let _ = crate::reconcile::stop_worker("factory_reset: mcp-os", proc);
+    }
+
+    // 3. Stop mcp-os (kill child, join drain threads, release log handles);
+    //    explicit stop + cleanup_files keeps parity with run_exit_cleanup.
+    if let Ok(mut guard) = mcp_os.lock() {
+        if let Some(mut proc) = guard.take() {
+            if let Err(e) = proc.stop() {
+                log::warn!("failed to stop mcp-os during factory reset: {e}");
+            }
+            proc.cleanup_files();
         }
-        log::info!("factory_reset: starting wipe");
+    }
+
+    // 3b. Stop per-project oauth workers — they hold token-file handles under the
+    // data dir and the exit path already stops them (parity).
+    if let Ok(mut map) = oauth.lock() {
+        for (project, mut proc) in map.drain() {
+            if let Err(e) = proc.stop() {
+                log::warn!("oauth worker for '{project}' stop error during factory reset: {e}");
+            }
+            proc.cleanup_files();
+        }
+    }
+
+    // 3c. Stop the clipboard-bridge watcher — Windows cannot delete a watched
+    // directory (os error 5), which made wipe_data_dir fail under claude-home.
+    if let Ok(mut guard) = clipboard.lock() {
+        drop(guard.take());
+    }
+
+    // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
+    let result = tokio::task::spawn_blocking(|| {
+        // 3d. Join in-flight background teardowns so the wipe does not race them,
+        // bounded — a hung compose_down must not wedge the reset (thread keeps draining).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drain_pending_teardowns();
+            let _ = tx.send(());
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(30)).is_err() {
+            log::warn!("background teardown drain did not finish within 30s, continuing with wipe");
+        }
+        log::info!("starting factory reset wipe");
         setup_wizard::factory_reset().map_err(|e| {
-            log::error!("factory_reset: error: {e}");
+            log::error!("factory reset failed: {e}");
             e.to_string()
         })
     })
@@ -896,7 +927,7 @@ pub async fn factory_reset(
     // 5. Always restart: success → clean wizard start (data dir gone);
     //    failure → recover subsystems (data dir may partially exist).
     if let Err(ref e) = result {
-        log::error!("factory_reset: wipe failed ({e}), restarting to recover");
+        log::error!("factory reset wipe failed ({e}), restarting to recover");
     }
     app.restart();
 }
@@ -924,7 +955,7 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     if let Some(ref url) = llm.base_url {
         let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
         if let Err(e) = crate::llm_cmd::validate_llm_base_url(&normalized) {
-            log::warn!("get_llm_config: stored base_url '{url}' fails current SSRF policy: {e}");
+            log::warn!("stored base_url '{url}' fails current SSRF policy: {e}");
         }
     }
 
@@ -993,7 +1024,9 @@ fn build_telemetry_response(
 }
 
 /// Applies each set field unless MDM locked it; returns the names of any locked
-/// fields the update tried to set (caller rejects the write when non-empty).
+/// fields the update tried to actually change (caller rejects the write when
+/// non-empty). A locked field submitted with its current resolved value is a
+/// no-op, never a rejection — it lets the frontend resend unlocked fields.
 fn apply_telemetry_update_with(
     user: &mut config::TelemetryConfig,
     update: TelemetryConfigUpdate,
@@ -1002,10 +1035,12 @@ fn apply_telemetry_update_with(
     use speedwave_runtime::telemetry_env::TelemetryField as F;
     let mut rejected: Vec<&'static str> = Vec::new();
     macro_rules! set_field {
-        ($name:literal, $field:expr, $present:expr, $assign:expr) => {
+        ($name:literal, $field:expr, $present:expr, $unchanged:expr, $assign:expr) => {
             if $present {
                 if resolved.is_field_locked($field) {
-                    rejected.push($name);
+                    if !$unchanged {
+                        rejected.push($name);
+                    }
                 } else {
                     $assign;
                 }
@@ -1016,33 +1051,49 @@ fn apply_telemetry_update_with(
         "enabled",
         F::Enabled,
         update.enabled.is_some(),
+        update.enabled == Some(resolved.enabled),
         user.enabled = update.enabled
     );
     // endpoint tri-state: Some(None) clears, Some(Some) sets.
     if let Some(e) = update.endpoint {
-        set_field!("endpoint", F::Endpoint, true, user.endpoint = e);
+        set_field!(
+            "endpoint",
+            F::Endpoint,
+            true,
+            e == resolved.endpoint,
+            user.endpoint = e
+        );
     }
     set_field!(
         "protocol",
         F::Protocol,
         update.protocol.is_some(),
+        update.protocol == Some(resolved.protocol),
         user.protocol = update.protocol
     );
     set_field!(
         "export_metrics",
         F::ExportMetrics,
         update.export_metrics.is_some(),
+        update.export_metrics == Some(resolved.export_metrics),
         user.export_metrics = update.export_metrics
     );
     set_field!(
         "export_logs",
         F::ExportLogs,
         update.export_logs.is_some(),
+        update.export_logs == Some(resolved.export_logs),
         user.export_logs = update.export_logs
     );
     // Headers tri-state: Some(None) clears, Some(Some) sets.
     if let Some(h) = update.headers {
-        set_field!("headers", F::Headers, true, user.headers = h);
+        set_field!(
+            "headers",
+            F::Headers,
+            true,
+            h == resolved.headers,
+            user.headers = h
+        );
     }
     // resource_attributes tri-state: Some(None) clears, Some(Some) sets.
     if let Some(ra) = update.resource_attributes {
@@ -1050,6 +1101,7 @@ fn apply_telemetry_update_with(
             "resource_attributes",
             F::ResourceAttributes,
             true,
+            ra == resolved.resource_attributes,
             user.resource_attributes = ra
         );
     }
@@ -1057,30 +1109,35 @@ fn apply_telemetry_update_with(
         "include_account_uuid",
         F::IncludeAccountUuid,
         update.include_account_uuid.is_some(),
+        update.include_account_uuid == Some(resolved.include_account_uuid),
         user.include_account_uuid = update.include_account_uuid
     );
     set_field!(
         "log_user_prompts",
         F::LogUserPrompts,
         update.log_user_prompts.is_some(),
+        update.log_user_prompts == Some(resolved.log_user_prompts),
         user.log_user_prompts = update.log_user_prompts
     );
     set_field!(
         "log_assistant_responses",
         F::LogAssistantResponses,
         update.log_assistant_responses.is_some(),
+        update.log_assistant_responses == Some(resolved.log_assistant_responses),
         user.log_assistant_responses = update.log_assistant_responses
     );
     set_field!(
         "log_tool_details",
         F::LogToolDetails,
         update.log_tool_details.is_some(),
+        update.log_tool_details == Some(resolved.log_tool_details),
         user.log_tool_details = update.log_tool_details
     );
     set_field!(
         "log_raw_api_bodies",
         F::LogRawApiBodies,
         update.log_raw_api_bodies.is_some(),
+        update.log_raw_api_bodies == Some(resolved.log_raw_api_bodies),
         user.log_raw_api_bodies = update.log_raw_api_bodies
     );
     // Interval tri-state: Some(None) clears, Some(Some) sets.
@@ -1089,6 +1146,7 @@ fn apply_telemetry_update_with(
             "metric_export_interval_ms",
             F::MetricExportInterval,
             true,
+            v == resolved.metric_export_interval_ms,
             user.metric_export_interval_ms = v
         );
     }
@@ -1097,10 +1155,24 @@ fn apply_telemetry_update_with(
             "logs_export_interval_ms",
             F::LogsExportInterval,
             true,
+            v == resolved.logs_export_interval_ms,
             user.logs_export_interval_ms = v
         );
     }
     rejected
+}
+
+/// True when either layer sets a non-empty headers value. Symmetric across
+/// user and MDM sources — an empty-string policy must never read as "configured".
+fn compute_has_headers(
+    user: Option<&config::TelemetryConfig>,
+    managed: Option<&speedwave_runtime::config::ManagedTelemetryConfig>,
+) -> bool {
+    let non_empty = |h: &String| !h.is_empty();
+    user.and_then(|t| t.headers.as_ref()).is_some_and(non_empty)
+        || managed
+            .and_then(|m| m.headers.as_ref())
+            .is_some_and(non_empty)
 }
 
 /// Returns the effective telemetry the container will use (user + MDM merge),
@@ -1113,12 +1185,7 @@ pub fn get_telemetry_config() -> Result<TelemetryConfigResponse, String> {
         .and_then(|m| m.telemetry);
     let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())
         .map_err(|e| e.to_string())?;
-    let has_headers = user_config
-        .telemetry
-        .as_ref()
-        .and_then(|t| t.headers.as_ref())
-        .is_some_and(|h| !h.is_empty())
-        || managed.as_ref().and_then(|m| m.headers.as_ref()).is_some();
+    let has_headers = compute_has_headers(user_config.telemetry.as_ref(), managed.as_ref());
     Ok(build_telemetry_response(&resolved, has_headers))
 }
 
@@ -1169,7 +1236,7 @@ pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
         Err(e) => {
             // UI verdict stays boolean; the reason (DNS/TLS/refused/timeout) is only
             // useful in diagnostics, so surface it at debug rather than discard it.
-            log::debug!("probe_otlp_endpoint: collector unreachable: {e}");
+            log::debug!("OTLP collector unreachable: {e}");
             Ok(false)
         }
     }
@@ -1228,7 +1295,7 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         canonicalize_provider_base_urls(providers);
     }
     log::info!(
-        "update_llm_config: provider={:?} model={:?} context_tokens={:?} \
+        "updating LLM config: provider={:?} model={:?} context_tokens={:?} \
          api_key_change={} custom_headers_change={}",
         update.provider,
         update.model,
@@ -1259,7 +1326,7 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         speedwave_runtime::compose::validate_base_url(&normalized).map_err(|e| e.to_string())?;
         let port_str = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
         log::info!(
-            "update_llm_config: base_url={}://{}{port_str}",
+            "updating LLM config base_url={}://{}{port_str}",
             parsed.scheme(),
             parsed.host_str().unwrap_or("<no-host>"),
         );
@@ -1337,7 +1404,7 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         apply_llm_config(&mut user_config, merged)?;
         config::save_user_config(&user_config)?;
         log::info!(
-            "update_llm_config: persisted to active_project={:?}",
+            "persisted LLM config to active_project={:?}",
             user_config.active_project
         );
         Ok(())
@@ -1467,7 +1534,7 @@ fn validate_provider_entries(
 #[tauri::command]
 pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
     log::info!(
-        "set_llm_provider_key: provider_id={provider_id} action={}",
+        "setting LLM provider key provider_id={provider_id} action={}",
         if key.as_deref().is_some_and(|k| !k.trim().is_empty()) {
             "write"
         } else {
@@ -1511,9 +1578,7 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
             } else {
                 // update_llm_config normally rewrites providers wholesale; a
                 // direct caller leaves has_api_key stuck false — surface that.
-                log::warn!(
-                    "set_llm_provider_key: provider '{provider_id}' not in config — has_api_key not updated"
-                );
+                log::warn!("provider '{provider_id}' not in config — has_api_key not updated");
             }
         }
         config::save_user_config(&user_config)?;
@@ -1526,7 +1591,7 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
 /// can't: it merges `active.or(stored.active)`, treating None as "unchanged".
 #[tauri::command]
 pub fn clear_active_llm_provider() -> Result<(), String> {
-    log::info!("clear_active_llm_provider");
+    log::info!("clearing active LLM provider");
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let active = user_config
@@ -1612,7 +1677,7 @@ fn apply_credential_action(
             let path = speedwave_runtime::compose::tokens_path(project, "local-llm", file)?;
             // One syscall, no TOCTOU — `NotFound` is the expected idempotent case.
             match std::fs::remove_file(&path) {
-                Ok(()) => log::info!("update_llm_config: removed token file {}", path.display()),
+                Ok(()) => log::info!("removed LLM token file {}", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
@@ -1624,7 +1689,7 @@ fn apply_credential_action(
             let path = speedwave_runtime::compose::tokens_path(project, "local-llm", file)?;
             speedwave_runtime::fs_perms::write_restricted_file_atomic(&path, value)?;
             log::info!(
-                "update_llm_config: wrote token file {} ({} bytes)",
+                "wrote LLM token file {} ({} bytes)",
                 path.display(),
                 value.len()
             );
@@ -1660,7 +1725,7 @@ fn mirror_local_key_to_llm_namespace(
         ),
     };
     if let Err(e) = result {
-        log::warn!("update_llm_config: mirroring local api_key to llm namespace failed: {e}");
+        log::warn!("failed to mirror local api_key to llm namespace: {e}");
     }
     Ok(())
 }
@@ -1669,7 +1734,11 @@ fn mirror_local_key_to_llm_namespace(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap/expect freely"
+)]
 mod tests {
     use super::*;
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
@@ -2780,14 +2849,32 @@ mod tests {
 
     #[test]
     #[serial_test::serial(teardown_intents)]
-    fn crashed_teardown_intents_removes_stale_tmp_file() {
+    fn teardown_intent_write_is_durable_atomic_rename() {
+        let project = format!("intent-atomic-{}", std::process::id());
+        record_teardown_intent(&project);
         let path = teardown_intents_path();
-        let tmp = path.with_extension("tmp");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&tmp, "stale").unwrap();
-        assert!(tmp.exists());
-        let _ = crashed_teardown_intents();
-        assert!(!tmp.exists(), "stale .tmp file should be removed");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.lines().any(|l| l == project));
+        // No leftover tempfile from the write-then-rename.
+        let stray = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().starts_with("write-"));
+        assert!(!stray, "no tempfile should remain after atomic rename");
+        clear_teardown_intent(&project);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn teardown_intents_file_is_not_owner_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = format!("intent-perm-{}", std::process::id());
+        record_teardown_intent(&project);
+        let path = teardown_intents_path();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "shared intents file must stay world-readable");
+        clear_teardown_intent(&project);
     }
 
     #[test]
@@ -2852,9 +2939,8 @@ mod tests {
         );
     }
 
-    /// Structural: add_project's closure must check for a missing LLM provider
-    /// BEFORE calling start_containers — otherwise render_compose bails and
-    /// teardown_only is attempted against a compose.yml that was never written.
+    /// Structural: add_project must check for a missing LLM provider BEFORE start_containers, else
+    /// render_compose bails and teardown_only targets a never-written compose.yml.
     #[test]
     fn add_project_checks_no_provider_before_start() {
         let source = include_str!("containers_cmd.rs");
@@ -3373,6 +3459,41 @@ mod tests {
     }
 
     #[test]
+    fn apply_update_unchanged_locked_value_is_a_no_op_alongside_unlocked_edit() {
+        use speedwave_runtime::config::{
+            resolve_telemetry, ManagedTelemetryConfig, TelemetryConfig,
+        };
+        // MDM locks the master switch (enabled=true); endpoint stays free. A save
+        // that resends the resolved `enabled` value plus a real endpoint edit must
+        // succeed in full — the unchanged locked field is a no-op, not a rejection.
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let mut user = TelemetryConfig {
+            endpoint: Some("https://old-user:4318".into()),
+            ..Default::default()
+        };
+        let resolved = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
+        assert!(resolved.enabled, "MDM-forced enabled must resolve true");
+        let update = TelemetryConfigUpdate {
+            enabled: Some(true),
+            endpoint: Some(Some("https://new-user:4318".into())),
+            ..Default::default()
+        };
+        let rejected = apply_telemetry_update_with(&mut user, update, &resolved);
+        assert!(
+            rejected.is_empty(),
+            "resending the resolved locked value must not reject the whole save: {rejected:?}"
+        );
+        assert_eq!(
+            user.endpoint.as_deref(),
+            Some("https://new-user:4318"),
+            "the unlocked endpoint edit must still apply"
+        );
+    }
+
+    #[test]
     fn apply_update_no_rejections_when_nothing_locked() {
         use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
         let mut user = TelemetryConfig::default();
@@ -3503,6 +3624,71 @@ mod tests {
         assert!(
             !json.contains("SUPER_SECRET"),
             "headers value must never reach the frontend"
+        );
+    }
+
+    #[test]
+    fn compute_has_headers_true_for_non_empty_user_or_managed() {
+        use speedwave_runtime::config::{ManagedTelemetryConfig, TelemetryConfig};
+        let user = TelemetryConfig {
+            headers: Some("Authorization=Bearer x".into()),
+            ..Default::default()
+        };
+        assert!(compute_has_headers(Some(&user), None));
+
+        let managed = ManagedTelemetryConfig {
+            headers: Some("Authorization=Bearer y".into()),
+            ..Default::default()
+        };
+        assert!(compute_has_headers(None, Some(&managed)));
+    }
+
+    #[test]
+    fn compute_has_headers_false_for_empty_string_on_either_side() {
+        use speedwave_runtime::config::{ManagedTelemetryConfig, TelemetryConfig};
+        let user_empty = TelemetryConfig {
+            headers: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            !compute_has_headers(Some(&user_empty), None),
+            "empty-string user headers must not report as configured"
+        );
+
+        let managed_empty = ManagedTelemetryConfig {
+            headers: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(
+            !compute_has_headers(None, Some(&managed_empty)),
+            "empty-string MDM headers must not report as configured (symmetry with user branch)"
+        );
+
+        assert!(!compute_has_headers(None, None));
+    }
+
+    #[test]
+    fn factory_reset_stops_clipboard_and_drains_teardowns_before_wipe() {
+        // Ordering guard (same pattern as main.rs ExitRequested guard): the watcher
+        // stop, oauth stop, and the teardown drain must precede the wipe inside factory_reset.
+        let src = include_str!("containers_cmd.rs");
+        let body = &src[src
+            .find("pub async fn factory_reset")
+            .expect("factory_reset fn")..];
+        let oauth_stop = body.find("oauth.lock()").expect("oauth stop call");
+        let clipboard_stop = body.find("clipboard.lock()").expect("clipboard stop call");
+        let drain = body.find("drain_pending_teardowns();").expect("drain call");
+        let wipe = body
+            .find("starting factory reset wipe")
+            .expect("wipe log line");
+        assert!(oauth_stop < wipe, "oauth workers must stop before the wipe");
+        assert!(
+            clipboard_stop < wipe,
+            "clipboard bridge must stop before the wipe"
+        );
+        assert!(
+            drain < wipe,
+            "pending teardowns must be joined before the wipe"
         );
     }
 }

@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.16.0](https://github.com/speednet-software/speedwave/compare/v0.15.0...v0.16.0) (2026-07-13)
+
+
+### Features
+
+* MDM-enforced telemetry, bundled Claude Code plugins, Jira attachments, and session reliability fixes ([#912](https://github.com/speednet-software/speedwave/issues/912)) ([2d1c88c](https://github.com/speednet-software/speedwave/commit/2d1c88c96560d784d81778fda291841149f49515))
+
 ## [0.15.0](https://github.com/speednet-software/speedwave/compare/v0.14.1...v0.15.0) (2026-07-04)
 
 

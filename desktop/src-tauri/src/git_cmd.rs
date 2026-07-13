@@ -15,9 +15,8 @@ pub(crate) fn get_git_branch(project: String) -> Result<Option<String>, String> 
     Ok(read_branch(Path::new(&entry.dir)))
 }
 
-/// Runs `git rev-parse --abbrev-ref HEAD` in `dir` and returns the trimmed
-/// branch name. Any non-zero exit (not a git repo, git missing, etc.) maps
-/// to `None` so the UI silently hides the branch chip.
+/// Runs `git rev-parse --abbrev-ref HEAD` in `dir` and returns the trimmed branch name. Any
+/// non-zero exit (not a git repo, git missing, etc.) maps to `None`, hiding the UI branch chip.
 fn read_branch(dir: &Path) -> Option<String> {
     // system_command applies CREATE_NO_WINDOW on Windows so git does not flash a console.
     let output = speedwave_runtime::binary::system_command("git")
@@ -38,7 +37,7 @@ fn read_branch(dir: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
     use std::process::Command;

@@ -1,6 +1,5 @@
-//! Host addressing SSOT: container-side gateway IP + host-side bind address,
-//! cached behind a pluggable computer (Lima static on macOS, WSL-detected on
-//! Windows). See ADR-067.
+//! Host addressing SSOT: container-side gateway IP + host-side bind address, cached behind a
+//! pluggable computer (Lima static on macOS, WSL-detected on Windows). See ADR-067.
 
 /// How containers reach host listeners: dialing `gateway_ip` with the raw bind port
 /// (`Direct`), or via the ADR-079 guest relay with `relay_port_for`-translated ports.
@@ -489,7 +488,7 @@ impl HostAddressingComputer for FixedComputer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod resolver_tests {
     use super::*;
 

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, META_KEYS } from '@speedwave/mcp-shared';
 import { createReleaseTools } from './release-tools.js';
 import type { GitHubClient } from '../client.js';
 
@@ -41,7 +41,7 @@ describe('release-tools', () => {
   it('exposes exactly the 3 expected tools, all deferred', () => {
     const tools = createReleaseTools(null);
     expect(tools.map((t) => t.tool.name)).toEqual(ALL_TOOLS);
-    expect(tools.every((t) => t.tool._meta!.deferLoading === true)).toBe(true);
+    expect(tools.every((t) => t.tool._meta![META_KEYS.DEFER_LOADING] === true)).toBe(true);
   });
 
   it('marks deleteTag as destructive and createTag/createRelease as non-destructive writes', () => {

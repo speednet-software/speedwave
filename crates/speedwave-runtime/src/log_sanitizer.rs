@@ -134,7 +134,6 @@ pub fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

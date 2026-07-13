@@ -56,9 +56,8 @@ struct CalendarCLI {
 
 // MARK: - Permission Helpers
 
-/// Requests Calendar access from EventKit. Uses the macOS 14+ full-access API
-/// when available, falling back to the legacy requestAccess(to:) API.
-/// The optional timeout (default: unbounded) is a safety net for check_permission.
+/// Requests Calendar access from EventKit (macOS 14+ full-access API, falling back to legacy requestAccess(to:)).
+/// Optional timeout (default: unbounded) is a safety net for check_permission.
 func requestCalendarAccess(store: EKEventStore, timeout: TimeInterval? = nil) -> (granted: Bool, error: Error?) {
     let semaphore = DispatchSemaphore(value: 0)
     var accessGranted = false

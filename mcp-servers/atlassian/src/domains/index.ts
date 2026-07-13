@@ -1,8 +1,6 @@
 /**
- * Domain client exports for the Atlassian worker.
- *
- * Each factory takes the shared {@link AtlassianClient} and returns a small
- * interface of normalised operations; tool modules in `../tools/` compose them.
+ * Domain client exports; each factory takes the shared {@link AtlassianClient} and returns
+ * normalised operations, composed by tool modules in `../tools/`.
  * @module mcp-atlassian/domains
  */
 

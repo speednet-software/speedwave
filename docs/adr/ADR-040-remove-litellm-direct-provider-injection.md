@@ -1,7 +1,7 @@
 # ADR-040: Remove LiteLLM — Direct Local Provider Injection
 
 > **Status:** Superseded in part by [ADR-073](ADR-073-embedded-per-project-speedwave-proxy.md) — the "no proxy" decision is reversed under a hardened threat model (pinned hashes, local build, no management plane, per-project network); the credential-handling, SSRF, and repo-config rules of this ADR remain in force. The direct-injection path survives behind the `llm.proxy_enabled` kill-switch until N+2.
-> **Context:** A LiteLLM supply-chain compromise (March 2026) plus native Anthropic Messages support in local LLM servers made the LiteLLM proxy container an unnecessary attack surface.
+> **Context:** A LiteLLM supply-chain compromise (March 2026)[^1] plus native Anthropic Messages support in local LLM servers made the LiteLLM proxy container an unnecessary attack surface.
 
 ## Decision
 
@@ -9,8 +9,8 @@ Remove the LiteLLM proxy container entirely. When a local LLM provider is select
 
 ## Why
 
-- LiteLLM was found to ship a backdoor via a poisoned dependency; a `:latest` proxy image is a recurring supply-chain risk.
-- Local servers (Ollama 0.14+, LM Studio 0.4.1+, llama.cpp PR #17570, vLLM, Unsloth) now speak Anthropic Messages natively, so the translation proxy is no longer needed for the local-first use case.
+- LiteLLM was found to ship a backdoor via a poisoned dependency (compromised maintainer PyPI credentials, versions 1.82.7/1.82.8)[^1]; a `:latest` proxy image is a recurring supply-chain risk.
+- Local servers (Ollama 0.14+[^2], LM Studio 0.4.1+[^3], llama.cpp PR #17570[^4], vLLM[^5], Unsloth[^6]) now speak Anthropic Messages natively, so the translation proxy is no longer needed for the local-first use case.
 - Re-introducing an OpenAI Chat Completions translation layer would resurrect exactly the attack surface this ADR removed. Pure `/v1/chat/completions` servers are out of scope; users who need one run their own proxy and point Speedwave at it.
 
 ## What is configured
@@ -49,3 +49,15 @@ Remove the LiteLLM proxy container entirely. When a local LLM provider is select
 - **Keep LiteLLM as a translation proxy** — recurring supply-chain risk and a standing extra container/port for a capability local servers now provide natively.
 - **Support cloud LLM providers** — would require external API keys inside containers, violating the token-isolation invariant.
 - **Mount the LLM credential like a plugin token (`:ro` file)** — Claude Code reads it from the environment, not from a file path, so a mount would not be consulted.
+
+[^1]: [LiteLLM: Security Update - Suspected Supply Chain Incident (March 2026)](https://docs.litellm.ai/blog/security-update-march-2026)
+
+[^2]: [Ollama docs: Anthropic API compatibility](https://docs.ollama.com/api/anthropic-compatibility)
+
+[^3]: [LM Studio docs: Anthropic Compatibility Endpoints](https://lmstudio.ai/docs/developer/anthropic-compat)
+
+[^4]: [llama.cpp PR #17570: server: add Anthropic Messages API support](https://github.com/ggml-org/llama.cpp/pull/17570)
+
+[^5]: [vLLM docs: Claude Code integration via the Anthropic Messages API](https://docs.vllm.ai/en/latest/serving/integrations/claude_code/)
+
+[^6]: [Unsloth docs: use Unsloth as an API endpoint](https://unsloth.ai/docs/basics/api)

@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { META_KEYS } from '@speedwave/mcp-shared';
 
 const stub = {
   addComment: vi.fn(),
@@ -40,7 +41,7 @@ describe('definitions', () => {
       'listAttachments',
     ]);
     for (const { tool } of defs) {
-      expect(tool._meta).toEqual({ deferLoading: true });
+      expect(tool._meta).toEqual({ [META_KEYS.DEFER_LOADING]: true });
       expect(tool.outputSchema?.required).toContain('success');
     }
   });

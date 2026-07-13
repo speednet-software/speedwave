@@ -48,7 +48,7 @@ Operationally:
 
 ## Alternatives considered
 
-**A. Wymuś `/MT` wszędzie** — `RUSTFLAGS=-C target-feature=+crt-static` plus `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` for whisper. Equivalent to what `e2e-vm.sh` was doing. **Rejected** because static-CRT Rust binaries have known compatibility issues with native crates that expect dynamic CRT (Tauri's pulled-in C++ deps, future native crates) and produce larger binaries with no upside. The MD path keeps Speedwave on the platform-default CRT.
+**A. Wymuś `/MT` wszędzie** — `RUSTFLAGS=-C target-feature=+crt-static` plus `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` for whisper. Equivalent to what `e2e-vm.sh` was doing. **Rejected** because static-CRT Rust binaries have known compatibility issues with native crates that expect dynamic CRT (Tauri's pulled-in C++ deps, future native crates)[^11] and produce larger binaries with no upside. The MD path keeps Speedwave on the platform-default CRT.
 
 **B. Build sherpa-onnx from source with `/MD`** — fork or vendor `sherpa-onnx-sys`, swap its `download_prebuilt_libs` for a cmake build of sherpa-onnx C++ sources. **Rejected** as +5–15 min per Windows CI run, ongoing maintenance against k2-fsa's CMake structure, and a vendor patch is a load-bearing local fork.
 
@@ -63,22 +63,24 @@ This ADR should be revisited when:
 - `sherpa-onnx-sys` exposes a feature flag or env var to select MT vs MD prebuilt directly (Decision D landed). The prefetch script can then be removed and replaced by a feature in `Cargo.toml`.
 - `audio-transcription` is dropped from Windows builds (e.g., shipping Windows as a transcription-less SKU). The prefetch step can then be removed entirely.
 
-[^1]: https://github.com/tazz4843/whisper-rs — `whisper-rs` GitHub repo, MIT, wraps `whisper.cpp`.
+[^1]: https://github.com/tazz4843/whisper-rs - `whisper-rs` GitHub repo, MIT, wraps `whisper.cpp`.
 
-[^2]: https://github.com/k2-fsa/sherpa-onnx — `sherpa-onnx` GitHub repo, Apache-2.0, official ONNX-runtime wrapper.
+[^2]: https://github.com/k2-fsa/sherpa-onnx - `sherpa-onnx` GitHub repo, Apache-2.0, official ONNX-runtime wrapper.
 
-[^3]: https://docs.rs/crate/sherpa-onnx-sys/1.13.2/source/build.rs — `sherpa-onnx-sys` build script source (downloads prebuilt static-lib archive at build time).
+[^3]: https://docs.rs/crate/sherpa-onnx-sys/1.13.2/source/build.rs - `sherpa-onnx-sys` build script source (downloads prebuilt static-lib archive at build time).
 
-[^4]: https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-error-lnk2038 — Microsoft Learn: LNK2038 mismatch detected for 'RuntimeLibrary'.
+[^4]: https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-error-lnk2038 - Microsoft Learn: LNK2038 mismatch detected for 'RuntimeLibrary'.
 
-[^5]: https://docs.rs/crate/sherpa-onnx-sys/1.13.2/source/build.rs — `SHERPA_ONNX_LIB_DIR` env var handling (lines 100–110) and `rustc-link-search` emission (line 60).
+[^5]: https://docs.rs/crate/sherpa-onnx-sys/1.13.2/source/build.rs - `SHERPA_ONNX_LIB_DIR` env var handling (lines 100–110) and `rustc-link-search` emission (line 60).
 
-[^6]: https://docs.rs/crate/sherpa-onnx-sys/1.13.2/source/build.rs — Windows archive name hard-coded as `sherpa-onnx-v{version}-win-x64-static-MT-Release-lib.tar.bz2` (lines 216–218).
+[^6]: https://docs.rs/crate/sherpa-onnx-sys/1.13.2/source/build.rs - Windows archive name hard-coded as `sherpa-onnx-v{version}-win-x64-static-MT-Release-lib.tar.bz2` (lines 216–218).
 
-[^7]: https://docs.rs/cmake/latest/cmake/ — `cmake` crate docs: on MSVC, the build script sets `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL` by default.
+[^7]: https://docs.rs/cmake/latest/cmake/ - `cmake` crate docs: on MSVC, the build script sets `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL` by default.
 
-[^8]: https://docs.rs/crate/whisper-rs-sys/0.15.0/source/build.rs — `whisper-rs-sys` build script forwards `CMAKE_*` / `WHISPER_*` / `GGML_*` env vars to cmake (around line 279).
+[^8]: https://docs.rs/crate/whisper-rs-sys/0.15.0/source/build.rs - `whisper-rs-sys` build script forwards `CMAKE_*` / `WHISPER_*` / `GGML_*` env vars to cmake (around line 279).
 
-[^9]: https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes — Rust reference on `crt-static` target feature; default on `x86_64-pc-windows-msvc` is dynamic CRT.
+[^9]: https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes - Rust reference on `crt-static` target feature; default on `x86_64-pc-windows-msvc` is dynamic CRT.
 
-[^10]: https://github.com/k2-fsa/sherpa-onnx/releases/tag/v1.13.2 — k2-fsa sherpa-onnx v1.13.2 release page; lists both `win-x64-static-MD-Release-lib.tar.bz2` and `win-x64-static-MT-Release-lib.tar.bz2`, plus a single `checksum.txt`.
+[^10]: https://github.com/k2-fsa/sherpa-onnx/releases/tag/v1.13.2 - k2-fsa sherpa-onnx v1.13.2 release page; lists both `win-x64-static-MD-Release-lib.tar.bz2` and `win-x64-static-MT-Release-lib.tar.bz2`, plus a single `checksum.txt`.
+
+[^11]: https://github.com/rust-lang/libs-team/issues/211 - rust-lang libs-team issue on Windows MSVC CRT linking: "When integrating with C/C++ code, it's essential that the same CRT is used for the Rust parts as the C/C++ parts. Mixing CRTs is unsupported."

@@ -36,11 +36,11 @@ export class SessionManager {
   }
 
   /**
-   * Create a new session
-   * @param clientInfo - Optional client information
-   * @param clientInfo.name - Name of the client application
-   * @param clientInfo.version - Version of the client application
-   * @returns Session ID (UUID)
+   * Create a new session for optional client info.
+   * @param clientInfo - optional client information
+   * @param clientInfo.name - name of the client application
+   * @param clientInfo.version - version of the client application
+   * @returns the session ID (UUID)
    */
   public createSession(clientInfo?: { name: string; version: string }): string {
     const sessionId = randomUUID();
@@ -61,9 +61,8 @@ export class SessionManager {
   }
 
   /**
-   * Get session by ID, updating last accessed time
-   * @param sessionId Session ID
-   * @returns Session or null if not found/expired
+   * Get session by ID, updating last accessed time; returns null if not found/expired.
+   * @param sessionId - session ID
    */
   public getSession(sessionId: string): Session | null {
     const session = this.sessions.get(sessionId);

@@ -1,9 +1,10 @@
 /**
- * Confluence spaces — listing (allowlist-filtered) and single-space lookup,
- * via the v2 API (`/wiki/api/v2/spaces`).
+ * Confluence spaces — listing (allowlist-filtered) and single-space lookup, via the v2 API
+ * (`/wiki/api/v2/spaces`).
  * @module mcp-atlassian/domains/confluence-spaces
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { assertConfluenceSpaceAllowed, filterByAllowlist } from '../scope.js';
 import type { ConfluenceSpace } from '../types.js';
@@ -17,15 +18,15 @@ export interface ConfluenceSpacesClient {
 }
 
 /**
- * Create a Confluence spaces client.
+ * Create a {@link ConfluenceSpacesClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
- * @returns A {@link ConfluenceSpacesClient}.
+ * @returns A Confluence spaces client.
  */
 export function createConfluenceSpacesClient(client: AtlassianClient): ConfluenceSpacesClient {
   return {
     async list(options = {}) {
       const params: Record<string, unknown> = {
-        limit: Math.min(Math.max(options.limit ?? 50, 1), 100),
+        limit: clampPageSize(options.limit, 50, 100),
       };
       if (options.keys && options.keys.length > 0) params.keys = options.keys.join(',');
       const res = await client.get<{ results?: unknown[] }>('/wiki/api/v2/spaces', params);

@@ -3,6 +3,7 @@
  */
 
 import {
+  META_KEYS,
   Tool,
   ToolDefinition,
   jsonResult,
@@ -11,12 +12,13 @@ import {
 } from '@speedwave/mcp-shared';
 import { GitHubClient } from '../client.js';
 import { withValidation } from './validation.js';
+import { TOOL_NAMES } from '../tool-names.js';
 
 const getTreeTool: Tool = {
-  name: 'getTree',
+  name: TOOL_NAMES.GET_TREE,
   description: 'Get a repository file tree (file/directory listing), optionally recursive.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'tree', 'files', 'repository', 'ls', 'directory'],
   example:
     'const { tree, count } = await github.getTree({ owner: "octocat", repo: "hello", recursive: true })',
@@ -69,9 +71,12 @@ const getTreeTool: Tool = {
 
 const getFileContentsTool: Tool = {
   name: 'getFileContents',
-  description: "Reads a file's contents from a repository. Errors if the path is a directory.",
+  description:
+    "Reads a file's contents from a repository. Text files are decoded to UTF-8; binary files " +
+    "(images, archives, ...) are returned as raw base64 with encoding: 'base64' so content is " +
+    'never corrupted. Errors if the path is a directory.',
   annotations: READ_ONLY_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'file', 'content', 'read', 'cat', 'source'],
   example:
     'const file = await github.getFileContents({ owner: "octocat", repo: "hello", path: "README.md" })',
@@ -90,8 +95,14 @@ const getFileContentsTool: Tool = {
     properties: {
       success: { type: 'boolean' },
       path: { type: 'string' },
-      content: { type: 'string', description: 'Decoded file text' },
-      encoding: { type: 'string' },
+      content: {
+        type: 'string',
+        description: "Decoded UTF-8 text, or raw base64 for binary files (see 'encoding')",
+      },
+      encoding: {
+        type: 'string',
+        description: "'utf-8' for decoded text, 'base64' for binary content",
+      },
       sha: { type: 'string', description: 'Blob SHA' },
       size: { type: 'number' },
       error: { type: 'string' },
@@ -118,7 +129,7 @@ const createOrUpdateFileTool: Tool = {
   name: 'createOrUpdateFile',
   description: 'Creates a new file or updates an existing one with a commit.',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { deferLoading: true },
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
   keywords: ['github', 'file', 'create', 'update', 'write', 'commit'],
   example:
     'const { commit_sha } = await github.createOrUpdateFile({ owner: "octocat", repo: "hello", path: "docs/x.md", content: "# Hi", message: "add doc" })',

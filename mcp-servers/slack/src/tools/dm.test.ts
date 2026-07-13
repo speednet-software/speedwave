@@ -122,6 +122,27 @@ describe('dm-tools', () => {
       expect(result.error?.code).toBe('OPEN_FAILED');
       expect(result.error?.message).toContain('findUsers');
     });
+
+    it('rejects a missing users array with a teaching error before calling Slack', async () => {
+      const result = await handleOpenDirectMessage(
+        presentClients(),
+        {} as unknown as { users: string[] }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain('Invalid users');
+      expect(client.openDm).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty users array with a teaching error before calling Slack', async () => {
+      const result = await handleOpenDirectMessage(presentClients(), { users: [] });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('MISSING_PARAM');
+      expect(result.error?.message).toContain('Invalid users');
+      expect(client.openDm).not.toHaveBeenCalled();
+    });
   });
 
   describe('createDmTools', () => {
@@ -144,10 +165,22 @@ describe('dm-tools', () => {
       }
     });
 
+    it('openDirectMessage rejects a missing users param via the schema-driven guard before the handler runs', async () => {
+      const tools = createDmTools(presentClients());
+      const handler = tools.find((t) => t.tool.name === 'openDirectMessage')!.handler;
+
+      const result = await handler({});
+
+      expect(result.isError).toBe(true);
+      const parsed = JSON.parse(result.content[0].text as string);
+      expect(parsed.code).toBe('MISSING_PARAM');
+      expect(parsed.message).toContain('for openDirectMessage');
+      expect(client.openDm).not.toHaveBeenCalled();
+    });
+
     it('forwards the users array to openDm verbatim (cap enforced in client)', async () => {
-      // The minItems/maxItems schema is a hint to the model; the runtime cap
-      // lives in openDm (client.ts), so the handler forwards as-is and surfaces
-      // a client-thrown cap violation as OPEN_FAILED.
+      // minItems/maxItems is a model hint only; the runtime cap lives in openDm (client.ts),
+      // so the handler forwards as-is and surfaces a cap violation as OPEN_FAILED.
       const tools = createDmTools(presentClients());
       vi.mocked(client.openDm).mockRejectedValue(
         new Error('A Slack DM holds at most 8 people; got 9.')

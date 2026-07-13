@@ -1,9 +1,10 @@
 /**
- * Jira issue comments and worklog entries. Comment bodies use Atlassian
- * Document Format (Jira Cloud REST v3).
+ * Jira issue comments and worklog entries; comment bodies use Atlassian Document Format
+ * (Jira Cloud REST v3).
  * @module mcp-atlassian/domains/jira-comments
  */
 
+import { clampPageSize } from '@speedwave/mcp-shared';
 import type { AtlassianClient } from '../client.js';
 import { toAdf } from '../adf.js';
 import { assertJiraIssueKeyAllowed } from '../scope.js';
@@ -17,13 +18,8 @@ export interface JiraCommentsClient {
   /** List comments on an issue (most recent last, Jira default ordering). */
   list(issueIdOrKey: string, options?: { maxResults?: number }): Promise<JiraComment[]>;
   /**
-   * Log work against an issue.
-   * @param issueIdOrKey - The issue key or numeric ID.
-   * @param params - Worklog parameters.
-   * @param params.timeSpentSeconds - Seconds of work logged.
-   * @param params.comment - Optional worklog comment (plain text → ADF, or a raw ADF document).
-   * @param params.started - Optional ISO 8601 start timestamp (defaults to now, server-side).
-   * @returns The created worklog entry, normalised.
+   * Log work against an issue. `comment` is plain text (→ ADF) or a raw ADF document; `started`
+   * is an ISO 8601 timestamp, defaulting to now server-side. Returns the normalised entry.
    */
   addWorklog(
     issueIdOrKey: string,
@@ -32,9 +28,9 @@ export interface JiraCommentsClient {
 }
 
 /**
- * Create a Jira comments client.
+ * Create a {@link JiraCommentsClient} from the shared Atlassian HTTP client.
  * @param client - The shared Atlassian HTTP client.
- * @returns A {@link JiraCommentsClient}.
+ * @returns A Jira comments client.
  */
 export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsClient {
   // Enforce the Jira project allowlist for an issue ref (see assertJiraIssueKeyAllowed).
@@ -55,7 +51,7 @@ export function createJiraCommentsClient(client: AtlassianClient): JiraCommentsC
       enforce(issueIdOrKey);
       const res = await client.get<{ comments?: unknown[] }>(
         `/rest/api/3/issue/${encodeURIComponent(issueIdOrKey)}/comment`,
-        { maxResults: Math.min(Math.max(options.maxResults ?? 50, 1), 100) }
+        { maxResults: clampPageSize(options.maxResults, 50, 100) }
       );
       return (res.comments ?? []).map(mapComment);
     },
@@ -92,7 +88,7 @@ export function mapComment(raw: unknown): JiraComment {
 /**
  * Map a raw Jira worklog entry to {@link JiraWorklog}.
  * @param raw - The raw object as returned by the Atlassian REST API.
- * @param issueIdOrKey - The Jira issue key (e.g. `PROJ-123`) or numeric ID.
+ * @param issueIdOrKey - The Jira issue key or numeric ID, used as a fallback issue reference.
  */
 export function mapWorklog(raw: unknown, issueIdOrKey: string): JiraWorklog {
   const o = (raw ?? {}) as Record<string, unknown>;

@@ -2,7 +2,9 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  OnDestroy,
   OnInit,
+  WritableSignal,
   computed,
   inject,
   output,
@@ -20,8 +22,74 @@ import type {
 } from '../../models/telemetry';
 
 /**
- * Settings → Telemetry: point Claude Code at your own OTLP collector.
- * MDM-locked fields render read-only; the headers secret never leaves the host.
+ * A form field that is either untouched (keep the saved/managed value) or
+ * touched with an explicit value, incl. `null` to clear it. Bundles the
+ * value + touched signal pair every MDM-lockable tri-state field needs.
+ */
+class TriStateField<T> {
+  readonly value: WritableSignal<T>;
+  readonly touched = signal(false);
+
+  constructor(initial: T) {
+    this.value = signal(initial);
+  }
+
+  /**
+   * Records an edit: sets the value and marks the field touched.
+   * @param value The edited value.
+   */
+  set(value: T): void {
+    this.value.set(value);
+    this.touched.set(true);
+  }
+
+  /**
+   * Reloads the field from a fresh server value and clears touched.
+   * @param value The freshly loaded server value.
+   */
+  reset(value: T): void {
+    this.value.set(value);
+    this.touched.set(false);
+  }
+
+  /**
+   * Writes the value onto `update[key]` when touched and unlocked; a locked
+   * field is omitted so the server never sees a change attempt for it.
+   * @param update The outgoing update payload to write into.
+   * @param key The payload key this field maps to.
+   * @param locked Whether MDM locks this field.
+   */
+  applyTo<K extends string, U extends Partial<Record<K, T>>>(
+    update: U,
+    key: K,
+    locked: boolean
+  ): void {
+    this.applyMappedTo(update, key, locked, (v) => v);
+  }
+
+  /**
+   * Like {@link applyTo}, but maps the value first — e.g. an emptied string
+   * to `null` (clear) before it reaches the wire type.
+   * @param update The outgoing update payload to write into.
+   * @param key The payload key this field maps to.
+   * @param locked Whether MDM locks this field.
+   * @param transform Maps the edited value to its wire type.
+   */
+  applyMappedTo<K extends string, W, U extends Partial<Record<K, W>>>(
+    update: U,
+    key: K,
+    locked: boolean,
+    transform: (value: T) => W
+  ): void {
+    if (this.touched() && !locked) {
+      update[key] = transform(this.value()) as U[K];
+    }
+  }
+}
+
+/**
+ * Settings → Telemetry: point Claude Code at your own OTLP collector. MDM-locked fields render
+ * read-only; the headers secret never leaves the host.
  */
 @Component({
   selector: 'app-telemetry-section',
@@ -424,7 +492,7 @@ import type {
     </section>
   `,
 })
-export class TelemetrySectionComponent implements OnInit {
+export class TelemetrySectionComponent implements OnInit, OnDestroy {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
@@ -468,28 +536,38 @@ export class TelemetrySectionComponent implements OnInit {
 
   // Editable form state (signals — OnPush requires it).
   readonly enabled = signal(false);
-  readonly endpoint = signal('');
-  readonly endpointTouched = signal(false);
   readonly protocol = signal<OtlpProtocol>('grpc');
   readonly exportMetrics = signal(true);
   readonly exportLogs = signal(false);
-  readonly headers = signal('');
-  readonly headersTouched = signal(false);
-  readonly resourceAttributes = signal('');
-  readonly resourceAttributesTouched = signal(false);
   readonly includeAccountUuid = signal(true);
-  readonly metricExportIntervalMs = signal<number | null>(null);
-  readonly metricIntervalTouched = signal(false);
-  readonly logsExportIntervalMs = signal<number | null>(null);
-  readonly logsIntervalTouched = signal(false);
   readonly logUserPrompts = signal(false);
   readonly logAssistantResponses = signal(false);
   readonly logToolDetails = signal(false);
   readonly logRawApiBodies = signal(false);
 
+  // MDM-lockable tri-state fields: untouched = keep saved/managed value,
+  // touched = send the edited value (incl. null to clear).
+  private readonly endpointField = new TriStateField('');
+  private readonly headersField = new TriStateField('');
+  private readonly resourceAttributesField = new TriStateField('');
+  private readonly metricIntervalField = new TriStateField<number | null>(null);
+  private readonly logsIntervalField = new TriStateField<number | null>(null);
+
+  readonly endpoint = this.endpointField.value;
+  readonly endpointTouched = this.endpointField.touched;
+  readonly headers = this.headersField.value;
+  readonly headersTouched = this.headersField.touched;
+  readonly resourceAttributes = this.resourceAttributesField.value;
+  readonly resourceAttributesTouched = this.resourceAttributesField.touched;
+  readonly metricExportIntervalMs = this.metricIntervalField.value;
+  readonly metricIntervalTouched = this.metricIntervalField.touched;
+  readonly logsExportIntervalMs = this.logsIntervalField.value;
+  readonly logsIntervalTouched = this.logsIntervalField.touched;
+
   private readonly tauri = inject(TauriService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly projectState = inject(ProjectStateService);
+  private savedTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Loads the effective telemetry config on first paint. */
   async ngOnInit(): Promise<void> {
@@ -501,20 +579,15 @@ export class TelemetrySectionComponent implements OnInit {
       const c = await this.tauri.invoke<TelemetryConfigResponse>('get_telemetry_config');
       this.config.set(c);
       this.enabled.set(c.enabled);
-      this.endpoint.set(c.endpoint ?? '');
-      this.endpointTouched.set(false);
+      this.endpointField.reset(c.endpoint ?? '');
       this.protocol.set(c.protocol);
       this.exportMetrics.set(c.export_metrics);
       this.exportLogs.set(c.export_logs);
-      this.headers.set('');
-      this.headersTouched.set(false);
-      this.resourceAttributes.set(c.resource_attributes ?? '');
-      this.resourceAttributesTouched.set(false);
+      this.headersField.reset('');
+      this.resourceAttributesField.reset(c.resource_attributes ?? '');
       this.includeAccountUuid.set(c.include_account_uuid);
-      this.metricExportIntervalMs.set(c.metric_export_interval_ms);
-      this.metricIntervalTouched.set(false);
-      this.logsExportIntervalMs.set(c.logs_export_interval_ms);
-      this.logsIntervalTouched.set(false);
+      this.metricIntervalField.reset(c.metric_export_interval_ms);
+      this.logsIntervalField.reset(c.logs_export_interval_ms);
       this.logUserPrompts.set(c.log_user_prompts);
       this.logAssistantResponses.set(c.log_assistant_responses);
       this.logToolDetails.set(c.log_tool_details);
@@ -527,9 +600,9 @@ export class TelemetrySectionComponent implements OnInit {
   }
 
   /**
-   * A privacy toggle turning ON requires an explicit confirm.
-   * @param field - which privacy-gate signal to toggle.
-   * @param ev - the checkbox change event.
+   * A privacy toggle turning ON requires an explicit confirm; `field` selects which gate signal.
+   * @param field - the privacy gate signal to toggle
+   * @param ev - the change event from the toggle input
    */
   onPrivacyToggle(
     field: 'logUserPrompts' | 'logAssistantResponses' | 'logToolDetails' | 'logRawApiBodies',
@@ -551,8 +624,7 @@ export class TelemetrySectionComponent implements OnInit {
    * @param value - the raw input value.
    */
   onHeadersInput(value: string): void {
-    this.headers.set(value);
-    this.headersTouched.set(true);
+    this.headersField.set(value);
   }
 
   /**
@@ -568,8 +640,7 @@ export class TelemetrySectionComponent implements OnInit {
    * @param value - the raw input value.
    */
   onEndpointInput(value: string): void {
-    this.endpoint.set(value);
-    this.endpointTouched.set(true);
+    this.endpointField.set(value);
     this.probeResult.set('');
   }
 
@@ -578,8 +649,7 @@ export class TelemetrySectionComponent implements OnInit {
    * @param value - the raw input value.
    */
   onResourceAttributesInput(value: string): void {
-    this.resourceAttributes.set(value);
-    this.resourceAttributesTouched.set(true);
+    this.resourceAttributesField.set(value);
   }
 
   /**
@@ -596,8 +666,7 @@ export class TelemetrySectionComponent implements OnInit {
    * @param value - the raw input value.
    */
   onMetricIntervalInput(value: string): void {
-    this.metricExportIntervalMs.set(this.parseInterval(value));
-    this.metricIntervalTouched.set(true);
+    this.metricIntervalField.set(this.parseInterval(value));
   }
 
   /**
@@ -605,8 +674,7 @@ export class TelemetrySectionComponent implements OnInit {
    * @param value - the raw input value.
    */
   onLogsIntervalInput(value: string): void {
-    this.logsExportIntervalMs.set(this.parseInterval(value));
-    this.logsIntervalTouched.set(true);
+    this.logsIntervalField.set(this.parseInterval(value));
   }
 
   /** Probes the endpoint's reachability from the host and shows the result. */
@@ -627,40 +695,65 @@ export class TelemetrySectionComponent implements OnInit {
     this.cdr.markForCheck();
   }
 
-  /** Persists the editable fields (MDM-locked ones are ignored server-side). */
+  /**
+   * Persists the editable fields. Locked fields are omitted entirely (never
+   * just server-ignored) so a save with one locked field never blocks an
+   * unrelated unlocked edit.
+   */
   async save(): Promise<void> {
     this.saving.set(true);
     this.saved.set(false);
     this.cdr.markForCheck();
-    const update: TelemetryConfigUpdate = {
-      enabled: this.enabled(),
-      protocol: this.protocol(),
-      export_metrics: this.exportMetrics(),
-      export_logs: this.exportLogs(),
-      include_account_uuid: this.includeAccountUuid(),
-      log_user_prompts: this.logUserPrompts(),
-      log_assistant_responses: this.logAssistantResponses(),
-      log_tool_details: this.logToolDetails(),
-      log_raw_api_bodies: this.logRawApiBodies(),
-    };
+    const locks = this.config()?.locks;
+    const update: TelemetryConfigUpdate = {};
+    if (!locks?.enabled) {
+      update.enabled = this.enabled();
+    }
+    if (!locks?.protocol) {
+      update.protocol = this.protocol();
+    }
+    if (!locks?.export_metrics) {
+      update.export_metrics = this.exportMetrics();
+    }
+    if (!locks?.export_logs) {
+      update.export_logs = this.exportLogs();
+    }
+    if (!locks?.include_account_uuid) {
+      update.include_account_uuid = this.includeAccountUuid();
+    }
+    if (!locks?.log_user_prompts) {
+      update.log_user_prompts = this.logUserPrompts();
+    }
+    if (!locks?.log_assistant_responses) {
+      update.log_assistant_responses = this.logAssistantResponses();
+    }
+    if (!locks?.log_tool_details) {
+      update.log_tool_details = this.logToolDetails();
+    }
+    if (!locks?.log_raw_api_bodies) {
+      update.log_raw_api_bodies = this.logRawApiBodies();
+    }
     // Tri-state (headers / endpoint / resource_attributes / intervals): send only
-    // when edited; an emptied field becomes null (clear), otherwise the value.
-    if (this.headersTouched()) {
-      update.headers = this.headers() === '' ? null : this.headers();
-    }
-    if (this.endpointTouched()) {
-      update.endpoint = this.endpoint() === '' ? null : this.endpoint();
-    }
-    if (this.resourceAttributesTouched()) {
-      update.resource_attributes =
-        this.resourceAttributes() === '' ? null : this.resourceAttributes();
-    }
-    if (this.metricIntervalTouched()) {
-      update.metric_export_interval_ms = this.metricExportIntervalMs();
-    }
-    if (this.logsIntervalTouched()) {
-      update.logs_export_interval_ms = this.logsExportIntervalMs();
-    }
+    // when edited; an emptied string field becomes null (clear), otherwise the value.
+    const emptyToNull = (v: string): string | null => (v === '' ? null : v);
+    this.headersField.applyMappedTo(update, 'headers', !!locks?.headers, emptyToNull);
+    this.endpointField.applyMappedTo(update, 'endpoint', !!locks?.endpoint, emptyToNull);
+    this.resourceAttributesField.applyMappedTo(
+      update,
+      'resource_attributes',
+      !!locks?.resource_attributes,
+      emptyToNull
+    );
+    this.metricIntervalField.applyTo(
+      update,
+      'metric_export_interval_ms',
+      !!locks?.metric_export_interval_ms
+    );
+    this.logsIntervalField.applyTo(
+      update,
+      'logs_export_interval_ms',
+      !!locks?.logs_export_interval_ms
+    );
     this.saveError.set('');
     try {
       await this.tauri.invoke('update_telemetry_config', { update });
@@ -674,8 +767,12 @@ export class TelemetrySectionComponent implements OnInit {
         // change only takes effect after a restart (as with an LLM claude-env change).
         this.projectState.requestRestart();
         this.saved.set(true);
-        setTimeout(() => {
+        if (this.savedTimer !== null) {
+          clearTimeout(this.savedTimer);
+        }
+        this.savedTimer = setTimeout(() => {
           this.saved.set(false);
+          this.savedTimer = null;
           this.cdr.markForCheck();
         }, 2000);
       }
@@ -685,6 +782,14 @@ export class TelemetrySectionComponent implements OnInit {
     }
     this.saving.set(false);
     this.cdr.markForCheck();
+  }
+
+  /** Cancels a pending "saved" flag reset so it never fires post-destroy. */
+  ngOnDestroy(): void {
+    if (this.savedTimer !== null) {
+      clearTimeout(this.savedTimer);
+      this.savedTimer = null;
+    }
   }
 
   private emitError(e: unknown): void {

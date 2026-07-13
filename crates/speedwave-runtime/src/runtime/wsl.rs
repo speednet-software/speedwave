@@ -95,9 +95,8 @@ impl WslRuntime {
         &self.distro_name
     }
 
-    /// Runs `argv` in the distro through `sh -c` with POSIX quoting — wsl.exe
-    /// re-parses the post-`--` line via the default shell, so bare splicing
-    /// breaks on metacharacters in %USERPROFILE% (`'`, `(`, `$`, backtick).
+    /// Runs `argv` via `sh -c` with POSIX quoting: wsl.exe re-parses the post-`--` line via the
+    /// default shell, so bare splicing breaks on %USERPROFILE% metachars (`'`, `(`, `$`, backtick).
     fn run_in_distro(&self, argv: &[&str], root: bool) -> anyhow::Result<String> {
         let remote_cmd = super::shell_quote_argv(argv);
         let mut full: Vec<&str> = vec!["-d", self.distro()];
@@ -117,9 +116,8 @@ impl WslRuntime {
             .map(|_| ())
     }
 
-    /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the
-    /// container uid around every `up` — nerdctl root-creates missing
-    /// bind-mount sources (ADR-052). Fail-open.
+    /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the container uid around
+    /// every `up` — nerdctl root-creates missing bind-mount sources (ADR-052). Fail-open.
     fn ensure_claude_home_writable(&self, project: &str) {
         let host = crate::claude_home::claude_home_dir(consts::data_dir(), project);
         let path = match crate::engine_path::to_engine_path(&host) {
@@ -163,9 +161,6 @@ impl WslRuntime {
 
     /// Checks a service runs in the WSL distro; on failure starts it via systemctl
     /// and retries up to `WSL_SERVICE_CHECK_MAX_RETRIES` times.
-    ///
-    /// - `service_name`: display name for logs/errors (e.g. "buildkitd")
-    /// - `systemd_unit`: systemd unit name for `systemctl start` (e.g. "buildkit")
     fn check_service(
         &self,
         distro: &str,
@@ -228,9 +223,8 @@ impl WslRuntime {
     }
 }
 
-/// Parsed WSL UNC path: `\\wsl.localhost\<distro>\<rest>` and equivalent forms.
-/// Server name and distro name are matched case-insensitively (Windows UNC is
-/// case-insensitive, and WSL distro names compare case-insensitively).
+/// Parsed WSL UNC path: `\\wsl.localhost\<distro>\<rest>` and equivalent forms. Server and
+/// distro names are matched case-insensitively (Windows UNC and WSL distro names both are).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslUncInfo {
     /// Distro name as written by the user (preserves original casing for messages).
@@ -289,14 +283,8 @@ fn is_wsl_server(server: &str) -> bool {
     server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$")
 }
 
-/// Recognizes WSL UNC paths in all four forms Windows emits:
-/// - `\\wsl.localhost\<distro>\<rest>` (modern)
-/// - `\\wsl$\<distro>\<rest>` (legacy)
-/// - `\\?\UNC\wsl.localhost\<distro>\<rest>` (canonicalized modern)
-/// - `\\?\UNC\wsl$\<distro>\<rest>` (canonicalized legacy)
-///
-/// Returns `None` for non-WSL UNC paths (`\\server\share\...`), drive-letter
-/// paths, and Unix paths.
+/// Recognizes WSL UNC paths in all four forms Windows emits (`\\wsl.localhost\<distro>\<rest>`,
+/// `\\wsl$\<distro>\<rest>`, and `\\?\UNC\...` variants). `None` for network UNC/drive/Unix paths.
 pub fn is_wsl_unc_path(s: &str) -> Option<WslUncInfo> {
     // Strip `\\?\UNC\` / `\\?\unc\` / `\\` (shared SSOT — see `strip_unc_prefix`).
     let after_double_backslash = strip_unc_prefix(s)?;
@@ -327,9 +315,8 @@ pub fn is_wsl_unc_path(s: &str) -> Option<WslUncInfo> {
     })
 }
 
-/// Returns `true` if a path looks like a WSL UNC server prefix
-/// (`\\wsl.localhost\...`, `\\wsl$\...`, or canonicalized `\\?\UNC\...`),
-/// even when malformed (e.g. missing distro segment).
+/// Returns `true` if a path looks like a WSL UNC server prefix (`\\wsl.localhost\...`,
+/// `\\wsl$\...`, or canonicalized `\\?\UNC\...`), even when malformed (e.g. missing distro).
 #[cfg(any(target_os = "windows", test))]
 pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
     match strip_unc_prefix(s) {
@@ -341,11 +328,8 @@ pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
     }
 }
 
-/// Converts a Windows path (`C:\foo`, `C:/foo`, `\\?\C:\...`) to a WSL mount path
-/// (`/mnt/c/foo`); passes Unix-style paths through.
-///
-/// WSL UNC paths: runtime distro → inner path (`/<rest>`); other distro → guidance
-/// error; true network UNC (`\\server\share`) → error.
+/// Converts a Windows path (`C:\foo`, `C:/foo`, `\\?\C:\...`) to a WSL mount path (`/mnt/c/foo`);
+/// passes Unix paths through. WSL UNC: runtime distro → `/<rest>`; other → error; network UNC → error.
 // Internal primitive of `engine_path::to_engine_path` — the one public SSOT.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
@@ -376,9 +360,8 @@ pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
         anyhow::bail!(consts::wsl_other_distro_msg(&info.distro));
     }
 
-    // Malformed WSL UNC (e.g. `\\wsl.localhost\` with no distro segment):
-    // surface a precise error instead of falling through to the generic
-    // "Network UNC" reject, which would mislead users who typed a WSL path.
+    // Malformed WSL UNC (e.g. `\\wsl.localhost\` with no distro): surface a precise error
+    // instead of the generic "Network UNC" reject, which would mislead WSL-path typists.
     if looks_like_wsl_unc_prefix(&s) {
         anyhow::bail!(
             "Malformed WSL UNC path '{}': expected \\\\wsl.localhost\\<distro>\\<path> or \
@@ -456,11 +439,10 @@ impl ContainerRuntime for WslRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        // No compose.yml → nothing was ever started (deferred no-provider
-        // project); skip so nerdctl doesn't fatally error and retry for ~70s.
-        // Check the host-side Windows path, not the /mnt/c engine path.
+        // No compose.yml → nothing was ever started (deferred no-provider project); skip so
+        // nerdctl doesn't error+retry ~70s. Checks the host-side Windows path, not /mnt/c.
         if super::compose_down_is_noop(&super::compose_file_path(project)?) {
-            log::info!("compose_down: no compose.yml for '{project}' — nothing to stop");
+            log::info!("no compose.yml for '{project}' — nothing to stop");
             return Ok(());
         }
         let remote = super::shell_quote_argv(&[
@@ -528,9 +510,7 @@ impl ContainerRuntime for WslRuntime {
         .collect();
         let remote_cmd = super::shell_quote_argv(&nerdctl_argv);
 
-        // Raw Command::new — intentionally bypasses binary::system_command() because
-        // interactive TTY sessions need a console window on Windows.
-        let mut command = Command::new("wsl.exe");
+        let mut command = crate::binary::interactive_command("wsl.exe");
         command.args(["-d", distro, "--", "sh", "-c", &remote_cmd]);
         command
     }
@@ -829,9 +809,8 @@ impl ContainerRuntime for WslRuntime {
         use std::time::Duration;
         let distro = self.distro();
 
-        // Use the canonical System32 path to avoid PATH-based binary substitution.
-        // CLAUDE.md security: host-side commands must not be resolvable via a
-        // user-controlled PATH entry.
+        // Canonical System32 path avoids PATH-based binary substitution: host-side commands
+        // must not be resolvable via a user-controlled PATH entry.
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
         let wsl = format!("{system_root}\\System32\\wsl.exe");
         let wsl = wsl.as_str();
@@ -921,7 +900,11 @@ impl WslRuntime {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test code asserts via unwrap/expect"
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_support::MockRunner;
@@ -1027,9 +1010,8 @@ mod tests {
         assert!(err.contains("setup wizard"));
     }
 
-    /// On Windows, os_prereqs::check_os_prereqs() catches missing WSL.
-    /// On macOS/Linux (dev/CI), prereqs return empty so ensure_ready()
-    /// proceeds to the distro list check — which fails via mock.
+    /// On Windows, `os_prereqs::check_os_prereqs()` catches missing WSL. On macOS/Linux
+    /// (dev/CI), prereqs return empty so `ensure_ready()` proceeds to the distro list check.
     #[test]
     fn test_ensure_ready_wsl_not_installed() {
         let runner = MockRunner::new().with_error("wsl.exe --list --quiet", "not found");
@@ -1182,9 +1164,8 @@ mod tests {
             remote_cmd.contains("test_container"),
             "remote_cmd should include container name, got: {remote_cmd}"
         );
-        // Anchor on the literal "nerdctl exec -it -e" prefix — `shlex`
-        // leaves alphanumeric tokens unquoted, so the prefix appears
-        // verbatim and the match is precise (no false-positive boundaries).
+        // Anchor on the literal "nerdctl exec -it -e" prefix — `shlex` leaves alphanumeric
+        // tokens unquoted, so it appears verbatim and the match is precise.
         assert!(
             remote_cmd.contains("nerdctl exec -it -e"),
             "remote_cmd should start the nerdctl invocation with -it, got: {remote_cmd}"
@@ -1234,9 +1215,8 @@ mod tests {
         );
     }
 
-    /// Same regression as `lima::tests::test_container_exec_remote_cmd_survives_shell_roundtrip` —
-    /// `wsl.exe` joins everything after `--` and execs through bash inside the
-    /// distro, so prompts with `(`, `'`, backticks must shell-quote correctly.
+    /// Same regression as lima's `test_container_exec_remote_cmd_survives_shell_roundtrip`:
+    /// wsl.exe execs everything after `--` via bash — `(`, `'`, backtick must shell-quote.
     #[test]
     #[serial_test::serial(env_term)]
     fn test_container_exec_remote_cmd_survives_shell_roundtrip() {
@@ -1464,9 +1444,7 @@ mod tests {
         );
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // WSL UNC path support tests
-    // ──────────────────────────────────────────────────────────────────────
+    // ── WSL UNC path support tests ──────────────────────────────────────────
 
     #[test]
     fn test_is_wsl_unc_path_modern_form() {
@@ -1673,9 +1651,7 @@ mod tests {
         assert!(err.contains("Ubuntu"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // Malformed WSL UNC — must surface a precise error, not "Network UNC".
-    // ──────────────────────────────────────────────────────────────────────
+    // ── Malformed WSL UNC — must surface a precise error, not "Network UNC" ──
 
     #[test]
     fn test_windows_to_wsl_path_malformed_wsl_unc_missing_distro() {
@@ -1727,9 +1703,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // is_root_path helper tests
-    // ──────────────────────────────────────────────────────────────────────
+    // ── is_root_path helper tests ───────────────────────────────────────────
 
     #[test]
     fn test_is_root_path_accepts_root_variants() {
@@ -1757,9 +1731,7 @@ mod tests {
         assert!(!is_root_path(Path::new("/foo/bar/..")));
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // looks_like_wsl_unc_prefix — used to surface "Malformed WSL UNC" error.
-    // ──────────────────────────────────────────────────────────────────────
+    // ── looks_like_wsl_unc_prefix — used to surface "Malformed WSL UNC" error ──
 
     #[test]
     fn test_looks_like_wsl_unc_prefix_modern() {
@@ -1790,9 +1762,7 @@ mod tests {
         assert!(!looks_like_wsl_unc_prefix("/home/user"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // Direct tests for SSOT helpers `strip_unc_prefix` and `is_wsl_server`
-    // ──────────────────────────────────────────────────────────────────────
+    // ── Direct tests for SSOT helpers `strip_unc_prefix` and `is_wsl_server` ──
 
     #[test]
     fn test_strip_unc_prefix_modern_double_backslash() {
@@ -1833,9 +1803,8 @@ mod tests {
 
     #[test]
     fn test_strip_unc_prefix_mixed_case_extended() {
-        // Per Win32 path normalization, the `UNC` segment is case-insensitive.
-        // Mixed-case forms (not produced by canonicalize but possible from
-        // manual input or third-party tooling) must still be recognized.
+        // Per Win32 normalization, the `UNC` segment is case-insensitive; mixed-case forms
+        // (not from canonicalize but possible from manual input) must still be recognized.
         assert_eq!(
             strip_unc_prefix(r"\\?\Unc\wsl.localhost\Speedwave\foo"),
             Some(r"wsl.localhost\Speedwave\foo")
@@ -1852,9 +1821,8 @@ mod tests {
 
     #[test]
     fn test_strip_unc_prefix_extended_takes_priority_over_double_backslash() {
-        // The `\\?\UNC\` branch MUST be tried before the plain `\\` branch.
-        // If the order were reversed, `\\?\UNC\wsl.localhost\...` would match
-        // `\\` first, leaving the bogus "server" `?\UNC\wsl.localhost`.
+        // The `\\?\UNC\` branch MUST be tried before the plain `\\` branch, or
+        // `\\?\UNC\wsl...` matches `\\` first, leaving the bogus server `?\UNC\wsl...`.
         let result = strip_unc_prefix(r"\\?\UNC\wsl.localhost\Speedwave\foo");
         assert_eq!(result, Some(r"wsl.localhost\Speedwave\foo"));
         // Negative: result must NOT contain the `?\UNC\` fragment that the
@@ -1885,9 +1853,7 @@ mod tests {
         assert!(!is_wsl_server("fileserver"));
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // Defense-in-depth: Unicode distros, typosquats, empty-distro classification
-    // ──────────────────────────────────────────────────────────────────────
+    // ── Defense-in-depth: Unicode distros, typosquats, empty-distro classification ──
 
     #[test]
     fn test_is_wsl_unc_path_accepts_unicode_distro_safely() {
@@ -2081,9 +2047,8 @@ mod tests {
             "",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
-        // force=true must add --force to the rmi args so nerdctl removes
-        // images that are still referenced by a running container (the
-        // explicit-uninstall path).
+        // force=true must add --force to the rmi args so nerdctl removes images still
+        // referenced by a running container (the explicit-uninstall path).
         assert!(rt.remove_images(&tags, true).is_ok());
     }
 
@@ -2387,9 +2352,8 @@ mod tests {
                 v.push(Ok("buildkit ready".to_string()));
                 v
             })
-            // systemctl start uses correct unit name "buildkit" (not "buildkitd").
-            // If the code used "buildkitd", this mock wouldn't match and the test
-            // would panic with "unexpected command".
+            // systemctl start uses unit name "buildkit" (not "buildkitd") — a "buildkitd"
+            // regression would miss this mock and panic with "unexpected command".
             .with_responses(
                 &format!("wsl.exe -d {distro} -- systemctl start buildkit"),
                 vec![Ok(String::new())],

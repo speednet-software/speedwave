@@ -1,12 +1,6 @@
 /**
- * Comprehensive tests for project-tools.ts
- *
- * Tests cover:
- * - list_project_ids: listing projects with search, membership, archived options
- * - get_project_full: getting full project data with optional includes
- * - search_code: searching code in projects
- * - Unconfigured client handling
- * - Error handling
+ * Tests for project-tools.ts: listProjectIds (search/membership/archived), getProjectFull
+ * (optional includes), searchCode, unconfigured-client handling, and error handling.
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
@@ -184,6 +178,28 @@ describe('createProjectTools', () => {
         content: [{ type: 'text', text: 'Error: API rate limit exceeded' }],
         isError: true,
       });
+    });
+
+    it('forwards owned/membership/archived filters to the client ("my projects" support)', async () => {
+      mockClient.listProjects.mockResolvedValue([]);
+
+      const tools = createProjectTools(mockClient as unknown as GitLabClient);
+      const listProjectIdsTool = tools.find((t) => t.tool.name === 'listProjectIds');
+      await listProjectIdsTool!.handler({ owned: true, membership: false, archived: true });
+
+      expect(mockClient.listProjects).toHaveBeenCalledWith({
+        owned: true,
+        membership: false,
+        archived: true,
+      });
+    });
+
+    it('declares owned in the input schema so "my projects" is discoverable', () => {
+      const tools = createProjectTools(mockClient as unknown as GitLabClient);
+      const listProjectIdsTool = tools.find((t) => t.tool.name === 'listProjectIds');
+
+      expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('owned');
+      expect(listProjectIdsTool?.tool.description).toContain('owned: true');
     });
   });
 
@@ -623,7 +639,7 @@ describe('createProjectTools', () => {
 
       const listProjectIdsTool = tools.find((t) => t.tool.name === 'listProjectIds');
       expect(listProjectIdsTool?.tool.description).toBe(
-        'List project IDs and paths. Use get_project_full for details.'
+        'List project IDs and paths. Use getProjectFull for details. For "my projects"/"projects I own", pass owned: true.'
       );
       expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('membership');
       expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('archived');
