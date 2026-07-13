@@ -56,28 +56,20 @@ pub enum PrivatePolicy {
 /// RFC 1918, CGNAT (100.64/10), IPv6 ULA, plus loopback under `AllowLoopback`.
 pub fn is_private_on_premise(url: &url::Url, policy: PrivatePolicy) -> bool {
     let allow_loopback = matches!(policy, PrivatePolicy::AllowLoopback);
-    match url.host() {
-        Some(url::Host::Ipv4(ipv4)) => {
-            if ipv4.is_private() && !ipv4.is_link_local() && !ipv4.is_unspecified() {
-                return true;
-            }
-            // RFC 6598 — 100.64.0.0/10 shared address space (CGNAT)
-            let oct = ipv4.octets();
-            if oct[0] == 100 && (oct[1] & 0xc0) == 64 {
-                return true;
-            }
-            allow_loopback && is_loopback_host(&url::Host::Ipv4(ipv4))
-        }
-        Some(url::Host::Ipv6(ipv6)) => {
-            // fc00::/7 — IPv6 Unique Local Address (RFC 4193)
-            if (ipv6.segments()[0] & 0xfe00) == 0xfc00 {
-                return true;
-            }
-            // Includes IPv6-mapped IPv4 loopback (::ffff:127.0.0.1).
-            allow_loopback && is_loopback_host(&url::Host::Ipv6(ipv6))
-        }
-        _ => false,
+    let Some(host) = url.host() else {
+        return false;
+    };
+    let ip = match host {
+        url::Host::Ipv4(v4) => std::net::IpAddr::V4(v4),
+        url::Host::Ipv6(v6) => std::net::IpAddr::V6(v6),
+        url::Host::Domain(_) => return false,
+    };
+    // Loopback (incl. IPv6-mapped v4 loopback via is_loopback_host) is on-prem
+    // only under AllowLoopback; the rest of the allowlist applies regardless.
+    if is_loopback_host(&host) {
+        return allow_loopback;
     }
+    is_on_premise_allowed(ip)
 }
 
 /// Shared preamble for both validators: reject backslashes (Windows path /
