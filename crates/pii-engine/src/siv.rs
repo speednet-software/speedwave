@@ -16,6 +16,21 @@ impl EngineKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+
+    /// Decodes 64 lowercase-or-uppercase hex chars (trimmed) into a 32-byte key; fails
+    /// closed on any length or non-hex mismatch, never carrying key material in the error.
+    pub fn from_hex(s: &str) -> Result<Self, SivError> {
+        let trimmed = s.trim();
+        if trimmed.len() != 64 {
+            return Err(SivError::Encoding);
+        }
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
+            let pair = std::str::from_utf8(chunk).map_err(|_| SivError::Encoding)?;
+            bytes[i] = u8::from_str_radix(pair, 16).map_err(|_| SivError::Encoding)?;
+        }
+        Ok(Self(bytes))
+    }
 }
 
 impl Drop for EngineKey {
@@ -26,7 +41,7 @@ impl Drop for EngineKey {
 
 /// Sealing, opening, or payload-decoding failure; the variant never reveals which check failed.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SivError {
+pub enum SivError {
     /// SIV tag verification failed, or the ciphertext is too short to contain a tag.
     Crypto,
     /// base64url payload decoding failed.
@@ -158,5 +173,35 @@ mod tests {
         let ct_a = seal(&key_a, "EMAIL", b"same-value").unwrap();
         let ct_b = seal(&key_b, "EMAIL", b"same-value").unwrap();
         assert_ne!(ct_a, ct_b);
+    }
+
+    #[test]
+    fn from_hex_trimmed_and_uppercase_decodes_the_expected_bytes() {
+        let from_hex_key = EngineKey::from_hex(&format!("  {}  ", "AB".repeat(32)))
+            .expect("trimmed uppercase 64-hex decodes");
+        let expected_key = EngineKey::from_bytes([0xABu8; 32]);
+        assert_eq!(
+            seal(&from_hex_key, "EMAIL", b"same-value").unwrap(),
+            seal(&expected_key, "EMAIL", b"same-value").unwrap()
+        );
+    }
+
+    #[test]
+    fn from_hex_rejects_wrong_length() {
+        assert!(matches!(EngineKey::from_hex(""), Err(SivError::Encoding)));
+        assert!(matches!(
+            EngineKey::from_hex(&"ab".repeat(31)),
+            Err(SivError::Encoding)
+        ));
+        assert!(matches!(
+            EngineKey::from_hex(&"ab".repeat(33)),
+            Err(SivError::Encoding)
+        ));
+    }
+
+    #[test]
+    fn from_hex_rejects_non_hex_characters() {
+        let bad = format!("{}zz", "a".repeat(62));
+        assert!(matches!(EngineKey::from_hex(&bad), Err(SivError::Encoding)));
     }
 }

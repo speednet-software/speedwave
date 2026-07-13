@@ -2653,6 +2653,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "speedwave-pii-engine-wasm"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "speedwave-pii-engine",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "speedwave-runtime"
 version = "0.16.0"
 dependencies = [

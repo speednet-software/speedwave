@@ -16,4 +16,4 @@ pub use scan::{
     detokenize_json, detokenize_text, scan_json, scan_text, Detection, DetectionAction,
     DetokenizeError, ScanError, ScanOutcome, TOKEN_SPAN_RE,
 };
-pub use siv::EngineKey;
+pub use siv::{EngineKey, SivError};

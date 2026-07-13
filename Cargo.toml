@@ -3,6 +3,7 @@ members = [
     "crates/speedwave-runtime",
     "crates/speedwave-cli",
     "crates/pii-engine",
+    "crates/pii-engine-wasm",
 ]
 resolver = "2"
 
@@ -37,3 +38,7 @@ allow_attributes_without_reason = "deny"
 unsafe_code = "deny"
 unused_must_use = "deny"
 missing_docs = "warn"
+
+[profile.release.package.speedwave-pii-engine-wasm]
+opt-level = "z"
+strip = true
