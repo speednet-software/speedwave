@@ -36,6 +36,7 @@ mod oauth_login_cmd;
 mod oauth_loopback;
 mod oauth_providers;
 mod paste_cmd;
+mod pii_display;
 mod plugin_oauth_cmd;
 mod slack_oauth_cmd;
 // `path_util` is consumed only by the Windows-only `oauth_login_cmd::open_terminal_with_command`.

@@ -1,4 +1,5 @@
 use crate::history;
+use speedwave_pii_engine::EngineKey;
 use speedwave_runtime::stream::{
     AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
 };
@@ -172,9 +173,92 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     }
 }
 
-/// The ONE way to emit a `chat_stream` event: sanitizes first so no site leaks.
-/// Enforced by `chat_stream_emits_go_through_helper`.
-fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk) {
+/// Detokenizes a chunk's free-text fields for display — the same fields
+/// `sanitize_chunk` transforms. `key: None` (no PII policy on the project) is a no-op.
+/// Runs BEFORE `sanitize_chunk` so the secret-redaction pass always sees the real
+/// display text, not a tokenized placeholder that could itself mask a leaked secret.
+fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk {
+    let Some(key) = key else {
+        return chunk;
+    };
+    use crate::pii_display::detokenize_for_display as detok;
+    match chunk {
+        StreamChunk::Text { content } => StreamChunk::Text {
+            content: detok(Some(key), &content),
+        },
+        StreamChunk::Thinking { content } => StreamChunk::Thinking {
+            content: detok(Some(key), &content),
+        },
+        StreamChunk::ToolResult {
+            tool_id,
+            content,
+            is_error,
+        } => StreamChunk::ToolResult {
+            tool_id,
+            content: detok(Some(key), &content),
+            is_error,
+        },
+        StreamChunk::Error { content } => StreamChunk::Error {
+            content: detok(Some(key), &content),
+        },
+        StreamChunk::Result {
+            result_text: Some(text),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+            context_usage,
+        } => StreamChunk::Result {
+            result_text: Some(detok(Some(key), &text)),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+            context_usage,
+        },
+        StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
+            session_id,
+            text: detok(Some(key), &text),
+        },
+        StreamChunk::AskUserQuestion {
+            tool_id,
+            mut questions,
+            current_index,
+        } => {
+            for q in &mut questions {
+                q.question = detok(Some(key), &q.question);
+                q.header = detok(Some(key), &q.header);
+                for opt in &mut q.options {
+                    opt.label = detok(Some(key), &opt.label);
+                    opt.value = detok(Some(key), &opt.value);
+                }
+            }
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                questions,
+                current_index,
+            }
+        }
+        other => other,
+    }
+}
+
+/// The ONE way to emit a `chat_stream` event: detokenizes for display, then sanitizes
+/// so no site leaks a secret. Enforced by `chat_stream_emits_go_through_helper`.
+fn emit_sanitized_chunk(
+    app_handle: &tauri::AppHandle,
+    chunk: StreamChunk,
+    key: Option<&EngineKey>,
+) {
+    let chunk = detokenize_chunk(chunk, key);
     if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
         log::warn!("failed to emit chat_stream event: {e}");
     }
@@ -1529,6 +1613,11 @@ impl ChatSession {
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
 
+        // Loaded once per turn/session (never per-chunk); `None` when the project has
+        // no PII policy/key, making every detokenize call downstream a no-op.
+        let display_key =
+            crate::pii_display::load_display_key(consts::data_dir(), &self.project_name);
+
         // On resume: seed cumulative session state from the transcript so the
         // first turn reports a real delta. Non-fatal — log and use a zero baseline.
         let resume_seed = resume_session_id.and_then(|id| {
@@ -1621,6 +1710,7 @@ impl ChatSession {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
                                     },
+                                    display_key.as_ref(),
                                 );
                                 break;
                             }
@@ -1632,6 +1722,7 @@ impl ChatSession {
                                 questions,
                                 current_index: 0,
                             },
+                            display_key.as_ref(),
                         );
                     } else {
                         // Auto-approve non-AskUserQuestion tools
@@ -1649,6 +1740,7 @@ impl ChatSession {
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
                                         },
+                                        display_key.as_ref(),
                                     );
                                     break;
                                 }
@@ -1663,6 +1755,7 @@ impl ChatSession {
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
                                         },
+                                        display_key.as_ref(),
                                     );
                                     break;
                                 }
@@ -1674,6 +1767,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                     },
+                                    display_key.as_ref(),
                                 );
                                 break;
                             }
@@ -1729,11 +1823,16 @@ impl ChatSession {
                     parser.reset();
                 }
                 for chunk in chunks {
-                    emit_sanitized_chunk(&app_handle, chunk);
+                    emit_sanitized_chunk(&app_handle, chunk, display_key.as_ref());
                 }
                 // ADR-045 drain: after Result chunks emit, write any queued message to stdin.
                 if let Some(session_id) = result_session_id {
-                    drain_queued_message(&app_handle, &session_id, &stdin_for_reader);
+                    drain_queued_message(
+                        &app_handle,
+                        &session_id,
+                        &stdin_for_reader,
+                        display_key.as_ref(),
+                    );
                 }
             }
 
@@ -1751,7 +1850,7 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                 };
-                emit_sanitized_chunk(&app_handle, chunk);
+                emit_sanitized_chunk(&app_handle, chunk, display_key.as_ref());
             }
         });
         self.drain_handles.push(h);
@@ -2060,6 +2159,7 @@ fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    key: Option<&EngineKey>,
 ) {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
@@ -2091,6 +2191,7 @@ fn drain_queued_message(
             session_id: session_id.to_string(),
             text: drained.text,
         },
+        key,
     );
     log::debug!("queue drained: {} bytes for session", drained_text.len());
 }
@@ -2213,6 +2314,190 @@ mod tests {
         match sanitize_chunk(chunk) {
             StreamChunk::ToolInputDelta { partial_json, .. } => {
                 assert_eq!(partial_json, raw, "partial_json must be byte-identical");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    // -- detokenize_chunk: PII display detokenization at the emit chokepoint --
+
+    fn detok_test_key(tmp: &std::path::Path, project: &str) -> EngineKey {
+        speedwave_runtime::pii_key::ensure_project_key_in(tmp, project)
+            .expect("ensure_project_key_in");
+        crate::pii_display::load_display_key(tmp, project).expect("key must load")
+    }
+
+    fn tokenize_for_test(key: &EngineKey, plain: &str) -> String {
+        use speedwave_pii_engine::{compile_policy_v2, default_policy_json, scan_text};
+        let policy = compile_policy_v2(&default_policy_json()).expect("policy compiles");
+        scan_text(&policy, key, plain).expect("scan succeeds").text
+    }
+
+    #[test]
+    fn detokenize_chunk_without_key_is_a_noop() {
+        let tokenized = "[EMAIL:TOKEN_whatever]";
+        let chunk = StreamChunk::Text {
+            content: tokenized.to_string(),
+        };
+        match detokenize_chunk(chunk, None) {
+            StreamChunk::Text { content } => assert_eq!(content, tokenized),
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_text_content_with_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "email me at jan@example.com");
+        assert!(tokenized.contains("TOKEN_"), "fixture must tokenize");
+
+        let chunk = StreamChunk::Text { content: tokenized };
+        match detokenize_chunk(chunk, Some(&key)) {
+            StreamChunk::Text { content } => {
+                assert_eq!(content, "email me at jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_thinking_and_tool_result_and_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "secret@example.com");
+
+        match detokenize_chunk(
+            StreamChunk::Thinking {
+                content: tokenized.clone(),
+            },
+            Some(&key),
+        ) {
+            StreamChunk::Thinking { content } => assert_eq!(content, "secret@example.com"),
+            other => panic!("variant changed: {other:?}"),
+        }
+
+        match detokenize_chunk(
+            StreamChunk::ToolResult {
+                tool_id: "t1".into(),
+                content: tokenized.clone(),
+                is_error: false,
+            },
+            Some(&key),
+        ) {
+            StreamChunk::ToolResult { content, .. } => {
+                assert_eq!(content, "secret@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+
+        match detokenize_chunk(
+            StreamChunk::Error {
+                content: tokenized.clone(),
+            },
+            Some(&key),
+        ) {
+            StreamChunk::Error { content } => assert_eq!(content, "secret@example.com"),
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_result_text_and_queue_drained() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "reach me at jan@example.com");
+
+        let result_chunk = StreamChunk::Result {
+            session_id: "s".into(),
+            total_cost: None,
+            usage: None,
+            result_text: Some(tokenized.clone()),
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+            context_usage: None,
+        };
+        match detokenize_chunk(result_chunk, Some(&key)) {
+            StreamChunk::Result { result_text, .. } => {
+                assert_eq!(result_text.as_deref(), Some("reach me at jan@example.com"));
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+
+        let queue_chunk = StreamChunk::QueueDrained {
+            session_id: "s".into(),
+            text: tokenized,
+        };
+        match detokenize_chunk(queue_chunk, Some(&key)) {
+            StreamChunk::QueueDrained { text, .. } => {
+                assert_eq!(text, "reach me at jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_ask_user_question_fields() {
+        use speedwave_runtime::stream::{AskUserOption, AskUserQuestionItem};
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "jan@example.com");
+
+        let chunk = StreamChunk::AskUserQuestion {
+            tool_id: "t1".into(),
+            questions: vec![AskUserQuestionItem {
+                question: format!("confirm {tokenized}?"),
+                header: tokenized.clone(),
+                multi_select: false,
+                options: vec![AskUserOption {
+                    label: tokenized.clone(),
+                    value: tokenized.clone(),
+                }],
+            }],
+            current_index: 0,
+        };
+        match detokenize_chunk(chunk, Some(&key)) {
+            StreamChunk::AskUserQuestion { questions, .. } => {
+                assert_eq!(questions[0].question, "confirm jan@example.com?");
+                assert_eq!(questions[0].header, "jan@example.com");
+                assert_eq!(questions[0].options[0].label, "jan@example.com");
+                assert_eq!(questions[0].options[0].value, "jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_wrong_project_key_falls_back_to_tokenized_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_a = detok_test_key(tmp.path(), "proj-a");
+        let key_b = detok_test_key(tmp.path(), "proj-b");
+        let tokenized = tokenize_for_test(&key_a, "secret@example.com");
+
+        let chunk = StreamChunk::Text {
+            content: tokenized.clone(),
+        };
+        match detokenize_chunk(chunk, Some(&key_b)) {
+            StreamChunk::Text { content } => assert_eq!(content, tokenized),
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_leaves_tool_input_delta_and_tool_start_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let raw = r#"{"path":"/x","token":"abc"#;
+        let chunk = StreamChunk::ToolInputDelta {
+            tool_id: "t1".into(),
+            partial_json: raw.into(),
+        };
+        match detokenize_chunk(chunk, Some(&key)) {
+            StreamChunk::ToolInputDelta { partial_json, .. } => {
+                assert_eq!(partial_json, raw);
             }
             other => panic!("variant changed: {other:?}"),
         }
