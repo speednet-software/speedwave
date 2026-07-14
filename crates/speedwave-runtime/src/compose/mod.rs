@@ -10112,10 +10112,8 @@ networks:
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_worker_auth_token_regenerated_when_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let integrations = ResolvedIntegrationsConfig {
             slack: true,
@@ -10132,11 +10130,11 @@ networks:
         let token_path = tmp.path().join("slack-auth-token");
         let first = std::fs::read_to_string(&token_path).unwrap();
 
-        // Simulate the Windows empty-DACL corruption via a chmod the owner cannot read.
-        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        if std::fs::read_to_string(&token_path).is_ok() {
-            return; // running as root — chmod cannot restrict, can't exercise the read-error path
-        }
+        crate::fs_perms::make_unreadable_for_test(&token_path);
+        assert!(
+            std::fs::read_to_string(&token_path).is_err(),
+            "artifact must be unreadable"
+        );
 
         let result = apply_worker_auth_tokens_with_dir(
             VALID_COMPOSE_ALL_WORKERS,

@@ -132,6 +132,73 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Test-only: makes an existing file unreadable by its own owner via a real OS artifact
+/// (Unix `chmod 0o000`; Windows a protected empty DACL) — not a mocked error path.
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture: setup failure must panic, not be swallowed"
+)]
+pub(crate) fn make_unreadable_for_test(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 0o000 on test artifact must succeed");
+    }
+
+    #[cfg(windows)]
+    {
+        set_windows_acl_empty_for_test(path).expect("empty-DACL test artifact must succeed");
+    }
+}
+
+/// Test-only: applies a protected, empty DACL to `path` — no ACEs at all, so even the
+/// owner is denied (icacls `/inheritance:r` would not clear the explicit owner ACE
+/// `set_windows_acl_owner_only` writes; this replaces the DACL outright).
+#[cfg(all(windows, test))]
+#[expect(
+    unsafe_code,
+    reason = "Windows DACL FFI boundary; every block carries a SAFETY comment"
+)]
+fn set_windows_acl_empty_for_test(path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        InitializeAcl, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    unsafe {
+        let mut acl: ACL = std::mem::zeroed();
+        let acl_size = std::mem::size_of::<ACL>() as u32;
+        // SAFETY: `acl` is a stack-local ACL header sized exactly for zero ACEs;
+        // InitializeAcl only writes within `acl_size` bytes of `&mut acl`.
+        if InitializeAcl(&mut acl, acl_size, ACL_REVISION) == 0 {
+            return Err("InitializeAcl failed".to_string());
+        }
+        let wide_path: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: wide_path is NUL-terminated UTF-16 and `acl` is a validly
+        // initialized empty ACL that outlives this call.
+        let rc = SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &acl,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: rc={rc}"));
+        }
+        Ok(())
+    }
+}
+
 /// Flushes file data to stable media. macOS: `F_FULLFSYNC` with fallback to `fsync` then
 /// best-effort no-op on unsupported fs (SMB/NFS). Other Unix: `fsync`. Windows: no-op.
 #[cfg(unix)]
@@ -424,6 +491,18 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
 )]
 mod tests {
     use super::*;
+
+    // Unix: root bypasses mode 0o000, so this test relies on CI running unprivileged;
+    // we deliberately don't gate it — revisit if a root-run flake ever appears.
+    #[test]
+    fn make_unreadable_for_test_actually_blocks_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("t");
+        std::fs::write(&p, "x").unwrap();
+        make_unreadable_for_test(&p);
+        let err = std::fs::read(&p).expect_err("read must fail on the planted artifact");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[test]
     fn read_no_follow_reads_regular_file() {
