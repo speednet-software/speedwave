@@ -834,6 +834,7 @@ SCRIPT
         echo "[macos] Running update-dirty-state suite (production-style install: LIMA_HOME + speedwave VM)..."
         macos_ssh bash <<'SCRIPT' || exit_code=$?
 set -euo pipefail
+eval "$(/opt/homebrew/bin/brew shellenv)"
 command -v bats >/dev/null 2>&1 || brew install bats-core
 SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
 ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
