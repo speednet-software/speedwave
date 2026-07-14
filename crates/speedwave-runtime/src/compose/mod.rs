@@ -12065,6 +12065,184 @@ services:
             .expect("deep real-directory tree must be accepted");
     }
 
+    /// #931-class gate: a plugin shipping claude-resources must (a) emit its
+    /// `/speedwave/plugins/<slug>:ro` mount and (b) pass the full SecurityCheck.
+    #[test]
+    fn plugin_render_emits_claude_resources_mount_and_passes_security_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
+        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
+        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "presalefix".into(),
+            service_id: Some("presalefix".into()),
+            slug: "presalefix".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let plugin = plugin::VerifiedPlugin::new(
+            manifest.clone(),
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let cfg = fixture_integrations_with_enabled("presalefix");
+        let ctx = ApplyPluginsCtx {
+            project_name: "test",
+            project_dir: "/test/project",
+            integrations: &cfg,
+            network_name: "test-net",
+            tokens_dir: Path::new("/test/.speedwave/tokens/test"),
+            bridges: &HostBridgesInfo::default(),
+        };
+        let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
+        assert!(
+            yaml.contains(":/speedwave/plugins/presalefix:ro"),
+            "regression surface not exercised — claude-resources mount missing:\n{yaml}"
+        );
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(violations.is_empty(), "got: {violations:?}");
+    }
+
+    /// #900-adjacent variant: a RESOURCE-ONLY plugin (no service_id) shipping
+    /// claude-resources must also mount and pass — `_full` skips dir creation
+    /// for these, so the test creates the dir itself (that IS the field shape).
+    #[test]
+    fn resource_only_plugin_render_mounts_resources_and_passes_security_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
+        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "presalefix".into(),
+            service_id: None,
+            slug: "presalefix".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let plugin = plugin::VerifiedPlugin::new(
+            manifest.clone(),
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let cfg = fixture_integrations_with_enabled("presalefix");
+        let ctx = ApplyPluginsCtx {
+            project_name: "test",
+            project_dir: "/test/project",
+            integrations: &cfg,
+            network_name: "test-net",
+            tokens_dir: Path::new("/test/.speedwave/tokens/test"),
+            bridges: &HostBridgesInfo::default(),
+        };
+        let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
+        assert!(
+            yaml.contains(":/speedwave/plugins/presalefix:ro"),
+            "regression surface not exercised — claude-resources mount missing:\n{yaml}"
+        );
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(violations.is_empty(), "got: {violations:?}");
+    }
+
+    #[test]
+    fn plugin_render_with_retargeted_mount_fails_security_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
+        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
+        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "presalefix".into(),
+            service_id: Some("presalefix".into()),
+            slug: "presalefix".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let plugin = plugin::VerifiedPlugin::new(
+            manifest.clone(),
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let cfg = fixture_integrations_with_enabled("presalefix");
+        let ctx = ApplyPluginsCtx {
+            project_name: "test",
+            project_dir: "/test/project",
+            integrations: &cfg,
+            network_name: "test-net",
+            tokens_dir: Path::new("/test/.speedwave/tokens/test"),
+            bridges: &HostBridgesInfo::default(),
+        };
+        let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
+        let tampered = yaml.replace("/speedwave/plugins/presalefix", "/etc/evil");
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            !violations.is_empty(),
+            "retargeted plugin mount must fail SecurityCheck"
+        );
+    }
+
     // ── Host-bridge env injection (generic plugin host-bridge plumbing) ─────
 
     fn render_with_host_bridge_plugin(
