@@ -22,11 +22,8 @@ async function fetchJson(url: string, apiKey: string): Promise<unknown> {
   return res.json();
 }
 
-/** Probes OpenRouter with the token budget Claude Code actually sends. The
- *  balance endpoint is not a substitute: OpenRouter reserves credit for the full
- *  `max_tokens` up front, so a funded-looking account still 402s here — and a 402
- *  leaves the proxy with no usage line, which the cost specs see only as an
- *  unpriced dashboard timing out. Fatal: nearly every chat spec needs this. */
+/** Probes with the real token budget: the balance endpoint is no substitute,
+ *  since a funded-looking account still 402s on the up-front reservation. */
 async function checkOpenrouter(): Promise<PreflightFailure | null> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = process.env.OPENROUTER_MODEL;
@@ -67,10 +64,8 @@ async function checkOpenrouter(): Promise<PreflightFailure | null> {
   return { service: 'OpenRouter', reason: `probe returned HTTP ${res.status}. ${detail}` };
 }
 
-/** True when the local OpenAI-compatible server answers FROM THIS HOST — model
- *  discovery runs on the e2e machine, not on the one that authored .env. Probes
- *  the catalog path production uses (`discovery.rs` → `{base}/v1/models`); bare
- *  `/models` 404s on LM Studio, llama.cpp and vLLM. */
+/** True when the server answers FROM THIS HOST on the catalog path production
+ *  uses (`discovery.rs` → `{base}/v1/models`); bare `/models` 404s on LM Studio. */
 async function localLlmReachable(): Promise<boolean> {
   const baseUrl = process.env.LOCAL_LLM_BASE_URL;
   const apiKey = process.env.LOCAL_LLM_API_KEY;
@@ -83,9 +78,8 @@ async function localLlmReachable(): Promise<boolean> {
   }
 }
 
-/** Fatal preconditions (empty when the suite may run) plus the local-LLM verdict.
- *  An unreachable local LLM is NOT fatal — it marks the two local-provider specs
- *  skippable so the other 16 keep reporting, and prints why. */
+/** Fatal preconditions, empty when the suite may run. An unreachable local LLM
+ *  is not fatal — it marks specs 11/12 skippable so the other 16 keep reporting. */
 export async function runPreflight(): Promise<PreflightFailure[]> {
   const [openrouter, localOk] = await Promise.all([checkOpenrouter(), localLlmReachable()]);
 
