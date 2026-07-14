@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 # Literal, not `.workspace = true`: this crate is vendored standalone (no ancestor workspace
 # root) into the proxy image's isolated build context (ADR-073 F4, containers/proxy/Cargo.toml
-# path dep) — same reasoning as proxy's own hardcoded package metadata below.
+# path dep). Same reasoning as proxy's own hardcoded package metadata below.
 description = "AI platform connecting Claude Code with external services"
 authors = ["Speednet"]
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = "1"
 
-# Literal, not `workspace = true` (see package block above) — must stay byte-identical to root
+# Literal, not `workspace = true` (see package block above): must stay byte-identical to root
 # `[workspace.lints]`, enforced by `lint_tables_are_aligned` (consts.rs).
 [lints.clippy]
 unwrap_used = "deny"

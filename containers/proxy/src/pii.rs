@@ -10,7 +10,7 @@ use speedwave_pii_engine::{
 };
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
-/// every `/v1/messages` call as a 5xx — never a silent fallback to an unscanned forward.
+/// every `/v1/messages` call as a 5xx: never a silent fallback to an unscanned forward.
 pub enum PiiEngineState {
     Ready {
         policy: CompiledPolicy,
@@ -44,7 +44,7 @@ fn default_state() -> PiiEngineState {
     }
 }
 
-/// 32 random bytes per process — only reached when `POLICY_FILE` is unset (dev/fail-safe);
+/// 32 random bytes per process: only reached when `POLICY_FILE` is unset (dev/fail-safe);
 /// production always supplies a persistent key via `POLICY_FILE`'s sibling `key` file.
 fn ephemeral_key() -> EngineKey {
     let mut bytes = [0u8; 32];
@@ -111,7 +111,7 @@ fn merge_detections(agg: &mut Vec<Detection>, more: Vec<Detection>) {
 }
 
 /// Scans `system` and every `messages[].content` (tool results included); other protocol
-/// fields are untouched. An `Err` may leave `body` partially mutated — the caller must discard it.
+/// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
 pub fn scan_request(
     policy: &CompiledPolicy,
     key: &EngineKey,

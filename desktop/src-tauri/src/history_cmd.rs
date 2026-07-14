@@ -37,9 +37,7 @@ pub(crate) async fn get_conversation(
             log::error!("failed to get conversation for project={project}: {e}");
             e.to_string()
         })?;
-        // Detokenize the returned COPY only — `history::get_conversation` parsed the
-        // on-disk JSONL (the model-readable source) into this owned struct, which is
-        // never written back; the transcript file itself stays tokenized.
+        // Detokenize the returned copy only; the tokenized source file stays unchanged.
         let key =
             crate::pii_display::load_display_key(speedwave_runtime::consts::data_dir(), &project);
         crate::pii_display::detokenize_transcript(&mut transcript, key.as_ref());

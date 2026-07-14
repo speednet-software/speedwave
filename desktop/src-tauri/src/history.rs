@@ -1884,11 +1884,8 @@ mod tests {
         assert_eq!(result.messages[1].content, "answer");
     }
 
-    /// INVARIANT: `history.rs` reads the on-disk transcript exactly as tokenized —
-    /// detokenization happens only on the copy `get_conversation` returns to the
-    /// webview (`pii_display::detokenize_transcript`), and the source file on disk
-    /// is never rewritten. A resume/edit-and-resend path that re-reads this same
-    /// file (via `get_conversation`/`compute_resume_snapshot`) sees only tokens.
+    /// INVARIANT: detokenization happens only on the copy returned to the webview;
+    /// the source JSONL on disk stays tokenized and unchanged.
     #[test]
     fn get_conversation_detokenizes_returned_copy_but_leaves_source_file_tokenized() {
         use speedwave_pii_engine::{compile_policy_v2, default_policy_json, scan_text, EngineKey};

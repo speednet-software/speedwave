@@ -78,7 +78,7 @@ impl PiiEngine {
     }
 }
 
-/// Thin re-export of the core's compiled-in default policy.json v2 — SSOT for the TS
+/// Thin re-export of the core's compiled-in default policy.json v2: SSOT for the TS
 /// "no POLICY_FILE" path; the proxy (native) calls the core function directly.
 #[wasm_bindgen]
 pub fn default_policy_json() -> String {

@@ -197,7 +197,7 @@ pub fn compile_policy_v2(json: &str) -> Result<CompiledPolicy, PolicyError> {
 }
 
 /// Serializes the compiled-in default policy.json v2 (every category tokenize-on, engine's
-/// default sensitive-key list) — the SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
+/// default sensitive-key list): the SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
 pub fn default_policy_json() -> String {
     let categories: serde_json::Map<String, serde_json::Value> = BUILTIN_CATEGORIES
         .iter()

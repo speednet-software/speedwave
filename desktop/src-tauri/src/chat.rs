@@ -173,10 +173,8 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     }
 }
 
-/// Detokenizes a chunk's free-text fields for display — the same fields
-/// `sanitize_chunk` transforms. `key: None` (no PII policy on the project) is a no-op.
-/// Runs BEFORE `sanitize_chunk` so the secret-redaction pass always sees the real
-/// display text, not a tokenized placeholder that could itself mask a leaked secret.
+/// Detokenizes a chunk's free-text fields for display (same fields as `sanitize_chunk`).
+/// Runs before `sanitize_chunk` so redaction sees the real display text, not a token placeholder.
 fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk {
     let Some(key) = key else {
         return chunk;

@@ -1,5 +1,5 @@
 //! PII detection audit writer: appends JSONL rows to `$AUDIT_DIR/audit-proxy.jsonl` (mirrors
-//! `consts::AUDIT_PROXY_FILE` / `audit-pii.ts`) — one line per (category, action), never a data value.
+//! `consts::AUDIT_PROXY_FILE` / `audit-pii.ts`): one line per (category, action), never a data value.
 
 use serde::Serialize;
 use speedwave_pii_engine::{Detection, DetectionAction};
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn no_op_when_audit_dir_is_none() {
-        // Must not panic and must not create anything — nowhere to check, just no crash.
+        // Must not panic and must not create anything. Nothing to check, just no crash.
         write_pii_audit(None, &[detection("EMAIL", DetectionAction::Tokenized, 1)]);
     }
 

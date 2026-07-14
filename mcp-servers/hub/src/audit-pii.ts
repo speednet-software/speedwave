@@ -1,5 +1,5 @@
 /**
- * PII detection audit writer: appends JSONL rows to `$AUDIT_DIR/audit-hub.jsonl` — one line per
+ * PII detection audit writer: appends JSONL rows to `$AUDIT_DIR/audit-hub.jsonl`, one line per
  * (layer, category, action, tool) per executeCode invocation, carrying zero data values.
  * @module audit-pii
  */

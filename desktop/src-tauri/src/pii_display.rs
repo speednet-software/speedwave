@@ -1,9 +1,5 @@
-//! Host-side PII detokenization at the Desktop presentation boundary (design ch.10):
-//! chat_stream emission (`chat.rs::emit_sanitized_chunk`) and the history transcript
-//! returned to the webview (`history_cmd.rs::get_conversation`). Angular never sees a
-//! token — it renders whatever this module hands back. Best-effort DISPLAY only, unlike
-//! the fail-closed tool-params path: this never writes a detokenized value back to disk,
-//! the JSONL transcript, or anything the model could re-read.
+//! Host-side PII detokenization at the Desktop presentation boundary.
+//! Chat emissions and history to webview are detokenized for display; the tokenized JSONL source and model-readable content stay on disk.
 
 use std::path::Path;
 
@@ -11,18 +7,14 @@ use speedwave_pii_engine::{detokenize_text, EngineKey};
 
 use crate::history::{ConversationSummary, ConversationTranscript, MessageBlock};
 
-/// Loads the active project's PII tokenization key once per session/command (never
-/// per-chunk). `None` when the project has no key yet — no PII policy was ever enabled,
-/// or the project predates the policy feature — callers treat that as a detok no-op.
+/// Loads the active project's PII tokenization key once per session. Returns `None` if the project has no key yet.
 pub(crate) fn load_display_key(data_dir: &Path, project: &str) -> Option<EngineKey> {
     speedwave_runtime::pii_key::read_project_key_in(data_dir, project)
         .ok()
         .map(EngineKey::from_bytes)
 }
 
-/// Detokenizes one string for display. `key: None` and an unresolvable token (wrong
-/// project, corrupted span) both fall back to `text` unchanged — never panics or errors
-/// the render. Never logs the key or the text.
+/// Detokenizes one string for display. Unresolvable tokens and missing keys fall back to unchanged text.
 pub(crate) fn detokenize_for_display(key: Option<&EngineKey>, text: &str) -> String {
     let Some(key) = key else {
         return text.to_string();
@@ -30,12 +22,8 @@ pub(crate) fn detokenize_for_display(key: Option<&EngineKey>, text: &str) -> Str
     detokenize_text(key, text).unwrap_or_else(|_| text.to_string())
 }
 
-/// Detokenizes a `ConversationTranscript` IN PLACE for display. The caller already holds
-/// this as an owned copy parsed from the on-disk JSONL — mutating it here never touches
-/// the tokenized transcript file itself, which stays the model-readable source.
-/// `ToolUse.input_json` is left untouched (tool call arguments, not display prose) —
-/// only the same fields `sanitize_chunk`/`detokenize_chunk` treat as free text: text,
-/// thinking, tool-result content, and error content.
+/// Detokenizes a `ConversationTranscript` in place for display, on a copy parsed from disk.
+/// The tokenized source file stays unchanged; `ToolUse.input_json` remains tokenized (not display prose).
 pub(crate) fn detokenize_transcript(
     transcript: &mut ConversationTranscript,
     key: Option<&EngineKey>,
@@ -68,9 +56,7 @@ pub(crate) fn detokenize_transcript(
     }
 }
 
-/// Detokenizes each summary's `preview` (a truncated snippet of the first user
-/// message shown in the sidebar) IN PLACE — the only display-facing text field
-/// `list_conversations` returns.
+/// Detokenizes each summary's `preview` in place (the only display-facing text field returned by `list_conversations`).
 pub(crate) fn detokenize_summaries(summaries: &mut [ConversationSummary], key: Option<&EngineKey>) {
     let Some(key) = key else {
         return;
@@ -140,7 +126,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
         let key = load_display_key(tmp.path(), "proj").expect("key must load");
-        // Well-formed span shape but bogus ciphertext — must not decode, and must not error.
+        // Well-formed span shape but bogus ciphertext: must not decode, and must not error.
         let text = "see [EMAIL:TOKEN_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] there";
         assert_eq!(detokenize_for_display(Some(&key), text), text);
     }

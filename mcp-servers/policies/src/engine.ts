@@ -50,7 +50,7 @@ export interface PiiEngine {
  * @returns A best-effort message string
  */
 function reasonOf(err: unknown): string {
-  /* c8 ignore next — fs sync calls and the WASM engine only ever throw a real Error instance */
+  /* c8 ignore next: fs sync calls and the WASM engine only ever throw a real Error instance */
   return err instanceof Error ? err.message : String(err);
 }
 
