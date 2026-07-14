@@ -12065,19 +12065,13 @@ services:
             .expect("deep real-directory tree must be accepted");
     }
 
-    /// #931-class gate: a plugin shipping claude-resources must (a) emit its
-    /// `/speedwave/plugins/<slug>:ro` mount and (b) pass the full SecurityCheck.
-    #[test]
-    fn plugin_render_emits_claude_resources_mount_and_passes_security_check() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("plugins").join("presalefix");
-        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
-        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
-        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
-        let manifest = plugin::PluginManifest {
-            name: "presalefix".into(),
-            service_id: Some("presalefix".into()),
-            slug: "presalefix".into(),
+    /// Manifest fixture for the claude-resources render/SecurityCheck tests below —
+    /// `service_id` toggles the MCP-service vs resource-only plugin shape.
+    fn fixture_plugin_manifest(slug: &str, service_id: Option<&str>) -> plugin::PluginManifest {
+        plugin::PluginManifest {
+            name: slug.into(),
+            service_id: service_id.map(String::from),
+            slug: slug.into(),
             version: "1.0.0".into(),
             description: "fixture".into(),
             port: None,
@@ -12094,7 +12088,19 @@ services:
             host_bridge: None,
             instructions: None,
             oauth: None,
-        };
+        }
+    }
+
+    /// #931-class gate: a plugin shipping claude-resources must (a) emit its
+    /// `/speedwave/plugins/<slug>:ro` mount and (b) pass the full SecurityCheck.
+    #[test]
+    fn plugin_render_emits_claude_resources_mount_and_passes_security_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
+        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
+        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        let manifest = fixture_plugin_manifest("presalefix", Some("presalefix"));
         let plugin = plugin::VerifiedPlugin::new(
             manifest.clone(),
             plugin_dir.to_path_buf(),
@@ -12125,36 +12131,15 @@ services:
         assert!(violations.is_empty(), "got: {violations:?}");
     }
 
-    /// #900-adjacent variant: a RESOURCE-ONLY plugin (no service_id) shipping
-    /// claude-resources must also mount and pass — `_full` skips dir creation
-    /// for these, so the test creates the dir itself (that IS the field shape).
+    /// #900-adjacent variant: a RESOURCE-ONLY plugin (no service_id) must also
+    /// mount its claude-resources and pass — the test creates the dir itself.
     #[test]
     fn resource_only_plugin_render_mounts_resources_and_passes_security_check() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("plugins").join("presalefix");
         std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
         std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
-        let manifest = plugin::PluginManifest {
-            name: "presalefix".into(),
-            service_id: None,
-            slug: "presalefix".into(),
-            version: "1.0.0".into(),
-            description: "fixture".into(),
-            port: None,
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-            host_bridge: None,
-            instructions: None,
-            oauth: None,
-        };
+        let manifest = fixture_plugin_manifest("presalefix", None);
         let plugin = plugin::VerifiedPlugin::new(
             manifest.clone(),
             plugin_dir.to_path_buf(),
@@ -12192,27 +12177,7 @@ services:
         std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
         std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
         std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
-        let manifest = plugin::PluginManifest {
-            name: "presalefix".into(),
-            service_id: Some("presalefix".into()),
-            slug: "presalefix".into(),
-            version: "1.0.0".into(),
-            description: "fixture".into(),
-            port: None,
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-            host_bridge: None,
-            instructions: None,
-            oauth: None,
-        };
+        let manifest = fixture_plugin_manifest("presalefix", Some("presalefix"));
         let plugin = plugin::VerifiedPlugin::new(
             manifest.clone(),
             plugin_dir.to_path_buf(),
@@ -12250,27 +12215,7 @@ services:
         let plugin_dir = tmp.path().join("plugins").join("presalefix");
         std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
         std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
-        let manifest = plugin::PluginManifest {
-            name: "presalefix".into(),
-            service_id: None,
-            slug: "presalefix".into(),
-            version: "1.0.0".into(),
-            description: "fixture".into(),
-            port: None,
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-            host_bridge: None,
-            instructions: None,
-            oauth: None,
-        };
+        let manifest = fixture_plugin_manifest("presalefix", None);
         let plugin = plugin::VerifiedPlugin::new(
             manifest,
             plugin_dir.to_path_buf(),
