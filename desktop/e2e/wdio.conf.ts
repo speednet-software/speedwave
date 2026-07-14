@@ -25,6 +25,7 @@ export const config = {
     './specs/16-restart-deferral.spec.ts',
     './specs/17-logs-diagnostics.spec.ts',
     './specs/18-anthropic-oauth-login.spec.ts',
+    './specs/19-dirty-state-self-heal.spec.ts',
     './specs/07-factory-reset.spec.ts',
   ],
   maxInstances: 1,
