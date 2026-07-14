@@ -1206,6 +1206,8 @@ impl SecurityCheck {
             "/home/speedwave",
             "/workspace",
             "/speedwave/resources",
+            // Each enabled plugin's ADR-051-validated claude-resources dir, mounted :ro.
+            "/speedwave/plugins",
             "/etc/claude-code",
             "/usage",
         ];
@@ -1878,6 +1880,37 @@ mod tests {
             v.iter()
                 .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
             "source outside claude-managed must fail"
+        );
+    }
+
+    #[test]
+    fn claude_plugin_resources_mount_is_allowed() {
+        // A plugin's claude-resources dir mounts read-only at /speedwave/plugins/<slug>.
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host/.speedwave/plugins/figma/claude-resources:/speedwave/plugins/figma:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected);
+        assert!(
+            v.is_empty(),
+            "plugin claude-resources mount must be allowed, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_unexpected_mount_target_still_rejected() {
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host/evil:/etc/cron.d:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("/etc/cron.d")),
+            "an unexpected mount target must still be rejected, got: {v:?}"
         );
     }
 
