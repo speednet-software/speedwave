@@ -5,43 +5,54 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import type {
-  PiiCategoryFlags,
+  CategoryFlagPair,
+  PiiCategoryPolicies,
   SecurityPolicyResponse,
   SecurityPolicyTemplateInfo,
+  SecurityPolicyUpdate,
 } from '../../models/security-policy';
 
-function allOn(overrides: Partial<PiiCategoryFlags> = {}): PiiCategoryFlags {
+function pair(tokenize: boolean, log = false): CategoryFlagPair {
+  return { tokenize, log };
+}
+
+function allCategories(overrides: Partial<PiiCategoryPolicies> = {}): PiiCategoryPolicies {
   return {
-    EMAIL: true,
-    PHONE_PL: true,
-    PESEL: true,
-    NIP: true,
-    IBAN: true,
-    CARD: true,
-    API_KEY: true,
-    SENSITIVE_FIELD: true,
+    EMAIL: pair(true),
+    PHONE_PL: pair(true),
+    PESEL: pair(true),
+    NIP: pair(true),
+    IBAN: pair(true),
+    CARD: pair(true),
+    API_KEY: pair(true),
+    SENSITIVE_FIELD: pair(true),
     ...overrides,
   };
 }
 
 function baseTemplates(): SecurityPolicyTemplateInfo[] {
   return [
-    { id: 'strict', name: 'Strict', description: 'All categories on.', categories: allOn() },
+    {
+      id: 'strict',
+      name: 'Strict',
+      description: 'All categories on.',
+      categories: allCategories(),
+    },
     {
       id: 'gdpr-art32',
       name: 'GDPR Art. 32',
       description: 'EU PII protection.',
-      categories: allOn({ API_KEY: false }),
+      categories: allCategories({ API_KEY: pair(false) }),
     },
   ];
 }
 
 function baseResponse(overrides: Partial<SecurityPolicyResponse> = {}): SecurityPolicyResponse {
   return {
-    template: 'strict',
-    categories: allOn(),
-    custom_patterns: [],
-    sensitive_keys_add: [],
+    enabled_policies: ['strict'],
+    forced_policies: [],
+    effective_categories: allCategories(),
+    custom_policies: [],
     ...overrides,
   };
 }
@@ -69,6 +80,13 @@ describe('SecuritySectionComponent', () => {
     component = fixture.componentInstance;
   }
 
+  function checkboxEvent(checked: boolean): Event {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = checked;
+    return { target: input } as unknown as Event;
+  }
+
   beforeEach(() => {
     setup(baseResponse());
   });
@@ -87,122 +105,151 @@ describe('SecuritySectionComponent', () => {
     component.ngOnInit();
     await fixture.whenStable();
     expect(component.templates()).toHaveLength(2);
-    expect(component.selectedTemplate()).toBe('strict');
-    expect(component.categories()).toEqual(allOn());
+    expect(component.isBuiltinEnabled('strict')).toBe(true);
+    expect(component.isBuiltinEnabled('gdpr-art32')).toBe(false);
+    expect(component.effectiveCategories()).toEqual(allCategories());
   });
 
-  it('renders one radio card per built-in template plus a Custom card', async () => {
+  it('renders one checklist row per built-in template plus each custom policy', async () => {
+    setup(
+      baseResponse({
+        custom_policies: [
+          {
+            id: 'my-custom',
+            name: 'My Custom',
+            categories: allCategories(),
+            custom_patterns: [],
+            sensitive_keys_add: [],
+          },
+        ],
+      })
+    );
     await create();
     component.ngOnInit();
     await fixture.whenStable();
     fixture.detectChanges();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="security-template-strict"]')
+      fixture.nativeElement.querySelector('[data-testid="security-policy-strict"]')
     ).not.toBeNull();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="security-template-gdpr-art32"]')
+      fixture.nativeElement.querySelector('[data-testid="security-policy-gdpr-art32"]')
     ).not.toBeNull();
+    expect(component.customPolicies()).toHaveLength(1);
+    const key = component.customPolicies()[0].key;
     expect(
-      fixture.nativeElement.querySelector('[data-testid="security-template-custom"]')
+      fixture.nativeElement.querySelector(`[data-testid="security-custom-${key}"]`)
     ).not.toBeNull();
   });
 
-  it('selecting a built-in template shows its categories read-only', async () => {
-    await create();
-    component.ngOnInit();
-    await fixture.whenStable();
-    component.selectTemplate('gdpr-art32', allOn({ API_KEY: false }));
-    expect(component.isCustom()).toBe(false);
-    expect(component.categories()['API_KEY']).toBe(false);
-    fixture.detectChanges();
-    const checkbox = fixture.nativeElement.querySelector(
-      '[data-testid="security-category-API_KEY"]'
-    ) as HTMLInputElement;
-    expect(checkbox.disabled).toBe(true);
-  });
-
-  it('selecting Custom exposes editable category checkboxes and the pattern/key sections', async () => {
-    await create();
-    component.ngOnInit();
-    await fixture.whenStable();
-    component.selectCustom();
-    fixture.detectChanges();
-    expect(component.isCustom()).toBe(true);
-    const checkbox = fixture.nativeElement.querySelector(
-      '[data-testid="security-category-EMAIL"]'
-    ) as HTMLInputElement;
-    expect(checkbox.disabled).toBe(false);
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="security-pattern-add"]')
-    ).not.toBeNull();
-    expect(fixture.nativeElement.querySelector('[data-testid="security-key-add"]')).not.toBeNull();
-  });
-
-  describe('onCategoryToggle', () => {
-    function checkboxEvent(checked: boolean): Event {
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.checked = checked;
-      return { target: input } as unknown as Event;
-    }
-
-    it('turning a category OFF requires a confirm', async () => {
+  describe('forced (MDM) policies', () => {
+    it('a forced built-in policy is checked, disabled, and shows a badge', async () => {
+      setup(baseResponse({ enabled_policies: ['strict'], forced_policies: ['strict'] }));
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      const spy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-      component.onCategoryToggle('EMAIL', checkboxEvent(false));
-      expect(spy).toHaveBeenCalledOnce();
-      expect(component.categories()['EMAIL']).toBe(false);
+      fixture.detectChanges();
+      expect(component.isBuiltinEnabled('strict')).toBe(true);
+      expect(component.isForced('strict')).toBe(true);
+      const checkbox = fixture.nativeElement.querySelector(
+        '[data-testid="security-policy-strict"]'
+      ) as HTMLInputElement;
+      expect(checkbox.checked).toBe(true);
+      expect(checkbox.disabled).toBe(true);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="security-forced-strict"]')
+      ).not.toBeNull();
     });
 
-    it('cancelling the confirm reverts the checkbox and keeps the category on', async () => {
+    it('toggling a forced built-in policy is a no-op', async () => {
+      setup(baseResponse({ enabled_policies: ['strict'], forced_policies: ['strict'] }));
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
-      const ev = checkboxEvent(false);
-      component.onCategoryToggle('EMAIL', ev);
-      expect(component.categories()['EMAIL']).toBe(true);
-      expect((ev.target as HTMLInputElement).checked).toBe(true);
+      component.toggleBuiltin('strict', checkboxEvent(false));
+      expect(component.isBuiltinEnabled('strict')).toBe(true);
+    });
+  });
+
+  describe('built-in checklist toggling', () => {
+    it('toggling on a non-forced built-in policy enables it', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
+      expect(component.isBuiltinEnabled('gdpr-art32')).toBe(true);
     });
 
-    it('turning a category ON never prompts', async () => {
+    it('toggling off an enabled built-in policy disables it', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      component.onCategoryToggle('API_KEY', checkboxEvent(false));
-      const spy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-      component.onCategoryToggle('API_KEY', checkboxEvent(true));
-      expect(spy).not.toHaveBeenCalled();
-      expect(component.categories()['API_KEY']).toBe(true);
+      component.toggleBuiltin('strict', checkboxEvent(false));
+      expect(component.isBuiltinEnabled('strict')).toBe(false);
+    });
+  });
+
+  describe('custom policy rows', () => {
+    it('adds and removes a custom policy row', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      expect(component.customPolicies()).toHaveLength(1);
+      const key = component.customPolicies()[0].key;
+      component.removeCustomPolicy(key);
+      expect(component.customPolicies()).toHaveLength(0);
+    });
+
+    it('names a custom policy row and toggles its enabled state', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.onCustomNameInput(key, 'Employee Roster');
+      expect(component.customPolicies()[0].name).toBe('Employee Roster');
+      component.toggleCustom(key, checkboxEvent(false));
+      expect(component.customPolicies()[0].enabled).toBe(false);
+    });
+
+    it('toggles a category tokenize/log pair independently', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.onCustomCategoryToggle(key, 'EMAIL', 'tokenize', checkboxEvent(true));
+      component.onCustomCategoryToggle(key, 'EMAIL', 'log', checkboxEvent(true));
+      const cats = component.customPolicies()[0].categories;
+      expect(cats.EMAIL).toEqual({ tokenize: true, log: true });
+      expect(cats.PHONE_PL).toEqual({ tokenize: false, log: false });
     });
   });
 
   describe('custom pattern rows', () => {
-    it('adds and removes a pattern row', async () => {
+    it('adds and removes a pattern row on a custom policy', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      component.addPattern();
-      expect(component.customPatterns()).toHaveLength(1);
-      component.removePattern(0);
-      expect(component.customPatterns()).toHaveLength(0);
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.addPattern(key);
+      expect(component.customPolicies()[0].patterns).toHaveLength(1);
+      component.removePattern(key, 0);
+      expect(component.customPolicies()[0].patterns).toHaveLength(0);
     });
 
     it('flags a syntactically invalid regex inline and blocks Save', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      component.addPattern();
-      component.onPatternNameInput(0, 'Bad');
-      component.onPatternRegexInput(0, '(unclosed');
-      expect(component.patternErrors()[0]).not.toBeNull();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.onCustomNameInput(key, 'Custom');
+      component.addPattern(key);
+      component.onPatternNameInput(key, 0, 'Bad');
+      component.onPatternRegexInput(key, 0, '(unclosed');
+      expect(component.patternErrorsFor(key)[0]).not.toBeNull();
       expect(component.canSave()).toBe(false);
     });
 
@@ -210,25 +257,27 @@ describe('SecuritySectionComponent', () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      component.addPattern();
-      component.onPatternNameInput(0, 'Employee ID');
-      component.onPatternRegexInput(0, '\\bEMP-\\d{4,8}\\b');
-      expect(component.patternErrors()[0]).toBeNull();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.addPattern(key);
+      component.onPatternNameInput(key, 0, 'Employee ID');
+      component.onPatternRegexInput(key, 0, '\\bEMP-\\d{4,8}\\b');
+      expect(component.patternErrorsFor(key)[0]).toBeNull();
     });
   });
 
   describe('sensitive key rows', () => {
-    it('adds and removes a key row', async () => {
+    it('adds and removes a key row on a custom policy', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      component.addKey();
-      component.onKeyInput(0, 'Salary');
-      expect(component.sensitiveKeys()).toEqual(['Salary']);
-      component.removeKey(0);
-      expect(component.sensitiveKeys()).toHaveLength(0);
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.addKey(key);
+      component.onKeyInput(key, 0, 'Salary');
+      expect(component.customPolicies()[0].sensitiveKeys).toEqual(['Salary']);
+      component.removeKey(key, 0);
+      expect(component.customPolicies()[0].sensitiveKeys).toHaveLength(0);
     });
   });
 
@@ -265,38 +314,65 @@ describe('SecuritySectionComponent', () => {
       expect(component.canSave()).toBe(false);
     });
 
-    it('editing a category enables Save', async () => {
+    it('toggling a built-in policy enables Save', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
-      component.onCategoryToggle('API_KEY', { target: { checked: false } } as unknown as Event);
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
       expect(component.canSave()).toBe(true);
+    });
+
+    it('an unnamed custom policy row blocks Save', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      expect(component.canSave()).toBe(false);
     });
   });
 
   describe('save', () => {
-    it('invokes update_security_policy with { update } and lowercases sensitive keys', async () => {
+    it('sends only built-in ids in policies and full definitions in custom_policies', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
-      component.addKey();
-      component.onKeyInput(0, 'Salary');
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.onCustomNameInput(key, 'Employee Roster');
+      component.addKey(key);
+      component.onKeyInput(key, 0, 'Salary');
       const spy = vi.spyOn(mockTauri, 'invoke');
       await component.save();
       const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
       expect(call).toBeDefined();
-      const update = (call?.[1] as { update: { sensitive_keys_add: string[] } }).update;
-      expect(update.sensitive_keys_add).toEqual(['salary']);
+      const update = (call?.[1] as { update: SecurityPolicyUpdate }).update;
+      expect(update.policies.sort()).toEqual(['gdpr-art32', 'strict']);
+      expect(update.custom_policies).toHaveLength(1);
+      expect(update.custom_policies[0].name).toBe('Employee Roster');
+      expect(update.custom_policies[0].enabled).toBe(true);
+      expect(update.custom_policies[0].sensitive_keys_add).toEqual(['salary']);
+    });
+
+    it('never sends a forced policy id, even when it was in enabled_policies', async () => {
+      setup(baseResponse({ enabled_policies: ['strict'], forced_policies: ['strict'] }));
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await component.save();
+      const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
+      expect(call).toBeDefined();
+      const update = (call?.[1] as { update: SecurityPolicyUpdate }).update;
+      expect(update.policies).toEqual(['gdpr-art32']);
     });
 
     it('requests a container restart on success', async () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
       const projectState = TestBed.inject(ProjectStateService);
       const spy = vi.spyOn(projectState, 'requestRestart');
       await component.save();
@@ -314,7 +390,7 @@ describe('SecuritySectionComponent', () => {
       await create();
       component.ngOnInit();
       await fixture.whenStable();
-      component.selectCustom();
+      component.toggleBuiltin('gdpr-art32', checkboxEvent(true));
       const projectState = TestBed.inject(ProjectStateService);
       const spy = vi.spyOn(projectState, 'requestRestart');
       await component.save();
@@ -336,7 +412,7 @@ describe('SecuritySectionComponent', () => {
       if (cmd === 'list_security_policy_templates') return baseTemplates();
       if (cmd === 'get_security_policy') {
         calls += 1;
-        return baseResponse({ template: 'gdpr-art32', categories: allOn({ API_KEY: false }) });
+        return baseResponse({ enabled_policies: ['gdpr-art32'] });
       }
       return undefined;
     };
@@ -347,7 +423,8 @@ describe('SecuritySectionComponent', () => {
     readyCb();
     await fixture.whenStable();
     expect(calls).toBe(1);
-    expect(component.selectedTemplate()).toBe('gdpr-art32');
+    expect(component.isBuiltinEnabled('gdpr-art32')).toBe(true);
+    expect(component.isBuiltinEnabled('strict')).toBe(false);
   });
 
   it('unsubscribes the project-ready listener on destroy', async () => {

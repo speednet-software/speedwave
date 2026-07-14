@@ -233,18 +233,28 @@ pub(crate) struct SecurityPolicyTemplateInfo {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
 }
 
-/// Effective PII policy for the active project: `categories` is the resolved
-/// all-8 view; `custom_patterns`/`sensitive_keys_add` are the raw selection.
-#[derive(Serialize)]
-pub(crate) struct SecurityPolicyResponse {
-    /// A built-in template id, or `"custom"` when the user overrides categories.
-    pub(crate) template: String,
-    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+/// A user-defined policy's Settings-picker metadata (editable); mirrors
+/// `PiiPolicyDefinition` minus the `sensitive_keys.remove` side.
+#[derive(Serialize, Clone)]
+pub(crate) struct CustomPolicyDto {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
     pub(crate) custom_patterns: Vec<speedwave_runtime::pii_policy::CustomPiiPattern>,
     pub(crate) sensitive_keys_add: Vec<String>,
+}
+
+/// Effective PII policy for the active project: `enabled_policies` is the
+/// user ∪ MDM-forced set, `forced_policies` the MDM-locked subset.
+#[derive(Serialize)]
+pub(crate) struct SecurityPolicyResponse {
+    pub(crate) enabled_policies: Vec<String>,
+    pub(crate) forced_policies: Vec<String>,
+    pub(crate) effective_categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
+    pub(crate) custom_policies: Vec<CustomPolicyDto>,
 }
 
 /// A custom pattern as entered in the Settings form: the UI never computes
@@ -256,14 +266,23 @@ pub(crate) struct SecurityPolicyCustomPatternInput {
     pub(crate) case_insensitive: bool,
 }
 
-/// User-supplied PII policy update (Settings → Security save path); `template`
-/// is a built-in id or `"custom"`. The server re-validates every field.
-#[derive(Deserialize)]
-pub(crate) struct SecurityPolicyUpdate {
-    pub(crate) template: String,
-    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryFlags,
+/// A user-defined policy as entered in the Settings form; the server derives
+/// the id from `name`. `enabled` is this policy's own state, never forced.
+#[derive(Deserialize, Clone)]
+pub(crate) struct CustomPolicyDtoInput {
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
     pub(crate) custom_patterns: Vec<SecurityPolicyCustomPatternInput>,
     pub(crate) sensitive_keys_add: Vec<String>,
+}
+
+/// User-supplied PII policy update (Settings → Security save path). `policies`
+/// and each custom entry's `enabled` carry the user's own selection only, never forced ids.
+#[derive(Deserialize)]
+pub(crate) struct SecurityPolicyUpdate {
+    pub(crate) policies: Vec<String>,
+    pub(crate) custom_policies: Vec<CustomPolicyDtoInput>,
 }
 
 #[derive(Serialize, Clone)]

@@ -14,8 +14,10 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
+  CategoryFlagPair,
+  CustomPolicyDtoInput,
   PiiCategory,
-  PiiCategoryFlags,
+  PiiCategoryPolicies,
   SecurityPolicyCustomPatternInput,
   SecurityPolicyResponse,
   SecurityPolicyTemplateInfo,
@@ -27,6 +29,20 @@ interface CustomPatternRow {
   displayName: string;
   pattern: string;
   caseInsensitive: boolean;
+}
+
+/**
+ * Editable row for a user-defined policy. `key` is a stable local identity for
+ * `track`/data-testid; `id` is the last server-known id, empty until saved once.
+ */
+interface CustomPolicyRow {
+  key: string;
+  id: string;
+  name: string;
+  enabled: boolean;
+  categories: PiiCategoryPolicies;
+  patterns: CustomPatternRow[];
+  sensitiveKeys: string[];
 }
 
 /** Every built-in category, in the contract's declaration order (Rust `PiiCategory::ALL`). */
@@ -53,11 +69,9 @@ const CATEGORY_LABELS: Record<PiiCategory, string> = {
   SENSITIVE_FIELD: 'Sensitive field names',
 };
 
-const CUSTOM_TEMPLATE_ID = 'custom';
-
 /**
- * Settings → Security: pick a built-in PII policy template or define a custom
- * one (categories, detection patterns, sensitive key names).
+ * Settings → Security: enable a set of built-in and/or custom PII policies,
+ * each with per-category tokenize/log pairs. MDM-forced policies show locked.
  */
 @Component({
   selector: 'app-security-section',
@@ -81,178 +95,220 @@ const CUSTOM_TEMPLATE_ID = 'custom';
       }
 
       @if (loaded()) {
-        <div
-          class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4"
-          role="radiogroup"
-          aria-label="Policy template"
-        >
+        <div class="mt-4 space-y-2">
+          <div class="mono text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+            Policies
+          </div>
           @for (t of templates(); track t.id) {
-            <button
-              type="button"
-              role="radio"
-              [attr.aria-checked]="selectedTemplate() === t.id"
-              class="rounded border px-3 py-2 text-left"
-              [class]="
-                selectedTemplate() === t.id
-                  ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
-                  : 'border-[var(--line)] bg-[var(--bg-1)] hover:border-[var(--line-strong)]'
-              "
-              [attr.data-testid]="'security-template-' + t.id"
-              (click)="selectTemplate(t.id, t.categories)"
+            <label
+              class="flex items-start gap-2 rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2"
             >
-              <div
-                class="mono text-[11px] font-medium"
-                [class]="
-                  selectedTemplate() === t.id ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
-                "
-              >
-                {{ selectedTemplate() === t.id ? '● ' : '○ ' }}{{ t.name }}
+              <input
+                type="checkbox"
+                class="mt-0.5 accent-[var(--accent)]"
+                [checked]="isBuiltinEnabled(t.id)"
+                [disabled]="isForced(t.id)"
+                (change)="toggleBuiltin(t.id, $event)"
+                [attr.data-testid]="'security-policy-' + t.id"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="text-[12px] font-medium text-[var(--ink)]">
+                  {{ t.name }}
+                  @if (isForced(t.id)) {
+                    <span
+                      class="mono ml-1 rounded bg-[var(--bg-3)] px-1.5 py-0.5 text-[10px] text-[var(--ink-dim)]"
+                      [attr.data-testid]="'security-forced-' + t.id"
+                    >
+                      Enforced by organization
+                    </span>
+                  }
+                </div>
+                <div class="text-[11px] text-[var(--ink-dim)]">{{ t.description }}</div>
               </div>
-              <div class="mt-1 text-[11px] leading-relaxed text-[var(--ink-dim)]">
-                {{ t.description }}
-              </div>
-            </button>
+            </label>
           }
+
+          @for (row of customPolicies(); track row.key) {
+            <div
+              class="rounded border border-[var(--line)] bg-[var(--bg-1)] px-3 py-2"
+              [attr.data-testid]="'security-custom-' + row.key"
+            >
+              <div class="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  class="accent-[var(--accent)]"
+                  [checked]="row.enabled"
+                  [disabled]="isForced(row.id)"
+                  (change)="toggleCustom(row.key, $event)"
+                  [attr.data-testid]="'security-custom-' + row.key + '-enabled'"
+                />
+                <input
+                  type="text"
+                  placeholder="Policy name"
+                  class="min-w-[8rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                  [value]="row.name"
+                  (input)="onCustomNameInput(row.key, eventValue($event))"
+                  [attr.data-testid]="'security-custom-' + row.key + '-name'"
+                />
+                @if (isForced(row.id)) {
+                  <span
+                    class="mono rounded bg-[var(--bg-3)] px-1.5 py-0.5 text-[10px] text-[var(--ink-dim)]"
+                    [attr.data-testid]="'security-custom-' + row.key + '-forced'"
+                  >
+                    Enforced by organization
+                  </span>
+                }
+                @if (rowNameError(row); as nameErr) {
+                  <span class="text-[11px] text-[var(--red)]">{{ nameErr }}</span>
+                }
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                  (click)="removeCustomPolicy(row.key)"
+                  [attr.data-testid]="'security-custom-' + row.key + '-remove'"
+                >
+                  remove
+                </button>
+              </div>
+
+              <div class="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+                @for (cat of categoryList; track cat) {
+                  <div class="rounded border border-[var(--line)] px-2 py-1 text-[11px]">
+                    <div class="text-[var(--ink-dim)]">{{ categoryLabels[cat] }}</div>
+                    <label class="mr-2 inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        [checked]="row.categories[cat].tokenize"
+                        (change)="onCustomCategoryToggle(row.key, cat, 'tokenize', $event)"
+                        [attr.data-testid]="'security-custom-' + row.key + '-' + cat + '-tokenize'"
+                      />
+                      tokenize
+                    </label>
+                    <label class="inline-flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        [checked]="row.categories[cat].log"
+                        (change)="onCustomCategoryToggle(row.key, cat, 'log', $event)"
+                        [attr.data-testid]="'security-custom-' + row.key + '-' + cat + '-log'"
+                      />
+                      log
+                    </label>
+                  </div>
+                }
+              </div>
+
+              <div class="mt-2">
+                <div class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+                  Custom patterns
+                </div>
+                @for (pattern of row.patterns; track $index; let i = $index) {
+                  <div class="mb-1 flex flex-wrap items-start gap-2">
+                    <input
+                      type="text"
+                      placeholder="Display name"
+                      class="min-w-[8rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                      [value]="pattern.displayName"
+                      (input)="onPatternNameInput(row.key, i, eventValue($event))"
+                      [attr.data-testid]="'security-custom-' + row.key + '-pattern-name-' + i"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Regex pattern"
+                      class="mono min-w-[10rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                      [value]="pattern.pattern"
+                      (input)="onPatternRegexInput(row.key, i, eventValue($event))"
+                      [attr.data-testid]="'security-custom-' + row.key + '-pattern-regex-' + i"
+                    />
+                    <button
+                      type="button"
+                      class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                      (click)="removePattern(row.key, i)"
+                      [attr.data-testid]="'security-custom-' + row.key + '-pattern-remove-' + i"
+                    >
+                      remove
+                    </button>
+                    @if (patternErrorsFor(row.key)[i]; as err) {
+                      <p
+                        class="w-full text-[11px] text-[var(--red)]"
+                        [attr.data-testid]="'security-custom-' + row.key + '-pattern-error-' + i"
+                      >
+                        {{ err }}
+                      </p>
+                    }
+                  </div>
+                }
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                  (click)="addPattern(row.key)"
+                  [attr.data-testid]="'security-custom-' + row.key + '-pattern-add'"
+                >
+                  Add pattern
+                </button>
+              </div>
+
+              <div class="mt-2">
+                <div class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
+                  Sensitive field names
+                </div>
+                @for (key of row.sensitiveKeys; track $index; let i = $index) {
+                  <div class="mb-1 flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="e.g. salary"
+                      class="mono flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                      [value]="key"
+                      (input)="onKeyInput(row.key, i, eventValue($event))"
+                      [attr.data-testid]="'security-custom-' + row.key + '-key-' + i"
+                    />
+                    <button
+                      type="button"
+                      class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                      (click)="removeKey(row.key, i)"
+                      [attr.data-testid]="'security-custom-' + row.key + '-key-remove-' + i"
+                    >
+                      remove
+                    </button>
+                  </div>
+                }
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+                  (click)="addKey(row.key)"
+                  [attr.data-testid]="'security-custom-' + row.key + '-key-add'"
+                >
+                  Add key name
+                </button>
+              </div>
+            </div>
+          }
+
           <button
             type="button"
-            role="radio"
-            [attr.aria-checked]="selectedTemplate() === customId"
-            class="rounded border px-3 py-2 text-left"
-            [class]="
-              selectedTemplate() === customId
-                ? 'border-[var(--accent-dim)] bg-[var(--accent-soft)]'
-                : 'border-[var(--line)] bg-[var(--bg-1)] hover:border-[var(--line-strong)]'
-            "
-            data-testid="security-template-custom"
-            (click)="selectCustom()"
+            class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1.5 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
+            (click)="addCustomPolicy()"
+            data-testid="security-custom-add"
           >
-            <div
-              class="mono text-[11px] font-medium"
-              [class]="
-                selectedTemplate() === customId ? 'text-[var(--accent)]' : 'text-[var(--ink-dim)]'
-              "
-            >
-              {{ selectedTemplate() === customId ? '● ' : '○ ' }}Custom
-            </div>
-            <div class="mt-1 text-[11px] leading-relaxed text-[var(--ink-dim)]">
-              Choose your own categories, patterns, and sensitive key names.
-            </div>
+            Add custom policy
           </button>
         </div>
 
         <div class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-4 py-3">
           <div class="mono mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-            Categories
-            @if (!isCustom()) {
-              <span class="normal-case tracking-normal">(read-only — pick Custom to edit)</span>
-            }
+            Effective categories (read-only, union of every enabled policy)
           </div>
-          <div class="space-y-1.5 text-[11px] text-[var(--ink)]">
+          <div
+            class="grid grid-cols-1 gap-1.5 text-[11px] text-[var(--ink)] sm:grid-cols-2 lg:grid-cols-4"
+          >
             @for (cat of categoryList; track cat) {
-              <label class="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  class="accent-[var(--accent)]"
-                  [checked]="categories()[cat]"
-                  [disabled]="!isCustom()"
-                  (change)="onCategoryToggle(cat, $event)"
-                  [attr.data-testid]="'security-category-' + cat"
-                />
-                {{ categoryLabels[cat] }}
-              </label>
+              <div [attr.data-testid]="'security-effective-' + cat">
+                {{ categoryLabels[cat] }}: tokenize
+                {{ effectiveCategories()[cat].tokenize ? 'on' : 'off' }}, log
+                {{ effectiveCategories()[cat].log ? 'on' : 'off' }}
+              </div>
             }
           </div>
         </div>
-
-        @if (isCustom()) {
-          <div class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-4 py-3">
-            <div class="mono mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-              Custom patterns
-            </div>
-            <div class="space-y-2">
-              @for (row of customPatterns(); track $index; let i = $index) {
-                <div class="flex flex-wrap items-start gap-2">
-                  <input
-                    type="text"
-                    placeholder="Display name"
-                    class="min-w-[10rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
-                    [value]="row.displayName"
-                    (input)="onPatternNameInput(i, eventValue($event))"
-                    [attr.data-testid]="'security-pattern-name-' + i"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Regex pattern"
-                    class="mono min-w-[12rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
-                    [value]="row.pattern"
-                    (input)="onPatternRegexInput(i, eventValue($event))"
-                    [attr.data-testid]="'security-pattern-regex-' + i"
-                  />
-                  <button
-                    type="button"
-                    class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
-                    (click)="removePattern(i)"
-                    [attr.data-testid]="'security-pattern-remove-' + i"
-                  >
-                    remove
-                  </button>
-                  @if (patternErrors()[i]; as err) {
-                    <p
-                      class="w-full text-[11px] text-[var(--red)]"
-                      [attr.data-testid]="'security-pattern-error-' + i"
-                    >
-                      {{ err }}
-                    </p>
-                  }
-                </div>
-              }
-            </div>
-            <button
-              type="button"
-              class="mono mt-2 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
-              (click)="addPattern()"
-              data-testid="security-pattern-add"
-            >
-              Add pattern
-            </button>
-          </div>
-
-          <div class="mt-4 rounded border border-[var(--line)] bg-[var(--bg-1)] px-4 py-3">
-            <div class="mono mb-2 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-              Sensitive field names
-            </div>
-            <div class="space-y-2">
-              @for (key of sensitiveKeys(); track $index; let i = $index) {
-                <div class="flex items-center gap-2">
-                  <input
-                    type="text"
-                    placeholder="e.g. salary"
-                    class="mono flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
-                    [value]="key"
-                    (input)="onKeyInput(i, eventValue($event))"
-                    [attr.data-testid]="'security-key-' + i"
-                  />
-                  <button
-                    type="button"
-                    class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
-                    (click)="removeKey(i)"
-                    [attr.data-testid]="'security-key-remove-' + i"
-                  >
-                    remove
-                  </button>
-                </div>
-              }
-            </div>
-            <button
-              type="button"
-              class="mono mt-2 rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
-              (click)="addKey()"
-              data-testid="security-key-add"
-            >
-              Add key name
-            </button>
-          </div>
-        }
 
         <div class="flex items-center justify-end gap-3 border-t border-[var(--line)] pt-4 mt-4">
           @if (saveError()) {
@@ -262,7 +318,7 @@ const CUSTOM_TEMPLATE_ID = 'custom';
           }
           @if (saved()) {
             <span class="mono text-[11px] text-[var(--green)]" data-testid="security-saved">
-              Saved — restart to apply
+              Saved: restart to apply
             </span>
           }
           <button
@@ -291,19 +347,20 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   /** False until the first get_security_policy resolves; gates the form + Save. */
   readonly loaded = signal(false);
 
-  readonly selectedTemplate = signal<string>(CUSTOM_TEMPLATE_ID);
-  readonly categories = signal<PiiCategoryFlags>(this.allCategoriesOn());
-  readonly customPatterns = signal<CustomPatternRow[]>([]);
-  readonly sensitiveKeys = signal<string[]>([]);
+  /** Enabled ids from the last load: built-in ids the checklist checks directly. */
+  readonly enabledPolicies = signal<Set<string>>(new Set());
+  /** MDM-forced ids (built-in or custom): checked, disabled, badge in the UI. */
+  readonly forcedPolicies = signal<Set<string>>(new Set());
+  readonly effectiveCategories = signal<PiiCategoryPolicies>(this.allOff());
+  readonly customPolicies = signal<CustomPolicyRow[]>([]);
 
   private readonly loadedFormSnapshot = signal('');
+  private nextRowKey = 0;
 
-  readonly isCustom = computed(() => this.selectedTemplate() === CUSTOM_TEMPLATE_ID);
-
-  /** Inline validation per custom-pattern row (empty until the row is filled in). */
-  readonly patternErrors = computed<(string | null)[]>(() =>
-    this.customPatterns().map((row) => this.rowError(row))
-  );
+  readonly patternErrorsFor = (rowKey: string): (string | null)[] => {
+    const row = this.customPolicies().find((r) => r.key === rowKey);
+    return row ? row.patterns.map((p) => this.patternRowError(p)) : [];
+  };
 
   readonly isDirty = computed<boolean>(
     () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
@@ -311,8 +368,11 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
 
   readonly canSave = computed<boolean>(() => {
     if (!this.loaded() || !this.isDirty()) return false;
-    if (!this.isCustom()) return true;
-    return this.patternErrors().every((e) => e === null);
+    return this.customPolicies().every(
+      (row) =>
+        this.rowNameError(row) === null &&
+        row.patterns.every((p) => this.patternRowError(p) === null)
+    );
   });
 
   private readonly tauri = inject(TauriService);
@@ -322,7 +382,6 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
 
   protected readonly categoryList = ALL_CATEGORIES;
   protected readonly categoryLabels = CATEGORY_LABELS;
-  protected readonly customId = CUSTOM_TEMPLATE_ID;
   protected readonly eventValue = eventValue;
 
   /** Loads templates + the current policy on first paint; reloads on project switch. */
@@ -339,8 +398,11 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     this.unsubProjectReady = null;
   }
 
-  private allCategoriesOn(): PiiCategoryFlags {
-    return ALL_CATEGORIES.reduce((acc, c) => ({ ...acc, [c]: true }), {} as PiiCategoryFlags);
+  private allOff(): PiiCategoryPolicies {
+    return ALL_CATEGORIES.reduce(
+      (acc, c) => ({ ...acc, [c]: { tokenize: false, log: false } }),
+      {} as PiiCategoryPolicies
+    );
   }
 
   private async refresh(): Promise<void> {
@@ -361,107 +423,247 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   private applyPolicy(policy: SecurityPolicyResponse): void {
-    this.selectedTemplate.set(policy.template);
-    this.categories.set(policy.categories);
-    this.customPatterns.set(
-      policy.custom_patterns.map((p) => ({
-        displayName: p.displayName,
-        pattern: p.pattern,
-        caseInsensitive: p.caseInsensitive,
+    this.forcedPolicies.set(new Set(policy.forced_policies));
+    this.enabledPolicies.set(new Set(policy.enabled_policies));
+    this.effectiveCategories.set(policy.effective_categories);
+    this.customPolicies.set(
+      policy.custom_policies.map((c) => ({
+        key: `srv-${c.id}`,
+        id: c.id,
+        name: c.name,
+        enabled: policy.enabled_policies.includes(c.id),
+        categories: c.categories,
+        patterns: c.custom_patterns.map((p) => ({
+          displayName: p.displayName,
+          pattern: p.pattern,
+          caseInsensitive: p.caseInsensitive,
+        })),
+        sensitiveKeys: c.sensitive_keys_add,
       }))
     );
-    this.sensitiveKeys.set(policy.sensitive_keys_add);
   }
 
   /**
-   * Selects a built-in template card; its category map replaces the form's
-   * (read-only until the user switches to Custom).
+   * Whether a built-in template id is currently enabled (checklist state).
    * @param id - the template id.
-   * @param categories - the template's category map, shown read-only.
    */
-  selectTemplate(id: string, categories: PiiCategoryFlags): void {
-    this.selectedTemplate.set(id);
-    this.categories.set(categories);
-  }
-
-  /** Selects the Custom card, exposing the editable category/pattern/key controls. */
-  selectCustom(): void {
-    this.selectedTemplate.set(CUSTOM_TEMPLATE_ID);
+  isBuiltinEnabled(id: string): boolean {
+    return this.enabledPolicies().has(id);
   }
 
   /**
-   * Toggles one category; turning a category OFF weakens detection, so it
-   * requires an explicit confirm (mirrors telemetry's privacy-gate confirm).
-   * @param cat - the category being toggled.
+   * Whether a policy id is MDM-forced: checked, disabled, badge shown.
+   * @param id - the policy id (built-in or a custom policy's last-known id).
+   */
+  isForced(id: string): boolean {
+    return id.length > 0 && this.forcedPolicies().has(id);
+  }
+
+  /**
+   * Toggles a built-in template's enabled state; a forced id ignores the event.
+   * @param id - the template id.
    * @param ev - the checkbox change event.
    */
-  onCategoryToggle(cat: PiiCategory, ev: Event): void {
+  toggleBuiltin(id: string, ev: Event): void {
+    if (this.isForced(id)) return;
     const on = eventChecked(ev);
-    if (!on && !confirm(`Turning off "${CATEGORY_LABELS[cat]}" weakens PII detection. Continue?`)) {
-      (ev.target as HTMLInputElement).checked = true;
-      return;
-    }
-    this.categories.update((c) => ({ ...c, [cat]: on }));
+    this.enabledPolicies.update((set) => {
+      const next = new Set(set);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
   }
 
-  /** Appends an empty custom-pattern row. */
-  addPattern(): void {
-    this.customPatterns.update((rows) => [
+  /**
+   * Toggles a custom policy row's enabled state; a forced id ignores the event.
+   * @param key - the row's local key.
+   * @param ev - the checkbox change event.
+   */
+  toggleCustom(key: string, ev: Event): void {
+    const row = this.customPolicies().find((r) => r.key === key);
+    if (row && this.isForced(row.id)) return;
+    const on = eventChecked(ev);
+    this.customPolicies.update((rows) =>
+      rows.map((r) => (r.key === key ? { ...r, enabled: on } : r))
+    );
+  }
+
+  /** Appends a new, enabled, all-off custom policy row. */
+  addCustomPolicy(): void {
+    const key = `new-${this.nextRowKey++}`;
+    this.customPolicies.update((rows) => [
       ...rows,
-      { displayName: '', pattern: '', caseInsensitive: false },
+      {
+        key,
+        id: '',
+        name: '',
+        enabled: true,
+        categories: this.allOff(),
+        patterns: [],
+        sensitiveKeys: [],
+      },
     ]);
   }
 
   /**
-   * Removes a custom-pattern row.
-   * @param i - the row index.
+   * Removes a custom policy row.
+   * @param key - the row's local key.
    */
-  removePattern(i: number): void {
-    this.customPatterns.update((rows) => rows.filter((_, idx) => idx !== i));
+  removeCustomPolicy(key: string): void {
+    this.customPolicies.update((rows) => rows.filter((r) => r.key !== key));
+  }
+
+  /**
+   * Updates a custom policy row's name.
+   * @param key - the row's local key.
+   * @param value - the new name.
+   */
+  onCustomNameInput(key: string, value: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) => (r.key === key ? { ...r, name: value } : r))
+    );
+  }
+
+  /**
+   * Toggles one category's tokenize or log flag on a custom policy row.
+   * @param key - the row's local key.
+   * @param cat - the category being toggled.
+   * @param field - which half of the flag pair.
+   * @param ev - the checkbox change event.
+   */
+  onCustomCategoryToggle(
+    key: string,
+    cat: PiiCategory,
+    field: keyof CategoryFlagPair,
+    ev: Event
+  ): void {
+    const on = eventChecked(ev);
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === key
+          ? { ...r, categories: { ...r.categories, [cat]: { ...r.categories[cat], [field]: on } } }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Appends an empty custom-pattern row to a policy.
+   * @param rowKey - the owning policy row's local key.
+   */
+  addPattern(rowKey: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              patterns: [...r.patterns, { displayName: '', pattern: '', caseInsensitive: false }],
+            }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Removes a custom-pattern row from a policy.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the pattern row index.
+   */
+  removePattern(rowKey: string, i: number): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey ? { ...r, patterns: r.patterns.filter((_, idx) => idx !== i) } : r
+      )
+    );
   }
 
   /**
    * Updates a pattern row's display name.
-   * @param i - the row index.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the pattern row index.
    * @param value - the new display name.
    */
-  onPatternNameInput(i: number, value: string): void {
-    this.customPatterns.update((rows) =>
-      rows.map((r, idx) => (idx === i ? { ...r, displayName: value } : r))
+  onPatternNameInput(rowKey: string, i: number, value: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              patterns: r.patterns.map((p, idx) => (idx === i ? { ...p, displayName: value } : p)),
+            }
+          : r
+      )
     );
   }
 
   /**
    * Updates a pattern row's regex source.
-   * @param i - the row index.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the pattern row index.
    * @param value - the new regex source.
    */
-  onPatternRegexInput(i: number, value: string): void {
-    this.customPatterns.update((rows) =>
-      rows.map((r, idx) => (idx === i ? { ...r, pattern: value } : r))
+  onPatternRegexInput(rowKey: string, i: number, value: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              patterns: r.patterns.map((p, idx) => (idx === i ? { ...p, pattern: value } : p)),
+            }
+          : r
+      )
     );
   }
 
-  /** Appends an empty sensitive-key row. */
-  addKey(): void {
-    this.sensitiveKeys.update((keys) => [...keys, '']);
+  /**
+   * Appends an empty sensitive-key row to a policy.
+   * @param rowKey - the owning policy row's local key.
+   */
+  addKey(rowKey: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) => (r.key === rowKey ? { ...r, sensitiveKeys: [...r.sensitiveKeys, ''] } : r))
+    );
   }
 
   /**
-   * Removes a sensitive-key row.
-   * @param i - the row index.
+   * Removes a sensitive-key row from a policy.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the key row index.
    */
-  removeKey(i: number): void {
-    this.sensitiveKeys.update((keys) => keys.filter((_, idx) => idx !== i));
+  removeKey(rowKey: string, i: number): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? { ...r, sensitiveKeys: r.sensitiveKeys.filter((_, idx) => idx !== i) }
+          : r
+      )
+    );
   }
 
   /**
    * Updates a sensitive-key row's value.
-   * @param i - the row index.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the key row index.
    * @param value - the new key-name text.
    */
-  onKeyInput(i: number, value: string): void {
-    this.sensitiveKeys.update((keys) => keys.map((k, idx) => (idx === i ? value : k)));
+  onKeyInput(rowKey: string, i: number, value: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? { ...r, sensitiveKeys: r.sensitiveKeys.map((k, idx) => (idx === i ? value : k)) }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Client-side pre-validation for a policy row's name; the server derives the
+   * id from this and re-validates on save. Called directly from the template.
+   * @param row - the policy row to validate.
+   */
+  protected rowNameError(row: CustomPolicyRow): string | null {
+    return row.name.trim() ? null : 'Name is required';
   }
 
   /**
@@ -469,7 +671,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
    * authoritative and re-validates on save.
    * @param row - the pattern row to validate.
    */
-  private rowError(row: CustomPatternRow): string | null {
+  private patternRowError(row: CustomPatternRow): string | null {
     if (!row.displayName.trim()) return 'Name is required';
     if (!row.pattern.trim()) return 'Pattern is required';
     try {
@@ -481,38 +683,43 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   private computeFormSnapshot(): string {
-    return [
-      this.selectedTemplate(),
-      JSON.stringify(this.categories()),
-      JSON.stringify(this.customPatterns()),
-      JSON.stringify(this.sensitiveKeys()),
-    ].join('|');
+    return JSON.stringify({
+      enabled: Array.from(this.enabledPolicies()).sort(),
+      custom: this.customPolicies().map((r) => ({
+        name: r.name,
+        enabled: r.enabled,
+        categories: r.categories,
+        patterns: r.patterns,
+        sensitiveKeys: r.sensitiveKeys,
+      })),
+    });
   }
 
   private buildUpdate(): SecurityPolicyUpdate {
-    const custom = this.isCustom();
-    const customPatterns: SecurityPolicyCustomPatternInput[] = custom
-      ? this.customPatterns().map((p) => ({
-          display_name: p.displayName,
+    const builtinIds = new Set(this.templates().map((t) => t.id));
+    const policies = Array.from(this.enabledPolicies()).filter(
+      (id) => builtinIds.has(id) && !this.isForced(id)
+    );
+    const custom_policies: CustomPolicyDtoInput[] = this.customPolicies().map((row) => ({
+      name: row.name.trim(),
+      enabled: row.enabled && !this.isForced(row.id),
+      categories: row.categories,
+      custom_patterns: row.patterns.map(
+        (p): SecurityPolicyCustomPatternInput => ({
+          display_name: p.displayName.trim(),
           pattern: p.pattern,
           case_insensitive: p.caseInsensitive,
-        }))
-      : [];
-    // The server rejects uppercase sensitive keys by contract.
-    const sensitiveKeysAdd = custom
-      ? this.sensitiveKeys()
-          .map((k) => k.trim().toLowerCase())
-          .filter((k) => k.length > 0)
-      : [];
-    return {
-      template: this.selectedTemplate(),
-      categories: this.categories(),
-      custom_patterns: customPatterns,
-      sensitive_keys_add: sensitiveKeysAdd,
-    };
+        })
+      ),
+      // The server rejects uppercase sensitive keys by contract.
+      sensitive_keys_add: row.sensitiveKeys
+        .map((k) => k.trim().toLowerCase())
+        .filter((k) => k.length > 0),
+    }));
+    return { policies, custom_policies };
   }
 
-  /** Persists the selected template/categories/patterns/keys, then requests a restart. */
+  /** Persists the enabled policies + custom definitions, then requests a restart. */
   async save(): Promise<void> {
     this.saving.set(true);
     this.saved.set(false);
@@ -523,7 +730,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       await this.tauri.invoke('update_security_policy', { update });
       await this.refresh();
       // refresh() swallows its own errors into error(), so gate success feedback
-      // on it being clear — never show "Saved" next to an error.
+      // on it being clear: never show "Saved" next to an error.
       if (this.error()) {
         this.saveError.set(this.error());
       } else {
