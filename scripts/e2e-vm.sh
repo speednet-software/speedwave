@@ -564,6 +564,24 @@ SCRIPT
     fi
     echo "[windows] Installer at: $WINDOWS_HOST:Desktop\\speedwave-setup.exe"
 
+    # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
+    # the desktop suite just left behind — must run before windows_clean_state below.
+    if [ "$exit_code" -eq 0 ]; then
+        echo "[windows] Resolving installed Windows CLI path via WSL interop..."
+        local windows_cli_path
+        # shellcheck disable=SC2086
+        windows_cli_path=$(ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc 'ls /mnt/c/Users/*/.speedwave/bin/speedwave*.exe 2>/dev/null | head -n1'")
+        if [ -z "$windows_cli_path" ]; then
+            echo "[windows] ERROR: installed speedwave CLI not found under /mnt/c/Users/*/.speedwave/bin" >&2
+            exit_code=1
+        else
+            local windows_data_dir="${windows_cli_path%/bin/*}"
+            echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
+            # shellcheck disable=SC2086
+            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats $WINDOWS_WSL_STAGING/engine-contract-suite/update-dirty-state.bats\"" || exit_code=$?
+        fi
+    fi
+
     # -- Cleanup: leave the machine clean after tests ----------------------------
     echo "[windows] Cleaning up..."
     windows_clean_state
@@ -783,10 +801,14 @@ hdiutil detach "/Volumes/Speedwave"
 echo "Install OK"
 SCRIPT
 
-    # Re-copy E2E test suite (macos_clean_state removed /tmp/speedwave-e2e)
+    # Re-copy E2E test suite (macos_clean_state removed /tmp/speedwave-e2e).
+    # Also ships _tests/e2e/ flat into the same dir — no filename overlap.
     # shellcheck disable=SC2086
     rsync -az -e "ssh $MACOS_SSH_OPTS" \
         "$HOST_REPO_DIR/desktop/e2e/" "${MACOS_HOST}:/tmp/speedwave-e2e/"
+    # shellcheck disable=SC2086
+    rsync -az -e "ssh $MACOS_SSH_OPTS" \
+        "$HOST_REPO_DIR/_tests/e2e/" "${MACOS_HOST}:/tmp/speedwave-e2e/"
     macos_ssh bash <<'SCRIPT'
 set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -802,6 +824,20 @@ SCRIPT
         echo "[macos] FAILED on second install (exit code: $exit_code)"
     fi
     echo "[macos] .dmg at: $MACOS_HOST:~/Desktop/speedwave.dmg"
+
+    # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
+    # the desktop suite just left behind — must run before macos_clean_state below.
+    if [ "$exit_code" -eq 0 ]; then
+        echo "[macos] Running update-dirty-state suite (production-style install: LIMA_HOME + speedwave VM)..."
+        macos_ssh bash <<'SCRIPT'
+set -euo pipefail
+command -v bats >/dev/null 2>&1 || brew install bats-core
+SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
+ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
+SPW_E2E_PROJECT=e2e-test bats /tmp/speedwave-e2e/update-dirty-state.bats
+SCRIPT
+        exit_code=$?
+    fi
 
     # -- Cleanup: leave the machine clean after tests ----------------------------
     echo "[macos] Cleaning up..."
