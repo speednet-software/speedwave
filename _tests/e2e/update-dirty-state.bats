@@ -33,6 +33,8 @@ teardown() {
 
 @test "update heals a single planted ghost and completes" {
   plant_ghost "${PREFIX}_${SPW_E2E_PROJECT}_mcp_hub"
+  # Precondition: a silently failed plant would make the heal assertions vacuous.
+  [ "$(ghost_count)" -eq 1 ]
   run "$SPEEDWAVE_BIN" update --project "$SPW_E2E_PROJECT"
   assert_exit_code 0
   assert_output_contains "Updated"
@@ -41,6 +43,7 @@ teardown() {
 
 @test "update heals three ghosts in a single pass" {
   for svc in mcp_hub claude proxy; do plant_ghost "${PREFIX}_${SPW_E2E_PROJECT}_${svc}"; done
+  [ "$(ghost_count)" -eq 3 ]
   run "$SPEEDWAVE_BIN" update --project "$SPW_E2E_PROJECT"
   assert_exit_code 0
   [ "$(ghost_count)" -eq 0 ]
