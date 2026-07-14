@@ -570,8 +570,11 @@ pub async fn add_project(
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("failed to start containers: {e:#}");
-                // Sanitize: the chain can carry raw nerdctl argv echoes (tokens).
-                speedwave_runtime::log_sanitizer::sanitize(&format!("{e:#}"))
+                // Condense to a bounded banner, then sanitize: the chain can carry
+                // raw nerdctl argv echoes (tokens) and unbounded engine output.
+                speedwave_runtime::log_sanitizer::sanitize(
+                    &speedwave_runtime::build::condense_engine_error(&format!("{e:#}")),
+                )
             })
         })
     })
@@ -692,8 +695,11 @@ pub async fn start_containers(
         log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
             log::error!("failed to start containers: {e:#}");
-            // Sanitize: the chain can carry raw nerdctl argv echoes (tokens).
-            speedwave_runtime::log_sanitizer::sanitize(&format!("{e:#}"))
+            // Condense to a bounded banner, then sanitize: the chain can carry
+            // raw nerdctl argv echoes (tokens) and unbounded engine output.
+            speedwave_runtime::log_sanitizer::sanitize(
+                &speedwave_runtime::build::condense_engine_error(&format!("{e:#}")),
+            )
         })
     })
     .await
@@ -1757,13 +1763,17 @@ mod tests {
             let site = source
                 .find(pat)
                 .unwrap_or_else(|| panic!("call site '{pat}' must exist"));
-            let mut end = (site + 400).min(source.len());
+            let mut end = (site + 500).min(source.len());
             while !source.is_char_boundary(end) {
                 end += 1;
             }
             assert!(
                 source[site..end].contains("log_sanitizer::sanitize"),
                 "'{pat}' must pass log_sanitizer::sanitize before Err(String)"
+            );
+            assert!(
+                source[site..end].contains("condense_engine_error"),
+                "'{pat}' must condense to a bounded banner before Err(String)"
             );
         }
     }

@@ -400,7 +400,7 @@ pub fn update_containers(
     .map_err(|e| {
         anyhow::anyhow!(
             "Image rebuild failed: {}. Containers are still running with the previous version.",
-            build::condense_build_error(&format!("{e:#}"))
+            build::condense_engine_error(&format!("{e:#}"))
         )
     })?;
 

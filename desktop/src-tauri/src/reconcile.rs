@@ -300,8 +300,11 @@ fn restore_one_project(
         Ok(())
     })
     // `{e:#}` keeps the whole context chain (an os error alone is undiagnosable);
-    // sanitize before the string crosses IPC (chains carry nerdctl argv echoes).
-    .map_err(|e| speedwave_runtime::log_sanitizer::sanitize(&format!("{e:#}")))
+    // condense to a bounded banner, then sanitize before the string crosses IPC
+    // (chains carry nerdctl argv echoes, and engine failures can be unbounded).
+    .map_err(|e| {
+        speedwave_runtime::log_sanitizer::sanitize(&build::condense_engine_error(&format!("{e:#}")))
+    })
 }
 
 /// Skip verdict for one project in a restore batch: `Permanent` drops it from
@@ -671,7 +674,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 build::build_missing_images_locked(&rt, &enabled, &manifest).map_err(|e| {
                     let msg = log_sanitizer::sanitize(&format!(
                         "Image rebuild failed after engine restart: {}",
-                        build::condense_build_error(&format!("{e:#}"))
+                        build::condense_engine_error(&format!("{e:#}"))
                     ));
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
@@ -683,7 +686,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                 log::error!("Image rebuild failed: {e:#}");
                 let msg = log_sanitizer::sanitize(&format!(
                     "Image rebuild failed: {}",
-                    build::condense_build_error(&format!("{e:#}"))
+                    build::condense_engine_error(&format!("{e:#}"))
                 ));
                 return Err(set_bundle_error(&mut state, msg));
             }
@@ -1201,8 +1204,12 @@ mod tests {
         );
         let tail = &source[fn_start..fn_start + 1600];
         assert!(
-            tail.contains("log_sanitizer::sanitize(&format!(\"{e:#}\"))"),
+            tail.contains("log_sanitizer::sanitize"),
             "restore errors cross IPC — the chain must be sanitized, not just flattened"
+        );
+        assert!(
+            tail.contains("condense_engine_error"),
+            "restore errors must be condensed to a bounded banner before crossing IPC"
         );
     }
 
@@ -2707,8 +2714,8 @@ mod tests {
             .find("Image rebuild failed: {}")
             .expect("Image rebuild failed bail path must exist");
         assert!(
-            inner_fn[bail_pos..bail_pos + 200].contains("condense_build_error"),
-            "the bail banner must go through build::condense_build_error, not the raw log"
+            inner_fn[bail_pos..bail_pos + 200].contains("condense_engine_error"),
+            "the bail banner must go through build::condense_engine_error, not the raw log"
         );
         assert!(
             inner_fn[bail_pos.saturating_sub(120)..bail_pos].contains("log_sanitizer::sanitize"),
@@ -2720,7 +2727,7 @@ mod tests {
         assert!(
             inner_fn[restart_pos.saturating_sub(120)..restart_pos + 200]
                 .contains("log_sanitizer::sanitize")
-                && inner_fn[restart_pos..restart_pos + 200].contains("condense_build_error"),
+                && inner_fn[restart_pos..restart_pos + 200].contains("condense_engine_error"),
             "the engine-restart rebuild banner must be sanitized and condensed too"
         );
         let applied_id_assignment_pos = inner_fn
