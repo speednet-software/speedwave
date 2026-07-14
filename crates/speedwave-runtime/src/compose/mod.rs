@@ -27,7 +27,8 @@ mod workers;
 pub(crate) use proxy::migrate_legacy_local_key_in;
 pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
-    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL, PROXY_PORT,
+    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL,
+    PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
 };
 
 // Host addressing SSOT (ADR-067) — public API surface.
@@ -618,11 +619,14 @@ pub fn save_compose_in(data_dir: &Path, project: &str, yaml: &str) -> anyhow::Re
     validate_compose_network_refs(yaml)
         .map_err(|e| anyhow::anyhow!("save_compose: in-memory YAML failed validation: {e}"))?;
 
+    use anyhow::Context;
     let path = compose_output_path_in(data_dir, project)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating compose dir {}", parent.display()))?;
     }
-    crate::fs_perms::write_restricted_file_atomic(&path, yaml)?;
+    crate::fs_perms::write_restricted_file_atomic(&path, yaml)
+        .with_context(|| format!("writing {}", path.display()))?;
 
     let on_disk = read_back_compose(&path).map_err(|e| {
         anyhow::anyhow!(

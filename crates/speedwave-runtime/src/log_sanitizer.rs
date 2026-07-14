@@ -82,6 +82,9 @@ static RULES: LazyLock<Vec<SanitizeRule>> = LazyLock::new(|| {
             r"(OTEL_EXPORTER_OTLP_HEADERS=)[^\r\n]+",
             "${1}***REDACTED***",
         ),
+        // Speedwave proxy caller token (nerdctl echoes the full run argv incl.
+        // ANTHROPIC_CUSTOM_HEADERS into error output); name pinned to compose::proxy SSOT.
+        (r"(?i)(x-speedwave-proxy-auth:\s*)\S+", "${1}***REDACTED***"),
     ];
 
     definitions
@@ -140,7 +143,7 @@ mod tests {
     // ── Guard tests — ensure no rules are silently dropped ────────────────
 
     /// Expected number of compiled rules; a mismatch flags a silently dropped rule.
-    const EXPECTED_RULE_COUNT: usize = 24;
+    const EXPECTED_RULE_COUNT: usize = 25;
 
     #[test]
     fn test_rules_count() {
@@ -183,6 +186,7 @@ mod tests {
             r"(?i)(X-Redmine-API-Key:\s*)\S+",
             r#"(?i)((?:password|passwd|secret|api_key|apikey|api_secret|access_token|private_key|[a-z0-9_]*_token)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s"',;&]+)"?"#,
             r"(OTEL_EXPORTER_OTLP_HEADERS=)[^\r\n]+",
+            r"(?i)(x-speedwave-proxy-auth:\s*)\S+",
         ];
 
         assert_eq!(
@@ -1307,6 +1311,39 @@ mod tests {
             sanitize(s),
             s,
             "endpoint is not a secret and must pass through"
+        );
+    }
+
+    #[test]
+    fn redacts_proxy_caller_auth_token_in_argv_echo() {
+        // The exact shape nerdctl echoes into error output (user-visible dialogs).
+        let s = "-e=ANTHROPIC_CUSTOM_HEADERS=x-speedwave-proxy-auth: synthetic-test-token-0000000000000000000000 -m=6442450944";
+        let out = sanitize(s);
+        assert!(
+            !out.contains("synthetic-test-token-0000000000000000000000"),
+            "leaked: {out}"
+        );
+        assert!(out.contains("x-speedwave-proxy-auth: ***REDACTED***"));
+        assert!(out.contains("-m=6442450944"), "non-secret tail preserved");
+    }
+
+    #[test]
+    fn does_not_redact_proxy_auth_header_name_alone() {
+        let s = "the x-speedwave-proxy-auth header is required";
+        assert_eq!(sanitize(s), s, "bare header-name prose must pass through");
+    }
+
+    /// Pins the rule's literal to the compose::proxy SSOT header name.
+    #[test]
+    fn proxy_auth_rule_matches_proxy_header_ssot() {
+        let probe = format!(
+            "{}: secret-token-value",
+            crate::compose::PROXY_CALLER_AUTH_HEADER
+        );
+        let out = sanitize(&probe);
+        assert!(
+            !out.contains("secret-token-value"),
+            "rule literal drifted from PROXY_CALLER_AUTH_HEADER: {out}"
         );
     }
 }

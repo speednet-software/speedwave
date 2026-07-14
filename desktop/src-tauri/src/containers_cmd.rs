@@ -569,8 +569,8 @@ pub async fn add_project(
             crate::ensure_oauth_running(&oauth_arc, proj);
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
-                log::error!("failed to start containers: {e}");
-                e.to_string()
+                log::error!("failed to start containers: {e:#}");
+                format!("{e:#}")
             })
         })
     })
@@ -690,8 +690,8 @@ pub async fn start_containers(
         }
         log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
-            log::error!("failed to start containers: {e}");
-            e.to_string()
+            log::error!("failed to start containers: {e:#}");
+            format!("{e:#}")
         })
     })
     .await

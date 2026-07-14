@@ -11,15 +11,35 @@ use crate::log_file::{open_log_file, write_log_line};
 
 use super::PORT_READ_TIMEOUT;
 
+/// Scan outcome for a stdout line during the `{"port": N}` handshake.
+pub(crate) enum PortAnnouncement {
+    NotPort,
+    Valid(u16),
+    Invalid(u64),
+}
+
+/// Classifies a stdout line: not a port line, a valid `u16` port, or a port line
+/// whose value is unusable (`0`/overflow — a wrong worker bind address, not noise).
+pub(crate) fn classify_port_line(line: &str) -> PortAnnouncement {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return PortAnnouncement::NotPort;
+    };
+    let Some(port) = v.get("port").and_then(serde_json::Value::as_u64) else {
+        return PortAnnouncement::NotPort;
+    };
+    match u16::try_from(port) {
+        Ok(p) if p != 0 => PortAnnouncement::Valid(p),
+        _ => PortAnnouncement::Invalid(port),
+    }
+}
+
 /// Parse a `{"port": N}` JSON line into a valid `u16`. Rejects `0` and values above `u16::MAX`
 /// so a malformed worker can't trick the manager into recording garbage.
 pub fn parse_port_line(line: &str) -> Option<u16> {
-    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    let port = v.get("port")?.as_u64()?;
-    if port == 0 || port > u16::MAX as u64 {
-        return None;
+    match classify_port_line(line) {
+        PortAnnouncement::Valid(p) => Some(p),
+        _ => None,
     }
-    u16::try_from(port).ok()
 }
 
 /// Spawn background threads to drain stdout/stderr, wait for the `{"port": N}` line on stdout,
@@ -66,11 +86,25 @@ pub fn drain_and_read_port(
             match line {
                 Ok(line) => {
                     if !port_sent {
-                        if let Some(port) = parse_port_line(&line) {
-                            let _ = tx.send(Ok(port));
-                            port_sent = true;
-                            write_log_line(&mut log_file, "STDOUT", &line);
-                            continue;
+                        match classify_port_line(&line) {
+                            PortAnnouncement::Valid(port) => {
+                                let _ = tx.send(Ok(port));
+                                port_sent = true;
+                                write_log_line(&mut log_file, "STDOUT", &line);
+                                continue;
+                            }
+                            // Fail fast: waiting out the timeout would mask the real
+                            // cause (worker bound a misdetected host address).
+                            PortAnnouncement::Invalid(raw) => {
+                                let _ = tx.send(Err(anyhow::anyhow!(
+                                    "{tag} announced unusable port {raw} — its listen \
+                                     address is misdetected (host networking changed?)"
+                                )));
+                                port_sent = true;
+                                write_log_line(&mut log_file, "STDOUT", &line);
+                                continue;
+                            }
+                            PortAnnouncement::NotPort => {}
                         }
                     }
                     log::debug!("{tag}: {line}");
@@ -181,6 +215,45 @@ mod tests {
         assert_eq!(parse_port_line(""), None);
         assert_eq!(parse_port_line("{}"), None);
         assert_eq!(parse_port_line(r#"{"other":1}"#), None);
+    }
+
+    #[test]
+    fn classify_port_line_separates_invalid_from_noise() {
+        assert!(matches!(
+            classify_port_line(r#"{"port":0}"#),
+            PortAnnouncement::Invalid(0)
+        ));
+        assert!(matches!(
+            classify_port_line(r#"{"port":65536}"#),
+            PortAnnouncement::Invalid(65536)
+        ));
+        assert!(matches!(
+            classify_port_line(r#"{"port":443}"#),
+            PortAnnouncement::Valid(443)
+        ));
+        assert!(matches!(
+            classify_port_line("plain log line"),
+            PortAnnouncement::NotPort
+        ));
+    }
+
+    #[test]
+    fn drain_fails_fast_on_port_zero_announcement() {
+        let dir = temp_log();
+        let log = dir.path().join("audit.log");
+        let mut child = spawn_stdout_lines(&[r#"{"port":0}"#, "worker keeps logging"]);
+        let started = std::time::Instant::now();
+        let err = drain_and_read_port(&mut child, &log, "test-worker")
+            .expect_err("port 0 must fail the handshake");
+        assert!(
+            started.elapsed() < super::super::PORT_READ_TIMEOUT / 2,
+            "must fail fast, not wait out the announcement timeout"
+        );
+        assert!(
+            err.to_string().contains("unusable port 0"),
+            "error names the announced value: {err}"
+        );
+        let _ = child.wait();
     }
 
     #[test]

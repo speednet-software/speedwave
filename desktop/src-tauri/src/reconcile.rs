@@ -299,7 +299,8 @@ fn restore_one_project(
             .map_err(|e| anyhow::anyhow!("compose_up_recreate failed for '{project}': {e}"))?;
         Ok(())
     })
-    .map_err(|e| e.to_string())
+    // `{e:#}` keeps the whole context chain (an os error alone is undiagnosable).
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// Skip verdict for one project in a restore batch: `Permanent` drops it from
@@ -667,14 +668,21 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
                     set_bundle_error(&mut state, msg)
                 })?;
                 build::build_missing_images_locked(&rt, &enabled, &manifest).map_err(|e| {
-                    let msg = format!("Image rebuild failed after engine restart: {e}");
+                    let msg = format!(
+                        "Image rebuild failed after engine restart: {}",
+                        build::condense_build_error(&format!("{e:#}"))
+                    );
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
             }
             Err(e) => {
-                let msg = format!("Image rebuild failed: {e}");
-                log::error!("{msg}");
+                // Full BuildKit output goes to the log; the banner gets the condensed cause.
+                log::error!("Image rebuild failed: {e:#}");
+                let msg = format!(
+                    "Image rebuild failed: {}",
+                    build::condense_build_error(&format!("{e:#}"))
+                );
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
@@ -2689,8 +2697,12 @@ mod tests {
             .expect("reconcile_bundle_update_inner function should exist");
 
         let bail_pos = inner_fn
-            .find("Image rebuild failed: {e}")
+            .find("Image rebuild failed: {}")
             .expect("Image rebuild failed bail path must exist");
+        assert!(
+            inner_fn[bail_pos..bail_pos + 200].contains("condense_build_error"),
+            "the bail banner must go through build::condense_build_error, not the raw log"
+        );
         let applied_id_assignment_pos = inner_fn
             .find("state.applied_bundle_id = Some(manifest.bundle_id.clone())")
             .expect("applied_bundle_id assignment must exist");

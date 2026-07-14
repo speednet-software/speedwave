@@ -1064,6 +1064,47 @@ fn is_network_build_error(err: &anyhow::Error) -> bool {
     false
 }
 
+/// Tail kept for unclassified build failures — banners stay readable; the full
+/// BuildKit log is still written to the session log file.
+const BUILD_ERROR_TAIL_CHARS: usize = 700;
+
+/// Condenses a raw image-build failure (often the whole BuildKit log) into an
+/// actionable banner message; known signatures get targeted user guidance.
+pub fn condense_build_error(raw: &str) -> String {
+    let connectivity_line = raw.lines().map(str::trim).find(|l| {
+        let ll = l.to_ascii_lowercase();
+        ll.contains("curl: (")
+            || ll.contains("failed to connect")
+            || ll.contains("could not resolve host")
+    });
+    let lower = raw.to_ascii_lowercase();
+    if let Some(line) = connectivity_line {
+        if lower.contains("install-claude.sh") || lower.contains("claude.ai") {
+            return format!(
+                "Cannot download Claude Code during the image build — the VM has no route \
+                 to claude.ai. Check VPN, proxy, or firewall (content filters often block \
+                 AI domains), then press Retry. Detail: {line}"
+            );
+        }
+    }
+    let crux: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains("ERROR:") || l.starts_with("error: failed to solve"))
+        .collect();
+    if !crux.is_empty() {
+        return format!("{} (full build log in Logs)", crux.join(" | "));
+    }
+    if raw.len() > BUILD_ERROR_TAIL_CHARS {
+        let mut cut = raw.len() - BUILD_ERROR_TAIL_CHARS;
+        while !raw.is_char_boundary(cut) {
+            cut += 1;
+        }
+        return format!("…{} (full build log in Logs)", &raw[cut..]);
+    }
+    raw.to_string()
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -1076,6 +1117,48 @@ mod tests {
     /// All built-in images as a slice — the pre-lazy-build "build everything" set.
     fn all_images() -> Vec<&'static ImageDef> {
         IMAGES.iter().collect()
+    }
+
+    #[test]
+    fn condense_build_error_names_claude_download_failure() {
+        // Shape of the field failure: full BuildKit log with the installer curl error.
+        let raw = "#7 21.96 Setting up liberror-perl (0.17029-2) ...\n\
+             #11 [ 7/13] RUN /usr/local/bin/install-claude.sh \"2.1.206\"\n\
+             #11 0.328 curl: (7) Failed to connect to claude.ai port 443 after 43 ms: Couldn't connect to server\n\
+             error: failed to solve: process \"/bin/sh -c /usr/local/bin/install-claude.sh\" did not complete successfully: exit code: 7";
+        let out = condense_build_error(raw);
+        assert!(out.contains("Cannot download Claude Code"), "got: {out}");
+        assert!(out.contains("Retry"), "actionable next step: {out}");
+        assert!(out.contains("curl: (7)"), "carries the detail line: {out}");
+        assert!(
+            !out.contains("liberror-perl"),
+            "apt noise must not reach the banner: {out}"
+        );
+    }
+
+    #[test]
+    fn condense_build_error_extracts_buildkit_crux_lines() {
+        let raw = "lots of progress\n#9 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1\n\
+             more noise\nerror: failed to solve: exit code: 1";
+        let out = condense_build_error(raw);
+        assert!(out.contains("ERROR:"), "crux kept: {out}");
+        assert!(out.contains("full build log in Logs"), "log pointer: {out}");
+        assert!(!out.contains("lots of progress"), "noise dropped: {out}");
+    }
+
+    #[test]
+    fn condense_build_error_passes_short_errors_through() {
+        let raw = "wsl.exe failed: no space left on device";
+        assert_eq!(condense_build_error(raw), raw);
+    }
+
+    #[test]
+    fn condense_build_error_truncates_long_unclassified_output_on_char_boundary() {
+        let raw = format!("{}żółć-końcówka", "x".repeat(2000));
+        let out = condense_build_error(&raw);
+        assert!(out.len() < 800, "truncated: {} chars", out.len());
+        assert!(out.starts_with('…') && out.contains("żółć-końcówka"));
+        assert!(out.contains("full build log in Logs"));
     }
 
     /// Integrations config with every built-in MCP service enabled — so `enabled_images` yields
