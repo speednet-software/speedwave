@@ -2714,6 +2714,15 @@ mod tests {
             inner_fn[bail_pos.saturating_sub(120)..bail_pos].contains("log_sanitizer::sanitize"),
             "the bail banner crosses IPC — it must pass log_sanitizer::sanitize"
         );
+        let restart_pos = inner_fn
+            .find("Image rebuild failed after engine restart: {}")
+            .expect("snapshotter-recovery rebuild bail must exist");
+        assert!(
+            inner_fn[restart_pos.saturating_sub(120)..restart_pos + 200]
+                .contains("log_sanitizer::sanitize")
+                && inner_fn[restart_pos..restart_pos + 200].contains("condense_build_error"),
+            "the engine-restart rebuild banner must be sanitized and condensed too"
+        );
         let applied_id_assignment_pos = inner_fn
             .find("state.applied_bundle_id = Some(manifest.bundle_id.clone())")
             .expect("applied_bundle_id assignment must exist");
