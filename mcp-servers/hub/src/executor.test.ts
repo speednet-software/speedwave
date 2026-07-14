@@ -1611,6 +1611,112 @@ describe('executor', () => {
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
     });
+
+    /** Mock a JSON-RPC error response (worker rejected the call) carrying `message` verbatim. */
+    function mockWorkerJsonRpcError(message: string): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          error: { code: -32000, message },
+        }),
+        text: async () => '',
+      }) as unknown as typeof fetch;
+    }
+
+    it('tokenizes PII carried in a bridge error message before it reaches the model', async () => {
+      mockWorkerJsonRpcError('invalid recipient: alice@example.com');
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).not.toContain('alice@example.com');
+      expect(result.error?.message).toMatch(/\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/);
+    });
+
+    it('tokenizes PII in a bridge error collected through batch() into a returned result', async () => {
+      mockWorkerJsonRpcError('invalid recipient: bob@example.com');
+
+      const code = `
+        const outcome = await batch([
+          slack.sendChannel({ channel: 'general', text: 'hi' }),
+        ]);
+        return outcome;
+      `;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      const errors = (result.data as { errors: Array<{ error: string }> }).errors;
+      expect(errors).toHaveLength(1);
+      expect(errors[0].error).not.toContain('bob@example.com');
+      expect(errors[0].error).toMatch(/\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/);
+    });
+
+    it('leaves a bridge error message without PII readable and unchanged', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({}),
+        text: async () => 'Internal Server Error',
+      }) as unknown as typeof fetch;
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).toBe(
+        'slack: Worker slack returned 500: Internal Server Error'
+      );
+    });
+
+    it('degrades to a generic message when the PII engine itself fails to tokenize an error', async () => {
+      const policyModule = await import('./policy.js');
+      const spy = vi.spyOn(policyModule, 'getEngine').mockReturnValue({
+        tokenize: () => {
+          throw new Error('engine boom');
+        },
+        detokenize: (v: unknown) => v,
+      });
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({}),
+        text: async () => 'Internal Server Error',
+      }) as unknown as typeof fetch;
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      // Never the raw, un-tokenized bridge message — a fixed generic string instead.
+      // (The outer catch's own tokenize attempt also fails and degrades again, dropping the
+      // service-name prefix wrapBridgeCall's degrade had added.)
+      expect(result.error?.message).toBe('tool call failed');
+
+      spy.mockRestore();
+    });
+
+    it('tokenizes PII in an error thrown directly by sandbox code (no bridge call involved)', async () => {
+      const code = `throw new Error('reach me at alice@example.com');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).not.toContain('alice@example.com');
+      expect(result.error?.message).toMatch(/\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/);
+    });
   });
 
   describe('sandbox-return scan + PII audit writer (F3.4)', () => {

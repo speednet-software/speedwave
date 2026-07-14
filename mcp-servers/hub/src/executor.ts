@@ -5,6 +5,7 @@
 
 import { IToolResult } from './hub-types.js';
 import { getEngine } from './policy.js';
+import type { Detection } from '@speedwave/policy-engine';
 import { aggregateDetections, writePiiAudit, type DetectionBatch } from './audit-pii.js';
 import { type AllBridges, initializeAllBridges, callWorker } from './http-bridge.js';
 import { TIMEOUTS, ts } from '@speedwave/mcp-shared';
@@ -206,6 +207,25 @@ function formatErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Tokenize error-message text before it can reach the model on the error channel; on any
+ * tokenize failure, degrade to a generic message rather than risk raw content leaking.
+ * @param text - Raw error message text to scan.
+ */
+function tokenizeErrorText(text: string): { value: string; detections: Detection[] } {
+  try {
+    const { value, detections } = getEngine().tokenize(text);
+    if (typeof value === 'string') {
+      return { value, detections };
+    }
+    /* c8 ignore next — tokenize() of a string input always returns a string */
+    return { value: 'tool call failed', detections: [] };
+  } catch (err) {
+    console.error(`${ts()} [pii] Failed to tokenize error message; degrading to generic:`, err);
+    return { value: 'tool call failed', detections: [] };
+  }
+}
+
 /** True when NODE_ENV=development or DEBUG is set. */
 function isDevelopmentMode(): boolean {
   const nodeEnv = process.env.NODE_ENV;
@@ -301,7 +321,14 @@ function createToolWrappers(
       logErrorDebug(serviceName, error);
       const message = formatErrorMessage(error);
       console.error(`${ts()} [${serviceName}] Bridge call failed:`, message);
-      throw new Error(`${serviceName}: ${message}`);
+      // Tokenize before the message can reach the model: this Error's .message propagates to
+      // executeCode's outer catch (and, via batch(), into a returned result), both model-visible.
+      const { value: tokenizedMessage, detections } = tokenizeErrorText(message);
+      if (detections.length > 0) {
+        const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
+        detectionBatches.push({ layer: 'B-result', tool, detections });
+      }
+      throw new Error(`${serviceName}: ${tokenizedMessage}`);
     }
   };
 
@@ -615,11 +642,19 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       }
     }
 
+    // Last defensive tokenization layer before the message reaches the model: covers any error
+    // path that bypassed wrapBridgeCall's own tokenization (idempotent when it did not).
+    const { value: tokenizedMessage, detections: finalDetections } =
+      tokenizeErrorText(sanitizedMessage);
+    if (finalDetections.length > 0) {
+      detectionBatches.push({ layer: 'sandbox-return', tool: null, detections: finalDetections });
+    }
+
     return {
       success: false,
       error: {
         code: 'EXECUTION_ERROR',
-        message: sanitizedMessage,
+        message: tokenizedMessage,
         retryable: message.includes('timeout'),
       },
     };
