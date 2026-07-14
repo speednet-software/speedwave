@@ -6,7 +6,7 @@ use crate::types::BundleReconcileStatus;
 use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
-use speedwave_runtime::{build, bundle, config, plugin};
+use speedwave_runtime::{build, bundle, config, log_sanitizer, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -299,8 +299,9 @@ fn restore_one_project(
             .map_err(|e| anyhow::anyhow!("compose_up_recreate failed for '{project}': {e}"))?;
         Ok(())
     })
-    // `{e:#}` keeps the whole context chain (an os error alone is undiagnosable).
-    .map_err(|e| format!("{e:#}"))
+    // `{e:#}` keeps the whole context chain (an os error alone is undiagnosable);
+    // sanitize before the string crosses IPC (chains carry nerdctl argv echoes).
+    .map_err(|e| speedwave_runtime::log_sanitizer::sanitize(&format!("{e:#}")))
 }
 
 /// Skip verdict for one project in a restore batch: `Permanent` drops it from
@@ -663,26 +664,27 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             {
                 log::warn!("snapshotter recovery failed, restarting engine");
                 rt.restart_container_engine().map_err(|re| {
-                    let msg = format!("Engine restart failed: {re}");
+                    let msg = log_sanitizer::sanitize(&format!("Engine restart failed: {re}"));
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
                 build::build_missing_images_locked(&rt, &enabled, &manifest).map_err(|e| {
-                    let msg = format!(
+                    let msg = log_sanitizer::sanitize(&format!(
                         "Image rebuild failed after engine restart: {}",
                         build::condense_build_error(&format!("{e:#}"))
-                    );
+                    ));
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
             }
             Err(e) => {
-                // Full BuildKit output goes to the log; the banner gets the condensed cause.
+                // Full BuildKit output goes to the log; the banner gets the condensed,
+                // sanitized cause (chains carry nerdctl argv echoes incl. tokens).
                 log::error!("Image rebuild failed: {e:#}");
-                let msg = format!(
+                let msg = log_sanitizer::sanitize(&format!(
                     "Image rebuild failed: {}",
                     build::condense_build_error(&format!("{e:#}"))
-                );
+                ));
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
@@ -1196,6 +1198,11 @@ mod tests {
         assert!(
             wait_pos < build_pos,
             "teardown join must precede any restore work"
+        );
+        let tail = &source[fn_start..fn_start + 1600];
+        assert!(
+            tail.contains("log_sanitizer::sanitize(&format!(\"{e:#}\"))"),
+            "restore errors cross IPC — the chain must be sanitized, not just flattened"
         );
     }
 
@@ -2702,6 +2709,10 @@ mod tests {
         assert!(
             inner_fn[bail_pos..bail_pos + 200].contains("condense_build_error"),
             "the bail banner must go through build::condense_build_error, not the raw log"
+        );
+        assert!(
+            inner_fn[bail_pos.saturating_sub(120)..bail_pos].contains("log_sanitizer::sanitize"),
+            "the bail banner crosses IPC — it must pass log_sanitizer::sanitize"
         );
         let applied_id_assignment_pos = inner_fn
             .find("state.applied_bundle_id = Some(manifest.bundle_id.clone())")

@@ -570,7 +570,8 @@ pub async fn add_project(
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("failed to start containers: {e:#}");
-                format!("{e:#}")
+                // Sanitize: the chain can carry raw nerdctl argv echoes (tokens).
+                speedwave_runtime::log_sanitizer::sanitize(&format!("{e:#}"))
             })
         })
     })
@@ -691,7 +692,8 @@ pub async fn start_containers(
         log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
             log::error!("failed to start containers: {e:#}");
-            format!("{e:#}")
+            // Sanitize: the chain can carry raw nerdctl argv echoes (tokens).
+            speedwave_runtime::log_sanitizer::sanitize(&format!("{e:#}"))
         })
     })
     .await
@@ -1742,6 +1744,29 @@ fn mirror_local_key_to_llm_namespace(
 mod tests {
     use super::*;
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
+
+    /// Structural: every `start_containers` error string crossing IPC is sanitized
+    /// (the anyhow chain carries raw nerdctl argv echoes, incl. bearer tokens).
+    #[test]
+    fn start_container_errors_are_sanitized_before_ipc() {
+        let source = include_str!("containers_cmd.rs");
+        for pat in [
+            "setup_wizard::start_containers(proj).map_err",
+            "setup_wizard::start_containers(&project).map_err",
+        ] {
+            let site = source
+                .find(pat)
+                .unwrap_or_else(|| panic!("call site '{pat}' must exist"));
+            let mut end = (site + 400).min(source.len());
+            while !source.is_char_boundary(end) {
+                end += 1;
+            }
+            assert!(
+                source[site..end].contains("log_sanitizer::sanitize"),
+                "'{pat}' must pass log_sanitizer::sanitize before Err(String)"
+            );
+        }
+    }
 
     fn make_config_with_active_project() -> SpeedwaveUserConfig {
         SpeedwaveUserConfig {
