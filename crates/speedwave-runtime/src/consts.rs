@@ -180,6 +180,31 @@ const _: () = assert!(NERDCTL_DOWNLOAD_CONNECT_TIMEOUT_SECS < NERDCTL_DOWNLOAD_M
 const _: () = assert!(NERDCTL_DOWNLOAD_MAX_TIME_SECS < NERDCTL_INSTALL_TIMEOUT_SECS);
 const _: () = assert!(NERDCTL_DOWNLOAD_RETRY_DELAY_SECS > NERDCTL_INSTALL_TIMEOUT_SECS);
 
+/// In-VM nerdctl state root (`--data-root` default); never overridden by Speedwave.
+pub const NERDCTL_DATA_ROOT: &str = "/var/lib/nerdctl";
+
+/// In-VM containerd socket (`--address` default); never overridden by Speedwave.
+pub const CONTAINERD_ADDRESS: &str = "/run/containerd/containerd.sock";
+
+/// containerd namespace nerdctl operates in (`--namespace` default).
+pub const CONTAINERD_NAMESPACE: &str = "default";
+
+/// nerdctl per-address datastore dir name: `sha256(address)[0..8]`
+/// (`<data-root>/<hash>/…`, matching nerdctl's `getAddrHash`).
+pub fn nerdctl_addr_hash_of(address: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(address.as_bytes());
+    let mut hex = crate::bundle::bytes_to_hex(&hasher.finalize());
+    hex.truncate(8);
+    hex
+}
+
+/// Addr-hash for the default containerd socket Speedwave runs against.
+pub fn nerdctl_addr_hash() -> String {
+    nerdctl_addr_hash_of(CONTAINERD_ADDRESS)
+}
+
 /// amd64 Ubuntu WSL rootfs URL; SHA256 below pins the version. `current` is
 /// rolling — a download/verify failure on clean dev/CI means bump the SHA256 (#183).
 pub const WSL_ROOTFS_URL_AMD64: &str =
@@ -1348,6 +1373,13 @@ mod tests {
         assert!(WSL_ROOTFS_URL_ARM64.starts_with("https://"));
     }
 
+    /// Pins nerdctl's `getAddrHash` for the default socket — the live VM dir
+    /// is `/var/lib/nerdctl/1935db59` on both platforms.
+    #[test]
+    fn nerdctl_addr_hash_matches_default_socket_digest() {
+        assert_eq!(nerdctl_addr_hash(), "1935db59");
+    }
+
     // Lock and backoff markers are flat filenames directly under data_dir().
     #[test]
     fn nerdctl_lock_and_backoff_files_are_distinct_flat_names() {
@@ -2479,6 +2511,16 @@ mod tests {
             src.contains(PRODUCTION_WSL_DISTRO),
             "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
              scripts/e2e-vm.sh; rename it there too (CLAUDE.md SSOT alignment)"
+        );
+    }
+
+    #[test]
+    fn wsl_distro_name_appears_in_container_health_spec() {
+        let src = include_str!("../../../desktop/e2e/specs/03-container-health.spec.ts");
+        assert!(
+            src.contains(&format!("'{PRODUCTION_WSL_DISTRO}'")),
+            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
+             03-container-health.spec.ts (flock assertion); rename it there too"
         );
     }
 

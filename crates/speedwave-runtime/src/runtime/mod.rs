@@ -807,23 +807,242 @@ pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
     format!("echo {b64} | base64 -d | sh")
 }
 
-/// Runs `up`; on a stale-CNI failure runs `cleanup(err)` and retries `up` **once**. Any
-/// other error propagates immediately. `cleanup` failure is logged, never fatal.
-pub(crate) fn with_cni_heal<U, C>(up: U, cleanup: C) -> anyhow::Result<()>
+/// In-VM coordinates of the nerdctl name-store a cleanup payload targets;
+/// tests inject a tempdir store and absolute stub binaries.
+pub(crate) struct NameStoreLayout {
+    pub data_root: String,
+    pub address: String,
+    pub namespace: String,
+    pub nerdctl_bin: String,
+}
+
+impl NameStoreLayout {
+    /// Production coordinates: nerdctl defaults, never overridden by Speedwave.
+    pub(crate) fn production() -> Self {
+        Self {
+            data_root: consts::NERDCTL_DATA_ROOT.to_string(),
+            address: consts::CONTAINERD_ADDRESS.to_string(),
+            namespace: consts::CONTAINERD_NAMESPACE.to_string(),
+            nerdctl_bin: "nerdctl".to_string(),
+        }
+    }
+
+    fn store_dir(&self) -> String {
+        format!(
+            "{}/{}/names/{}",
+            self.data_root,
+            consts::nerdctl_addr_hash_of(&self.address),
+            self.namespace
+        )
+    }
+}
+
+/// Container-name shape our compose renders (`<prefix>_<project>_<service>`);
+/// anything else never reaches a cleanup payload (shell-safety + scoping gate).
+fn is_safe_container_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-')
+        })
+}
+
+/// `(container_name, dead_id)` pairs from a nerdctl name-store conflict, scoped to
+/// `project` (exact dynamic `<compose_prefix>_<project>_` anchor). Empty = not classified.
+pub(crate) fn name_store_conflicts(e: &anyhow::Error, project: &str) -> Vec<(String, String)> {
+    let raw = e.to_string();
+    let lower = raw.to_lowercase();
+    if !lower.contains("name-store error") || !lower.contains("is already used by id") {
+        return Vec::new();
+    }
+    // logrus escapes inner quotes (`\"`); names/IDs never contain backslashes.
+    let msg = raw.replace('\\', "");
+    let required_prefix = format!("{}_{}_", consts::compose_prefix(), project);
+    const NAME_OPEN: &str = "name \"";
+    const MID: &str = "\" is already used by ID \"";
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut rest = msg.as_str();
+    while let Some(i) = rest.find(NAME_OPEN) {
+        rest = &rest[i + NAME_OPEN.len()..];
+        let Some(j) = rest.find(MID) else { break };
+        let name = &rest[..j];
+        rest = &rest[j + MID.len()..];
+        let Some(k) = rest.find('"') else { break };
+        let id = &rest[..k];
+        rest = &rest[k + 1..];
+        // Empty ID is the documented nerdctl corruption variant (#3351); a live
+        // container can never be named by it, so it stays a healable target.
+        let id_ok = id.is_empty()
+            || (id.len() == 64
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        if name.starts_with(&required_prefix)
+            && is_safe_container_name(name)
+            && id_ok
+            && !out.iter().any(|(n, _)| n == name)
+        {
+            out.push((name.to_string(), id.to_string()));
+        }
+    }
+    out
+}
+
+/// Shared fail-closed per-entry heal function + flock gate. The destructive `rm`
+/// runs under the store's own flock (the lock nerdctl's name-store uses).
+fn name_store_script_header(layout: &NameStoreLayout) -> String {
+    format!(
+        "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n\
+         store=\"{store}\"\n\
+         heal_entry() {{\n\
+         f=\"$1\"\n\
+         [ -f \"$f\" ] || return 0\n\
+         id=$(cat \"$f\" 2>/dev/null)\n\
+         if [ -z \"$id\" ]; then\n\
+         flock -w 5 \"$store\" sh -c '[ -f \"$1\" ] && [ -z \"$(cat \"$1\" 2>/dev/null)\" ] && rm -f \"$1\"' _ \"$f\"\n\
+         return 0\n\
+         fi\n\
+         case \"$id\" in *[!0-9a-f]*) return 0 ;; esac\n\
+         [ \"${{#id}}\" -eq 64 ] || return 0\n\
+         out=$(\"{nerdctl}\" --address \"{addr}\" --namespace \"{ns}\" --data-root \"{root}\" inspect \"$id\" 2>&1); rc=$?\n\
+         [ \"$rc\" -ne 0 ] || return 0\n\
+         case \"$out\" in *\"no such object $id\"*) ;; *) return 0 ;; esac\n\
+         flock -w 5 \"$store\" sh -c '[ \"$(cat \"$1\" 2>/dev/null)\" = \"$2\" ] && rm -f \"$1\"' _ \"$f\" \"$id\"\n\
+         return 0\n\
+         }}\n\
+         command -v flock >/dev/null 2>&1 || exit 0\n",
+        store = layout.store_dir(),
+        nerdctl = layout.nerdctl_bin,
+        addr = layout.address,
+        ns = layout.namespace,
+        root = layout.data_root,
+    )
+}
+
+fn wrap_base64_sh(script: &str) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+    format!("echo {b64} | base64 -d | sh")
+}
+
+/// Heal payload for an `up` name-store conflict: exact-name targets only —
+/// the project's rendered container names plus the names parsed from `err`.
+pub(crate) fn name_store_heal_command_in(
+    layout: &NameStoreLayout,
+    err: &anyhow::Error,
+    project: &str,
+) -> String {
+    let mut targets = configured_project_container_names(project);
+    for (name, _) in name_store_conflicts(err, project) {
+        push_unique_target(&mut targets, name);
+    }
+    let prefix = format!("{}_{}_", consts::compose_prefix(), project);
+    let mut script = name_store_script_header(layout);
+    for name in targets
+        .iter()
+        .filter(|n| n.starts_with(&prefix) && is_safe_container_name(n))
+    {
+        script.push_str(&format!("heal_entry \"$store/{name}\"\n"));
+    }
+    script.push_str("true\n");
+    wrap_base64_sh(&script)
+}
+
+/// Sweep payload for a project with no rendered compose.yml (down path). Prefix-scoped
+/// with longest-prefix disambiguation so `foo` never claims `foo_bar`'s entries.
+pub(crate) fn name_store_sweep_command_in(
+    layout: &NameStoreLayout,
+    project: &str,
+    registered_projects: &[String],
+) -> String {
+    let own_prefix = format!("{}_{}_", consts::compose_prefix(), project);
+    let longer: Vec<String> = registered_projects
+        .iter()
+        .filter(|p| p.as_str() != project)
+        .map(|p| format!("{}_{}_", consts::compose_prefix(), p))
+        .filter(|pref| pref.starts_with(&own_prefix) && pref.len() > own_prefix.len())
+        .filter(|pref| is_safe_container_name(pref.trim_end_matches('_')))
+        .collect();
+    let mut script = name_store_script_header(layout);
+    script.push_str(&format!("for f in \"$store/{own_prefix}\"*; do\n"));
+    if !longer.is_empty() {
+        let arms = longer
+            .iter()
+            .map(|p| format!("{p}*"))
+            .collect::<Vec<_>>()
+            .join("|");
+        script.push_str(&format!(
+            "case \"${{f##*/}}\" in {arms}) continue ;; esac\n"
+        ));
+    }
+    script.push_str("heal_entry \"$f\"\ndone\ntrue\n");
+    wrap_base64_sh(&script)
+}
+
+/// Compose-project names known to this host (`<data_dir>/compose/<project>/`);
+/// the sweep's registry for longest-prefix ownership checks.
+pub(crate) fn registered_compose_projects() -> Vec<String> {
+    let dir = consts::data_dir().join("compose");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
+}
+
+/// Runs `up`; heals at most once per class (stale CNI, stale name-store) and retries.
+/// Other errors propagate; cleanup failure still retries; surfaced error = latest `up`'s.
+pub(crate) fn with_engine_state_heal<U, C, N>(
+    project: &str,
+    up: U,
+    cni_cleanup: C,
+    name_store_cleanup: N,
+) -> anyhow::Result<()>
 where
     U: Fn() -> anyhow::Result<()>,
     C: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
+    N: FnOnce(&anyhow::Error) -> anyhow::Result<()>,
 {
-    match up() {
-        Err(e) if is_stale_cni_error(&e) => {
-            log::warn!("compose up hit a CNI setup failure ({e}); flushing any named CNI state and retrying once");
-            if let Err(ce) = cleanup(&e) {
-                log::warn!("CNI cleanup failed (continuing to retry): {ce}");
+    let mut cni_cleanup = Some(cni_cleanup);
+    let mut name_store_cleanup = Some(name_store_cleanup);
+    let mut result = up();
+    for _ in 0..2 {
+        let Err(e) = result else {
+            return Ok(());
+        };
+        let healed = if is_stale_cni_error(&e) {
+            match cni_cleanup.take() {
+                Some(cleanup) => {
+                    log::warn!("compose up hit a CNI setup failure ({e}); flushing any named CNI state and retrying once");
+                    if let Err(ce) = cleanup(&e) {
+                        log::warn!("CNI cleanup failed (continuing to retry): {ce}");
+                    }
+                    true
+                }
+                None => false,
             }
-            up()
+        } else if !name_store_conflicts(&e, project).is_empty() {
+            match name_store_cleanup.take() {
+                Some(cleanup) => {
+                    log::warn!("compose up hit a stale name-store reservation ({e}); releasing dead entries for '{project}' and retrying once");
+                    if let Err(ce) = cleanup(&e) {
+                        log::warn!("name-store cleanup failed (continuing to retry): {ce}");
+                    }
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !healed {
+            return Err(e);
         }
-        other => other,
+        result = up();
     }
+    result
 }
 
 /// Shared `force_remove_project_containers` (the `rm` closure removes a batch;
@@ -2567,11 +2786,12 @@ services:
     }
 
     #[test]
-    fn with_cni_heal_cleans_and_retries_once_on_cni_error() {
+    fn engine_state_heal_cleans_and_retries_once_on_cni_error() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let ups = AtomicUsize::new(0);
         let cleaned = AtomicUsize::new(0);
-        let r = with_cni_heal(
+        let r = with_engine_state_heal(
+            "acme",
             || {
                 if ups.fetch_add(1, Ordering::SeqCst) == 0 {
                     anyhow::bail!("iptables: Chain already exists")
@@ -2583,6 +2803,7 @@ services:
                 cleaned.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
+            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run on a CNI error") },
         );
         assert!(r.is_ok());
         assert_eq!(ups.load(Ordering::SeqCst), 2, "up runs twice");
@@ -2590,25 +2811,28 @@ services:
     }
 
     #[test]
-    fn with_cni_heal_skips_cleanup_and_retry_on_other_error() {
+    fn engine_state_heal_skips_cleanup_and_retry_on_other_error() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let ups = AtomicUsize::new(0);
-        let r = with_cni_heal(
+        let r = with_engine_state_heal(
+            "acme",
             || {
                 ups.fetch_add(1, Ordering::SeqCst);
                 anyhow::bail!("no such image")
             },
             |_e| -> anyhow::Result<()> { panic!("cleanup must not run on non-CNI error") },
+            |_e| -> anyhow::Result<()> { panic!("cleanup must not run on non-name-store error") },
         );
         assert!(r.is_err());
         assert_eq!(ups.load(Ordering::SeqCst), 1, "up runs once, no retry");
     }
 
     #[test]
-    fn with_cni_heal_retries_even_if_cleanup_fails() {
+    fn engine_state_heal_retries_even_if_cleanup_fails() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let ups = AtomicUsize::new(0);
-        let r = with_cni_heal(
+        let r = with_engine_state_heal(
+            "acme",
             || {
                 if ups.fetch_add(1, Ordering::SeqCst) == 0 {
                     anyhow::bail!("iptables: Chain already exists")
@@ -2617,6 +2841,7 @@ services:
                 }
             },
             |_e| anyhow::bail!("cleanup blew up"),
+            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run on a CNI error") },
         );
         assert!(
             r.is_ok(),
@@ -2825,10 +3050,11 @@ services:
     }
 
     #[test]
-    fn with_cni_heal_propagates_error_when_retry_also_fails() {
+    fn engine_state_heal_propagates_error_when_retry_also_fails() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let ups = AtomicUsize::new(0);
-        let r = with_cni_heal(
+        let r = with_engine_state_heal(
+            "acme",
             || {
                 if ups.fetch_add(1, Ordering::SeqCst) == 0 {
                     anyhow::bail!("iptables: Chain already exists")
@@ -2837,6 +3063,7 @@ services:
                 }
             },
             |_e| Ok(()),
+            |_e| -> anyhow::Result<()> { panic!("name-store cleanup must not run on a CNI error") },
         );
         let err = r.expect_err("second failure must propagate");
         assert!(
@@ -2848,6 +3075,411 @@ services:
             2,
             "exactly one retry, never two"
         );
+    }
+
+    /// Raw nerdctl stderr for a name-store conflict, with logrus-escaped inner quotes.
+    fn ns_conflict_err(name: &str, id: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "limactl failed: time=\"2026-07-14T10:50:38+02:00\" level=fatal \
+             msg=\"name-store error\\nname \\\"{name}\\\" is already used by ID \\\"{id}\\\"\""
+        )
+    }
+
+    fn own_name(project: &str, service: &str) -> String {
+        format!("{}_{}_{service}", consts::compose_prefix(), project)
+    }
+
+    const DEAD_ID: &str = "db0da85287aa1119f5ef5483d7585c28ef721cf946111cf8d5369d308ecf450e";
+
+    #[test]
+    fn name_store_conflicts_parses_real_nerdctl_message() {
+        let name = own_name("acme", "mcp_hub");
+        let got = name_store_conflicts(&ns_conflict_err(&name, DEAD_ID), "acme");
+        assert_eq!(got, vec![(name, DEAD_ID.to_string())]);
+    }
+
+    #[test]
+    fn name_store_conflicts_requires_both_phrases_and_a_pair() {
+        let name = own_name("acme", "mcp_hub");
+        let no_store = anyhow::anyhow!("name \"{name}\" is already used by ID \"{DEAD_ID}\"");
+        assert!(name_store_conflicts(&no_store, "acme").is_empty());
+        let no_used = anyhow::anyhow!("name-store error: something else about {name}");
+        assert!(name_store_conflicts(&no_used, "acme").is_empty());
+        assert!(name_store_conflicts(&anyhow::anyhow!("no such image"), "acme").is_empty());
+    }
+
+    #[test]
+    fn name_store_conflicts_scopes_names_by_project_prefix() {
+        let foreign = own_name("other", "mcp_hub");
+        assert!(name_store_conflicts(&ns_conflict_err(&foreign, DEAD_ID), "acme").is_empty());
+        // The prefix gate is deliberately not a uniqueness proof for `_`-nested projects:
+        // an `up` conflict only ever names the upping project; live safety is payload-enforced.
+        let nested = own_name("foo_bar", "mcp_hub");
+        assert_eq!(
+            name_store_conflicts(&ns_conflict_err(&nested, DEAD_ID), "foo_bar").len(),
+            1
+        );
+        assert_eq!(
+            name_store_conflicts(&ns_conflict_err(&nested, DEAD_ID), "foo").len(),
+            1,
+            "prefix-matching parse is accepted; the target is still exact and fail-closed"
+        );
+    }
+
+    #[test]
+    fn name_store_conflicts_validates_id_shape() {
+        let name = own_name("acme", "mcp_hub");
+        let short = &DEAD_ID[..63];
+        assert!(name_store_conflicts(&ns_conflict_err(&name, short), "acme").is_empty());
+        let upper = DEAD_ID.to_uppercase();
+        assert!(name_store_conflicts(&ns_conflict_err(&name, &upper), "acme").is_empty());
+        // Empty ID is the documented #3351 corruption variant — healable.
+        assert_eq!(
+            name_store_conflicts(&ns_conflict_err(&name, ""), "acme"),
+            vec![(name, String::new())]
+        );
+    }
+
+    #[test]
+    fn name_store_conflicts_dedups_repeated_names() {
+        let name = own_name("acme", "mcp_hub");
+        let msg = anyhow::anyhow!(
+            "name-store error\\nname \\\"{name}\\\" is already used by ID \\\"{DEAD_ID}\\\" \
+             and again name \\\"{name}\\\" is already used by ID \\\"{DEAD_ID}\\\""
+        );
+        assert_eq!(name_store_conflicts(&msg, "acme").len(), 1);
+    }
+
+    fn decode_payload(cmd: &str) -> String {
+        use base64::Engine;
+        let b64 = cmd
+            .strip_prefix("echo ")
+            .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
+            .expect("payload must be `echo <b64> | base64 -d | sh`");
+        assert!(
+            b64.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
+            "payload must be pure base64 (quote-free through the WSL reparse)"
+        );
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .expect("valid base64"),
+        )
+        .expect("utf8 script")
+    }
+
+    fn test_layout(data_root: &str) -> NameStoreLayout {
+        NameStoreLayout {
+            data_root: data_root.to_string(),
+            address: consts::CONTAINERD_ADDRESS.to_string(),
+            namespace: consts::CONTAINERD_NAMESPACE.to_string(),
+            nerdctl_bin: "nerdctl".to_string(),
+        }
+    }
+
+    #[test]
+    fn name_store_heal_command_is_fail_closed_and_lock_guarded() {
+        let name = own_name("acme", "mcp_hub");
+        let cmd = name_store_heal_command_in(
+            &test_layout("/var/lib/nerdctl"),
+            &ns_conflict_err(&name, DEAD_ID),
+            "acme",
+        );
+        let script = decode_payload(&cmd);
+        assert!(script.contains(&format!("heal_entry \"$store/{name}\"")));
+        // Proof is bound to explicit engine coordinates, never ambient env.
+        for flag in ["--address", "--namespace", "--data-root"] {
+            assert!(script.contains(flag), "inspect must pass {flag}");
+        }
+        assert!(script.contains("no such object $id"), "ID-bound signature");
+        assert!(
+            script.contains("[ \"$rc\" -ne 0 ]"),
+            "non-zero exit required"
+        );
+        assert!(
+            script.contains("command -v flock"),
+            "missing flock -> no-op"
+        );
+        let inspect_pos = script.find("inspect \"$id\"").expect("inspect present");
+        let rm_pos = script
+            .rfind("flock -w 5 \"$store\" sh -c '[ \"$(cat")
+            .expect("locked rm present");
+        assert!(
+            inspect_pos < rm_pos,
+            "proof runs before the locked destructive step"
+        );
+        assert!(
+            script.contains(&format!(
+                "{}/{}/names/{}",
+                "/var/lib/nerdctl",
+                consts::nerdctl_addr_hash(),
+                consts::CONTAINERD_NAMESPACE
+            )),
+            "exact computed store path, no globbing"
+        );
+    }
+
+    #[test]
+    fn name_store_heal_command_drops_foreign_and_unsafe_names() {
+        let foreign = own_name("other", "mcp_hub");
+        let cmd = name_store_heal_command_in(
+            &test_layout("/var/lib/nerdctl"),
+            &ns_conflict_err(&foreign, DEAD_ID),
+            "acme",
+        );
+        let script = decode_payload(&cmd);
+        assert!(
+            !script.contains("heal_entry \"$store/"),
+            "no targets -> no heal_entry lines"
+        );
+    }
+
+    #[test]
+    fn name_store_sweep_command_skips_longer_registered_prefixes() {
+        let registered = vec!["foo".to_string(), "foo_bar".to_string()];
+        let cmd = name_store_sweep_command_in(&test_layout("/var/lib/nerdctl"), "foo", &registered);
+        let script = decode_payload(&cmd);
+        let own = format!("{}_foo_", consts::compose_prefix());
+        let longer = format!("{}_foo_bar_", consts::compose_prefix());
+        assert!(script.contains(&format!("for f in \"$store/{own}\"*")));
+        assert!(
+            script.contains(&format!("{longer}*) continue")),
+            "foo's sweep must skip entries owned by registered foo_bar"
+        );
+        // Without the longer sibling no case-guard is emitted (empty `case` is a syntax error).
+        let solo =
+            name_store_sweep_command_in(&test_layout("/var/lib/nerdctl"), "foo", &registered[..1]);
+        assert!(!decode_payload(&solo).contains("continue"));
+    }
+
+    /// Executes generated payloads against a stub store + stub binaries. macOS-gated:
+    /// the payload prepends system dirs to PATH, and only macOS ships no system flock.
+    #[cfg(target_os = "macos")]
+    mod name_store_payload_exec {
+        use super::*;
+        use std::path::{Path, PathBuf};
+
+        const FLOCK_OK: &str = "#!/bin/sh\nshift 3\nexec \"$@\"\n";
+        const FLOCK_BUSY: &str = "#!/bin/sh\nexit 1\n";
+        const NERDCTL_DEAD: &str = "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\n\
+             echo \"level=fatal msg=\\\"1 errors: [no such object $last]\\\"\" >&2\nexit 1\n";
+        const NERDCTL_LIVE: &str = "#!/bin/sh\necho '[{\"State\":{\"Running\":true}}]'\nexit 0\n";
+        const NERDCTL_ADVERSARIAL: &str = "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\n\
+             echo \"env HINT=no such object $last\"\nexit 0\n";
+        const NERDCTL_INFRA: &str =
+            "#!/bin/sh\necho 'cannot access containerd socket: no such file' >&2\nexit 1\n";
+        const NERDCTL_ID_SWAP: &str = "#!/bin/sh\nprintf '%s' \"$SWAP_TO\" > \"$SWAP_FILE\"\n\
+             for a in \"$@\"; do last=\"$a\"; done\necho \"no such object $last\" >&2\nexit 1\n";
+
+        struct StubStore {
+            _tmp: tempfile::TempDir,
+            store: PathBuf,
+            layout: NameStoreLayout,
+        }
+
+        fn write_exec(path: &Path, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn stub_store(nerdctl_body: &str, flock_body: &str) -> StubStore {
+            let tmp = tempfile::tempdir().unwrap();
+            let data_root = tmp.path().join("nerdctl-root");
+            let store = data_root
+                .join(consts::nerdctl_addr_hash())
+                .join("names")
+                .join(consts::CONTAINERD_NAMESPACE);
+            std::fs::create_dir_all(&store).unwrap();
+            let bin = tmp.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            write_exec(&bin.join("nerdctl"), nerdctl_body);
+            write_exec(&bin.join("flock"), flock_body);
+            let layout = NameStoreLayout {
+                data_root: data_root.to_string_lossy().to_string(),
+                address: consts::CONTAINERD_ADDRESS.to_string(),
+                namespace: consts::CONTAINERD_NAMESPACE.to_string(),
+                nerdctl_bin: bin.join("nerdctl").to_string_lossy().to_string(),
+            };
+            StubStore {
+                _tmp: tmp,
+                store,
+                layout,
+            }
+        }
+
+        fn run_payload(env: &StubStore, cmd: &str, extra_env: &[(&str, &str)]) {
+            let bin = Path::new(&env.layout.nerdctl_bin).parent().unwrap();
+            let path = format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            // SSOT-allow: test executes the generated payload against a stub store
+            let mut command = std::process::Command::new("/bin/sh");
+            command.arg("-c").arg(cmd).env("PATH", path);
+            for (k, v) in extra_env {
+                command.env(k, v);
+            }
+            let out = command.output().unwrap();
+            assert!(
+                out.status.success(),
+                "payload must never fail: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        fn heal_cmd(env: &StubStore, name: &str, id: &str, project: &str) -> String {
+            name_store_heal_command_in(&env.layout, &ns_conflict_err(name, id), project)
+        }
+
+        #[test]
+        fn dead_entry_is_removed_and_other_datastore_untouched() {
+            let env = stub_store(NERDCTL_DEAD, FLOCK_OK);
+            let name = own_name("nsheal1", "mcp_hub");
+            let entry = env.store.join(&name);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            let other = env
+                .store
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("deadbee0")
+                .join("names")
+                .join("default");
+            std::fs::create_dir_all(&other).unwrap();
+            let foreign_entry = other.join(&name);
+            std::fs::write(&foreign_entry, DEAD_ID).unwrap();
+            run_payload(&env, &heal_cmd(&env, &name, DEAD_ID, "nsheal1"), &[]);
+            assert!(!entry.exists(), "provably-dead reservation is released");
+            assert!(
+                foreign_entry.exists(),
+                "another datastore's entry is never touched (no globbing)"
+            );
+        }
+
+        #[test]
+        fn live_entry_is_kept() {
+            let env = stub_store(NERDCTL_LIVE, FLOCK_OK);
+            let name = own_name("nsheal2", "mcp_hub");
+            let entry = env.store.join(&name);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            run_payload(&env, &heal_cmd(&env, &name, DEAD_ID, "nsheal2"), &[]);
+            assert!(entry.exists(), "live container's reservation stays");
+        }
+
+        #[test]
+        fn rc_zero_with_phrase_in_output_is_kept() {
+            let env = stub_store(NERDCTL_ADVERSARIAL, FLOCK_OK);
+            let name = own_name("nsheal3", "mcp_hub");
+            let entry = env.store.join(&name);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            run_payload(&env, &heal_cmd(&env, &name, DEAD_ID, "nsheal3"), &[]);
+            assert!(
+                entry.exists(),
+                "rc=0 means alive even if the JSON contains the phrase"
+            );
+        }
+
+        #[test]
+        fn infra_failure_is_kept() {
+            let env = stub_store(NERDCTL_INFRA, FLOCK_OK);
+            let name = own_name("nsheal4", "mcp_hub");
+            let entry = env.store.join(&name);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            run_payload(&env, &heal_cmd(&env, &name, DEAD_ID, "nsheal4"), &[]);
+            assert!(entry.exists(), "unreachable containerd must not delete");
+        }
+
+        #[test]
+        fn id_swap_between_proof_and_lock_is_kept() {
+            let env = stub_store(NERDCTL_ID_SWAP, FLOCK_OK);
+            let name = own_name("nsheal5", "mcp_hub");
+            let entry = env.store.join(&name);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            let swapped = "a".repeat(64);
+            run_payload(
+                &env,
+                &heal_cmd(&env, &name, DEAD_ID, "nsheal5"),
+                &[
+                    ("SWAP_FILE", entry.to_string_lossy().as_ref()),
+                    ("SWAP_TO", &swapped),
+                ],
+            );
+            assert_eq!(
+                std::fs::read_to_string(&entry).unwrap(),
+                swapped,
+                "under-lock re-check must keep an entry whose ID changed since the proof"
+            );
+        }
+
+        #[test]
+        fn flock_busy_is_kept() {
+            let env = stub_store(NERDCTL_DEAD, FLOCK_BUSY);
+            let name = own_name("nsheal6", "mcp_hub");
+            let entry = env.store.join(&name);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            run_payload(&env, &heal_cmd(&env, &name, DEAD_ID, "nsheal6"), &[]);
+            assert!(entry.exists(), "no lock -> no delete");
+        }
+
+        #[test]
+        fn empty_entry_is_removed_and_garbled_is_kept() {
+            let env = stub_store(NERDCTL_DEAD, FLOCK_OK);
+            let empty = env.store.join(own_name("nsheal7", "mcp_hub"));
+            std::fs::write(&empty, "").unwrap();
+            let garbled = env.store.join(own_name("nsheal7", "mcp_office"));
+            std::fs::write(&garbled, &DEAD_ID[..63]).unwrap();
+            let err = anyhow::anyhow!(
+                "name-store error\\nname \\\"{}\\\" is already used by ID \\\"\\\" and \
+                 name \\\"{}\\\" is already used by ID \\\"{}\\\"",
+                own_name("nsheal7", "mcp_hub"),
+                own_name("nsheal7", "mcp_office"),
+                DEAD_ID
+            );
+            let cmd = name_store_heal_command_in(&env.layout, &err, "nsheal7");
+            run_payload(&env, &cmd, &[]);
+            assert!(!empty.exists(), "empty reservation (#3351) is released");
+            assert!(garbled.exists(), "non-64-hex content is fail-closed kept");
+        }
+
+        #[test]
+        fn missing_first_target_does_not_abort_later_targets() {
+            let env = stub_store(NERDCTL_DEAD, FLOCK_OK);
+            let absent = own_name("nsheal8", "mcp_hub");
+            let present = own_name("nsheal8", "mcp_office");
+            let entry = env.store.join(&present);
+            std::fs::write(&entry, DEAD_ID).unwrap();
+            let err = anyhow::anyhow!(
+                "name-store error\\nname \\\"{absent}\\\" is already used by ID \\\"{DEAD_ID}\\\" \
+                 and name \\\"{present}\\\" is already used by ID \\\"{DEAD_ID}\\\""
+            );
+            let cmd = name_store_heal_command_in(&env.layout, &err, "nsheal8");
+            run_payload(&env, &cmd, &[]);
+            assert!(!entry.exists(), "second target heals despite missing first");
+        }
+
+        #[test]
+        fn sweep_removes_own_ghosts_but_skips_longer_registered_project() {
+            let env = stub_store(NERDCTL_DEAD, FLOCK_OK);
+            let own = env.store.join(own_name("foo", "mcp_presale"));
+            std::fs::write(&own, DEAD_ID).unwrap();
+            let nested = env.store.join(own_name("foo_bar", "mcp_hub"));
+            std::fs::write(&nested, DEAD_ID).unwrap();
+            let registered = vec!["foo".to_string(), "foo_bar".to_string()];
+            let cmd = name_store_sweep_command_in(&env.layout, "foo", &registered);
+            run_payload(&env, &cmd, &[]);
+            assert!(!own.exists(), "own dead ghost (plugin-named) is swept");
+            assert!(
+                nested.exists(),
+                "registered foo_bar's entry is never claimed by foo"
+            );
+        }
     }
 
     /// Gated `#[serial(env_term)]`; `TermGuard` restores the prior `TERM` on drop,

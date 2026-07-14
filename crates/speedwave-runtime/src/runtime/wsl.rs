@@ -116,6 +116,25 @@ impl WslRuntime {
             .map(|_| ())
     }
 
+    /// Releases the project's provably-dead name-store reservations named in `err`
+    /// (fail-closed, under the store flock); see [`super::name_store_heal_command_in`].
+    fn cleanup_stale_name_store(&self, err: &anyhow::Error, project: &str) -> anyhow::Result<()> {
+        let cmd =
+            super::name_store_heal_command_in(&super::NameStoreLayout::production(), err, project);
+        self.run_in_distro(&["sh", "-c", &cmd], true).map(|_| ())
+    }
+
+    /// Ghost sweep for a project with no rendered compose.yml (down path);
+    /// see [`super::name_store_sweep_command_in`].
+    fn sweep_stale_name_store(&self, project: &str) -> anyhow::Result<()> {
+        let cmd = super::name_store_sweep_command_in(
+            &super::NameStoreLayout::production(),
+            project,
+            &super::registered_compose_projects(),
+        );
+        self.run_in_distro(&["sh", "-c", &cmd], true).map(|_| ())
+    }
+
     /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the container uid around
     /// every `up` — nerdctl root-creates missing bind-mount sources (ADR-052). Fail-open.
     fn ensure_claude_home_writable(&self, project: &str) {
@@ -428,9 +447,14 @@ impl ContainerRuntime for WslRuntime {
             )
             .map(|_| ())
         };
-        // Self-heal a stale CNI iptables/bridge collision from a prior dirty
-        // shutdown (`iptables: Chain already exists`): flush + retry once.
-        let result = super::with_cni_heal(up, |e| self.cleanup_stale_cni(e));
+        // Self-heal stale engine state from a prior dirty shutdown (CNI chain
+        // collisions, dead name-store reservations): clean + retry once per class.
+        let result = super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
+        );
         // AFTER up (even a failed one): hand back anything nerdctl root-created.
         self.ensure_claude_home_writable(project);
         result
@@ -439,10 +463,26 @@ impl ContainerRuntime for WslRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        // No compose.yml → nothing was ever started (deferred no-provider project); skip so
-        // nerdctl doesn't error+retry ~70s. Checks the host-side Windows path, not /mnt/c.
+        // No compose.yml → compose can't run, but labelled leftovers and dead
+        // name-store reservations may persist — reap those instead of skipping.
         if super::compose_down_is_noop(&super::compose_file_path(project)?) {
-            log::info!("no compose.yml for '{project}' — nothing to stop");
+            log::info!("no compose.yml for '{project}' — removing leftovers without compose down");
+            let nerdctl_prefix = ["-d", distro, "--", "nerdctl"];
+            super::force_remove_project_containers(
+                &*self.runner,
+                "wsl.exe",
+                project,
+                &nerdctl_prefix,
+            );
+            super::force_remove_project_networks(
+                &*self.runner,
+                "wsl.exe",
+                project,
+                &nerdctl_prefix,
+            );
+            if let Err(e) = self.sweep_stale_name_store(project) {
+                log::warn!("name-store sweep failed for '{project}': {e}");
+            }
             return Ok(());
         }
         let remote = super::shell_quote_argv(&[
@@ -617,52 +657,66 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
-        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        let _ = distro;
         self.ensure_claude_home_writable(project);
-        let up = self.run_in_distro(
-            &[
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "up",
-                "-d",
-                "--force-recreate",
-                "--remove-orphans",
-            ],
-            false,
+        let up = || {
+            self.run_in_distro(
+                &[
+                    "nerdctl",
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "-p",
+                    project,
+                    "up",
+                    "-d",
+                    "--force-recreate",
+                    "--remove-orphans",
+                ],
+                false,
+            )
+            .map(|_| ())
+        };
+        let result = super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
         );
         self.ensure_claude_home_writable(project);
-        up.map(|_| ())
+        result
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
-        let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        let _ = distro;
         self.ensure_claude_home_writable(project);
-        let up = self.run_in_distro(
-            &[
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "up",
-                "-d",
-                "--force-recreate",
-                service,
-            ],
-            false,
+        let up = || {
+            self.run_in_distro(
+                &[
+                    "nerdctl",
+                    "compose",
+                    "-f",
+                    &compose_file,
+                    "-p",
+                    project,
+                    "up",
+                    "-d",
+                    "--force-recreate",
+                    service,
+                ],
+                false,
+            )
+            .map(|_| ())
+        };
+        let result = super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
         );
         self.ensure_claude_home_writable(project);
-        up.map(|_| ())
+        result
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -2811,6 +2865,94 @@ mod tests {
                 calls[3].1
             );
             assert!(calls[4].1.last().unwrap().contains(" up "), "retry up");
+        }
+
+        fn name_store_conflict_msg() -> String {
+            format!(
+                "level=fatal msg=\"name-store error\\nname \\\"{}_acme_mcp_hub\\\" \
+                 is already used by ID \\\"db0da85287aa1119f5ef5483d7585c28ef721cf946111cf8d5369d308ecf450e\\\"\"",
+                crate::consts::compose_prefix()
+            )
+        }
+
+        #[test]
+        fn compose_up_recreate_self_heals_stale_name_store_and_retries() {
+            let mut responses = owned_pass();
+            responses.push(Err(anyhow::anyhow!("{}", name_store_conflict_msg())));
+            responses.push(Ok("".into())); // heal payload
+            responses.push(Ok("".into())); // up retry succeeds
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(
+                rt.compose_up_recreate("acme").is_ok(),
+                "a dead name-store reservation must self-heal and retry to success"
+            );
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                7,
+                "2 pre + up(fail) + heal + up(retry) + 2 post"
+            );
+            assert!(
+                calls[3].1.last().unwrap().contains("base64 -d | sh"),
+                "heal payload runs between failure and retry: {:?}",
+                calls[3].1
+            );
+            assert!(
+                calls[3].1.contains(&"root".to_string()),
+                "heal payload runs as root in the distro: {:?}",
+                calls[3].1
+            );
+            assert!(
+                calls[4].1.last().unwrap().contains("--force-recreate"),
+                "retry re-runs the recreate"
+            );
+        }
+
+        #[test]
+        fn compose_up_service_self_heals_stale_name_store_and_retries() {
+            let mut responses = owned_pass();
+            responses.push(Err(anyhow::anyhow!("{}", name_store_conflict_msg())));
+            responses.push(Ok("".into())); // heal payload
+            responses.push(Ok("".into())); // up retry succeeds
+            responses.extend(owned_pass());
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            assert!(rt.compose_up_service("acme", "proxy").is_ok());
+            assert_eq!(mock_clone.calls.lock().unwrap().len(), 7);
+        }
+
+        #[test]
+        fn compose_down_without_compose_file_sweeps_leftovers() {
+            let responses = vec![Ok("".into()), Ok("".into()), Ok("".into())];
+            let mock = Arc::new(SequentialMockRunner::new(responses));
+            let mock_clone = Arc::clone(&mock);
+            let rt =
+                WslRuntime::with_distro_name("Speedwave-test".into(), Box::new(ArcRunner(mock)));
+            rt.compose_down("wsl-no-compose-sweep").unwrap();
+            let calls = mock_clone.calls.lock().unwrap();
+            assert_eq!(calls.len(), 3, "ps + network ls + sweep: {calls:?}");
+            let joined0 = calls[0].1.join(" ");
+            assert!(
+                joined0.contains("ps -a")
+                    && joined0.contains("label=com.docker.compose.project=wsl-no-compose-sweep"),
+                "live leftovers looked up by label: {joined0}"
+            );
+            assert!(calls[1].1.join(" ").contains("network ls"));
+            let sweep = calls[2].1.join(" ");
+            assert!(
+                sweep.contains("base64 -d | sh") && sweep.contains("root"),
+                "ghost sweep runs as root: {sweep}"
+            );
+            assert!(
+                !calls.iter().any(|c| c.1.join(" ").contains(" down ")),
+                "no compose down without a compose file"
+            );
         }
     }
 
