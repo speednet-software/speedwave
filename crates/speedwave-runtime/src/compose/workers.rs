@@ -134,15 +134,25 @@ fn ensure_worker_auth_token(
 
     // Reject symlinks before is_file() — is_file() follows symlinks.
     let token = if !token_path.is_symlink() && token_path.is_file() {
-        let content = std::fs::read_to_string(&token_path)?.trim().to_string();
-        if content.is_empty() {
-            log::warn!(
-                "Token file at {} is empty — generating new auth token; MCP workers will require restart",
-                token_path.display()
-            );
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            content
+        // An unreadable token (e.g. a DACL corrupted by an interrupted write) must self-heal
+        // like an empty one, not hard-fail every container start with a bare ACCESS_DENIED.
+        match std::fs::read_to_string(&token_path) {
+            Ok(content) if !content.trim().is_empty() => content.trim().to_string(),
+            Ok(_) => {
+                log::warn!(
+                    "Token file at {} is empty — generating new auth token; MCP workers will require restart",
+                    token_path.display()
+                );
+                uuid::Uuid::new_v4().to_string()
+            }
+            Err(e) => {
+                log::warn!(
+                    "Token file at {} is unreadable ({e}) — regenerating; MCP workers will require restart",
+                    token_path.display()
+                );
+                let _ = std::fs::remove_file(&token_path);
+                uuid::Uuid::new_v4().to_string()
+            }
         }
     } else {
         if token_path.is_symlink() {
