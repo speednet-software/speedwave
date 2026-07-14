@@ -4,7 +4,6 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -50,13 +49,22 @@ export function engineExec(argv: string[]): string {
   throw new Error(`engineExec: unsupported platform '${process.platform}'`);
 }
 
-/** Reads the name-store dir into filename → 64-hex content. */
+/** Reads the name-store via the engine (the dir exists only in the VM/distro) into filename → 64-hex content. */
 export function storeSnapshot(): Map<string, string> {
   const dir = nameStoreDir();
-  const names = readdirSync(dir);
+  const script = `for f in ${dir}/*; do [ -e "$f" ] || continue; printf '%s %s\\n' "\${f##*/}" "$(cat "$f")"; done`;
+  const out = engineExec(['sh', '-c', script]);
   const snapshot = new Map<string, string>();
-  for (const name of names) {
-    const content = readFileSync(join(dir, name), 'utf8').trim();
+  if (out === '') return snapshot;
+  for (const line of out.split('\n')) {
+    const sep = line.indexOf(' ');
+    const name = sep === -1 ? line : line.slice(0, sep);
+    const content = sep === -1 ? '' : line.slice(sep + 1).trim();
+    if (!/^[0-9a-f]{64}$/.test(content)) {
+      throw new Error(
+        `storeSnapshot: entry '${name}' holds malformed content '${content}' — expected a 64-hex container id`
+      );
+    }
     snapshot.set(name, content);
   }
   return snapshot;
@@ -71,12 +79,14 @@ function inspectSucceeds(id: string): boolean {
   }
 }
 
-/** Removes the live container and leaves a dead reservation behind it (0600). */
+/** Removes the live container and leaves a dead reservation behind it (0600), all in the engine namespace. */
 export function plantGhost(containerName: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(containerName)) {
+    throw new Error(`plantGhost: unsafe container name '${containerName}'`);
+  }
   engineExec(['nerdctl', 'rm', '-f', containerName]);
-  const path = join(nameStoreDir(), containerName);
-  writeFileSync(path, DEAD_ID, 'utf8');
-  chmodSync(path, 0o600);
+  const file = `${nameStoreDir()}/${containerName}`;
+  engineExec(['sh', '-c', `printf '%s' ${DEAD_ID} > ${file} && chmod 600 ${file}`]);
 }
 
 /**
@@ -100,8 +110,8 @@ export function assertStoreHealed(ghosts: string[]): void {
 }
 
 /**
- * Every non-ghost entry captured in `before` must still be present and must
- * still resolve to a live container (before-id or a current re-acquired id).
+ * Every non-ghost entry from `before` must still be present with a CURRENT id that
+ * inspects live (containers may be legitimately recreated on restart); repointing checks are out of scope.
  */
 export function assertLiveEntriesIntact(before: Map<string, string>, ghosts: string[]): void {
   const after = storeSnapshot();
