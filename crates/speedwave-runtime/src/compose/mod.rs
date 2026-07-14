@@ -10108,6 +10108,54 @@ networks:
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_worker_auth_token_regenerated_when_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        )
+        .unwrap();
+        let token_path = tmp.path().join("slack-auth-token");
+        let first = std::fs::read_to_string(&token_path).unwrap();
+
+        // Simulate the Windows empty-DACL corruption via a chmod the owner cannot read.
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&token_path).is_ok() {
+            return; // running as root — chmod cannot restrict, can't exercise the read-error path
+        }
+
+        let result = apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        );
+        assert!(
+            result.is_ok(),
+            "an unreadable token must self-heal, not fail the render: {:?}",
+            result.err()
+        );
+        let regenerated = std::fs::read_to_string(&token_path).unwrap();
+        assert!(
+            uuid::Uuid::parse_str(regenerated.trim()).is_ok(),
+            "regenerated token must be a valid UUID, got '{regenerated}'"
+        );
+        assert_ne!(
+            first, regenerated,
+            "a fresh token must replace the corrupt one"
+        );
+    }
+
     #[test]
     fn test_worker_auth_tokens_use_engine_path() {
         let tmp = tempfile::tempdir().unwrap();
