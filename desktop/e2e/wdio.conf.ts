@@ -1,6 +1,8 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { runPreflight } from './helpers/preflight';
+
 const SCREENSHOT_DIR = join(process.cwd(), 'screenshots');
 
 export const config = {
@@ -48,10 +50,19 @@ export const config = {
 
   logLevel: 'warn',
 
+  // Fail fast on a broken external dependency: an exhausted OpenRouter account or
+  // an unreachable local LLM otherwise surfaces mid-suite as an unrelated timeout.
+  onPrepare: async function () {
+    const failures = await runPreflight();
+    if (failures.length === 0) return;
+    const detail = failures.map((f) => `  ✖ ${f.service}: ${f.reason}`).join('\n');
+    throw new Error(`E2E preflight failed — the suite cannot produce a valid result:\n${detail}`);
+  },
+
   afterTest: async function (
     _test: unknown,
     _context: unknown,
-    { passed, error }: { passed: boolean; error?: Error },
+    { passed, error }: { passed: boolean; error?: Error }
   ) {
     if (!passed) {
       if (error) console.error(`Test failed: ${error.message}`);
