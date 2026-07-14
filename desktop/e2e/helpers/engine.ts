@@ -49,17 +49,17 @@ export function engineExec(argv: string[]): string {
   throw new Error(`engineExec: unsupported platform '${process.platform}'`);
 }
 
-/** Reads the name-store via the engine (the dir exists only in the VM/distro) into filename → 64-hex content. */
+/** Reads the name-store via the engine into filename → 64-hex content. Plain metachar-free
+ *  argv is what survives both transports' default-shell re-parse (wsl.rs::run_in_distro). */
 export function storeSnapshot(): Map<string, string> {
   const dir = nameStoreDir();
-  const script = `for f in ${dir}/*; do [ -e "$f" ] || continue; printf '%s %s\\n' "\${f##*/}" "$(cat "$f")"; done`;
-  const out = engineExec(['sh', '-c', script]);
+  const listing = engineExec(['ls', dir]);
   const snapshot = new Map<string, string>();
-  if (out === '') return snapshot;
-  for (const line of out.split('\n')) {
-    const sep = line.indexOf(' ');
-    const name = sep === -1 ? line : line.slice(0, sep);
-    const content = sep === -1 ? '' : line.slice(sep + 1).trim();
+  if (listing === '') return snapshot;
+  for (const rawName of listing.split('\n')) {
+    const name = rawName.trim();
+    if (name === '') continue;
+    const content = engineExec(['cat', `${dir}/${name}`]);
     if (!/^[0-9a-f]{64}$/.test(content)) {
       throw new Error(
         `storeSnapshot: entry '${name}' holds malformed content '${content}' — expected a 64-hex container id`
@@ -86,7 +86,12 @@ export function plantGhost(containerName: string): void {
   }
   engineExec(['nerdctl', 'rm', '-f', containerName]);
   const file = `${nameStoreDir()}/${containerName}`;
-  engineExec(['sh', '-c', `printf '%s' ${DEAD_ID} > ${file} && chmod 600 ${file}`]);
+  // Base64 keeps the redirect script quote/metachar-free through both transports'
+  // default-shell re-parse — the runtime's wrap_base64_sh rationale (runtime/mod.rs).
+  const b64 = Buffer.from(`printf '%s' ${DEAD_ID} > ${file} && chmod 600 ${file}`, 'utf8').toString(
+    'base64'
+  );
+  engineExec(['sh', '-c', `echo ${b64} | base64 -d | sh`]);
 }
 
 /**
