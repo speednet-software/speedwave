@@ -86,7 +86,8 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-077](ADR-077-bundled-official-anthropic-plugins.md)               | Bundle official Anthropic Claude Code plugins (runtime install at start + pre-baked TS server)                         | Accepted                      |
 | [ADR-078](ADR-078-claude-hook-registration.md)                         | Claude Code hook registration — hooks.json declarations merged into settings.json at container start                   | Accepted                      |
 | [ADR-079](ADR-079-identity-metadata-and-teaching-errors.md)            | Identity metadata trio and the teaching-error contract: `_meta` identity companions + structured validation errors     | Accepted                      |
-| [ADR-080](ADR-080-policy-engine-pii-tokenization.md)                   | Policy engine: PII tokenization via a resolved, host-rendered policy mounted read-only into mcp-hub                    | Accepted                      |
+| [ADR-080](ADR-080-policy-engine-pii-tokenization.md)                   | Policy engine: PII tokenization via a resolved, host-rendered policy mounted read-only into mcp-hub                    | Superseded by ADR-081         |
+| [ADR-081](ADR-081-vaultless-pii-tokenization.md)                       | Vaultless PII tokenization via a shared Rust engine (AES-SIV, policy v2, proxy + hub enforcement)                       | Accepted                      |
 
 ## Creating a New ADR
 

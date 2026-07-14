@@ -1,12 +1,14 @@
 # ADR-080: Policy Engine, PII Tokenization
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-081](ADR-081-vaultless-pii-tokenization.md)
 
 **Date:** 2026-07-09
 
+**Note:** Most of this ADR's mechanics (the map-based tokenizer, the v1 boolean `policy.json` contract, and the absence of a proxy enforcement point, a tokenization key, and a detection audit trail) were replaced by ADR-081. What survives from this ADR: per-project, host-rendered policy resolution; YAML-authored policy templates as the shipped-preset mechanism; and MDM-shaped delivery of an org-forced policy layer.
+
 ## Context
 
-The MCP Hub has always tokenized PII in tool arguments/results before they reach the model: email, phone, PESEL, NIP, IBAN, card, API key, and key-name-based "sensitive field" detection, replacing matched values with `[TYPE:TOKEN]` placeholders that Claude never sees in cleartext (see [Executor Sandbox](../architecture/security.md#executor-sandbox-mcp-hub)). Until this feature, that behavior lived in one file, `mcp-servers/hub/src/pii-tokenizer.ts`: a hardcoded pattern set and a hardcoded default `PIIContext` with no way for a project to change what gets detected, add a project-specific pattern (an internal employee-ID format, say), or turn a category off. Every project got exactly the same fixed policy.
+The MCP Hub has always tokenized PII in tool arguments/results before they reach the model: email, phone, PESEL, NIP, IBAN, card, API key, and key-name-based "sensitive field" detection, replacing matched values with `[TYPE:TOKEN]` placeholders that Claude never sees in cleartext (see the hub's zero-external-credentials invariant, [`.claude/rules/security.md`](../../.claude/rules/security.md)). Until this feature, that behavior lived in one file, `mcp-servers/hub/src/pii-tokenizer.ts`: a hardcoded pattern set and a hardcoded default `PIIContext` with no way for a project to change what gets detected, add a project-specific pattern (an internal employee-ID format, say), or turn a category off. Every project got exactly the same fixed policy.
 
 Two things motivated giving projects control over this policy:
 
