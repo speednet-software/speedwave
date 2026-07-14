@@ -565,7 +565,7 @@ SCRIPT
     # the app has run — the Speedwave WSL distro is created on first app start.
     echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
     # shellcheck disable=SC2086
-    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\""
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\"" || exit_code=$?
 
     # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
     # the desktop suite just left behind — must run before windows_clean_state below.
