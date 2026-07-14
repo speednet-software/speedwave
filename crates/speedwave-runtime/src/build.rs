@@ -1105,10 +1105,12 @@ pub fn condense_engine_error(raw: &str) -> String {
          block AI domains), then press Retry. Detail: ";
     let mut reduced;
     let msg = if let Some(line) = connectivity_line.filter(|_| is_claude_download_failure) {
+        // A connectivity summary always drops surrounding noise — reduced even
+        // when the detail line is short.
+        reduced = true;
         // Clamp the detail line to leave room for the prefix, so the friendly
         // guidance always survives the final tail-clamp below.
         let detail_budget = BUILD_ERROR_TAIL_CHARS.saturating_sub(CONNECTIVITY_PREFIX.len());
-        reduced = line.len() > detail_budget;
         let detail = tail_chars_within(line, detail_budget);
         format!("{CONNECTIVITY_PREFIX}{detail}")
     } else {
@@ -1172,6 +1174,10 @@ mod tests {
         assert!(
             !out.contains("liberror-perl"),
             "apt noise must not reach the banner: {out}"
+        );
+        assert!(
+            out.ends_with("(full output in Logs)"),
+            "a connectivity summary always carries the log pointer: {out}"
         );
     }
 
