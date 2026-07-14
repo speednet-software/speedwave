@@ -67,7 +67,11 @@ describe('Dirty-state self-heal', function () {
     await requestBackendRestart();
     await waitForHealthy(PROJECT);
     assertStoreHealed([HUB]);
-    assertLiveEntriesIntact(before, [HUB]);
+    // Other projects' entries can be legitimately reaped (session-scoped claude
+    // containers) between snapshot and assert — scope the invariant to PROJECT.
+    const projectPrefix = `${composePrefix()}_${PROJECT}_`;
+    const beforeScoped = new Map([...before].filter(([name]) => name.startsWith(projectPrefix)));
+    assertLiveEntriesIntact(beforeScoped, [HUB]);
   });
 
   it('heals multiple ghosts in one pass', async function () {
@@ -78,7 +82,11 @@ describe('Dirty-state self-heal', function () {
     await requestBackendRestart();
     await waitForHealthy(PROJECT);
     assertStoreHealed([HUB, CLAUDE]);
-    assertLiveEntriesIntact(before, [HUB, CLAUDE]);
+    // Other projects' entries can be legitimately reaped (session-scoped claude
+    // containers) between snapshot and assert — scope the invariant to PROJECT.
+    const projectPrefix = `${composePrefix()}_${PROJECT}_`;
+    const beforeScoped = new Map([...before].filter(([name]) => name.startsWith(projectPrefix)));
+    assertLiveEntriesIntact(beforeScoped, [HUB, CLAUDE]);
   });
 
   it('heals an unreadable worker auth token (Windows empty-DACL corruption)', async function () {
