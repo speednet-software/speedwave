@@ -829,14 +829,13 @@ SCRIPT
     # the desktop suite just left behind — must run before macos_clean_state below.
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running update-dirty-state suite (production-style install: LIMA_HOME + speedwave VM)..."
-        macos_ssh bash <<'SCRIPT'
+        macos_ssh bash <<'SCRIPT' || exit_code=$?
 set -euo pipefail
 command -v bats >/dev/null 2>&1 || brew install bats-core
 SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
 ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 SPW_E2E_PROJECT=e2e-test bats /tmp/speedwave-e2e/update-dirty-state.bats
 SCRIPT
-        exit_code=$?
     fi
 
     # -- Cleanup: leave the machine clean after tests ----------------------------
