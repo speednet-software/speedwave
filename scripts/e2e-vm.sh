@@ -501,9 +501,6 @@ SCRIPT
     # Engine-contract suite: rsynced into the STAGING distro only, bats runs there,
     # and crosses into the tested Speedwave distro via WSL interop — never touched directly.
     windows_rsync_to "$HOST_REPO_DIR/_tests/e2e/" "$WINDOWS_WSL_STAGING/engine-contract-suite/"
-    echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
-    # shellcheck disable=SC2086
-    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\""
 
     # Copy E2E test suite to WSL2 then to Windows side
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
@@ -563,6 +560,12 @@ SCRIPT
         echo "[windows] FAILED on second install (exit code: $exit_code)"
     fi
     echo "[windows] Installer at: $WINDOWS_HOST:Desktop\\speedwave-setup.exe"
+
+    # Engine-contract suite needs the provisioned engine, which exists only after
+    # the app has run — the Speedwave WSL distro is created on first app start.
+    echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
+    # shellcheck disable=SC2086
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\""
 
     # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
     # the desktop suite just left behind — must run before windows_clean_state below.
