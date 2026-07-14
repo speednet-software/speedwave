@@ -1230,6 +1230,32 @@ impl SecurityCheck {
                 });
                 continue;
             }
+            if let Some(slug) = target.strip_prefix("/speedwave/plugins/") {
+                let Some((host, mode)) = extract_volume_for_target(s, target) else {
+                    continue;
+                };
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!("plugin '{slug}' claude-resources mount must be :ro"),
+                        remediation:
+                            "Re-render compose; plugin claude-resources mounts are read-only.",
+                    });
+                }
+                let expected_suffix = format!("/plugins/{slug}/claude-resources");
+                if !host.ends_with(&expected_suffix) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!(
+                            "plugin '{slug}' claude-resources source '{host}' != expected '*{expected_suffix}'"
+                        ),
+                        remediation: "Re-render compose; a plugin mount must come from its own claude-resources dir.",
+                    });
+                }
+                continue;
+            }
             if target != "/workspace" {
                 continue;
             }

@@ -12243,6 +12243,101 @@ services:
         );
     }
 
+    /// Renders a plugin with claude-resources, same shape as the tests above;
+    /// callers tamper with the resulting mount to probe the plugin-prefix arm.
+    fn render_presalefix_plugin_mount() -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
+        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "presalefix".into(),
+            service_id: None,
+            slug: "presalefix".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let plugin = plugin::VerifiedPlugin::new(
+            manifest,
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let cfg = fixture_integrations_with_enabled("presalefix");
+        let ctx = ApplyPluginsCtx {
+            project_name: "test",
+            project_dir: "/test/project",
+            integrations: &cfg,
+            network_name: "test-net",
+            tokens_dir: Path::new("/test/.speedwave/tokens/test"),
+            bridges: &HostBridgesInfo::default(),
+        };
+        apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap()
+    }
+
+    #[test]
+    fn plugin_mount_with_foreign_source_fails_security_check() {
+        let yaml = render_presalefix_plugin_mount();
+        assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
+        let tampered = yaml.replace(
+            "claude-resources:/speedwave/plugins/presalefix:ro",
+            "/etc:/speedwave/plugins/presalefix:ro",
+        );
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("presalefix")),
+            "foreign plugin mount source must be rejected, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_mount_without_ro_fails_security_check() {
+        let yaml = render_presalefix_plugin_mount();
+        assert!(yaml.contains(":/speedwave/plugins/presalefix:ro"));
+        let tampered = yaml.replace(
+            ":/speedwave/plugins/presalefix:ro",
+            ":/speedwave/plugins/presalefix:rw",
+        );
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("presalefix")),
+            "writable plugin mount must be rejected, got: {violations:?}"
+        );
+    }
+
     // ── Host-bridge env injection (generic plugin host-bridge plumbing) ─────
 
     fn render_with_host_bridge_plugin(
