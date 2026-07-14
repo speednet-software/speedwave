@@ -101,6 +101,31 @@ impl LimaRuntime {
             .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
             .map(|_| ())
     }
+
+    /// Releases the project's provably-dead name-store reservations named in `err`
+    /// (fail-closed, under the store flock); see [`super::name_store_heal_command_in`].
+    fn cleanup_stale_name_store(&self, err: &anyhow::Error, project: &str) -> anyhow::Result<()> {
+        let vm = consts::lima_vm_name();
+        let cmd =
+            super::name_store_heal_command_in(&super::NameStoreLayout::production(), err, project);
+        self.runner
+            .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
+            .map(|_| ())
+    }
+
+    /// Ghost sweep for a project with no rendered compose.yml (down path);
+    /// see [`super::name_store_sweep_command_in`].
+    fn sweep_stale_name_store(&self, project: &str) -> anyhow::Result<()> {
+        let vm = consts::lima_vm_name();
+        let cmd = super::name_store_sweep_command_in(
+            &super::NameStoreLayout::production(),
+            project,
+            &super::registered_compose_projects(),
+        );
+        self.runner
+            .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
+            .map(|_| ())
+    }
 }
 
 /// Recursively copies `src` into `dst`, creating directories as needed.
@@ -305,19 +330,40 @@ impl ContainerRuntime for LimaRuntime {
                 )
                 .map(|_| ())
         };
-        // Self-heal a stale CNI iptables/bridge collision from a prior dirty
-        // shutdown (`iptables: Chain already exists`): flush + retry once.
-        super::with_cni_heal(up, |e| self.cleanup_stale_cni(e))
+        // Self-heal stale engine state from a prior dirty shutdown (CNI chain
+        // collisions, dead name-store reservations): clean + retry once per class.
+        super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
+        )
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let vm = consts::lima_vm_name();
         let compose_file = super::compose_file_path(project)?;
-        // No compose.yml → nothing was ever started (deferred no-provider
-        // project); skip so nerdctl doesn't fatally error and retry for ~70s.
+        // No compose.yml → compose can't run, but labelled leftovers and dead
+        // name-store reservations may persist — reap those instead of skipping.
         if super::compose_down_is_noop(&compose_file) {
-            log::info!("no compose.yml for '{project}' — nothing to stop, skipping compose down");
+            log::info!("no compose.yml for '{project}' — removing leftovers without compose down");
+            let nerdctl_prefix = ["shell", vm, "--", "sudo", "nerdctl"];
+            force_remove_project_containers_with_retry(
+                &*self.runner,
+                "limactl",
+                project,
+                &nerdctl_prefix,
+            );
+            force_remove_project_networks_with_retry(
+                &*self.runner,
+                "limactl",
+                project,
+                &nerdctl_prefix,
+            );
+            if let Err(e) = self.sweep_stale_name_store(project) {
+                log::warn!("name-store sweep failed for '{project}': {e}");
+            }
             return Ok(());
         }
         compose_down_and_cleanup_with_retry(
@@ -597,52 +643,70 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
-        self.runner.run(
-            "limactl",
-            &[
-                "shell",
-                consts::lima_vm_name(),
-                "--",
-                "sudo",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "up",
-                "-d",
-                "--force-recreate",
-                "--remove-orphans",
-            ],
-        )?;
-        Ok(())
+        let up = || {
+            self.runner
+                .run(
+                    "limactl",
+                    &[
+                        "shell",
+                        consts::lima_vm_name(),
+                        "--",
+                        "sudo",
+                        "nerdctl",
+                        "compose",
+                        "-f",
+                        &compose_file,
+                        "-p",
+                        project,
+                        "up",
+                        "-d",
+                        "--force-recreate",
+                        "--remove-orphans",
+                    ],
+                )
+                .map(|_| ())
+        };
+        super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
+        )
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
         self.require_running()?;
         let compose_file = super::compose_file_path(project)?;
-        self.runner.run(
-            "limactl",
-            &[
-                "shell",
-                consts::lima_vm_name(),
-                "--",
-                "sudo",
-                "nerdctl",
-                "compose",
-                "-f",
-                &compose_file,
-                "-p",
-                project,
-                "up",
-                "-d",
-                "--force-recreate",
-                service,
-            ],
-        )?;
-        Ok(())
+        let up = || {
+            self.runner
+                .run(
+                    "limactl",
+                    &[
+                        "shell",
+                        consts::lima_vm_name(),
+                        "--",
+                        "sudo",
+                        "nerdctl",
+                        "compose",
+                        "-f",
+                        &compose_file,
+                        "-p",
+                        project,
+                        "up",
+                        "-d",
+                        "--force-recreate",
+                        service,
+                    ],
+                )
+                .map(|_| ())
+        };
+        super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
+        )
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
@@ -1563,6 +1627,97 @@ mod tests {
             "up runs twice (fail + retry)"
         );
         assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "cleanup runs once");
+    }
+
+    /// Runner whose first compose `up` fails with a real nerdctl name-store conflict.
+    struct NameStoreHealRunner {
+        up_calls: Arc<std::sync::atomic::AtomicUsize>,
+        cleanup_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl CommandRunner for NameStoreHealRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+            use std::sync::atomic::Ordering;
+            if cmd == "limactl" && args.first() == Some(&"--version") {
+                return Ok("limactl version 1.0.0".to_string());
+            }
+            if cmd == "limactl" && args.first() == Some(&"list") {
+                return Ok("Running".to_string());
+            }
+            let joined = args.join(" ");
+            if joined.contains("nerdctl") && joined.contains("compose") && joined.contains(" up ") {
+                if self.up_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    anyhow::bail!(
+                        "level=fatal msg=\"name-store error\\nname \\\"{}_acme_mcp_hub\\\" \
+                         is already used by ID \\\"{}\\\"\"",
+                        consts::compose_prefix(),
+                        "db0da85287aa1119f5ef5483d7585c28ef721cf946111cf8d5369d308ecf450e"
+                    );
+                }
+                return Ok(String::new());
+            }
+            if joined.contains("base64 -d | sh") {
+                self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn compose_up_recreate_self_heals_stale_name_store_and_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let up_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let rt = LimaRuntime::with_runner(Box::new(NameStoreHealRunner {
+            up_calls: Arc::clone(&up_calls),
+            cleanup_calls: Arc::clone(&cleanup_calls),
+        }));
+        assert!(
+            rt.compose_up_recreate("acme").is_ok(),
+            "a dead name-store reservation must self-heal and retry to success"
+        );
+        assert_eq!(up_calls.load(Ordering::SeqCst), 2, "up fail + retry");
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "one heal payload");
+    }
+
+    #[test]
+    fn compose_up_service_self_heals_stale_name_store_and_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let up_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let rt = LimaRuntime::with_runner(Box::new(NameStoreHealRunner {
+            up_calls: Arc::clone(&up_calls),
+            cleanup_calls: Arc::clone(&cleanup_calls),
+        }));
+        assert!(rt.compose_up_service("acme", "proxy").is_ok());
+        assert_eq!(up_calls.load(Ordering::SeqCst), 2, "up fail + retry");
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1, "one heal payload");
+    }
+
+    #[test]
+    fn compose_down_without_compose_file_sweeps_leftovers() {
+        let (recorded, runner) = make_recording_runner();
+        let rt = LimaRuntime::with_runner(runner);
+        rt.compose_down("lima-no-compose-sweep").unwrap();
+        let commands = recorded.lock().unwrap();
+        assert!(
+            commands.iter().any(|c| c.contains("ps -a")
+                && c.contains("label=com.docker.compose.project=lima-no-compose-sweep")),
+            "live leftovers are looked up by project label: {commands:?}"
+        );
+        assert!(
+            commands.iter().any(|c| c.contains("network ls")),
+            "leftover networks are looked up: {commands:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains("sudo sh -c") && c.contains("base64 -d | sh")),
+            "ghost name-store sweep runs as root: {commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| c.contains(" down ")),
+            "no compose down without a compose file: {commands:?}"
+        );
     }
 
     #[test]
