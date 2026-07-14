@@ -1070,10 +1070,16 @@ const BUILD_ERROR_TAIL_CHARS: usize = 700;
 
 /// Char-boundary-safe tail of `raw`, at most `BUILD_ERROR_TAIL_CHARS` long.
 fn tail_chars(raw: &str) -> &str {
-    if raw.len() <= BUILD_ERROR_TAIL_CHARS {
+    tail_chars_within(raw, BUILD_ERROR_TAIL_CHARS)
+}
+
+/// Char-boundary-safe tail of `raw`, at most `budget` chars long — the shared
+/// primitive behind [`tail_chars`] for callers clamping to a smaller budget.
+fn tail_chars_within(raw: &str, budget: usize) -> &str {
+    if raw.len() <= budget {
         return raw;
     }
-    let mut cut = raw.len() - BUILD_ERROR_TAIL_CHARS;
+    let mut cut = raw.len() - budget;
     while !raw.is_char_boundary(cut) {
         cut += 1;
     }
@@ -1094,13 +1100,17 @@ pub fn condense_engine_error(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     let is_claude_download_failure =
         lower.contains("install-claude.sh") || lower.contains("claude.ai");
-    let mut reduced = true;
+    const CONNECTIVITY_PREFIX: &str = "Cannot download Claude Code during the image build — the \
+         VM has no route to claude.ai. Check VPN, proxy, or firewall (content filters often \
+         block AI domains), then press Retry. Detail: ";
+    let mut reduced;
     let msg = if let Some(line) = connectivity_line.filter(|_| is_claude_download_failure) {
-        format!(
-            "Cannot download Claude Code during the image build — the VM has no route \
-             to claude.ai. Check VPN, proxy, or firewall (content filters often block \
-             AI domains), then press Retry. Detail: {line}"
-        )
+        // Clamp the detail line to leave room for the prefix, so the friendly
+        // guidance always survives the final tail-clamp below.
+        let detail_budget = BUILD_ERROR_TAIL_CHARS.saturating_sub(CONNECTIVITY_PREFIX.len());
+        reduced = line.len() > detail_budget;
+        let detail = tail_chars_within(line, detail_budget);
+        format!("{CONNECTIVITY_PREFIX}{detail}")
     } else {
         let crux: Vec<&str> = raw
             .lines()
@@ -1112,6 +1122,9 @@ pub fn condense_engine_error(raw: &str) -> String {
             })
             .collect();
         if !crux.is_empty() {
+            // Crux extraction always drops surrounding noise, so it always
+            // counts as a reduction even when the joined result is short.
+            reduced = true;
             crux.join(" | ")
         } else {
             reduced = raw.len() > BUILD_ERROR_TAIL_CHARS;
@@ -1170,6 +1183,10 @@ mod tests {
         let raw =
             format!("install-claude.sh\ncurl: (7) Failed to connect to claude.ai: {big_detail}");
         let out = condense_engine_error(&raw);
+        assert!(
+            out.starts_with("Cannot download Claude Code"),
+            "friendly prefix survives the clamp: {out}"
+        );
         assert!(
             out.contains(&big_detail[big_detail.len() - 100..]),
             "keeps the tail: {out}"
