@@ -153,9 +153,8 @@ pub(crate) fn make_unreadable_for_test(path: &Path) {
     }
 }
 
-/// Test-only: applies a protected, empty DACL to `path` — no ACEs at all, so even the
-/// owner is denied (icacls `/inheritance:r` would not clear the explicit owner ACE
-/// `set_windows_acl_owner_only` writes; this replaces the DACL outright).
+/// Test-only: replaces the DACL with a protected, empty one — zero ACEs denies even the
+/// owner (icacls `/inheritance:r` would keep `set_windows_acl_owner_only`'s explicit ACE).
 #[cfg(all(windows, test))]
 #[expect(
     unsafe_code,
