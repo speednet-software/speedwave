@@ -374,6 +374,9 @@ impl IdeBridge {
             .endpoint(AuthScheme::Header(IDE_BRIDGE_AUTH_HEADER))
             .origin_policy(OriginPolicy::RejectIfPresent)
             .subprotocol(SubprotocolPolicy { accepted: &["mcp"] })
+            // Claude Code (in the container) dials the port from the lock FILENAME; under
+            // WSL2 mirrored mode that must be the relay port, not the raw bind port (ADR-080).
+            .container_facing_lock(true)
             .lock_body(|ctx: LockBodyContext<'_>| {
                 let lock = IdeLockFile {
                     pid: 1,
@@ -389,7 +392,7 @@ impl IdeBridge {
 
         let inner = HostBridge::new(config)?;
         let tcp_port = inner.port();
-        let lock_file_path = inner.lock_file_path().to_path_buf();
+        let lock_file_path = inner.lock_file_path();
         // Re-wrap HostBridge's token as the legacy AuthState handle.
         let auth = Arc::new(Mutex::new(AuthState::new(inner.auth_token())));
         let (upstream_changed_tx, _) = tokio::sync::broadcast::channel(4);

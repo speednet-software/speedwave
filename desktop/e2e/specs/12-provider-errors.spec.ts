@@ -13,6 +13,7 @@
  */
 
 import { openSettings, requireLocalLlm } from '../helpers/llm';
+import { localLlmUnreachable } from '../helpers/preflight';
 
 /** A routable host with a port nothing listens on — forces a discovery timeout. */
 const OFFLINE_BASE_URL = 'http://127.0.0.1:9';
@@ -32,6 +33,9 @@ describe('Provider Error Paths', function () {
 
   it('surfaces a discovery error for a bad api key', async function () {
     this.timeout(60_000);
+    // Needs a server that actively rejects the key; with no route the request would
+    // time out and pass for the wrong reason.
+    if (localLlmUnreachable()) this.skip();
     const local = requireLocalLlm();
     await (await $('[data-testid="settings-llm-base-url"]')).setValue(local.baseUrl);
     await (await $('[data-testid="settings-llm-api-key"]')).setValue('sk-definitely-invalid-key');
@@ -52,6 +56,8 @@ describe('Provider Error Paths', function () {
 
   it('enables Save once discovery auto-selects the model', async function () {
     this.timeout(60_000);
+    // Needs a successful discovery against a live server.
+    if (localLlmUnreachable()) this.skip();
     const local = requireLocalLlm();
     await (await $('[data-testid="settings-llm-base-url"]')).setValue(local.baseUrl);
     await (await $('[data-testid="settings-llm-api-key"]')).setValue(local.apiKey);

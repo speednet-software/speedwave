@@ -92,7 +92,7 @@ struct RedmineActivitiesResponse {
 
 /// Validates and normalizes a Redmine host URL for API use. Allows private on-premise IPs
 /// (RFC1918/ULA/CGNAT) with a warning; blocks loopback, link-local, creds, non-HTTP schemes.
-fn validate_redmine_host_url(url: &str) -> Result<String, String> {
+pub(crate) fn validate_redmine_host_url(url: &str) -> Result<String, String> {
     // Reject backslashes before parsing (Windows path confusion)
     if url.contains('\\') {
         return Err("URL must not contain backslashes".to_string());

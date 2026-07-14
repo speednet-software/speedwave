@@ -8,7 +8,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::consts;
-use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
+use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo, VAD_MODEL};
 
 /// Max time to establish the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -103,6 +103,18 @@ pub struct ModelStatusEntry {
 /// A no-op progress callback for callers that don't care about progress.
 pub fn no_progress(_p: DownloadProgress) {}
 
+/// Accepted on-disk size window for a verified model of estimated size
+/// `approx_bytes`: rejects truncated/oversized leftovers, tolerates drift.
+fn size_window(approx_bytes: u64) -> (u64, u64) {
+    (approx_bytes / 10 * 9, download_cap(approx_bytes))
+}
+
+/// Per-download byte cap: the estimate plus 5% headroom (guards a wildly-wrong
+/// `Content-Length` from writing gigabytes; the file itself is a fixed size).
+fn download_cap(approx_bytes: u64) -> u64 {
+    approx_bytes + approx_bytes / 20 + 1024
+}
+
 /// Downloads, verifies, and caches transcription models under a root directory.
 pub struct ModelStore {
     root: PathBuf,
@@ -131,13 +143,12 @@ impl ModelStore {
         self.whisper_dir().join(info.file)
     }
 
-    /// `true` if the file size is within `[90%, 105%]` of the catalogue estimate (SHA-verified
-    /// before rename; the window rejects truncated/oversized leftovers, tolerates size drift).
+    /// `true` if the file size is within the [`size_window`] of the catalogue
+    /// estimate (SHA-verified before rename put it there).
     fn whisper_is_present(&self, info: &WhisperModelInfo) -> bool {
         match std::fs::metadata(self.whisper_path(info)) {
             Ok(m) => {
-                let floor = info.approx_bytes / 10 * 9;
-                let ceil = info.approx_bytes + info.approx_bytes / 20 + 1024;
+                let (floor, ceil) = size_window(info.approx_bytes);
                 m.len() >= floor && m.len() <= ceil
             }
             Err(_) => false,
@@ -167,9 +178,7 @@ impl ModelStore {
         }
         std::fs::create_dir_all(self.whisper_dir())?;
         restrict_dir_perms(&self.whisper_dir());
-        // Per-model cap = catalogue approx_bytes + 5% headroom; just guards against a
-        // wildly-wrong Content-Length writing gigabytes (the file itself is a fixed size).
-        let per_model_cap = info.approx_bytes + info.approx_bytes / 20 + 1024;
+        let per_model_cap = download_cap(info.approx_bytes);
         // Total-storage check.
         let current_total = self.total_bytes_used();
         let would_be = current_total + info.approx_bytes;
@@ -198,7 +207,7 @@ impl ModelStore {
     }
 
     /// Downloads `url` to `dest`, verifies SHA256 against `expected_sha256`, enforces `cap`,
-    /// restricts perms, removes the file on mismatch. Shared body of `ensure_model` / test seam.
+    /// restricts perms. Shared body of `ensure_model` / test seam.
     fn download_to(
         &self,
         url: &str,
@@ -208,19 +217,56 @@ impl ModelStore {
         cap: u64,
         progress: &mut dyn FnMut(DownloadProgress),
     ) -> Result<(), ModelStoreError> {
-        let got_hash = download_verified(url, dest, model_key, cap, progress)?;
-        if got_hash != expected_sha256 {
-            // download_verified renamed the temp into `dest` on success; on a
-            // hash mismatch that means there is now a bad file at `dest` — remove it.
-            let _ = std::fs::remove_file(dest);
-            return Err(ModelStoreError::HashMismatch {
-                model: model_key.to_string(),
-                expected: expected_sha256.to_string(),
-                got: got_hash,
-            });
-        }
+        download_verified(url, dest, model_key, expected_sha256, cap, progress)?;
         restrict_file_perms(dest);
         Ok(())
+    }
+
+    /// Local path the Silero VAD model lives at once downloaded.
+    pub fn vad_path(&self) -> PathBuf {
+        self.whisper_dir().join(VAD_MODEL.file)
+    }
+
+    /// `true` if the verified VAD model file is present (same size window as
+    /// `whisper_is_present`; SHA-verified before the rename put it there).
+    pub fn vad_is_present(&self) -> bool {
+        match std::fs::metadata(self.vad_path()) {
+            Ok(m) => {
+                let (floor, ceil) = size_window(VAD_MODEL.approx_bytes);
+                m.len() >= floor && m.len() <= ceil
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Ensures the Silero VAD model is present locally, downloading + verifying
+    /// it if needed. Returns the local path.
+    pub fn ensure_vad_model(
+        &self,
+        progress: &mut dyn FnMut(DownloadProgress),
+    ) -> Result<PathBuf, ModelStoreError> {
+        let dest = self.vad_path();
+        if self.vad_is_present() {
+            return Ok(dest);
+        }
+        std::fs::create_dir_all(self.whisper_dir())?;
+        restrict_dir_perms(&self.whisper_dir());
+        let cap = download_cap(VAD_MODEL.approx_bytes);
+        log::info!(
+            target: "transcription::models",
+            "downloading the Silero VAD model (~{} bytes)",
+            VAD_MODEL.approx_bytes
+        );
+        self.download_to(
+            &VAD_MODEL.url(),
+            &dest,
+            "silero-vad",
+            VAD_MODEL.sha256,
+            cap,
+            progress,
+        )?;
+        log::info!(target: "transcription::models", "the Silero VAD model downloaded and verified");
+        Ok(dest)
     }
 
     /// Status of every Whisper model in the catalogue (downloaded? size? path?).
@@ -310,24 +356,39 @@ fn host_on_allowlist(url: &reqwest::Url) -> bool {
     }
 }
 
-/// Streams `url` into `dest`, hashing SHA256, enforcing `cap`, reporting progress, and atomically
-/// renaming on success (`.part` temp removed on error). Returns hex SHA256; parent must exist.
+/// Streams `url` into a temp, verifies SHA256 against `expected_sha256`, then atomically
+/// renames into `dest` — an unverified file is never visible at the public path.
 fn download_verified(
     url: &str,
     dest: &Path,
     model_key: &str,
+    expected_sha256: &str,
     cap: u64,
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<String, ModelStoreError> {
+    // The temp name is unique per attempt: the SHA256 is computed over the network
+    // stream, so a second concurrent writer on a shared temp could install a
+    // corrupt file whose hash check passed.
+    static DOWNLOAD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let attempt = DOWNLOAD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join(format!(
-        ".{}.part",
+        ".{}.{}-{attempt}.part",
         dest.file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("download")
+            .unwrap_or("download"),
+        std::process::id()
     ));
     let hash = stream_to_path(url, &tmp, model_key, cap, progress)?;
-    // Atomic rename into place.
+    if hash != expected_sha256 {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ModelStoreError::HashMismatch {
+            model: model_key.to_string(),
+            expected: expected_sha256.to_string(),
+            got: hash,
+        });
+    }
+    // Atomic rename into place — only after the hash verified.
     std::fs::rename(&tmp, dest).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         ModelStoreError::Io(e)
@@ -575,13 +636,55 @@ mod tests {
         let (_srv, url) = serve_bytes(&body);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("final.bin");
-        let hash = download_verified(&url, &dest, "t", 10_000, &mut no_progress).unwrap();
+        let hash = download_verified(
+            &url,
+            &dest,
+            "t",
+            &sha256_hex(&body),
+            10_000,
+            &mut no_progress,
+        )
+        .unwrap();
         assert_eq!(hash, sha256_hex(&body));
         assert!(dest.is_file(), "final file in place");
-        assert!(
-            !dir.path().join(".final.bin.part").exists(),
-            "temp gone after rename"
-        );
+        assert!(no_part_files(dir.path()), "temp gone after rename");
+    }
+
+    /// `true` when `dir` holds no leftover `.part` temp files.
+    fn no_part_files(dir: &Path) -> bool {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".part"))
+    }
+
+    #[test]
+    fn concurrent_downloads_to_the_same_dest_never_share_a_temp_file() {
+        // Two writers on one temp path could install a corrupt file whose
+        // stream-hash check passed — unique temps make both installs valid.
+        let body = b"model-bytes".repeat(400);
+        let expected = sha256_hex(&body);
+        let (_srv, url) = serve_bytes(&body);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.bin");
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let url = url.clone();
+                    let dest = dest.clone();
+                    let expected = expected.clone();
+                    s.spawn(move || {
+                        download_verified(&url, &dest, "t", &expected, 100_000, &mut no_progress)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in results {
+            assert_eq!(r.unwrap(), sha256_hex(&body));
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), body, "installed file intact");
+        assert!(no_part_files(dir.path()));
     }
 
     #[test]
@@ -759,10 +862,7 @@ mod tests {
             other => panic!("expected HashMismatch, got {other:?}"),
         }
         assert!(!dest.exists(), "the bad file is removed after the mismatch");
-        assert!(
-            !store.whisper_dir().join(".m.bin.part").exists(),
-            "no temp left behind"
-        );
+        assert!(no_part_files(&store.whisper_dir()), "no temp left behind");
     }
 
     #[test]
@@ -867,6 +967,28 @@ mod tests {
             !store.whisper_is_present(info),
             "a wildly-oversized file (>105%) is not present"
         );
+    }
+
+    #[test]
+    fn vad_presence_tracks_the_size_window_and_skips_the_download_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        assert!(store.vad_path().starts_with(dir.path()));
+        assert!(!store.vad_is_present(), "empty store has no VAD model");
+
+        std::fs::create_dir_all(store.whisper_dir()).unwrap();
+        let write_sparse = |len: u64| {
+            let f = std::fs::File::create(store.vad_path()).unwrap();
+            f.set_len(len).unwrap();
+        };
+        write_sparse(VAD_MODEL.approx_bytes);
+        assert!(store.vad_is_present(), "exact size is present");
+        // Present → ensure returns the path without touching the network.
+        let p = store.ensure_vad_model(&mut no_progress).unwrap();
+        assert_eq!(p, store.vad_path());
+
+        write_sparse(VAD_MODEL.approx_bytes / 2);
+        assert!(!store.vad_is_present(), "a truncated file is not present");
     }
 
     #[test]

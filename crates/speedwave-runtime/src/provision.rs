@@ -71,6 +71,19 @@ provision:
       YAML
       chmod 600 /etc/netplan/99-speedwave-prefer-vznat.yaml
       netplan apply
+  - mode: boot
+    script: |
+      #!/bin/sh
+      # Lima's guestagent SyncTime steps the guest clock (also backward) by host-clock
+      # offset plus RPC latency every 10s; deny CAP_SYS_TIME so timesyncd owns the clock.
+      set -eu
+      mkdir -p /etc/systemd/system/lima-guestagent.service.d
+      cat > /etc/systemd/system/lima-guestagent.service.d/99-speedwave-no-settime.conf <<'UNIT'
+      [Service]
+      CapabilityBoundingSet=~CAP_SYS_TIME
+      UNIT
+      systemctl daemon-reload
+      systemctl try-restart lima-guestagent.service || true
 "#,
         desired_lima_vm_cpus(),
         desired_lima_vm_memory()
@@ -89,8 +102,12 @@ fn limactl_command() -> std::process::Command {
 #[cfg(any(target_os = "macos", test))]
 const LIMA_VPN_PROVISION_SENTINEL: &str = "99-speedwave-prefer-vznat.yaml";
 
-/// Returns `true` if the Lima config needs regenerating: VPN netplan drop-in missing, or
-/// `memory`/`cpus` drifted from SSOT. Unparseable = no-drift (never touch a hand-mangled file).
+/// Clock provision: Lima's SyncTime steps the guest clock every 10s (see `lima_config`).
+#[cfg(any(target_os = "macos", test))]
+const LIMA_TIMESYNC_PROVISION_SENTINEL: &str = "99-speedwave-no-settime.conf";
+
+/// Returns `true` if the Lima config needs regenerating: either managed provision drop-in
+/// missing, or `memory`/`cpus` drifted. Unparseable = no-drift (never touch a hand-mangled file).
 #[cfg(any(target_os = "macos", test))]
 pub fn lima_vm_config_needs_update(config_content: &str) -> bool {
     use crate::resources;
@@ -105,9 +122,11 @@ pub fn lima_vm_config_needs_update_with(
     desired_gib: u32,
     desired_cpus: u32,
 ) -> bool {
-    // Trigger migration when the VPN-aware netplan drop-in is absent — pre-update installs need
-    // the new netplan-based fix injected on next boot. See `lima_config()`, lima-vm/lima#2984.
-    if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL) {
+    // Trigger migration when either managed provision drop-in is absent — pre-update installs
+    // need the netplan (lima-vm/lima#2984) and clock-step fixes injected on next boot.
+    if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL)
+        || !config_content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
+    {
         return true;
     }
     // Whether a `prefix` line exists at all (regardless of parseability).
@@ -233,7 +252,9 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     let desired_gib =
         crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
     let desired_cpus = desired_lima_vm_cpus();
-    let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL) {
+    let (updated, surgical) = if content.contains(LIMA_VPN_PROVISION_SENTINEL)
+        && content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
+    {
         match update_lima_managed_fields(&content, desired_gib, desired_cpus) {
             Some(u) => (u, true),
             None => {
@@ -247,7 +268,7 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     } else {
         log::warn!(
-            "lima.yaml at {} pre-dates the VPN netplan provision — regenerating \
+            "lima.yaml at {} pre-dates a managed provision drop-in — regenerating \
              from the SSOT template; any manual edits are discarded",
             source_template.display()
         );
@@ -473,6 +494,72 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
 
     install_nerdctl_full()?;
 
+    // Ungated by the nerdctl pin (install_nerdctl_full early-returns when aligned);
+    // iptables is CNI-critical — without it every compose up fails opaquely, so fatal.
+    ensure_relay_packages()?;
+
+    Ok(())
+}
+
+/// Marker printed by `relay_packages_script` when `socat` is still missing after install
+/// (non-fatal — the relay degrades). One SSOT for the emitter and the `ensure` matcher.
+#[cfg(any(target_os = "windows", test))]
+const SPW_SOCAT_MISSING_MARKER: &str = "SPW_SOCAT_MISSING";
+
+/// Provision script for `ensure_relay_packages`: fails (exit 1) only when `iptables` is
+/// still missing after install; a missing `socat` degrades to `SPW_SOCAT_MISSING_MARKER`.
+#[cfg(any(target_os = "windows", test))]
+fn relay_packages_script() -> String {
+    format!(
+        "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0\n\
+         apt-get update -qq && apt-get install -y -qq iptables socat >/dev/null\n\
+         command -v iptables >/dev/null 2>&1 || {{ echo 'iptables missing after install' >&2; exit 1; }}\n\
+         command -v socat >/dev/null 2>&1 || echo {SPW_SOCAT_MISSING_MARKER}\n"
+    )
+}
+
+/// Ensures `iptables` (CNI-critical — error when missing) and `socat` (ADR-080 relay —
+/// warn-only) in the distro. Idempotent; runs as root via `bash -s` on stdin; bounded.
+#[cfg(target_os = "windows")]
+fn ensure_relay_packages() -> anyhow::Result<()> {
+    let mut child = crate::binary::system_command("wsl.exe")
+        .args([
+            "-d",
+            consts::wsl_distro_name(),
+            "-u",
+            "root",
+            "--",
+            "bash",
+            "-s",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(relay_packages_script().as_bytes())?;
+    }
+    let output =
+        crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(120))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "ensuring relay packages (iptables/socat) in distro '{}': {e}",
+                    consts::wsl_distro_name()
+                )
+            })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "iptables provisioning failed (CNI networking cannot work without it): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if String::from_utf8_lossy(&output.stdout).contains(SPW_SOCAT_MISSING_MARKER) {
+        log::warn!(
+            "socat unavailable in the distro — WSL2 mirrored-mode host relay (ADR-080) \
+             is disabled until it installs"
+        );
+    }
     Ok(())
 }
 
@@ -1199,47 +1286,6 @@ fn clear_download_backoff(path: &std::path::Path) {
     }
 }
 
-/// Waits for `child` (piped stdout/stderr) at most `timeout`, draining pipes
-/// on threads; kills the child and errors on expiry.
-#[cfg(any(target_os = "windows", test))]
-fn wait_with_output_timeout(
-    mut child: std::process::Child,
-    timeout: std::time::Duration,
-) -> anyhow::Result<std::process::Output> {
-    fn drain<R: std::io::Read + Send + 'static>(
-        pipe: Option<R>,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut r) = pipe {
-                let _ = r.read_to_end(&mut buf);
-            }
-            buf
-        })
-    }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if start.elapsed() >= timeout => {
-                if let Err(e) = child.kill() {
-                    log::warn!("failed to kill timed-out child process: {e}");
-                }
-                let _ = child.wait();
-                anyhow::bail!("child process timed out after {}s", timeout.as_secs());
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(200)),
-        }
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
-
 #[cfg(target_os = "windows")]
 fn install_nerdctl_full() -> anyhow::Result<()> {
     let nerdctl_check = crate::binary::system_command("wsl.exe")
@@ -1387,11 +1433,8 @@ pkill -x buildkitd 2>/dev/null || true
 pkill -x containerd 2>/dev/null || true
 tar -C /usr/local --unlink-first --recursive-unlink -xzf "/tmp/nerdctl-install/${{TARBALL}}"
 rm -rf /tmp/nerdctl-install
-# Install iptables — required by CNI bridge plugin for container networking.
-# nerdctl-full bundles CNI plugins but iptables is a system dependency.
-if ! command -v iptables >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y -qq iptables >/dev/null
-fi
+# iptables (CNI) + socat (relay) are installed idempotently by ensure_relay_packages,
+# ungated by the nerdctl pin (this script is skipped when nerdctl already matches).
 # install_service NAME EXEC AFTER REQUIRES CHECK_CMD [CHECK_ARGS...]
 # Installs a systemd service unit file, starts it, and waits up to 30s for readiness.
 install_service() {{
@@ -1454,7 +1497,7 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         // Drop stdin to close the pipe and let bash finish
     }
     // Bounded host-side wait — a stalled in-distro download must not hang startup.
-    let output = match wait_with_output_timeout(
+    let output = match crate::binary::wait_with_output_timeout(
         child,
         std::time::Duration::from_secs(consts::NERDCTL_INSTALL_TIMEOUT_SECS),
     ) {
@@ -1520,6 +1563,11 @@ pub fn ensure_windows_invariants() {
         }
         if let Err(e) = ensure_wslconfig_vpn_compat() {
             log::warn!("could not verify .wslconfig VPN compat: {e}");
+        }
+        // Upgrades skip the wizard (init_vm_windows never runs) — this per-start path is their
+        // only iptables/socat installer. Warn-only: a failed compose up surfaces iptables itself.
+        if let Err(e) = ensure_relay_packages() {
+            log::warn!("could not ensure relay packages (iptables/socat): {e}");
         }
     });
 }
@@ -1675,11 +1723,11 @@ mod tests {
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
 
-    /// Appends the VPN provision sentinel so memory/CPU tests don't also
+    /// Appends both managed provision sentinels so memory/CPU tests don't also
     /// trigger the provision-absent migration branch.
     fn with_provision_sentinel(base: &str) -> String {
         format!(
-            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n"
+            "{base}provision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/99-speedwave-prefer-vznat.yaml <<'YAML'\n  - mode: boot\n    script: |\n      cat > /etc/systemd/system/lima-guestagent.service.d/99-speedwave-no-settime.conf <<'UNIT'\n"
         )
     }
 
@@ -1824,6 +1872,28 @@ mod tests {
         assert!(lima_config().contains(LIMA_VPN_PROVISION_SENTINEL));
     }
 
+    /// SSOT guard: the clock-step drop-in filename in the template must match the sentinel.
+    #[test]
+    fn lima_config_contains_timesync_provision_sentinel() {
+        assert!(lima_config().contains(LIMA_TIMESYNC_PROVISION_SENTINEL));
+    }
+
+    #[test]
+    fn lima_vm_config_missing_timesync_sentinel_triggers_update() {
+        // A pre-clock-fix config carries only the netplan provision — must regenerate.
+        let config = format!(
+            "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\nprovision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/{LIMA_VPN_PROVISION_SENTINEL} <<'YAML'\n"
+        );
+        assert!(lima_vm_config_needs_update_with(&config, 8, 4));
+    }
+
+    #[test]
+    fn lima_vm_config_both_sentinels_and_matching_values_no_update() {
+        let config =
+            with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
+        assert!(!lima_vm_config_needs_update_with(&config, 8, 4));
+    }
+
     /// Drift interaction: an 8 GiB host that ran v0.13.3 (`memory: "4GiB"`)
     /// must NOT be migrated up to a VM sized at 100% of host RAM.
     #[test]
@@ -1940,6 +2010,10 @@ mod tests {
             body.contains("LIMA_VPN_PROVISION_SENTINEL"),
             "full regeneration must be gated on the missing provision sentinel"
         );
+        assert!(
+            body.contains("LIMA_TIMESYNC_PROVISION_SENTINEL"),
+            "full regeneration must also be gated on the clock-step provision sentinel"
+        );
     }
 
     /// Structural pin: the migration restart (`init_vm_macos` start path) runs under the
@@ -2036,30 +2110,47 @@ mod tests {
         assert!(err.to_string().contains("boom"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn wait_with_output_timeout_returns_output_and_kills_on_expiry() {
-        // SSOT-allow: test fixture spawn
-        let fast = std::process::Command::new("sh")
-            .args(["-c", "echo out"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let out = wait_with_output_timeout(fast, std::time::Duration::from_secs(10)).unwrap();
-        assert!(out.status.success());
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
+    fn relay_packages_script_is_fatal_on_iptables_soft_on_socat() {
+        // Contract: a failed iptables install must FAIL provisioning (CNI-critical);
+        // a missing socat only degrades the ADR-080 relay via the marker.
+        let script = relay_packages_script();
+        assert!(script.contains("apt-get install -y -qq iptables socat"));
+        assert!(
+            script.contains("command -v iptables >/dev/null 2>&1 || { echo"),
+            "iptables absence must be checked after install"
+        );
+        assert!(
+            script.contains("exit 1"),
+            "iptables absence must exit non-zero (fatal)"
+        );
+        // Marker is single-sourced: the emitter and the `ensure` matcher share the const.
+        assert!(
+            script.contains(&format!("|| echo {SPW_SOCAT_MISSING_MARKER}")),
+            "socat absence must only emit the degradation marker"
+        );
+        // Short-circuit: both present → exit 0 before touching apt.
+        assert!(script.starts_with(
+            "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0"
+        ));
+    }
 
-        // SSOT-allow: test fixture spawn
-        let slow = std::process::Command::new("sh")
-            .args(["-c", "sleep 30"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let err =
-            wait_with_output_timeout(slow, std::time::Duration::from_millis(300)).unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
+    #[test]
+    fn ensure_windows_invariants_installs_relay_packages_for_upgrades() {
+        // Wiring guard: upgrades never run init_vm_windows, so this per-start path is their
+        // only iptables/socat installer — dropping the call strands the relay (ADR-080).
+        let src = include_str!("provision.rs");
+        let start = src
+            .find("pub fn ensure_windows_invariants() {\n")
+            .expect("windows ensure_windows_invariants must exist");
+        let region = &src[start..];
+        let end = region
+            .find("\n/// No-op off Windows.")
+            .unwrap_or(region.len());
+        assert!(
+            region[..end].contains("ensure_relay_packages"),
+            "the per-start Windows invariants path must call ensure_relay_packages()"
+        );
     }
 
     #[test]
@@ -2749,45 +2840,6 @@ mod tests {
                 anyhow::bail!("boom") as anyhow::Result<i32>
             });
             assert!(err.unwrap_err().to_string().contains("boom"));
-        }
-
-        // SSOT-allow: test fixture spawn
-        fn spawn_shell(script: &str) -> std::process::Child {
-            let mut cmd = if cfg!(windows) {
-                let mut c = std::process::Command::new("cmd");
-                c.arg("/C").arg(script);
-                c
-            } else {
-                let mut c = std::process::Command::new("sh");
-                c.arg("-c").arg(script);
-                c
-            };
-            cmd.stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("spawn shell child")
-        }
-
-        #[test]
-        fn wait_with_output_timeout_captures_fast_child_output() {
-            let child = spawn_shell("echo drained");
-            let out = wait_with_output_timeout(child, std::time::Duration::from_secs(30))
-                .expect("fast child");
-            assert!(out.status.success());
-            assert!(String::from_utf8_lossy(&out.stdout).contains("drained"));
-        }
-
-        #[test]
-        fn wait_with_output_timeout_kills_and_errors_on_expiry() {
-            let script = if cfg!(windows) {
-                "ping -n 30 127.0.0.1 >NUL"
-            } else {
-                "sleep 30"
-            };
-            let child = spawn_shell(script);
-            let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
-                .expect_err("must time out");
-            assert!(err.to_string().contains("timed out"));
         }
     }
 }
