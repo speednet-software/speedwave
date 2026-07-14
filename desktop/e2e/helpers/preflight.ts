@@ -68,13 +68,15 @@ async function checkOpenrouter(): Promise<PreflightFailure | null> {
 }
 
 /** True when the local OpenAI-compatible server answers FROM THIS HOST — model
- *  discovery runs on the e2e machine, not on the one that authored .env. */
+ *  discovery runs on the e2e machine, not on the one that authored .env. Probes
+ *  the catalog path production uses (`discovery.rs` → `{base}/v1/models`); bare
+ *  `/models` 404s on LM Studio, llama.cpp and vLLM. */
 async function localLlmReachable(): Promise<boolean> {
   const baseUrl = process.env.LOCAL_LLM_BASE_URL;
   const apiKey = process.env.LOCAL_LLM_API_KEY;
   if (!baseUrl || !apiKey) return false;
   try {
-    await fetchJson(`${baseUrl.replace(/\/$/, '')}/models`, apiKey);
+    await fetchJson(`${baseUrl.replace(/\/$/, '')}/v1/models`, apiKey);
     return true;
   } catch {
     return false;
