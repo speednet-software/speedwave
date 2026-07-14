@@ -2515,6 +2515,16 @@ mod tests {
     }
 
     #[test]
+    fn wsl_distro_name_appears_in_container_health_spec() {
+        let src = include_str!("../../../desktop/e2e/specs/03-container-health.spec.ts");
+        assert!(
+            src.contains(&format!("'{PRODUCTION_WSL_DISTRO}'")),
+            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
+             03-container-health.spec.ts (flock assertion); rename it there too"
+        );
+    }
+
+    #[test]
     fn data_dir_appears_in_installer_hooks_template() {
         // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
         // in the hand-edited template.
