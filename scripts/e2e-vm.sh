@@ -498,6 +498,13 @@ if (Test-Path "C:\Speedwave\speedwave-desktop.exe") {
 }
 SCRIPT
 
+    # Engine-contract suite: rsynced into the STAGING distro only, bats runs there,
+    # and crosses into the tested Speedwave distro via WSL interop — never touched directly.
+    windows_rsync_to "$HOST_REPO_DIR/_tests/e2e/" "$WINDOWS_WSL_STAGING/engine-contract-suite/"
+    echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
+    # shellcheck disable=SC2086
+    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\""
+
     # Copy E2E test suite to WSL2 then to Windows side
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
     windows_ps <<'SCRIPT'
