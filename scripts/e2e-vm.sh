@@ -842,6 +842,22 @@ SCRIPT
     # first, then the bats step, then reset-only (factory reset still runs last).
     run_macos_e2e "pre-reset" || exit_code=$?
 
+    # Engine-contract suite plants only spwcontract_-prefixed names and is
+    # teardown-reaped, so it is safe to run before update-dirty-state mutates state.
+    if [ "$exit_code" -eq 0 ]; then
+        echo "[macos] Running engine-contract suite (production-style install: LIMA_HOME + speedwave VM)..."
+        macos_ssh bash <<'SCRIPT' || exit_code=$?
+set -euo pipefail
+eval "$(/opt/homebrew/bin/brew shellenv)"
+command -v bats >/dev/null 2>&1 || brew install bats-core
+# The app stops the Lima VM when it exits after the pre-reset suite; unlike WSL,
+# Lima has no on-demand start — bring the VM back before the engine preflight.
+env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave
+ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
+bats --print-output-on-failure /tmp/speedwave-e2e/engine-contract.bats
+SCRIPT
+    fi
+
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running update-dirty-state suite (production-style install: LIMA_HOME + speedwave VM)..."
         macos_ssh bash <<'SCRIPT' || exit_code=$?
