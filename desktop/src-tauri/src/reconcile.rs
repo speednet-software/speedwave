@@ -1189,6 +1189,9 @@ mod tests {
         );
     }
 
+    // The teardown-join happens before ensure_project_images_built, whose own
+    // errors are condensed+sanitized before the `?` here propagates — so this
+    // early-return path is bounded transitively, not by a check in this function.
     #[test]
     fn restore_one_project_joins_pending_teardown_first() {
         let source = include_str!("reconcile.rs");
