@@ -127,9 +127,8 @@ export function assertStoreHealed(ghosts: string[]): void {
 }
 
 /**
- * Every non-ghost entry from `before` may disappear ONLY together with its container:
- * still present -> its current id must inspect live; missing -> its `before` id must
- * no longer inspect (legitimate reap), else the heal ate a live reservation.
+ * A non-ghost entry may disappear ONLY together with its container: present -> current
+ * id inspects live; missing -> the `before` id must be gone too (legitimate reap).
  */
 export function assertLiveEntriesIntact(before: Map<string, string>, ghosts: string[]): void {
   const after = storeSnapshot();

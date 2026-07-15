@@ -1086,10 +1086,8 @@ fn tail_chars_within(raw: &str, budget: usize) -> &str {
     &raw[cut..]
 }
 
-/// Condenses a raw engine failure (image-build BuildKit log, or an engine-level
-/// `level=fatal` line such as nerdctl name-store errors) into an actionable
-/// banner; known signatures get targeted user guidance. The result is always
-/// clamped to a bounded tail — never unbounded raw output.
+/// Condenses a raw engine failure (BuildKit log or nerdctl `level=fatal`) into an
+/// actionable banner; every branch is clamped to a bounded tail, never raw output.
 pub fn condense_engine_error(raw: &str) -> String {
     let connectivity_line = raw.lines().map(str::trim).find(|l| {
         let ll = l.to_ascii_lowercase();

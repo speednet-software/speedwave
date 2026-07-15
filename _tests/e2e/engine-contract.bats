@@ -46,9 +46,8 @@ teardown() {
 }
 
 @test "flock on the names dir blocks nerdctl create (TOCTOU guard basis)" {
-  # Waits until the holder provably owns the lock, surfaces create's rc+stderr.
-  # b64-wrapped like the runtime's wrap_base64_sh: wsl.exe interop re-parses the
-  # post--- line and eats \$ constructs (wsl.rs:98) — b64 keeps the script opaque.
+  # Proves the holder owns the lock before timing; b64-wrapped (wrap_base64_sh shape)
+  # because the wsl.exe interop re-parse eats \$ constructs (wsl.rs:98).
   script=$(cat <<EOF
 flock $STORE sleep 6 &
 i=0
