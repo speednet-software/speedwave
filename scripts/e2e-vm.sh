@@ -576,7 +576,7 @@ SCRIPT
         # shellcheck disable=SC2086
         # head runs HOST-side: cmd.exe ignores single quotes, so a remote-side pipe
         # would be intercepted as cmd's own operator ('head' is not recognized).
-        windows_cli_path=$(ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"ls /mnt/c/Users/*/.speedwave/bin/speedwave*.exe 2>/dev/null\"" | head -n1 | tr -d '\r')
+        windows_cli_path=$(ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"ls /mnt/c/Users/*/.speedwave/bin/speedwave*.exe 2>/dev/null\"" | head -n1 | tr -d '\r') || windows_cli_path=""
         if [ -z "$windows_cli_path" ]; then
             echo "[windows] ERROR: installed speedwave CLI not found under /mnt/c/Users/*/.speedwave/bin" >&2
             exit_code=1
