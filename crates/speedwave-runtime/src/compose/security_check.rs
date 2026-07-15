@@ -483,7 +483,7 @@ impl SecurityCheck {
                 expected_paths.telemetry_locked,
             ),
             // claude /workspace mount source == exact project dir
-            Self::check_claude_workspace_mount(&doc, expected_paths),
+            Self::check_claude_workspace_mount(&doc, expected_paths, data_dir),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -1186,6 +1186,7 @@ impl SecurityCheck {
     fn check_claude_workspace_mount(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
+        data_dir: &std::path::Path,
     ) -> Vec<SecurityViolation> {
         let mut violations = Vec::new();
         let Some(services) = get_services(doc) else {
@@ -1228,6 +1229,61 @@ impl SecurityCheck {
                     message: format!("claude mounts an unexpected target '{target}'"),
                     remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
                 });
+                continue;
+            }
+            if let Some(slug) = target.strip_prefix("/speedwave/plugins/") {
+                if !plugin::is_valid_slug(slug) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!(
+                            "plugin claude-resources mount has a malformed slug '{slug}'"
+                        ),
+                        remediation: "Re-render compose; plugin slug is malformed.",
+                    });
+                    continue;
+                }
+                let Some((host, mode)) = extract_volume_for_target(s, target) else {
+                    continue;
+                };
+                if mode.as_deref() != Some("ro") {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!("plugin '{slug}' claude-resources mount must be :ro"),
+                        remediation:
+                            "Re-render compose; plugin claude-resources mounts are read-only.",
+                    });
+                }
+                // A path-resolution failure must fail closed: never let an unverifiable
+                // mount source pass through as if the mount were merely absent.
+                let plugin_dir = data_dir.join("plugins").join(slug);
+                let resources_dir = plugin::plugin_claude_resources_dir(&plugin_dir);
+                let expected_source = match to_engine_path(&resources_dir) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        violations.push(SecurityViolation {
+                            container: "claude".into(),
+                            rule: SecurityRule::ClaudeWorkspaceMount,
+                            message: format!(
+                                "cannot resolve expected claude-resources source for plugin '{slug}': {e}"
+                            ),
+                            remediation:
+                                "Ensure the data directory path is resolvable by the container engine.",
+                        });
+                        continue;
+                    }
+                };
+                if host != expected_source {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!(
+                            "plugin '{slug}' claude-resources source '{host}' != expected '{expected_source}'"
+                        ),
+                        remediation: "Re-render compose; a plugin mount must come from its own claude-resources dir.",
+                    });
+                }
                 continue;
             }
             if target != "/workspace" {
@@ -1886,12 +1942,13 @@ mod tests {
     #[test]
     fn claude_plugin_resources_mount_is_allowed() {
         // A plugin's claude-resources dir mounts read-only at /speedwave/plugins/<slug>.
+        let data_dir = std::path::Path::new("/host/.speedwave");
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
                     - /host/.speedwave/plugins/figma/claude-resources:/speedwave/plugins/figma:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
-        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected);
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir);
         assert!(
             v.is_empty(),
             "plugin claude-resources mount must be allowed, got: {v:?}"
@@ -1899,13 +1956,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_plugin_resources_mount_from_foreign_root_rejected() {
+        // Correct /plugins/<slug>/claude-resources suffix but wrong root must not
+        // pass as a mere substring/suffix match (the ends_with bypass).
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /tmp/foreign/plugins/presalefix/claude-resources:/speedwave/plugins/presalefix:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message
+                        .contains("/tmp/foreign/plugins/presalefix/claude-resources")),
+            "a plugin mount sourced from a foreign root must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
     fn claude_unexpected_mount_target_still_rejected() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
                     - /host/evil:/etc/cron.d:ro\n";
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
         let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
-        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected);
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir);
         assert!(
             v.iter()
                 .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount

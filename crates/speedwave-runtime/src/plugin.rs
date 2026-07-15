@@ -412,6 +412,12 @@ pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir().join("plugins"))
 }
 
+/// The claude-resources dir a plugin's `/speedwave/plugins/<slug>` mount must come from —
+/// shared by the renderer (`compose/plugins.rs`) and `SecurityCheck::check_claude_workspace_mount`.
+pub fn plugin_claude_resources_dir(plugin_dir: &Path) -> PathBuf {
+    plugin_dir.join("claude-resources")
+}
+
 /// Returns the base directory for mutable per-plugin state — default `~/.speedwave/plugin-state/`.
 fn plugin_state_base_for(plugins_dir: &Path) -> PathBuf {
     plugins_dir

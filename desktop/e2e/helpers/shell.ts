@@ -34,3 +34,16 @@ export async function confirmRestartAndWait(timeoutMs = 180_000): Promise<void> 
     timeoutMsg: `restart-overlay still visible after ${timeoutMs}ms — restart did not complete`,
   });
 }
+
+/**
+ * Requests a backend container restart via the command-palette action and
+ * waits for it to complete. An independent entry point into requestRestart()
+ * that does not depend on a pending config change.
+ * @param timeoutMs - How long to wait for the restart to complete.
+ */
+export async function requestBackendRestart(timeoutMs = 180_000): Promise<void> {
+  await (await $('[data-testid="nav-rail-palette"]')).click();
+  await $('[data-testid="command-palette"]').waitForExist({ timeout: 10_000 });
+  await (await $('[data-testid="palette-item-action-restart-containers"]')).click();
+  await confirmRestartAndWait(timeoutMs);
+}

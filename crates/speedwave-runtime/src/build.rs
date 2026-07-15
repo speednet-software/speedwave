@@ -1064,13 +1064,31 @@ fn is_network_build_error(err: &anyhow::Error) -> bool {
     false
 }
 
-/// Tail kept for unclassified build failures — banners stay readable; the full
-/// BuildKit log is still written to the session log file.
+/// Tail kept for unclassified engine failures — banners stay readable; the full
+/// log is still written to the session log file.
 const BUILD_ERROR_TAIL_CHARS: usize = 700;
 
-/// Condenses a raw image-build failure (often the whole BuildKit log) into an
-/// actionable banner message; known signatures get targeted user guidance.
-pub fn condense_build_error(raw: &str) -> String {
+/// Char-boundary-safe tail of `raw`, at most `BUILD_ERROR_TAIL_CHARS` long.
+fn tail_chars(raw: &str) -> &str {
+    tail_chars_within(raw, BUILD_ERROR_TAIL_CHARS)
+}
+
+/// Char-boundary-safe tail of `raw`, at most `budget` chars long — the shared
+/// primitive behind [`tail_chars`] for callers clamping to a smaller budget.
+fn tail_chars_within(raw: &str, budget: usize) -> &str {
+    if raw.len() <= budget {
+        return raw;
+    }
+    let mut cut = raw.len() - budget;
+    while !raw.is_char_boundary(cut) {
+        cut += 1;
+    }
+    &raw[cut..]
+}
+
+/// Condenses a raw engine failure (BuildKit log or nerdctl `level=fatal`) into an
+/// actionable banner; every branch is clamped to a bounded tail, never raw output.
+pub fn condense_engine_error(raw: &str) -> String {
     let connectivity_line = raw.lines().map(str::trim).find(|l| {
         let ll = l.to_ascii_lowercase();
         ll.contains("curl: (")
@@ -1078,31 +1096,52 @@ pub fn condense_build_error(raw: &str) -> String {
             || ll.contains("could not resolve host")
     });
     let lower = raw.to_ascii_lowercase();
-    if let Some(line) = connectivity_line {
-        if lower.contains("install-claude.sh") || lower.contains("claude.ai") {
-            return format!(
-                "Cannot download Claude Code during the image build — the VM has no route \
-                 to claude.ai. Check VPN, proxy, or firewall (content filters often block \
-                 AI domains), then press Retry. Detail: {line}"
-            );
+    let is_claude_download_failure =
+        lower.contains("install-claude.sh") || lower.contains("claude.ai");
+    const CONNECTIVITY_PREFIX: &str = "Cannot download Claude Code during the image build — the \
+         VM has no route to claude.ai. Check VPN, proxy, or firewall (content filters often \
+         block AI domains), then press Retry. Detail: ";
+    let mut reduced;
+    let msg = if let Some(line) = connectivity_line.filter(|_| is_claude_download_failure) {
+        // A connectivity summary always drops surrounding noise — reduced even
+        // when the detail line is short.
+        reduced = true;
+        // Clamp the detail line to leave room for the prefix, so the friendly
+        // guidance always survives the final tail-clamp below.
+        let detail_budget = BUILD_ERROR_TAIL_CHARS.saturating_sub(CONNECTIVITY_PREFIX.len());
+        let detail = tail_chars_within(line, detail_budget);
+        format!("{CONNECTIVITY_PREFIX}{detail}")
+    } else {
+        let crux: Vec<&str> = raw
+            .lines()
+            .map(str::trim)
+            .filter(|l| {
+                l.contains("ERROR:")
+                    || l.starts_with("error: failed to solve")
+                    || l.contains("level=fatal")
+            })
+            .collect();
+        if !crux.is_empty() {
+            // Crux extraction always drops surrounding noise, so it always
+            // counts as a reduction even when the joined result is short.
+            reduced = true;
+            crux.join(" | ")
+        } else {
+            reduced = raw.len() > BUILD_ERROR_TAIL_CHARS;
+            raw.to_string()
         }
+    };
+    let clamped = if msg.len() > BUILD_ERROR_TAIL_CHARS {
+        reduced = true;
+        format!("…{}", tail_chars(&msg))
+    } else {
+        msg
+    };
+    if reduced {
+        format!("{clamped} (full output in Logs)")
+    } else {
+        clamped
     }
-    let crux: Vec<&str> = raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.contains("ERROR:") || l.starts_with("error: failed to solve"))
-        .collect();
-    if !crux.is_empty() {
-        return format!("{} (full build log in Logs)", crux.join(" | "));
-    }
-    if raw.len() > BUILD_ERROR_TAIL_CHARS {
-        let mut cut = raw.len() - BUILD_ERROR_TAIL_CHARS;
-        while !raw.is_char_boundary(cut) {
-            cut += 1;
-        }
-        return format!("…{} (full build log in Logs)", &raw[cut..]);
-    }
-    raw.to_string()
 }
 
 #[cfg(test)]
@@ -1120,13 +1159,13 @@ mod tests {
     }
 
     #[test]
-    fn condense_build_error_names_claude_download_failure() {
+    fn condense_engine_error_names_claude_download_failure() {
         // Shape of the field failure: full BuildKit log with the installer curl error.
         let raw = "#7 21.96 Setting up liberror-perl (0.17029-2) ...\n\
              #11 [ 7/13] RUN /usr/local/bin/install-claude.sh \"2.1.206\"\n\
              #11 0.328 curl: (7) Failed to connect to claude.ai port 443 after 43 ms: Couldn't connect to server\n\
              error: failed to solve: process \"/bin/sh -c /usr/local/bin/install-claude.sh\" did not complete successfully: exit code: 7";
-        let out = condense_build_error(raw);
+        let out = condense_engine_error(raw);
         assert!(out.contains("Cannot download Claude Code"), "got: {out}");
         assert!(out.contains("Retry"), "actionable next step: {out}");
         assert!(out.contains("curl: (7)"), "carries the detail line: {out}");
@@ -1134,31 +1173,73 @@ mod tests {
             !out.contains("liberror-perl"),
             "apt noise must not reach the banner: {out}"
         );
+        assert!(
+            out.ends_with("(full output in Logs)"),
+            "a connectivity summary always carries the log pointer: {out}"
+        );
     }
 
     #[test]
-    fn condense_build_error_extracts_buildkit_crux_lines() {
+    fn condense_engine_error_bounds_long_connectivity_detail_line() {
+        // A pathological "Detail" line (e.g. a multi-KB proxy error dump) must
+        // still clamp — the connectivity branch is not exempt from the tail clamp.
+        let big_detail = "y".repeat(5_000);
+        let raw =
+            format!("install-claude.sh\ncurl: (7) Failed to connect to claude.ai: {big_detail}");
+        let out = condense_engine_error(&raw);
+        assert!(
+            out.starts_with("Cannot download Claude Code"),
+            "friendly prefix survives the clamp: {out}"
+        );
+        assert!(
+            out.contains(&big_detail[big_detail.len() - 100..]),
+            "keeps the tail: {out}"
+        );
+        assert!(
+            out.len() <= BUILD_ERROR_TAIL_CHARS + 64,
+            "clamped: {} chars",
+            out.len()
+        );
+        assert!(out.ends_with("(full output in Logs)"));
+    }
+
+    #[test]
+    fn condense_engine_error_extracts_buildkit_crux_lines() {
         let raw = "lots of progress\n#9 ERROR: process \"/bin/sh -c npm ci\" did not complete successfully: exit code: 1\n\
              more noise\nerror: failed to solve: exit code: 1";
-        let out = condense_build_error(raw);
+        let out = condense_engine_error(raw);
         assert!(out.contains("ERROR:"), "crux kept: {out}");
-        assert!(out.contains("full build log in Logs"), "log pointer: {out}");
+        assert!(out.contains("full output in Logs"), "log pointer: {out}");
         assert!(!out.contains("lots of progress"), "noise dropped: {out}");
     }
 
     #[test]
-    fn condense_build_error_passes_short_errors_through() {
+    fn condense_engine_error_passes_short_errors_through() {
         let raw = "wsl.exe failed: no space left on device";
-        assert_eq!(condense_build_error(raw), raw);
+        assert_eq!(condense_engine_error(raw), raw);
     }
 
     #[test]
-    fn condense_build_error_truncates_long_unclassified_output_on_char_boundary() {
+    fn condense_engine_error_truncates_long_unclassified_output_on_char_boundary() {
         let raw = format!("{}żółć-końcówka", "x".repeat(2000));
-        let out = condense_build_error(&raw);
+        let out = condense_engine_error(&raw);
         assert!(out.len() < 800, "truncated: {} chars", out.len());
         assert!(out.starts_with('…') && out.contains("żółć-końcówka"));
-        assert!(out.contains("full build log in Logs"));
+        assert!(out.contains("full output in Logs"));
+    }
+
+    #[test]
+    fn condense_engine_error_extracts_and_bounds_fatal_lines() {
+        let one = "time=\"x\" level=fatal msg=\"name-store error: name is already used by ID\"";
+        let raw = format!("{}\n{}", "noise ".repeat(200), vec![one; 40].join("\n"));
+        let out = condense_engine_error(&raw);
+        assert!(out.contains("level=fatal"));
+        assert!(
+            out.len() <= BUILD_ERROR_TAIL_CHARS + 64,
+            "clamped: {} chars",
+            out.len()
+        );
+        assert!(out.ends_with("(full output in Logs)"));
     }
 
     /// Integrations config with every built-in MCP service enabled — so `enabled_images` yields
