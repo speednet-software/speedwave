@@ -12260,11 +12260,26 @@ services:
     fn plugin_mount_with_traversal_slug_fails_security_check() {
         let yaml = render_presalefix_plugin_mount();
         assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
-        let tampered = yaml.replace(
-            "claude-resources:/speedwave/plugins/presalefix:ro",
-            "/etc:/speedwave/plugins/legit/../evil:ro",
-        );
         let tmp_data_dir = tempfile::tempdir().unwrap();
+        // Mirrors exactly how the vulnerable code built `expected_source` (unnormalized
+        // PathBuf::join): a host source equal to this string would pass a bare
+        // string-equality check even though it resolves outside `legit/` at mount time.
+        let traversal_source = tmp_data_dir
+            .path()
+            .join("plugins")
+            .join("legit/../evil")
+            .join("claude-resources");
+        let traversal_source = traversal_source.to_string_lossy();
+        let original_line = yaml
+            .lines()
+            .find(|l| l.contains("claude-resources:/speedwave/plugins/presalefix:ro"))
+            .unwrap()
+            .trim_start()
+            .trim_start_matches("- ");
+        let tampered = yaml.replace(
+            original_line,
+            &format!("{traversal_source}:/speedwave/plugins/legit/../evil:ro"),
+        );
         let violations = SecurityCheck::run_with_data_dir(
             &tampered,
             "test",
