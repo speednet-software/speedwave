@@ -1112,6 +1112,11 @@ pub const PLUGIN_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
 /// rendered on the plugin Changelog tab. Part of the signed tree.
 pub const PLUGIN_CHANGELOG_FILE: &str = "CHANGELOG.md";
 
+/// Filename of the validated non-secret settings JSON, written into the per-plugin token dir and
+/// mounted `:ro` into the worker at `/tokens/_settings.json`. Reserved: no `auth_fields` key may
+/// use it. Mirrored in `mcp-servers/shared/src/security.ts` (cross-read test).
+pub const PLUGIN_SETTINGS_FILE: &str = "_settings.json";
+
 /// Byte cap for a plugin's `CHANGELOG.md` (grows with every release, so it
 /// gets more headroom than `instructions`). Bounds `PluginStatusEntry` size.
 pub const PLUGIN_CHANGELOG_MAX_BYTES: usize = 64 * 1024;
@@ -2621,6 +2626,23 @@ mod tests {
         assert_eq!(
             &cap[1], HOST_GATEWAY_ALIAS,
             "TS HOST_GATEWAY_ALIAS must match Rust consts::HOST_GATEWAY_ALIAS"
+        );
+    }
+
+    // Cross-language SSOT for the settings-file name: the host writes `/tokens/_settings.json`
+    // and the TS worker reader (`loadPluginSettings`) must read the same name.
+    #[test]
+    fn plugin_settings_file_matches_mcp_shared_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/security.ts");
+        let re =
+            regex::Regex::new(r#"export\s+const\s+PLUGIN_SETTINGS_FILE\s*=\s*['"]([^'"]+)['"]"#)
+                .unwrap();
+        let cap = re.captures(src).expect(
+            "mcp-servers/shared/src/security.ts must declare `export const PLUGIN_SETTINGS_FILE`",
+        );
+        assert_eq!(
+            &cap[1], PLUGIN_SETTINGS_FILE,
+            "TS PLUGIN_SETTINGS_FILE must match Rust consts::PLUGIN_SETTINGS_FILE"
         );
     }
 

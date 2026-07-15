@@ -652,6 +652,44 @@ pub fn token_dir_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf
     data_dir.join("tokens").join(project).join(service_id)
 }
 
+/// Path to a plugin's non-secret settings file inside its token dir:
+/// `~/.speedwave/tokens/<project>/<service_id>/_settings.json`, mounted `:ro` at
+/// `/tokens/_settings.json`. The sole config channel to a worker; secrets stay in `auth_fields`.
+pub fn settings_file(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
+    Ok(token_dir(project, service_id)?.join(consts::PLUGIN_SETTINGS_FILE))
+}
+
+/// `data_dir`-parameterised variant of [`settings_file`] for tests.
+pub fn settings_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
+    token_dir_in(data_dir, project, service_id).join(consts::PLUGIN_SETTINGS_FILE)
+}
+
+/// Materialises the validated settings JSON into the per-plugin token dir (creating the dir and
+/// writing the file owner-only, fsync-before-rename). Callers validate against `settings_schema`
+/// first; this never writes secrets — those go to `auth_fields` files.
+pub fn write_settings_file(
+    project: &str,
+    service_id: &str,
+    settings: &serde_json::Value,
+) -> anyhow::Result<()> {
+    write_settings_file_in(consts::data_dir(), project, service_id, settings)
+}
+
+/// `data_dir`-parameterised variant of [`write_settings_file`] for tests.
+pub fn write_settings_file_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+    settings: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let dir = token_dir_in(data_dir, project, service_id);
+    crate::fs_perms::ensure_owner_only_dir(&dir)?;
+    let path = dir.join(consts::PLUGIN_SETTINGS_FILE);
+    let body = serde_json::to_string_pretty(settings)? + "\n";
+    crate::fs_perms::write_restricted_file(&path, &body)?;
+    Ok(())
+}
+
 /// Host-only OAuth state `~/.speedwave/oauth/<project>/<service_id>.json`
 /// (refreshToken + providerData + scopes; ADR-060). Never mounted into a worker.
 pub fn oauth_state_file(project: &str, service_id: &str) -> PathBuf {
@@ -981,6 +1019,13 @@ pub(crate) fn validate_manifest(
         {
             anyhow::bail!(
                 "Invalid auth_field key '{}': must not contain path separators, '..', or null bytes",
+                field.key
+            );
+        }
+        // The settings file shares the token dir with credential files — reserve its name.
+        if field.key == consts::PLUGIN_SETTINGS_FILE {
+            anyhow::bail!(
+                "auth_field key '{}' is reserved for the plugin settings file",
                 field.key
             );
         }
@@ -6497,6 +6542,103 @@ mod tests {
             "token_dir should return ~/.speedwave/tokens/<project>/<service_id>, got: {}",
             result.display()
         );
+    }
+
+    // --- Plugin settings-file delivery (contract: /tokens/_settings.json) ---
+
+    #[test]
+    fn test_settings_file_path_is_inside_token_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = settings_file_in(tmp.path(), "myproject", "example-plugin");
+        assert!(
+            path.ends_with("tokens/myproject/example-plugin/_settings.json"),
+            "settings file must live in the plugin token dir, got: {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            consts::PLUGIN_SETTINGS_FILE
+        );
+    }
+
+    #[test]
+    fn test_write_settings_file_roundtrips_validated_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = serde_json::json!({ "scope": "read", "page_size": 50, "verbose": true });
+        write_settings_file_in(tmp.path(), "proj", "example-plugin", &settings).unwrap();
+
+        let path = settings_file_in(tmp.path(), "proj", "example-plugin");
+        let read_back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, settings);
+    }
+
+    #[test]
+    fn test_write_settings_file_creates_token_dir_and_owner_only_perms() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Token dir does not exist yet — the writer must create it.
+        write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({})).unwrap();
+        let path = settings_file_in(tmp.path(), "proj", "svc");
+        assert!(path.exists(), "settings file must be created");
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "{}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "settings file must be owner-only");
+        }
+    }
+
+    #[test]
+    fn test_write_settings_file_overwrites_previous_on_resave() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({ "n": 1 })).unwrap();
+        write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({ "n": 2 })).unwrap();
+        let path = settings_file_in(tmp.path(), "proj", "svc");
+        let read_back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, serde_json::json!({ "n": 2 }));
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_settings_file_as_auth_key() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-reserved".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: consts::PLUGIN_SETTINGS_FILE.to_string(),
+                label: "Collision".to_string(),
+                field_type: "text".to_string(),
+                placeholder: "".to_string(),
+                is_secret: false,
+                required: true,
+                description: None,
+                validation: None,
+                oauth_flow: false,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("an auth_field named _settings.json must be rejected")
+            .to_string();
+        assert!(err.contains("reserved"), "unexpected error: {err}");
     }
 
     // --- Zip Slip security tests (issue #36) ---

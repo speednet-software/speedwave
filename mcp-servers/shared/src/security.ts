@@ -24,6 +24,44 @@ export async function loadTokenFile(name: string): Promise<string> {
 }
 
 /**
+ * Filename of the validated non-secret settings JSON delivered by the host under {@link tokensDir}.
+ * SSOT mirror — synchronized with `crates/speedwave-runtime/src/consts.rs::PLUGIN_SETTINGS_FILE`
+ * via the Rust cross-read test `plugin_settings_file_matches_mcp_shared_ts`.
+ */
+export const PLUGIN_SETTINGS_FILE = '_settings.json';
+
+/**
+ * Load a plugin's validated non-secret settings (the manifest `settings_schema` values) from
+ * `<tokensDir>/_settings.json`. Returns `{}` when the file is absent (no settings saved yet). The
+ * host re-writes this file on every save, so a worker calling this per request sees live updates.
+ * Secrets never live here — read those from credential files via {@link loadTokenFile}.
+ * @throws {Error} on unreadable or non-JSON content (a malformed settings file is a hard error).
+ */
+export async function loadPluginSettings<T = Record<string, unknown>>(): Promise<
+  T | Record<string, never>
+> {
+  const settingsPath = path.join(tokensDir(), PLUGIN_SETTINGS_FILE);
+  let raw: string;
+  try {
+    raw = await fs.readFile(settingsPath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read plugin settings file: ${settingsPath} (${message})`, {
+      cause: error,
+    });
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Plugin settings file is not valid JSON: ${settingsPath} (${message})`, {
+      cause: error,
+    });
+  }
+}
+
+/**
  * Load a token from a file (mounted read-only from host to /tokens/), trimmed.
  * @param tokenPath - path to the token file
  * @throws {Error} with details specific to the failure mode (ENOENT/EACCES/EISDIR/other).
