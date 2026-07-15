@@ -340,6 +340,7 @@ const pluginMarked = new Marked({
                   <app-plugin-credentials-form
                     [authFields]="plugin.auth_fields"
                     [configuredFields]="plugin.configured_fields"
+                    [currentValues]="plugin.current_values"
                     [inFlight]="saving"
                     [providerLabel]="plugin.name"
                     [oauthConfigured]="plugin.configured"
