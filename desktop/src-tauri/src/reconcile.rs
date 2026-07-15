@@ -1158,6 +1158,24 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 mod tests {
     use super::*;
 
+    /// Clamps `pos` to the nearest char boundary at or after it, capped at `s.len()`.
+    fn char_boundary_at_or_after(s: &str, pos: usize) -> usize {
+        let mut end = pos.min(s.len());
+        while !s.is_char_boundary(end) {
+            end += 1;
+        }
+        end
+    }
+
+    /// Clamps `pos` to the nearest char boundary at or before it (saturating at 0).
+    fn char_boundary_at_or_before(s: &str, pos: usize) -> usize {
+        let mut start = pos.min(s.len());
+        while !s.is_char_boundary(start) {
+            start -= 1;
+        }
+        start
+    }
+
     #[test]
     fn container_cleanup_skips_teardown_while_cli_session_live() {
         // A separate CLI terminal session shares the VM; exit cleanup must not
@@ -2719,21 +2737,24 @@ mod tests {
         let bail_pos = inner_fn
             .find("Image rebuild failed: {}")
             .expect("Image rebuild failed bail path must exist");
+        let bail_end = char_boundary_at_or_after(inner_fn, bail_pos + 200);
+        let bail_start = char_boundary_at_or_before(inner_fn, bail_pos.saturating_sub(120));
         assert!(
-            inner_fn[bail_pos..bail_pos + 200].contains("condense_engine_error"),
+            inner_fn[bail_pos..bail_end].contains("condense_engine_error"),
             "the bail banner must go through build::condense_engine_error, not the raw log"
         );
         assert!(
-            inner_fn[bail_pos.saturating_sub(120)..bail_pos].contains("log_sanitizer::sanitize"),
+            inner_fn[bail_start..bail_pos].contains("log_sanitizer::sanitize"),
             "the bail banner crosses IPC — it must pass log_sanitizer::sanitize"
         );
         let restart_pos = inner_fn
             .find("Image rebuild failed after engine restart: {}")
             .expect("snapshotter-recovery rebuild bail must exist");
+        let restart_start = char_boundary_at_or_before(inner_fn, restart_pos.saturating_sub(120));
+        let restart_end = char_boundary_at_or_after(inner_fn, restart_pos + 200);
         assert!(
-            inner_fn[restart_pos.saturating_sub(120)..restart_pos + 200]
-                .contains("log_sanitizer::sanitize")
-                && inner_fn[restart_pos..restart_pos + 200].contains("condense_engine_error"),
+            inner_fn[restart_start..restart_end].contains("log_sanitizer::sanitize")
+                && inner_fn[restart_pos..restart_end].contains("condense_engine_error"),
             "the engine-restart rebuild banner must be sanitized and condensed too"
         );
         let applied_id_assignment_pos = inner_fn
@@ -2759,7 +2780,7 @@ mod tests {
 
         // Spot-check that the failing branch is `return Err(set_bundle_error(...))`
         // and not a silent log + continue.
-        let bail_context = &inner_fn[bail_pos..bail_pos.saturating_add(200)];
+        let bail_context = &inner_fn[bail_pos..bail_end];
         assert!(
             bail_context.contains("return Err(set_bundle_error"),
             "Image rebuild failure must `return Err(set_bundle_error(...))`, \
@@ -2840,7 +2861,9 @@ mod tests {
         );
 
         // Warn-only handling: `if let Err` / `warn!`, not `?`.
-        let plugin_context = &inner_fn[plugin_pos.saturating_sub(100)..plugin_pos + 200];
+        let plugin_start = char_boundary_at_or_before(inner_fn, plugin_pos.saturating_sub(100));
+        let plugin_end = char_boundary_at_or_after(inner_fn, plugin_pos + 200);
+        let plugin_context = &inner_fn[plugin_start..plugin_end];
         assert!(
             plugin_context.contains("if let Err") || plugin_context.contains("warn!"),
             "ensure_plugin_images must use warn-only error handling: {plugin_context}"
