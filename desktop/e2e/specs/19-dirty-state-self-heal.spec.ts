@@ -21,6 +21,13 @@ const PROJECT = 'e2e-test';
 const SERVICE = 'context7';
 const HUB = `${composePrefix()}_${PROJECT}_mcp_hub`;
 const CLAUDE = `${composePrefix()}_${PROJECT}_claude`;
+const PROJECT_PREFIX = `${composePrefix()}_${PROJECT}_`;
+
+// The name store is shared across projects; spec 18 leaves e2e-second running and
+// its async teardown races our snapshot. Scope the live-entry invariant to e2e-test.
+function projectEntries(snapshot: Map<string, string>): Map<string, string> {
+  return new Map([...snapshot].filter(([name]) => name.startsWith(PROJECT_PREFIX)));
+}
 
 // Rust SSOT for the token path: `<data_dir>/secrets/<project>/<service>-auth-token`
 // (compose/tokens.rs:21 + compose/workers.rs:132-133); rendered only while enabled.
@@ -62,26 +69,22 @@ describe('Dirty-state self-heal', function () {
 
   it('heals a planted name-store ghost and keeps every live entry', async function () {
     this.timeout(300_000);
-    const before = storeSnapshot();
+    const before = projectEntries(storeSnapshot());
     plantGhost(HUB);
     await requestBackendRestart();
     await waitForHealthy(PROJECT);
     assertStoreHealed([HUB]);
-    // An entry may vanish only together with its container (session-scoped reap);
-    // assertLiveEntriesIntact checks that invariant itself — no project scoping needed.
     assertLiveEntriesIntact(before, [HUB]);
   });
 
   it('heals multiple ghosts in one pass', async function () {
     this.timeout(300_000);
-    const before = storeSnapshot();
+    const before = projectEntries(storeSnapshot());
     plantGhost(HUB);
     plantGhost(CLAUDE);
     await requestBackendRestart();
     await waitForHealthy(PROJECT);
     assertStoreHealed([HUB, CLAUDE]);
-    // An entry may vanish only together with its container (session-scoped reap);
-    // assertLiveEntriesIntact checks that invariant itself — no project scoping needed.
     assertLiveEntriesIntact(before, [HUB, CLAUDE]);
   });
 

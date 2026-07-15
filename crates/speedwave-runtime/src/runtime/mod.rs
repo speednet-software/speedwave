@@ -3480,6 +3480,24 @@ services:
                 "registered foo_bar's entry is never claimed by foo"
             );
         }
+
+        /// A foreign project's shared-store entry survives an own-project heal even when
+        /// the stub would classify it dead — prefix scoping, not a live-inspect race.
+        #[test]
+        fn own_project_heal_never_touches_a_foreign_projects_entry() {
+            let env = stub_store(NERDCTL_DEAD, FLOCK_OK);
+            let own_ghost = env.store.join(own_name("e2e-test", "mcp_hub"));
+            std::fs::write(&own_ghost, DEAD_ID).unwrap();
+            let foreign = env.store.join(own_name("e2e-second", "claude"));
+            std::fs::write(&foreign, DEAD_ID).unwrap();
+            let cmd = heal_cmd(&env, &own_name("e2e-test", "mcp_hub"), DEAD_ID, "e2e-test");
+            run_payload(&env, &cmd, &[]);
+            assert!(!own_ghost.exists(), "own dead reservation is released");
+            assert!(
+                foreign.exists(),
+                "foreign project's entry is out of the prefix scope, never a heal target"
+            );
+        }
     }
 
     /// Gated `#[serial(env_term)]`; `TermGuard` restores the prior `TERM` on drop,
