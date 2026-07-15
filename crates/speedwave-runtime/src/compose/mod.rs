@@ -12116,7 +12116,7 @@ services:
         let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
         assert!(
             yaml.contains(":/speedwave/plugins/presalefix:ro"),
-            "regression surface not exercised — claude-resources mount missing:\n{yaml}"
+            "regression surface not exercised — claude-resources mount missing"
         );
         let tmp_data_dir = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
@@ -12155,7 +12155,7 @@ services:
         let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
         assert!(
             yaml.contains(":/speedwave/plugins/presalefix:ro"),
-            "regression surface not exercised — claude-resources mount missing:\n{yaml}"
+            "regression surface not exercised — claude-resources mount missing"
         );
         let tmp_data_dir = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
