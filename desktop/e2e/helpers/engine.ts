@@ -127,8 +127,9 @@ export function assertStoreHealed(ghosts: string[]): void {
 }
 
 /**
- * Every non-ghost entry from `before` must still be present with a CURRENT id that
- * inspects live (containers may be legitimately recreated on restart); repointing checks are out of scope.
+ * Every non-ghost entry from `before` may disappear ONLY together with its container:
+ * still present -> its current id must inspect live; missing -> its `before` id must
+ * no longer inspect (legitimate reap), else the heal ate a live reservation.
  */
 export function assertLiveEntriesIntact(before: Map<string, string>, ghosts: string[]): void {
   const after = storeSnapshot();
@@ -137,7 +138,13 @@ export function assertLiveEntriesIntact(before: Map<string, string>, ghosts: str
     if (ghostSet.has(name)) continue;
     const currentId = after.get(name);
     if (currentId === undefined) {
-      throw new Error(`assertLiveEntriesIntact: '${name}' disappeared from the name store`);
+      if (inspectSucceeds(beforeId)) {
+        throw new Error(
+          `assertLiveEntriesIntact: '${name}' disappeared from the name store, but its ` +
+            `container '${beforeId}' still inspects live — the heal removed a live reservation`
+        );
+      }
+      continue;
     }
     if (!inspectSucceeds(currentId)) {
       throw new Error(
