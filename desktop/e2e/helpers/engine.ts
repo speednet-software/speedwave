@@ -15,33 +15,50 @@ export function nameStoreDir(): string {
   return '/var/lib/nerdctl/1935db59/names/default';
 }
 
-/** Mirrors `consts::compose_prefix()`: data-dir basename, leading dots stripped. */
+/** Resolves SPEEDWAVE_DATA_DIR the way the runtime does, default `~/.speedwave`. */
+function dataDir(): string {
+  return process.env.SPEEDWAVE_DATA_DIR || join(homedir(), '.speedwave');
+}
+
+/** Mirrors `consts::compose_prefix()`/`derive_instance_name_from`: data-dir basename, leading dots stripped. */
 export function composePrefix(): string {
-  const dataDir = process.env.SPEEDWAVE_DATA_DIR || join(homedir(), '.speedwave');
   const basename =
-    dataDir
+    dataDir()
       .replace(/[/\\]+$/, '')
       .split(/[/\\]/)
       .pop() || '';
   return basename.replace(/^\.+/, '');
 }
 
+/** Lima VM instance name: same derivation as `composePrefix()` (`consts::lima_vm_name`). */
+export function instanceName(): string {
+  return composePrefix();
+}
+
+/** Mirrors `consts::derive_wsl_distro_name_from`: `.speedwave`→`Speedwave`, else `Speedwave-<suffix>`. */
+export function wslDistroName(): string {
+  const basename = composePrefix();
+  if (basename === 'speedwave') return 'Speedwave';
+  const suffix = basename.startsWith('speedwave-') ? basename.slice('speedwave-'.length) : basename;
+  return `Speedwave-${suffix}`;
+}
+
 /**
  * Runs argv as root inside the engine namespace and returns trimmed UTF-8 stdout.
- * darwin: bundled limactl `shell speedwave -- sudo <argv>`; win32: `wsl.exe -d Speedwave -u root --`.
+ * darwin: bundled limactl `shell <instance> -- sudo <argv>`; win32: `wsl.exe -d <distro> -u root --`.
  */
 export function engineExec(argv: string[]): string {
   if (process.platform === 'darwin') {
     const limactl = '/Applications/Speedwave.app/Contents/Resources/lima/bin/limactl';
-    const env = { ...process.env, LIMA_HOME: join(homedir(), '.speedwave', 'lima') };
-    return execFileSync(limactl, ['shell', 'speedwave', '--', 'sudo', ...argv], {
+    const env = { ...process.env, LIMA_HOME: join(dataDir(), 'lima') };
+    return execFileSync(limactl, ['shell', instanceName(), '--', 'sudo', ...argv], {
       env,
       encoding: 'utf8',
     }).trim();
   }
   if (process.platform === 'win32') {
     const env = { ...process.env, WSL_UTF8: '1' };
-    return execFileSync('wsl.exe', ['-d', 'Speedwave', '-u', 'root', '--', ...argv], {
+    return execFileSync('wsl.exe', ['-d', wslDistroName(), '-u', 'root', '--', ...argv], {
       env,
       encoding: 'utf8',
     }).trim();
