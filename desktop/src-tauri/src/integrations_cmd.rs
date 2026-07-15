@@ -1204,13 +1204,21 @@ pub fn ensure_project_images_built(
     let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
-    speedwave_runtime::build::build_missing_images_locked(rt, &enabled, &manifest)
-        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+    speedwave_runtime::build::build_missing_images_locked(rt, &enabled, &manifest).map_err(
+        |e| {
+            log_sanitizer::sanitize(&speedwave_runtime::build::condense_engine_error(&format!(
+                "{e:#}"
+            )))
+        },
+    )?;
 
     // Plugin images must also be built outside the compose lock (ADR-066).
     let enabled_plugin_ids = integrations.enabled_plugin_service_ids();
-    speedwave_runtime::plugin::ensure_plugin_images(rt, &enabled_plugin_ids)
-        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+    speedwave_runtime::plugin::ensure_plugin_images(rt, &enabled_plugin_ids).map_err(|e| {
+        log_sanitizer::sanitize(&speedwave_runtime::build::condense_engine_error(&format!(
+            "{e:#}"
+        )))
+    })?;
     Ok(())
 }
 

@@ -287,7 +287,8 @@ fn restore_one_project(
     // A background teardown of this project (mid-session switch) must finish
     // before the restore, or it would kill the freshly restored containers.
     crate::containers_cmd::wait_for_pending_teardown(project);
-    // Build OUTSIDE the lock (ADR-066): bundle + plugin images.
+    // Build OUTSIDE the lock (ADR-066): bundle + plugin images. Errors are already
+    // condensed + sanitized inside ensure_project_images_built before this `?`.
     crate::integrations_cmd::ensure_project_images_built(rt, project)?;
 
     use crate::types::IntoAnyhow;
@@ -667,7 +668,10 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             {
                 log::warn!("snapshotter recovery failed, restarting engine");
                 rt.restart_container_engine().map_err(|re| {
-                    let msg = log_sanitizer::sanitize(&format!("Engine restart failed: {re}"));
+                    let msg = log_sanitizer::sanitize(&format!(
+                        "Engine restart failed: {}",
+                        build::condense_engine_error(&format!("{re:#}"))
+                    ));
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
