@@ -12093,8 +12093,10 @@ services:
     /// `/speedwave/plugins/<slug>:ro` mount and (b) pass the full SecurityCheck.
     #[test]
     fn plugin_render_emits_claude_resources_mount_and_passes_security_check() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        // plugin_dir must live under the SAME data dir passed to SecurityCheck —
+        // the check now requires an exact match, not merely a path-suffix match.
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp_data_dir.path().join("plugins").join("presalefix");
         std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
         std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
         std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
@@ -12118,7 +12120,6 @@ services:
             yaml.contains(":/speedwave/plugins/presalefix:ro"),
             "regression surface not exercised — claude-resources mount missing"
         );
-        let tmp_data_dir = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -12133,8 +12134,8 @@ services:
     /// mount its claude-resources and pass — the test creates the dir itself.
     #[test]
     fn resource_only_plugin_render_mounts_resources_and_passes_security_check() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp_data_dir.path().join("plugins").join("presalefix");
         std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
         std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
         let manifest = fixture_plugin_manifest("presalefix", None);
@@ -12157,7 +12158,6 @@ services:
             yaml.contains(":/speedwave/plugins/presalefix:ro"),
             "regression surface not exercised — claude-resources mount missing"
         );
-        let tmp_data_dir = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",

@@ -139,7 +139,7 @@ pub(crate) fn apply_plugins_from_verified(
         }
 
         // Validate claude-resources is a real dir, not a symlink (ADR-051 security model).
-        let plugin_resources = plugin_dir.join("claude-resources");
+        let plugin_resources = plugin::plugin_claude_resources_dir(plugin_dir);
         if plugin_resources.exists() {
             ensure_resources_dir_safe(plugin_dir, &plugin_resources)
                 .map_err(|e| anyhow::anyhow!("plugin '{slug}': claude-resources unsafe: {e}"))?;
