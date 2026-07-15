@@ -12206,11 +12206,11 @@ services:
         );
     }
 
-    /// Renders a plugin with claude-resources, same shape as the tests above;
-    /// callers tamper with the resulting mount to probe the plugin-prefix arm.
-    fn render_presalefix_plugin_mount() -> String {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin_dir = tmp.path().join("plugins").join("presalefix");
+    /// Renders a plugin with claude-resources under `data_dir` (the SAME dir the
+    /// caller must pass to `SecurityCheck::run_with_data_dir`), same shape as the
+    /// tests above; callers tamper with the resulting mount to probe one guard.
+    fn render_presalefix_plugin_mount(data_dir: &std::path::Path) -> String {
+        let plugin_dir = data_dir.join("plugins").join("presalefix");
         std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
         std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
         let manifest = fixture_plugin_manifest("presalefix", None);
@@ -12233,13 +12233,22 @@ services:
 
     #[test]
     fn plugin_mount_with_foreign_source_fails_security_check() {
-        let yaml = render_presalefix_plugin_mount();
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let yaml = render_presalefix_plugin_mount(tmp_data_dir.path());
         assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
+        // A valid render must first pass, isolating this test's tamper to the source check.
+        let baseline = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(baseline.is_empty(), "valid render must pass: {baseline:?}");
         let tampered = yaml.replace(
             "claude-resources:/speedwave/plugins/presalefix:ro",
             "/etc:/speedwave/plugins/presalefix:ro",
         );
-        let tmp_data_dir = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &tampered,
             "test",
@@ -12258,9 +12267,9 @@ services:
 
     #[test]
     fn plugin_mount_with_traversal_slug_fails_security_check() {
-        let yaml = render_presalefix_plugin_mount();
-        assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
         let tmp_data_dir = tempfile::tempdir().unwrap();
+        let yaml = render_presalefix_plugin_mount(tmp_data_dir.path());
+        assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
         // The unnormalized source the vulnerable code built: a bare string-equality
         // check would pass it, though it resolves outside `legit/` at mount time.
         let traversal_source = tmp_data_dir
@@ -12297,13 +12306,22 @@ services:
 
     #[test]
     fn plugin_mount_without_ro_fails_security_check() {
-        let yaml = render_presalefix_plugin_mount();
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let yaml = render_presalefix_plugin_mount(tmp_data_dir.path());
         assert!(yaml.contains(":/speedwave/plugins/presalefix:ro"));
+        // A valid render must first pass, isolating this test's tamper to the mode check.
+        let baseline = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(baseline.is_empty(), "valid render must pass: {baseline:?}");
         let tampered = yaml.replace(
             ":/speedwave/plugins/presalefix:ro",
             ":/speedwave/plugins/presalefix:rw",
         );
-        let tmp_data_dir = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &tampered,
             "test",
