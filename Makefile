@@ -579,13 +579,13 @@ ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/
 
 test-engine-contract:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" bats _tests/e2e/engine-contract.bats
+	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" bats --print-output-on-failure _tests/e2e/engine-contract.bats
 
 test-e2e-update-dirty: build-cli
 	@test -n "$(SPW_E2E_PROJECT)" || { echo "SPW_E2E_PROJECT is required (e.g. make test-e2e-update-dirty SPW_E2E_PROJECT=speedwave)"; exit 1; }
 	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" SPEEDWAVE_DATA_DIR=$(HOME)/.speedwave-dev \
 	SPW_E2E_PROJECT="$(SPW_E2E_PROJECT)" SPEEDWAVE_BIN=$(CURDIR)/target/debug/speedwave \
-	bats _tests/e2e/update-dirty-state.bats
+	bats --print-output-on-failure _tests/e2e/update-dirty-state.bats
 
 test-entrypoint:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
