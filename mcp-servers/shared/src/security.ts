@@ -24,18 +24,15 @@ export async function loadTokenFile(name: string): Promise<string> {
 }
 
 /**
- * Filename of the validated non-secret settings JSON delivered by the host under {@link tokensDir}.
- * SSOT mirror — synchronized with `crates/speedwave-runtime/src/consts.rs::PLUGIN_SETTINGS_FILE`
- * via the Rust cross-read test `plugin_settings_file_matches_mcp_shared_ts`.
+ * Filename of the validated non-secret settings JSON under {@link tokensDir}. SSOT mirror of Rust
+ * `consts::PLUGIN_SETTINGS_FILE` (cross-read test `plugin_settings_file_matches_mcp_shared_ts`).
  */
 export const PLUGIN_SETTINGS_FILE = '_settings.json';
 
 /**
- * Load a plugin's validated non-secret settings (the manifest `settings_schema` values) from
- * `<tokensDir>/_settings.json`. Returns `{}` when the file is absent (no settings saved yet). The
- * host re-writes this file on every save, so a worker calling this per request sees live updates.
- * Secrets never live here — read those from credential files via {@link loadTokenFile}.
- * @throws {Error} on unreadable or non-JSON content (a malformed settings file is a hard error).
+ * Load a plugin's validated non-secret settings (`settings_schema` values) from
+ * `<tokensDir>/_settings.json`; `{}` when absent. Never a secret channel — see {@link loadTokenFile}.
+ * @throws {Error} on unreadable or non-JSON content.
  */
 export async function loadPluginSettings<T = Record<string, unknown>>(): Promise<
   T | Record<string, never>

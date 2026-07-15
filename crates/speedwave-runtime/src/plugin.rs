@@ -652,9 +652,8 @@ pub fn token_dir_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf
     data_dir.join("tokens").join(project).join(service_id)
 }
 
-/// Path to a plugin's non-secret settings file inside its token dir:
-/// `~/.speedwave/tokens/<project>/<service_id>/_settings.json`, mounted `:ro` at
-/// `/tokens/_settings.json`. The sole config channel to a worker; secrets stay in `auth_fields`.
+/// Path to a plugin's non-secret settings file in its token dir, mounted `:ro` at
+/// `/tokens/_settings.json`. Secrets stay in `auth_fields`, never here.
 pub fn settings_file(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
     Ok(token_dir(project, service_id)?.join(consts::PLUGIN_SETTINGS_FILE))
 }
@@ -664,9 +663,8 @@ pub fn settings_file_in(data_dir: &Path, project: &str, service_id: &str) -> Pat
     token_dir_in(data_dir, project, service_id).join(consts::PLUGIN_SETTINGS_FILE)
 }
 
-/// Materialises the validated settings JSON into the per-plugin token dir (creating the dir and
-/// writing the file owner-only, fsync-before-rename). Callers validate against `settings_schema`
-/// first; this never writes secrets — those go to `auth_fields` files.
+/// Writes the (caller-validated) settings JSON into the per-plugin token dir, owner-only and
+/// fsync-before-rename. Never a secret channel — those go to `auth_fields` files.
 pub fn write_settings_file(
     project: &str,
     service_id: &str,
@@ -6576,7 +6574,6 @@ mod tests {
     #[test]
     fn test_write_settings_file_creates_token_dir_and_owner_only_perms() {
         let tmp = tempfile::tempdir().unwrap();
-        // Token dir does not exist yet — the writer must create it.
         write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({})).unwrap();
         let path = settings_file_in(tmp.path(), "proj", "svc");
         assert!(path.exists(), "settings file must be created");

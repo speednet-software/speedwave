@@ -1112,9 +1112,8 @@ pub const PLUGIN_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
 /// rendered on the plugin Changelog tab. Part of the signed tree.
 pub const PLUGIN_CHANGELOG_FILE: &str = "CHANGELOG.md";
 
-/// Filename of the validated non-secret settings JSON, written into the per-plugin token dir and
-/// mounted `:ro` into the worker at `/tokens/_settings.json`. Reserved: no `auth_fields` key may
-/// use it. Mirrored in `mcp-servers/shared/src/security.ts` (cross-read test).
+/// Non-secret settings JSON in the per-plugin token dir, mounted `:ro` at `/tokens/_settings.json`.
+/// Reserved `auth_fields` key; mirrored in mcp-shared (cross-read test).
 pub const PLUGIN_SETTINGS_FILE: &str = "_settings.json";
 
 /// Byte cap for a plugin's `CHANGELOG.md` (grows with every release, so it
