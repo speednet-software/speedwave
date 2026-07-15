@@ -94,12 +94,13 @@ describe('Dirty-state self-heal', function () {
     // ~180s each — the suite's usual 300s budget cannot fit them.
     this.timeout(600_000);
 
-    // Own the precondition: the token renders only while context7 is enabled
-    // (workers.rs:201-207 skips disabled services); spec 16 leaves it disabled.
-    await setContext7('running');
     const token = serviceTokenPath();
-    const before = readFileSync(token, 'utf8');
+    let before: string;
     try {
+      // Own the precondition inside the try so cleanup runs even if enable throws:
+      // the token renders only while context7 is enabled (workers.rs:201-207).
+      await setContext7('running');
+      before = readFileSync(token, 'utf8');
       // Rust mirror: fs_perms.rs::set_windows_acl_empty_for_test — a present,
       // protected, zero-ACE DACL via SDDL D:P (never NULL, which grants everyone access).
       const psToken = token.replace(/'/g, "''");
