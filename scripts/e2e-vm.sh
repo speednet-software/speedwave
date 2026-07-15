@@ -582,6 +582,8 @@ SCRIPT
             exit_code=1
         else
             local windows_data_dir="${windows_cli_path%/bin/*}"
+            # SPEEDWAVE_DATA_DIR (WSL-shaped /mnt/c path) feeds only the bats PREFIX
+            # derivation; WSL interop never forwards it into speedwave.exe (no WSLENV).
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
             # shellcheck disable=SC2086
             ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
