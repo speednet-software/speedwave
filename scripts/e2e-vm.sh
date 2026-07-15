@@ -78,6 +78,8 @@ ensure_provisioned_macos() {
 # ── Helper functions: SSH (Windows native OpenSSH → cmd.exe/powershell.exe/wsl.exe) ──
 # Staging dir NOT /tmp — WSL2 clears tmpfs on restart/idle.
 WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
+# Dedicated dir for the engine bats suites — other steps rm -rf the main staging dir.
+WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 
 # Escapes a value for a PowerShell single-quoted literal (' doubled = literal ').
 ps_squote() {
@@ -501,7 +503,7 @@ SCRIPT
 
     # Engine-contract suite: rsynced into the STAGING distro only, bats runs there,
     # and crosses into the tested Speedwave distro via WSL interop — never touched directly.
-    windows_rsync_to "$HOST_REPO_DIR/_tests/e2e/" "$WINDOWS_WSL_STAGING/engine-contract-suite/"
+    windows_rsync_to "$HOST_REPO_DIR/_tests/e2e/" "$WINDOWS_CONTRACT_STAGING/"
 
     # Copy E2E test suite to WSL2 then to Windows side
     windows_rsync_to "$HOST_REPO_DIR/desktop/e2e/" "$WINDOWS_WSL_STAGING/"
@@ -563,7 +565,7 @@ SCRIPT
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
         # shellcheck disable=SC2086
-        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\"" || exit_code=$?
+        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
     fi
 
     # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
@@ -580,7 +582,7 @@ SCRIPT
             local windows_data_dir="${windows_cli_path%/bin/*}"
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
             # shellcheck disable=SC2086
-            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats $WINDOWS_WSL_STAGING/engine-contract-suite/update-dirty-state.bats\"" || exit_code=$?
+            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
         fi
     fi
 

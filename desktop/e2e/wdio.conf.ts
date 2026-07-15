@@ -31,7 +31,7 @@ const ALL_SPECS = [
 ];
 
 function resolveSpecs(): string[] {
-  const phase = process.env.SPW_E2E_SPEC_PHASE ?? 'all';
+  const phase = process.env.SPW_E2E_SPEC_PHASE || 'all';
   if (phase === 'pre-reset') return ALL_SPECS.filter((s) => s !== FACTORY_RESET_SPEC);
   if (phase === 'reset-only') return [FACTORY_RESET_SPEC];
   if (phase !== 'all') throw new Error(`unknown SPW_E2E_SPEC_PHASE: ${phase}`);
