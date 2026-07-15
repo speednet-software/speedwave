@@ -844,6 +844,9 @@ SCRIPT
 set -euo pipefail
 eval "$(/opt/homebrew/bin/brew shellenv)"
 command -v bats >/dev/null 2>&1 || brew install bats-core
+# The app stops the Lima VM when it exits after the pre-reset suite; unlike WSL,
+# Lima has no on-demand start — bring the VM back before the engine preflight.
+env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave
 SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
 ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 SPW_E2E_PROJECT=e2e-test bats /tmp/speedwave-e2e/update-dirty-state.bats

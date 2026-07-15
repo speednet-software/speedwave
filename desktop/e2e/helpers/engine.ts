@@ -59,7 +59,19 @@ export function storeSnapshot(): Map<string, string> {
   for (const rawName of listing.split('\n')) {
     const name = rawName.trim();
     if (name === '') continue;
-    const content = engineExec(['cat', `${dir}/${name}`]);
+    let content: string;
+    try {
+      content = engineExec(['cat', `${dir}/${name}`]);
+    } catch (err) {
+      // Entries can be legitimately reaped between ls and cat (session-scoped
+      // containers) — skip iff the file is truly gone, rethrow real read errors.
+      try {
+        engineExec(['test', '-e', `${dir}/${name}`]);
+      } catch {
+        continue;
+      }
+      throw err;
+    }
     if (!/^[0-9a-f]{64}$/.test(content)) {
       throw new Error(
         `storeSnapshot: entry '${name}' holds malformed content '${content}' — expected a 64-hex container id`
