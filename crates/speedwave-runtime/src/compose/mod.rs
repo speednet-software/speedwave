@@ -12261,9 +12261,8 @@ services:
         let yaml = render_presalefix_plugin_mount();
         assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
         let tmp_data_dir = tempfile::tempdir().unwrap();
-        // Mirrors exactly how the vulnerable code built `expected_source` (unnormalized
-        // PathBuf::join): a host source equal to this string would pass a bare
-        // string-equality check even though it resolves outside `legit/` at mount time.
+        // The unnormalized source the vulnerable code built: a bare string-equality
+        // check would pass it, though it resolves outside `legit/` at mount time.
         let traversal_source = tmp_data_dir
             .path()
             .join("plugins")
