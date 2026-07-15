@@ -119,12 +119,19 @@ describe('Dirty-state self-heal', function () {
         `  [System.IO.File]::ReadAllText('${psToken}') | Out-Null`,
         "  throw 'plant no-op: read succeeded despite empty protected DACL'",
         '} catch [System.UnauthorizedAccessException] {}',
+        // Trailing statement: powershell.exe exits 1 with empty stdout/stderr when a
+        // successfully-caught empty catch{} is the script's last statement.
+        'Write-Output PLANT_OK',
       ].join('; ');
-      execFileSync(systemPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
-        encoding: 'utf8',
-      });
+      const plantOutput = execFileSync(
+        systemPowershellPath(),
+        ['-NoProfile', '-NonInteractive', '-Command', script],
+        { encoding: 'utf8' }
+      );
+      expect(plantOutput).toContain('PLANT_OK');
 
-      expect(() => readFileSync(token, 'utf8')).toThrow(/EPERM|EACCES/);
+      // Node/libuv's FILE_FLAG_BACKUP_SEMANTICS + an elevated runner's SeBackupPrivilege
+      // bypass the DACL, so the plant script's own .NET ReadAllText denial is the proof.
 
       await requestBackendRestart();
       await waitForHealthy(PROJECT);
