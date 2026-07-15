@@ -12257,6 +12257,31 @@ services:
     }
 
     #[test]
+    fn plugin_mount_with_traversal_slug_fails_security_check() {
+        let yaml = render_presalefix_plugin_mount();
+        assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
+        let tampered = yaml.replace(
+            "claude-resources:/speedwave/plugins/presalefix:ro",
+            "/etc:/speedwave/plugins/legit/../evil:ro",
+        );
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("evil")),
+            "traversal plugin slug must be rejected before any path is built from it, got: {violations:?}"
+        );
+    }
+
+    #[test]
     fn plugin_mount_without_ro_fails_security_check() {
         let yaml = render_presalefix_plugin_mount();
         assert!(yaml.contains(":/speedwave/plugins/presalefix:ro"));

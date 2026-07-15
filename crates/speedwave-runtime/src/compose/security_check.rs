@@ -1232,6 +1232,17 @@ impl SecurityCheck {
                 continue;
             }
             if let Some(slug) = target.strip_prefix("/speedwave/plugins/") {
+                if !plugin::is_valid_slug(slug) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!(
+                            "plugin claude-resources mount has a malformed slug '{slug}'"
+                        ),
+                        remediation: "Re-render compose; plugin slug is malformed.",
+                    });
+                    continue;
+                }
                 let Some((host, mode)) = extract_volume_for_target(s, target) else {
                     continue;
                 };
