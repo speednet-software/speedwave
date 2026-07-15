@@ -104,17 +104,21 @@ describe('Dirty-state self-heal', function () {
     const token = serviceTokenPath();
     const before = readFileSync(token, 'utf8');
     try {
-      // Rust mirror: fs_perms.rs::make_unreadable_for_test — protected DACL with
-      // zero ACEs; the script exits non-zero if the plant did not take effect.
+      // Rust mirror: fs_perms.rs::set_windows_acl_empty_for_test — a present,
+      // protected, zero-ACE DACL via SDDL D:P (never NULL, which grants everyone access).
       const psToken = token.replace(/'/g, "''");
       const script = [
         "$ErrorActionPreference = 'Stop'",
-        '$acl = New-Object System.Security.AccessControl.FileSecurity',
-        '$acl.SetAccessRuleProtection($true, $false)',
-        `Set-Acl -Path '${psToken}' -AclObject $acl`,
-        `$check = Get-Acl -Path '${psToken}'`,
-        'if (-not $check.AreAccessRulesProtected -or $check.Access.Count -ne 0)' +
-          " { throw 'plant no-op: DACL is not protected-empty' }",
+        `$acl = Get-Acl -LiteralPath '${psToken}'`,
+        "$acl.SetSecurityDescriptorSddlForm('D:P')",
+        `Set-Acl -LiteralPath '${psToken}' -AclObject $acl`,
+        `$sddl = (Get-Acl -LiteralPath '${psToken}').Sddl`,
+        'if ($sddl -notmatch \'D:P(AI)?(?!\\()\') { throw "plant no-op: unexpected SDDL $sddl" }',
+        // Expected path: an empty protected DACL denies all access, including the owner.
+        'try {',
+        `  [System.IO.File]::ReadAllText('${psToken}') | Out-Null`,
+        "  throw 'plant no-op: read succeeded despite empty protected DACL'",
+        '} catch [System.UnauthorizedAccessException] {}',
       ].join('; ');
       execFileSync(systemPowershellPath(), ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8',
