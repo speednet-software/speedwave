@@ -46,9 +46,30 @@ teardown() {
 }
 
 @test "flock on the names dir blocks nerdctl create (TOCTOU guard basis)" {
-  # Wait until the holder provably owns the lock, and surface create's rc+stderr —
-  # a fast-failing create must fail THIS test loudly, not fake a missing block.
-  run $ENGINE_EXEC sh -c "flock $STORE sleep 6 & i=0; while flock -n $STORE true 2>/dev/null; do i=\$((i+1)); [ \$i -ge 20 ] && { echo holder-never-acquired; exit 1; }; sleep 0.2; done; start=\$(date +%s); nerdctl create --name $NAME $IMG >/dev/null 2>/tmp/spwcontract_create.err; rc=\$?; end=\$(date +%s); nerdctl rm -f $NAME >/dev/null 2>&1; echo create_rc=\$rc; sed 's/^/create_err: /' /tmp/spwcontract_create.err; rm -f /tmp/spwcontract_create.err; echo blocked=\$((end-start))"
+  # Waits until the holder provably owns the lock, surfaces create's rc+stderr.
+  # b64-wrapped like the runtime's wrap_base64_sh: wsl.exe interop re-parses the
+  # post--- line and eats \$ constructs (wsl.rs:98) — b64 keeps the script opaque.
+  script=$(cat <<EOF
+flock $STORE sleep 6 &
+i=0
+while flock -n $STORE true 2>/dev/null; do
+  i=\$((i+1))
+  [ "\$i" -ge 20 ] && { echo holder-never-acquired; exit 1; }
+  sleep 0.2
+done
+start=\$(date +%s)
+nerdctl create --name $NAME $IMG >/dev/null 2>/tmp/spwcontract_create.err
+rc=\$?
+end=\$(date +%s)
+nerdctl rm -f $NAME >/dev/null 2>&1
+echo create_rc=\$rc
+sed 's/^/create_err: /' /tmp/spwcontract_create.err
+rm -f /tmp/spwcontract_create.err
+echo blocked=\$((end-start))
+EOF
+  )
+  b64=$(printf '%s' "$script" | base64 | tr -d '\n')
+  run $ENGINE_EXEC sh -c "echo $b64 | base64 -d | sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"create_rc=0"* ]]
   [ "${output##*blocked=}" -ge 2 ]
