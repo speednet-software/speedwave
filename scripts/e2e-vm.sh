@@ -100,7 +100,8 @@ windows_ps() {
 \$env:OPENROUTER_MODEL = '$(ps_squote "${OPENROUTER_MODEL:-}")'
 \$env:LOCAL_LLM_BASE_URL = '$(ps_squote "${LOCAL_LLM_BASE_URL:-}")'
 \$env:LOCAL_LLM_API_KEY = '$(ps_squote "${LOCAL_LLM_API_KEY:-}")'
-\$env:LOCAL_LLM_MODEL = '$(ps_squote "${LOCAL_LLM_MODEL:-}")'"
+\$env:LOCAL_LLM_MODEL = '$(ps_squote "${LOCAL_LLM_MODEL:-}")'
+\$env:SPW_E2E_SPEC_PHASE = '$(ps_squote "${SPW_E2E_SPEC_PHASE:-}")'"
     # UTF-8 BOM required — PowerShell falls back to the system locale (e.g. Windows-1252)
     # reading a BOM-less .ps1, corrupting multi-byte characters.
     printf '\xEF\xBB\xBF%s\n%s\n' "$ps_prefix" "$ps_script" > "$tmpfile_local"
@@ -552,23 +553,21 @@ Set-Location C:\speedwave-e2e
 npm ci
 SCRIPT
 
-    run_windows_e2e || exit_code=$?
-
-    if [ "$exit_code" -eq 0 ]; then
-        echo "[windows] PASSED (both first and second install)"
-    else
-        echo "[windows] FAILED on second install (exit code: $exit_code)"
-    fi
-    echo "[windows] Installer at: $WINDOWS_HOST:Desktop\\speedwave-setup.exe"
+    # The bats suites need the provisioned engine + live 'e2e-test' project, which only
+    # exists between the pre-reset specs and 07-factory-reset.spec.ts — run pre-reset
+    # first, then the bats steps, then reset-only (factory reset still runs last).
+    run_windows_e2e "pre-reset" || exit_code=$?
 
     # Engine-contract suite needs the provisioned engine, which exists only after
     # the app has run — the Speedwave WSL distro is created on first app start.
-    echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
-    # shellcheck disable=SC2086
-    ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\"" || exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+        echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
+        # shellcheck disable=SC2086
+        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats $WINDOWS_WSL_STAGING/engine-contract-suite/engine-contract.bats\"" || exit_code=$?
+    fi
 
     # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
-    # the desktop suite just left behind — must run before windows_clean_state below.
+    # the desktop suite just left behind — must run before the reset-only wdio run below.
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Resolving installed Windows CLI path via WSL interop..."
         local windows_cli_path
@@ -584,6 +583,17 @@ SCRIPT
             ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats $WINDOWS_WSL_STAGING/engine-contract-suite/update-dirty-state.bats\"" || exit_code=$?
         fi
     fi
+
+    if [ "$exit_code" -eq 0 ]; then
+        run_windows_e2e "reset-only" || exit_code=$?
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
+        echo "[windows] PASSED (both first and second install)"
+    else
+        echo "[windows] FAILED on second install (exit code: $exit_code)"
+    fi
+    echo "[windows] Installer at: $WINDOWS_HOST:Desktop\\speedwave-setup.exe"
 
     # -- Cleanup: leave the machine clean after tests ----------------------------
     echo "[windows] Cleaning up..."
@@ -636,7 +646,9 @@ SCRIPT
 
 # Runs the Speedwave desktop app and executes wdio tests on Windows via SSH.
 # Expects the app to be installed at C:\Speedwave and E2E suite at C:\speedwave-e2e.
+# $1 (optional): SPW_E2E_SPEC_PHASE value forwarded to wdio.conf.ts (default: unset = full suite).
 run_windows_e2e() {
+    local SPW_E2E_SPEC_PHASE="${1:-}"
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = "Stop"
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
@@ -819,17 +831,11 @@ eval "$(/opt/homebrew/bin/brew shellenv)"
 cd /tmp/speedwave-e2e && npm ci
 SCRIPT
 
-    run_macos_e2e || exit_code=$?
+    # The bats suites need the provisioned engine + live 'e2e-test' project, which only
+    # exists between the pre-reset specs and 07-factory-reset.spec.ts — run pre-reset
+    # first, then the bats step, then reset-only (factory reset still runs last).
+    run_macos_e2e "pre-reset" || exit_code=$?
 
-    if [ "$exit_code" -eq 0 ]; then
-        echo "[macos] PASSED (both first and second install)"
-    else
-        echo "[macos] FAILED on second install (exit code: $exit_code)"
-    fi
-    echo "[macos] .dmg at: $MACOS_HOST:~/Desktop/speedwave.dmg"
-
-    # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
-    # the desktop suite just left behind — must run before macos_clean_state below.
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running update-dirty-state suite (production-style install: LIMA_HOME + speedwave VM)..."
         macos_ssh bash <<'SCRIPT' || exit_code=$?
@@ -842,6 +848,17 @@ SPW_E2E_PROJECT=e2e-test bats /tmp/speedwave-e2e/update-dirty-state.bats
 SCRIPT
     fi
 
+    if [ "$exit_code" -eq 0 ]; then
+        run_macos_e2e "reset-only" || exit_code=$?
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
+        echo "[macos] PASSED (both first and second install)"
+    else
+        echo "[macos] FAILED on second install (exit code: $exit_code)"
+    fi
+    echo "[macos] .dmg at: $MACOS_HOST:~/Desktop/speedwave.dmg"
+
     # -- Cleanup: leave the machine clean after tests ----------------------------
     echo "[macos] Cleaning up..."
     macos_clean_state
@@ -851,7 +868,9 @@ SCRIPT
 
 # Runs the Speedwave desktop app and executes wdio tests on macOS via SSH. Expects the .app
 # at /Applications/Speedwave.app and the E2E suite in /tmp/speedwave-e2e.
+# $1 (optional): SPW_E2E_SPEC_PHASE value forwarded to wdio.conf.ts (default: unset = full suite).
 run_macos_e2e() {
+    local spec_phase="${1:-}"
     # SSH does not forward local env vars — export the LLM test config via
     # locally expanded prefix lines ahead of the quoted heredoc body.
     {
@@ -860,6 +879,7 @@ run_macos_e2e() {
         printf 'export LOCAL_LLM_BASE_URL=%q\n' "${LOCAL_LLM_BASE_URL:-}"
         printf 'export LOCAL_LLM_API_KEY=%q\n' "${LOCAL_LLM_API_KEY:-}"
         printf 'export LOCAL_LLM_MODEL=%q\n' "${LOCAL_LLM_MODEL:-}"
+        printf 'export SPW_E2E_SPEC_PHASE=%q\n' "$spec_phase"
         cat <<'SCRIPT'
 set -euo pipefail
 SPEEDWAVE_DATA_DIR="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
