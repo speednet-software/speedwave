@@ -31,6 +31,21 @@ function makeMockLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 
+/** Resolves only after `tick()` is called; lets a test hold a refresh() mid-flight. */
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('SlashService', () => {
   let service: SlashService;
   let tauri: MockTauri;
@@ -48,11 +63,12 @@ describe('SlashService', () => {
     service = TestBed.inject(SlashService);
   });
 
-  it('starts empty with no source and not discovering', () => {
+  it('starts empty with no source, not discovering, not unavailable', () => {
     expect(service.commands()).toEqual([]);
     expect(service.source()).toBeNull();
     expect(service.discovering()).toBe(false);
     expect(service.isLoadingEmpty()).toBe(false);
+    expect(service.unavailable()).toBe(false);
   });
 
   it('refresh() populates signals from the backend discovery', async () => {
@@ -78,6 +94,39 @@ describe('SlashService', () => {
     expect(service.source()).toBe('Init');
     expect(service.discovering()).toBe(false);
     expect(service.error()).toBeNull();
+    expect(service.unavailable()).toBe(false);
+  });
+
+  it('refresh() sets unavailable=true when source is Unavailable, keeps returned commands', async () => {
+    const discovery: SlashDiscovery = { commands: [], source: 'Unavailable' };
+    tauri.invokeMock.mockResolvedValue(discovery);
+
+    await service.refresh('acme');
+
+    expect(service.source()).toBe('Unavailable');
+    expect(service.unavailable()).toBe(true);
+    expect(service.commands()).toEqual([]);
+    expect(service.error()).toBeNull();
+  });
+
+  it('refresh() clears unavailable on a subsequent Init result', async () => {
+    tauri.invokeMock.mockResolvedValueOnce({
+      commands: [],
+      source: 'Unavailable',
+    } as SlashDiscovery);
+    await service.refresh('acme');
+    expect(service.unavailable()).toBe(true);
+
+    tauri.invokeMock.mockResolvedValueOnce({
+      commands: [
+        { name: 'clear', description: null, argument_hint: null, kind: 'Builtin', plugin: null },
+      ],
+      source: 'Init',
+    } as SlashDiscovery);
+    await service.refresh('acme');
+
+    expect(service.unavailable()).toBe(false);
+    expect(service.source()).toBe('Init');
   });
 
   it('refresh() sets source=null and error on backend failure without throwing', async () => {
@@ -89,6 +138,7 @@ describe('SlashService', () => {
     expect(service.error()).toBe('Error: container down');
     expect(service.commands()).toEqual([]);
     expect(service.discovering()).toBe(false);
+    expect(service.unavailable()).toBe(false);
   });
 
   it('refresh() preserves the previous list on error (no wipe)', async () => {
@@ -105,7 +155,6 @@ describe('SlashService', () => {
     tauri.invokeMock.mockRejectedValueOnce(new Error('later failure'));
     await service.refresh('acme');
 
-    // Commands are preserved, error is captured, source becomes null.
     expect(service.commands().length).toBe(1);
     expect(service.source()).toBeNull();
     expect(service.error()).toContain('later failure');
@@ -116,6 +165,7 @@ describe('SlashService', () => {
     expect(tauri.invokeMock).not.toHaveBeenCalled();
     expect(service.commands()).toEqual([]);
     expect(service.source()).toBeNull();
+    expect(service.unavailable()).toBe(false);
   });
 
   it('isLoadingEmpty computes true only while discovering an empty list', async () => {
@@ -124,10 +174,41 @@ describe('SlashService', () => {
     });
     tauri.invokeMock.mockReturnValue(never);
     const pending = service.refresh('acme');
-    // After set(true) in refresh, the computed reflects loading-empty.
     expect(service.isLoadingEmpty()).toBe(true);
-    // Stop the pending promise by rejecting internal state: simulate abort.
     void pending;
+  });
+
+  it('a second concurrent refresh() no-ops while one is already in flight', async () => {
+    const first = deferred<SlashDiscovery>();
+    tauri.invokeMock.mockReturnValueOnce(first.promise);
+
+    const call1 = service.refresh('acme');
+    expect(service.discovering()).toBe(true);
+
+    // Second caller arrives while the first is still in flight.
+    const call2 = service.refresh('acme');
+
+    first.resolve({
+      commands: [
+        { name: 'clear', description: null, argument_hint: null, kind: 'Builtin', plugin: null },
+      ],
+      source: 'Init',
+    });
+    await Promise.all([call1, call2]);
+
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
+    expect(service.commands().length).toBe(1);
+    expect(service.discovering()).toBe(false);
+  });
+
+  it('refresh() runs again once the previous in-flight call has resolved', async () => {
+    tauri.invokeMock.mockResolvedValueOnce({ commands: [], source: 'Init' } as SlashDiscovery);
+    await service.refresh('acme');
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
+
+    tauri.invokeMock.mockResolvedValueOnce({ commands: [], source: 'Init' } as SlashDiscovery);
+    await service.refresh('acme');
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(2);
   });
 
   it('invalidate() calls the Tauri command', async () => {

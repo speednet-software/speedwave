@@ -48,12 +48,18 @@ export class SlashService {
   readonly source = signal<DiscoverySource | null>(null);
   /** Error message from the last failed discovery, if any. */
   readonly error = signal<string | null>(null);
+  /** True when the last discovery reported `source: 'Unavailable'`. */
+  readonly unavailable = signal<boolean>(false);
 
   /** Convenience computed: is the popover "empty and loading"? */
   readonly isLoadingEmpty = computed(() => this.discovering() && this.commands().length === 0);
 
+  /** Promise of the in-flight `refresh()` call, if any (TS-side single-flight guard). */
+  private inFlight: Promise<void> | null = null;
+
   /**
    * Fetches the slash-command list and updates the signals; never throws.
+   * A concurrent call while one is already in flight is a no-op that awaits the same result.
    * @param projectId - Project name used by Tauri to find the container.
    */
   async refresh(projectId: string): Promise<void> {
@@ -61,8 +67,19 @@ export class SlashService {
       this.commands.set([]);
       this.source.set(null);
       this.error.set(null);
+      this.unavailable.set(false);
       return;
     }
+    if (this.inFlight) {
+      return this.inFlight;
+    }
+    this.inFlight = this.doRefresh(projectId).finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  private async doRefresh(projectId: string): Promise<void> {
     this.discovering.set(true);
     this.error.set(null);
     try {
@@ -71,9 +88,11 @@ export class SlashService {
       });
       this.commands.set(result.commands);
       this.source.set(result.source);
+      this.unavailable.set(result.source === 'Unavailable');
     } catch (err) {
       this.source.set(null);
       this.error.set(String(err));
+      this.unavailable.set(false);
     } finally {
       this.discovering.set(false);
     }
