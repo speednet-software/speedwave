@@ -217,6 +217,7 @@ pub fn native_command(name: &str) -> Option<&'static NativeSlashCommand> {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code asserts via expect")]
 mod tests {
     use super::*;
 
