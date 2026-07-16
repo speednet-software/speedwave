@@ -817,6 +817,7 @@ impl Drop for MixedWasapiAudioStream {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
+    use super::super::mix::PairedPcm;
     use super::*;
 
     #[test]
@@ -1036,7 +1037,7 @@ mod tests {
         rm.feed(&ones, &mic_sink);
         // Both streams delivered ~CHUNK_SAMPLES at offset 0 → an aligned pair pops.
         let mut b = buf.lock().unwrap();
-        let (sys, mic) = b
+        let PairedPcm { system: sys, mic } = b
             .pop_pair(1, CHUNK_SAMPLES)
             .expect("a paired chunk is ready");
         assert!(!sys.is_empty());

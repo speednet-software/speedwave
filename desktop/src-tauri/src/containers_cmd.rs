@@ -570,11 +570,7 @@ pub async fn add_project(
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
                 log::error!("failed to start containers: {e:#}");
-                // Condense to a bounded banner, then sanitize: the chain can carry
-                // raw nerdctl argv echoes (tokens) and unbounded engine output.
-                speedwave_runtime::log_sanitizer::sanitize(
-                    &speedwave_runtime::build::condense_engine_error(&format!("{e:#}")),
-                )
+                speedwave_runtime::build::user_facing_engine_error(&e)
             })
         })
     })
@@ -695,11 +691,7 @@ pub async fn start_containers(
         log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
             log::error!("failed to start containers: {e:#}");
-            // Condense to a bounded banner, then sanitize: the chain can carry
-            // raw nerdctl argv echoes (tokens) and unbounded engine output.
-            speedwave_runtime::log_sanitizer::sanitize(
-                &speedwave_runtime::build::condense_engine_error(&format!("{e:#}")),
-            )
+            speedwave_runtime::build::user_facing_engine_error(&e)
         })
     })
     .await
@@ -1751,10 +1743,10 @@ mod tests {
     use super::*;
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
 
-    /// Structural: every `start_containers` error string crossing IPC is sanitized
-    /// (the anyhow chain carries raw nerdctl argv echoes, incl. bearer tokens).
+    /// Structural: every `start_containers` error string crossing IPC goes through
+    /// the one condensing+sanitizing helper (the chain carries nerdctl argv echoes).
     #[test]
-    fn start_container_errors_are_sanitized_before_ipc() {
+    fn start_container_errors_route_through_the_owning_helper() {
         let source = include_str!("containers_cmd.rs");
         for pat in [
             "setup_wizard::start_containers(proj).map_err",
@@ -1763,17 +1755,10 @@ mod tests {
             let site = source
                 .find(pat)
                 .unwrap_or_else(|| panic!("call site '{pat}' must exist"));
-            let mut end = (site + 500).min(source.len());
-            while !source.is_char_boundary(end) {
-                end += 1;
-            }
+            let end = speedwave_runtime::build::char_boundary_at_or_after(source, site + 300);
             assert!(
-                source[site..end].contains("log_sanitizer::sanitize"),
-                "'{pat}' must pass log_sanitizer::sanitize before Err(String)"
-            );
-            assert!(
-                source[site..end].contains("condense_engine_error"),
-                "'{pat}' must condense to a bounded banner before Err(String)"
+                source[site..end].contains("user_facing_engine_error"),
+                "'{pat}' must route through build::user_facing_engine_error before Err(String)"
             );
         }
     }

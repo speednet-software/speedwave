@@ -9,8 +9,8 @@ NAME=spwcontract_ghost
 DEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 
 setup_file() {
-  # ENGINE_EXEC may be legitimately EMPTY (Task 5b runs in-namespace); the marker
-  # var distinguishes "unset" (config error) from "empty on purpose".
+  # A caller already inside the engine namespace may export an empty ENGINE_EXEC;
+  # the marker var distinguishes "unset" (config error) from "empty on purpose".
   [ "${ENGINE_EXEC+set}" = "set" ] || { echo "ENGINE_EXEC must be set (may be empty for in-namespace runs)" >&2; return 1; }
   $ENGINE_EXEC true || { echo "engine executor unreachable: '$ENGINE_EXEC'" >&2; return 1; }
   # Deterministic image pick: a tagged Speedwave image, never <none>.
@@ -47,7 +47,7 @@ teardown() {
 
 @test "flock on the names dir blocks nerdctl create (TOCTOU guard basis)" {
   # Proves the holder owns the lock before timing; b64-wrapped (wrap_base64_sh shape)
-  # because the wsl.exe interop re-parse eats \$ constructs (wsl.rs:98).
+  # because the wsl.exe interop re-parse eats \$ constructs (WslRuntime::run_in_distro).
   script=$(cat <<EOF
 flock $STORE sleep 6 &
 i=0

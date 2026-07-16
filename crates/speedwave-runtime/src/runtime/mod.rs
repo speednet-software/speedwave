@@ -785,7 +785,6 @@ fn scan_cni_ids(haystack: &str, prefix: &str) -> Vec<String> {
 /// Best-effort cleanup for a stale-CNI failure: base64 `sh -c` payload (root, in the VM)
 /// targeting ONLY the `CNI-*` chains / `br-*` bridges named in `err`.
 pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
-    use base64::Engine;
     let msg = err.to_string();
     let mut script = String::from(
         "export PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n",
@@ -803,16 +802,15 @@ pub(crate) fn cni_cleanup_command(err: &anyhow::Error) -> String {
         script.push_str(&format!("ip link delete {br} 2>/dev/null || true\n"));
     }
     script.push_str("true\n");
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&script);
-    format!("echo {b64} | base64 -d | sh")
+    wrap_base64_sh(&script)
 }
 
 /// In-VM coordinates of the nerdctl name-store a cleanup payload targets;
-/// tests inject a tempdir store and absolute stub binaries.
+/// tests inject a tempdir store and absolute stub binaries. The containerd
+/// address/namespace are never overridden by Speedwave, so they are read
+/// directly from `consts` rather than carried as fields.
 pub(crate) struct NameStoreLayout {
     pub data_root: String,
-    pub address: String,
-    pub namespace: String,
     pub nerdctl_bin: String,
 }
 
@@ -821,8 +819,6 @@ impl NameStoreLayout {
     pub(crate) fn production() -> Self {
         Self {
             data_root: consts::NERDCTL_DATA_ROOT.to_string(),
-            address: consts::CONTAINERD_ADDRESS.to_string(),
-            namespace: consts::CONTAINERD_NAMESPACE.to_string(),
             nerdctl_bin: "nerdctl".to_string(),
         }
     }
@@ -831,8 +827,8 @@ impl NameStoreLayout {
         format!(
             "{}/{}/names/{}",
             self.data_root,
-            consts::nerdctl_addr_hash_of(&self.address),
-            self.namespace
+            consts::nerdctl_addr_hash(),
+            consts::CONTAINERD_NAMESPACE
         )
     }
 }
@@ -912,8 +908,8 @@ fn name_store_script_header(layout: &NameStoreLayout) -> String {
          command -v flock >/dev/null 2>&1 || exit 0\n",
         store = layout.store_dir(),
         nerdctl = layout.nerdctl_bin,
-        addr = layout.address,
-        ns = layout.namespace,
+        addr = consts::CONTAINERD_ADDRESS,
+        ns = consts::CONTAINERD_NAMESPACE,
         root = layout.data_root,
     )
 }
@@ -2855,6 +2851,39 @@ services:
     }
 
     #[test]
+    fn engine_state_heal_runs_both_classes_across_two_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ups = AtomicUsize::new(0);
+        let cni_cleaned = AtomicUsize::new(0);
+        let ns_cleaned = AtomicUsize::new(0);
+        let name = own_name("acme", "mcp_hub");
+        let r = with_engine_state_heal(
+            "acme",
+            || match ups.fetch_add(1, Ordering::SeqCst) {
+                0 => anyhow::bail!("iptables: Chain already exists"),
+                1 => Err(ns_conflict_err(&name, DEAD_ID)),
+                _ => Ok(()),
+            },
+            |_e| {
+                cni_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_e| {
+                ns_cleaned.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(r.is_ok(), "third up succeeds after both heals: {r:?}");
+        assert_eq!(ups.load(Ordering::SeqCst), 3, "up runs three times");
+        assert_eq!(cni_cleaned.load(Ordering::SeqCst), 1, "CNI heal ran once");
+        assert_eq!(
+            ns_cleaned.load(Ordering::SeqCst),
+            1,
+            "name-store heal ran once"
+        );
+    }
+
+    #[test]
     fn scan_cni_ids_extracts_only_hex_suffixed_names() {
         let s = "chain CNI-68fe31e0 and CNI-abc plus br-deadbeef but not CNI-nothex or plain";
         assert_eq!(scan_cni_ids(s, "CNI-"), vec!["CNI-68fe31e0", "CNI-abc"]);
@@ -2900,23 +2929,29 @@ services:
         );
     }
 
+    fn decode_payload(cmd: &str) -> String {
+        use base64::Engine;
+        let b64 = cmd
+            .strip_prefix("echo ")
+            .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
+            .expect("payload must be `echo <b64> | base64 -d | sh`");
+        assert!(
+            b64.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
+            "payload must be pure base64 (quote-free through the WSL reparse)"
+        );
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .expect("valid base64"),
+        )
+        .expect("utf8 script")
+    }
+
     #[test]
     fn cni_cleanup_command_targets_only_named_state() {
-        use base64::Engine;
-        let decode = |cmd: &str| -> String {
-            let b64 = cmd
-                .trim_start_matches("echo ")
-                .trim_end_matches(" | base64 -d | sh");
-            String::from_utf8(
-                base64::engine::general_purpose::STANDARD
-                    .decode(b64)
-                    .unwrap(),
-            )
-            .unwrap()
-        };
-
         // Names the colliding chain → flush + delete THAT chain, never a VM-wide scan.
-        let script = decode(&cni_cleanup_command(&anyhow::anyhow!(
+        let script = decode_payload(&cni_cleanup_command(&anyhow::anyhow!(
             "iptables -t nat -N CNI-68fe31e0 --wait: iptables: Chain already exists"
         )));
         assert!(script.contains("iptables -t nat -F CNI-68fe31e0"));
@@ -2949,7 +2984,7 @@ services:
         );
 
         // No id in the error → no iptables/bridge/network mutation at all (retry only).
-        let bare = decode(&cni_cleanup_command(&anyhow::anyhow!(
+        let bare = decode_payload(&cni_cleanup_command(&anyhow::anyhow!(
             "failed to call cni.Setup: plugin failed (add)"
         )));
         assert!(
@@ -3150,30 +3185,9 @@ services:
         assert_eq!(name_store_conflicts(&msg, "acme").len(), 1);
     }
 
-    fn decode_payload(cmd: &str) -> String {
-        use base64::Engine;
-        let b64 = cmd
-            .strip_prefix("echo ")
-            .and_then(|r| r.strip_suffix(" | base64 -d | sh"))
-            .expect("payload must be `echo <b64> | base64 -d | sh`");
-        assert!(
-            b64.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
-            "payload must be pure base64 (quote-free through the WSL reparse)"
-        );
-        String::from_utf8(
-            base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .expect("valid base64"),
-        )
-        .expect("utf8 script")
-    }
-
     fn test_layout(data_root: &str) -> NameStoreLayout {
         NameStoreLayout {
             data_root: data_root.to_string(),
-            address: consts::CONTAINERD_ADDRESS.to_string(),
-            namespace: consts::CONTAINERD_NAMESPACE.to_string(),
             nerdctl_bin: "nerdctl".to_string(),
         }
     }
@@ -3298,8 +3312,6 @@ services:
             write_exec(&bin.join("flock"), flock_body);
             let layout = NameStoreLayout {
                 data_root: data_root.to_string_lossy().to_string(),
-                address: consts::CONTAINERD_ADDRESS.to_string(),
-                namespace: consts::CONTAINERD_NAMESPACE.to_string(),
                 nerdctl_bin: bin.join("nerdctl").to_string_lossy().to_string(),
             };
             StubStore {

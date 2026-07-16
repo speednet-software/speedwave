@@ -3180,22 +3180,46 @@ mod tests {
         );
     }
 
-    /// Wiring guard: the watchdog must re-ensure the mirror relay so a WSL distro
-    /// restart (which this bridge process outlives) self-heals it (ADR-080).
+    /// The relay lifecycle must ride the bridge lifecycle: ensure at start, periodic
+    /// watchdog re-ensure (a WSL distro restart wipes the relay), remove at stop (ADR-080).
     #[test]
-    fn watchdog_reensures_mirror_relay() {
-        let source = include_str!("host_bridge.rs");
-        let wd = source
-            .find("\"host_bridge::{}::watchdog\"")
-            .expect("watchdog thread name must exist");
-        let end = source[wd..]
-            .find("self.shutdown_tx = Some(shutdown_tx);")
-            .map(|o| wd + o)
-            .expect("watchdog block terminator must exist");
-        // Match the CALL token, not the bare identifier — a comment must not satisfy it.
+    fn relay_lifecycle_rides_bridge_start_watchdog_and_stop() {
+        use crate::mirror_relay::recorder::{calls_for_port, RelayOp};
+
+        let mut cfg = endpoint_config("relay-lifecycle");
+        // Watchdog re-ensures every `watchdog_interval * 6`; shrink it so the test
+        // observes at least one re-ensure quickly.
+        cfg.watchdog_interval = Duration::from_millis(50);
+        let mut bridge = HostBridge::new(cfg).unwrap();
+        let port = bridge.port();
+        // The recorder is process-global: skip residue another test's bridge left on a
+        // reused ephemeral port (impossible after this point — the port is bound by us).
+        let baseline = calls_for_port(port).len();
+        let ops = move || calls_for_port(port).split_off(baseline);
+
+        let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
+        bridge.start_endpoint(handler).unwrap();
+        assert_eq!(
+            ops().first(),
+            Some(&RelayOp::Ensure),
+            "start must ensure the relay"
+        );
+
+        let ensure_count = || ops().iter().filter(|op| **op == RelayOp::Ensure).count();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && ensure_count() < 2 {
+            std::thread::sleep(Duration::from_millis(25));
+        }
         assert!(
-            source[wd..end].contains("mirror_relay::ensure_relay_for_port("),
-            "watchdog loop must call ensure_relay_for_port to revive the relay after a distro restart"
+            ensure_count() >= 2,
+            "watchdog must periodically re-ensure the relay"
+        );
+
+        bridge.stop().unwrap();
+        assert_eq!(
+            ops().last(),
+            Some(&RelayOp::Remove),
+            "stop must remove the relay (synchronously, after joining the watchdog)"
         );
     }
 

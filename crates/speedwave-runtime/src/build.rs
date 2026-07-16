@@ -1073,22 +1073,42 @@ fn tail_chars(raw: &str) -> &str {
     tail_chars_within(raw, BUILD_ERROR_TAIL_CHARS)
 }
 
+/// Clamps `pos` to the nearest char boundary at or after it, capped at `s.len()`.
+pub fn char_boundary_at_or_after(s: &str, pos: usize) -> usize {
+    let mut i = pos.min(s.len());
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Clamps `pos` to the nearest char boundary at or before it (saturating at 0).
+pub fn char_boundary_at_or_before(s: &str, pos: usize) -> usize {
+    let mut i = pos.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Char-boundary-safe tail of `raw`, at most `budget` chars long — the shared
 /// primitive behind [`tail_chars`] for callers clamping to a smaller budget.
 fn tail_chars_within(raw: &str, budget: usize) -> &str {
     if raw.len() <= budget {
         return raw;
     }
-    let mut cut = raw.len() - budget;
-    while !raw.is_char_boundary(cut) {
-        cut += 1;
-    }
-    &raw[cut..]
+    &raw[char_boundary_at_or_after(raw, raw.len() - budget)..]
+}
+
+/// User-facing rendering of an engine failure: the full `{err:#}` chain, secret-redacted
+/// BEFORE condensing (a tail clamp could clip a token's prefix out of regex range).
+pub fn user_facing_engine_error(err: &anyhow::Error) -> String {
+    condense_engine_error(&crate::log_sanitizer::sanitize(&format!("{err:#}")))
 }
 
 /// Condenses a raw engine failure (BuildKit log or nerdctl `level=fatal`) into an
-/// actionable banner; every branch is clamped to a bounded tail, never raw output.
-pub fn condense_engine_error(raw: &str) -> String {
+/// actionable banner; module-private — callers go through [`user_facing_engine_error`].
+fn condense_engine_error(raw: &str) -> String {
     let connectivity_line = raw.lines().map(str::trim).find(|l| {
         let ll = l.to_ascii_lowercase();
         ll.contains("curl: (")
@@ -1240,6 +1260,72 @@ mod tests {
             out.len()
         );
         assert!(out.ends_with("(full output in Logs)"));
+    }
+
+    #[test]
+    fn user_facing_engine_error_sanitizes_planted_token() {
+        let err = anyhow::anyhow!("run failed: x-speedwave-proxy-auth: sw-secret-value-123")
+            .context("compose up failed");
+        let out = user_facing_engine_error(&err);
+        assert!(!out.contains("sw-secret-value-123"), "got: {out}");
+        assert!(out.contains("***REDACTED***"), "got: {out}");
+        assert!(out.contains("compose up failed"), "chain kept: {out}");
+    }
+
+    #[test]
+    fn user_facing_engine_error_redacts_token_whose_prefix_the_tail_clamp_clips() {
+        // The tail clamp cuts inside the header name here — redaction must run on
+        // the full text first, or the value survives with its prefix clipped away.
+        let raw = format!(
+            "{}\nx-speedwave-proxy-auth: sw-secret-value-987\n{}",
+            "A".repeat(300),
+            "B".repeat(BUILD_ERROR_TAIL_CHARS - 32)
+        );
+        let out = user_facing_engine_error(&anyhow::anyhow!(raw));
+        assert!(!out.contains("sw-secret-value-987"), "got: {out}");
+    }
+
+    #[test]
+    fn user_facing_engine_error_condenses_long_output_and_keeps_log_pointer() {
+        let err = anyhow::anyhow!("{}tail-marker", "x".repeat(2000));
+        let out = user_facing_engine_error(&err);
+        assert!(
+            out.len() <= BUILD_ERROR_TAIL_CHARS + 64,
+            "bounded: {} chars",
+            out.len()
+        );
+        assert!(out.starts_with('…') && out.contains("tail-marker"), "{out}");
+        assert!(out.ends_with("(full output in Logs)"));
+    }
+
+    #[test]
+    fn user_facing_engine_error_passes_short_chains_through() {
+        let err = anyhow::anyhow!("no space left on device").context("image build failed");
+        assert_eq!(
+            user_facing_engine_error(&err),
+            "image build failed: no space left on device"
+        );
+    }
+
+    #[test]
+    fn user_facing_engine_error_handles_empty_and_multibyte_messages() {
+        assert_eq!(user_facing_engine_error(&anyhow::anyhow!("")), "");
+        let err = anyhow::anyhow!("{}żółć-końcówka", "ź".repeat(2000));
+        let out = user_facing_engine_error(&err);
+        assert!(out.contains("żółć-końcówka"), "no mid-char split: {out}");
+    }
+
+    #[test]
+    fn char_boundary_clamps_round_multibyte_and_saturate() {
+        let s = "aż b"; // 'ż' occupies bytes 1..3
+        assert_eq!(char_boundary_at_or_after(s, 2), 3);
+        assert_eq!(char_boundary_at_or_before(s, 2), 1);
+        assert_eq!(char_boundary_at_or_after(s, 0), 0);
+        assert_eq!(char_boundary_at_or_before(s, 0), 0);
+        assert_eq!(char_boundary_at_or_after(s, 99), s.len());
+        assert_eq!(char_boundary_at_or_before(s, 99), s.len());
+        assert_eq!(char_boundary_at_or_after("", 5), 0);
+        assert_eq!(char_boundary_at_or_before("", 5), 0);
     }
 
     /// Integrations config with every built-in MCP service enabled — so `enabled_images` yields

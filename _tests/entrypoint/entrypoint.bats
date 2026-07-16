@@ -2176,3 +2176,99 @@ EOF
     run bash -c "grep -o 'speedwave entrypoint' /etc/passwd 2>/dev/null | wc -l | tr -d ' '"
     [ "$output" -eq 0 ]
 }
+
+# ── _diag_redact: token-shaped secrets never reach the persisted log ───────────────────────────────
+
+@test "startup log redacts Bearer ghp_, xoxe rotating and x-speedwave-proxy-auth secrets" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "auth failed: Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn and xoxe.xoxp-FAKE-TOKEN-VALUE and x-speedwave-proxy-auth: synthetic-test-token-0000000000000000000000" >&2
+    exit 1
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"[REDACTED]"* ]]
+    [[ "$output" != *"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn"* ]]
+    [[ "$output" != *"xoxe."* ]]
+    [[ "$output" != *"synthetic-test-token-0000000000000000000000"* ]]
+    # The header name itself is diagnostic value, not a secret; it survives redaction.
+    [[ "$output" == *"x-speedwave-proxy-auth: [REDACTED]"* ]]
+}
+
+@test "startup log redacts an Anthropic sk-ant- key and a GitHub fine-grained github_pat_ token" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "leaked sk-ant-api03-abcdef123456789-abcdef and github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn" >&2
+    exit 1
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"[REDACTED]"* ]]
+    [[ "$output" != *"sk-ant-api03-abcdef123456789-abcdef"* ]]
+    [[ "$output" != *"github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn"* ]]
+}
+
+@test "startup log message at exactly the 500-char cap is kept in full" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    printf 'A%.0s' {1..494} >&2
+    printf 'Z' >&2
+    exit 1
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    # Plugin/marketplace are single chars so the "p@m: " prefix is exactly 5 bytes:
+    # 5 + 494 A's + 1 Z == 500, the exact cap: the trailing Z must survive uncut.
+    export SPEEDWAVE_BUNDLED_PLUGINS="p"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="m"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run bash -c "grep -o 'p@m: A*Z' '$TEST_HOME/.speedwave-entrypoint.log'"
+    [ "$status" -eq 0 ]
+    [ "${#output}" -eq 500 ]
+    [[ "$output" == *Z ]]
+}
+
+@test "startup log message over the 500-char cap is truncated, dropping the tail" {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then exit 0; fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    printf 'A%.0s' {1..495} >&2
+    printf 'Z' >&2
+    exit 1
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+    # Same 5-byte "p@m: " prefix; 5 + 495 A's + 1 Z == 501, one over the cap: the
+    # cut must drop exactly the trailing Z, leaving 500 bytes ending in A.
+    export SPEEDWAVE_BUNDLED_PLUGINS="p"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="m"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" != *"Z"* ]]
+    run bash -c "grep -o 'p@m: A*' '$TEST_HOME/.speedwave-entrypoint.log'"
+    [ "$status" -eq 0 ]
+    [ "${#output}" -eq 500 ]
+}

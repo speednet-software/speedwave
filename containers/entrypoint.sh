@@ -19,9 +19,12 @@ else
 fi
 
 # Secrets must never reach disk: collapse newlines, redact token-shaped values, cap length.
+# Shapes mirrored from crates/speedwave-runtime/src/log_sanitizer.rs RULES (kept in sync manually).
 _diag_redact() {
     printf '%s' "$*" | tr '\n' ' ' \
-        | sed -E 's/(sk-[A-Za-z0-9_-]{8,}|xox[a-z]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|Bearer +[A-Za-z0-9._-]{8,})/[REDACTED]/g' \
+        | sed -E \
+            -e 's/(sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|xoxe[.-][A-Za-z0-9.-]{8,}|xox[a-z]-[A-Za-z0-9-]{8,}|github_pat_[A-Za-z0-9]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|Bearer +[A-Za-z0-9._-]{8,})/[REDACTED]/g' \
+            -e 's/(x-speedwave-proxy-auth:[[:space:]]+)[^[:space:]]+/\1[REDACTED]/g' \
         | cut -c1-500
 }
 
@@ -305,7 +308,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
         # The CLI can print NOTHING with exit 0 on a cold start; blank means unknown,
-        # never "everything installed" (jammy's jq -e exits 0 on empty input).
+        # never "everything installed" (jq 1.6's -e exits 0 on empty input).
         _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
         [ -n "${_installed//[$' \t\n\r']/}" ] || _installed='[]'
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do

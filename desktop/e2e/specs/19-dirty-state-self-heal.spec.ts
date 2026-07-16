@@ -30,14 +30,14 @@ function projectEntries(snapshot: Map<string, string>): Map<string, string> {
 }
 
 // Rust SSOT for the token path: `<data_dir>/secrets/<project>/<service>-auth-token`
-// (compose/tokens.rs:21 + compose/workers.rs:132-133); rendered only while enabled.
+// (tokens::init_secrets_dir_in + workers::ensure_worker_auth_token); rendered only while enabled.
 function serviceTokenPath(): string {
   const dataDir = process.env.SPEEDWAVE_DATA_DIR || join(homedir(), '.speedwave');
   return join(dataDir, 'secrets', PROJECT, `${SERVICE}-auth-token`);
 }
 
 // Absolute System32 path — a bare `powershell` PATH lookup is hijackable;
-// mirror of binary.rs::system_powershell_path (binary.rs:177-185).
+// mirror of binary::system_powershell_path.
 function systemPowershellPath(): string {
   const systemRoot = process.env.SystemRoot || 'C:\\Windows';
   return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -91,7 +91,6 @@ describe('Dirty-state self-heal', function () {
   it('heals an unreadable worker auth token (Windows empty-DACL corruption)', async function () {
     if (process.platform !== 'win32') {
       this.skip();
-      return;
     }
     // Three UI-confirmed restarts (enable, heal, cleanup-disable) at up to
     // ~180s each — the suite's usual 300s budget cannot fit them.
@@ -101,7 +100,7 @@ describe('Dirty-state self-heal', function () {
     let before: string;
     try {
       // Own the precondition inside the try so cleanup runs even if enable throws:
-      // the token renders only while context7 is enabled (workers.rs:201-207).
+      // the token renders only while context7 is enabled (workers::apply_worker_auth_tokens_with_dir).
       await setContext7('running');
       before = readFileSync(token, 'utf8');
       // Rust mirror: fs_perms.rs::set_windows_acl_empty_for_test — a present,

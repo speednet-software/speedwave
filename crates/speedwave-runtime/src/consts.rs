@@ -189,20 +189,15 @@ pub const CONTAINERD_ADDRESS: &str = "/run/containerd/containerd.sock";
 /// containerd namespace nerdctl operates in (`--namespace` default).
 pub const CONTAINERD_NAMESPACE: &str = "default";
 
-/// nerdctl per-address datastore dir name: `sha256(address)[0..8]`
-/// (`<data-root>/<hash>/…`, matching nerdctl's `getAddrHash`).
-pub fn nerdctl_addr_hash_of(address: &str) -> String {
+/// nerdctl per-address datastore dir name for `CONTAINERD_ADDRESS`:
+/// `sha256(address)[0..8]` (`<data-root>/<hash>/…`, matching nerdctl's `getAddrHash`).
+pub fn nerdctl_addr_hash() -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(address.as_bytes());
+    hasher.update(CONTAINERD_ADDRESS.as_bytes());
     let mut hex = crate::bundle::bytes_to_hex(&hasher.finalize());
     hex.truncate(8);
     hex
-}
-
-/// Addr-hash for the default containerd socket Speedwave runs against.
-pub fn nerdctl_addr_hash() -> String {
-    nerdctl_addr_hash_of(CONTAINERD_ADDRESS)
 }
 
 /// amd64 Ubuntu WSL rootfs URL; SHA256 below pins the version. `current` is
@@ -2827,5 +2822,132 @@ mod tests {
     fn entrypoint_log_file_matches_entrypoint_sh() {
         let sh = include_str!("../../../containers/entrypoint.sh");
         assert!(sh.contains(ENTRYPOINT_LOG_FILE));
+    }
+
+    // Cross-read guards for the e2e helper/bats mirrors below: the hash pin above covers only
+    // the hash segment, not the full downstream nerdctl name-store / token-path / prefix copies.
+
+    #[test]
+    fn name_store_dir_literal_matches_e2e_engine_ts_and_bats_suites() {
+        let expected = format!(
+            "{NERDCTL_DATA_ROOT}/{}/names/{CONTAINERD_NAMESPACE}",
+            nerdctl_addr_hash()
+        );
+        assert_eq!(expected, "/var/lib/nerdctl/1935db59/names/default");
+
+        let engine_ts = include_str!("../../../desktop/e2e/helpers/engine.ts");
+        assert!(
+            engine_ts.contains(&format!("'{expected}'")),
+            "engine.ts nameStoreDir() must return '{expected}'; rename it there too"
+        );
+
+        let engine_contract = include_str!("../../../_tests/e2e/engine-contract.bats");
+        assert!(
+            engine_contract.contains(&format!("STORE={expected}")),
+            "engine-contract.bats STORE= must match the Rust-computed name-store dir '{expected}'"
+        );
+
+        let update_dirty_state = include_str!("../../../_tests/e2e/update-dirty-state.bats");
+        assert!(
+            update_dirty_state.contains(&format!("STORE={expected}")),
+            "update-dirty-state.bats STORE= must match the Rust-computed name-store \
+             dir '{expected}'"
+        );
+    }
+
+    /// Pins the concrete default-basename literals `derive_wsl_distro_name_from` produces,
+    /// then asserts engine.ts's hand-written composePrefix()/wslDistroName() mirror them.
+    #[test]
+    fn engine_ts_compose_prefix_and_wsl_distro_derivation_mirrors_consts() {
+        let default_prefix =
+            derive_instance_name_from(std::path::Path::new("/home/user/.speedwave"));
+        let default_distro =
+            derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave"));
+        assert_eq!(default_prefix, "speedwave");
+        assert_eq!(default_distro, "Speedwave");
+
+        let engine_ts = include_str!("../../../desktop/e2e/helpers/engine.ts");
+        assert!(
+            engine_ts.contains(r"replace(/^\.+/, '')"),
+            "engine.ts composePrefix() must strip ALL leading dots like \
+             derive_instance_name_from's trim_start_matches('.'); rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("basename === '{default_prefix}'")),
+            "engine.ts wslDistroName() must special-case the default basename '{default_prefix}'; \
+             rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("return '{default_distro}'")),
+            "engine.ts wslDistroName() must return '{default_distro}' for the default basename; \
+             rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("'{default_prefix}-'")),
+            "engine.ts wslDistroName() must strip the '{default_prefix}-' prefix like \
+             derive_wsl_distro_name_from's strip_prefix; rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("`{default_distro}-")),
+            "engine.ts wslDistroName() must build '{default_distro}-<suffix>' for non-default \
+             basenames; rename it there too"
+        );
+    }
+
+    /// Extracts the literal directory name / filename suffix `tokens.rs` and `workers.rs`
+    /// actually use, then asserts the dirty-state spec's serviceTokenPath() mirrors them.
+    #[test]
+    fn dirty_state_spec_service_token_path_matches_tokens_and_workers_shape() {
+        let tokens_src = include_str!("../../../crates/speedwave-runtime/src/compose/tokens.rs");
+        let marker = "let secrets_dir = data_dir.join(\"";
+        let after_marker = tokens_src
+            .find(marker)
+            .map(|i| &tokens_src[i + marker.len()..])
+            .expect("tokens.rs must build the secrets dir via data_dir.join(\"...\")");
+        let secrets_dir_name = &after_marker[..after_marker
+            .find('"')
+            .expect("secrets dir name must be a quoted literal")];
+
+        let workers_src = include_str!("../../../crates/speedwave-runtime/src/compose/workers.rs");
+        let marker = "{token_key}";
+        let after_marker = workers_src
+            .find(marker)
+            .map(|i| &workers_src[i + marker.len()..])
+            .expect("workers.rs must format the token filename using {token_key}");
+        let token_suffix = &after_marker[..after_marker
+            .find('"')
+            .expect("token filename suffix must be a quoted literal")];
+        assert!(
+            token_suffix.starts_with('-') && !token_suffix.is_empty(),
+            "token filename suffix must be a non-empty, hyphen-prefixed literal, \
+             got: {token_suffix:?}"
+        );
+
+        let spec_src = include_str!("../../../desktop/e2e/specs/19-dirty-state-self-heal.spec.ts");
+        assert!(
+            spec_src.contains(&format!("'{secrets_dir_name}'")),
+            "19-dirty-state-self-heal.spec.ts serviceTokenPath() must use the same \
+             '{secrets_dir_name}' directory name as tokens::init_secrets_dir_in; \
+             rename it there too"
+        );
+        assert!(
+            spec_src.contains(&format!("{token_suffix}`")),
+            "19-dirty-state-self-heal.spec.ts serviceTokenPath() must keep the '{token_suffix}' \
+             filename suffix from workers::ensure_worker_auth_token; rename it there too"
+        );
+    }
+
+    /// Pins the update-dirty-state.bats PREFIX derivation against the same data-dir-basename,
+    /// leading-dot-stripped shape as `compose_prefix()`/`derive_instance_name_from`.
+    #[test]
+    fn update_dirty_state_bats_prefix_derivation_mirrors_compose_prefix() {
+        let bats = include_str!("../../../_tests/e2e/update-dirty-state.bats");
+        assert!(
+            bats.contains(
+                r#"PREFIX=$(basename "${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"); PREFIX=${PREFIX#.}"#
+            ),
+            "update-dirty-state.bats PREFIX derivation must mirror consts::compose_prefix() \
+             (data-dir basename, leading dot stripped); rename it there too"
+        );
     }
 }

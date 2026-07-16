@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-/** Same sentinel content the P2 bats suite (`engine-contract.bats`) plants. */
+/** Same sentinel content `engine-contract.bats` plants. */
 export const DEAD_ID = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 
 /** nerdctl name-store dir; hash pinned by `consts::tests::nerdctl_addr_hash_matches_default_socket_digest`. */

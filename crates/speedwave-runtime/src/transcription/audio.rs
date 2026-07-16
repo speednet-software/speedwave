@@ -363,15 +363,17 @@ pub fn parse_wav_to_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), Ca
     Ok((out, spec.sample_rate))
 }
 
-/// Decoded duration of a WAV file (`None` when unreadable). Counts actual
-/// samples, never the header, so it always matches what a decode pass sees.
+/// Duration of a WAV file from its header (`None` when unreadable or the header
+/// carries a zero sample rate). Never decodes samples — cheap on long recordings.
 pub fn wav_duration(path: &Path) -> Option<Duration> {
-    let (channels, rate) = parse_wav_to_channels_f32(path).ok()?;
+    let reader = hound::WavReader::open(path).ok()?;
+    let rate = reader.spec().sample_rate;
     if rate == 0 {
         return None;
     }
-    let frames = channels.iter().map(Vec::len).max()?;
-    Some(Duration::from_secs_f64(frames as f64 / rate as f64))
+    Some(Duration::from_secs_f64(
+        f64::from(reader.duration()) / f64::from(rate),
+    ))
 }
 
 /// File-backed dev path: parse + resample to 16 kHz.
@@ -707,6 +709,61 @@ mod tests {
             stream.next_chunk().unwrap().is_none(),
             "no samples → no chunks"
         );
+    }
+
+    /// Hand-crafts a minimal 16-bit mono PCM WAV so headers hound's writer
+    /// refuses (e.g. a zero sample rate) can still be planted.
+    fn write_raw_wav(path: &Path, rate: u32, frames: u32) {
+        let data_len = frames * 2;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&rate.saturating_mul(2).to_le_bytes()); // byte rate
+        b.extend_from_slice(&2u16.to_le_bytes()); // block align
+        b.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data_len.to_le_bytes());
+        b.resize(b.len() + data_len as usize, 0);
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn wav_duration_reads_the_header_of_a_valid_file() {
+        // 0.5 s mono at 16 kHz, and 0.25 s stereo (duration is per channel).
+        let (_g1, mono) = write_temp_wav(&vec![0.1f32; 8_000], 16_000, 1);
+        assert_eq!(wav_duration(&mono), Some(Duration::from_millis(500)));
+        let (_g2, stereo) = write_temp_wav(&vec![0.1f32; 4_000], 16_000, 2);
+        assert_eq!(wav_duration(&stereo), Some(Duration::from_millis(250)));
+        // A header-only WAV is a valid zero-length recording.
+        let (_g3, empty) = write_temp_wav(&[], 16_000, 1);
+        assert_eq!(wav_duration(&empty), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn wav_duration_rejects_a_zero_sample_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-rate.wav");
+        write_raw_wav(&path, 0, 100);
+        assert_eq!(wav_duration(&path), None, "rate 0 must never divide");
+        // Sanity: the same raw shape with a real rate parses.
+        let ok = dir.path().join("ok.wav");
+        write_raw_wav(&ok, 16_000, 8_000);
+        assert_eq!(wav_duration(&ok), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn wav_duration_is_none_for_unreadable_or_corrupt_files() {
+        assert_eq!(wav_duration(Path::new("/no/such/file.wav")), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.wav");
+        std::fs::write(&path, vec![0xAAu8; 200]).unwrap();
+        assert_eq!(wav_duration(&path), None);
     }
 
     #[test]
