@@ -653,12 +653,7 @@ pub fn token_dir_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf
 }
 
 /// Path to a plugin's non-secret settings file in its token dir, mounted `:ro` at
-/// `/tokens/_settings.json`. Secrets stay in `auth_fields`, never here.
-pub fn settings_file(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(token_dir(project, service_id)?.join(consts::PLUGIN_SETTINGS_FILE))
-}
-
-/// `data_dir`-parameterised variant of [`settings_file`] for tests.
+/// `/tokens/_settings.json`; `data_dir`-parameterised for tests. Secrets stay in `auth_fields`.
 pub fn settings_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
     token_dir_in(data_dir, project, service_id).join(consts::PLUGIN_SETTINGS_FILE)
 }
