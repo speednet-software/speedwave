@@ -156,6 +156,8 @@ pub struct MockRuntimeBuilder {
     build_panic_substrings: Vec<String>,
     container_exec_program: String,
     exec_piped_script: Option<String>,
+    exec_piped_hang_secs: Option<u64>,
+    exec_piped_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -217,6 +219,8 @@ impl MockRuntimeBuilder {
             build_panic_substrings: Vec::new(),
             container_exec_program: "true".to_string(),
             exec_piped_script: None,
+            exec_piped_hang_secs: None,
+            exec_piped_hang_used: Arc::new(Mutex::new(false)),
             exec_piped_error: None,
             exec_piped_failure_queue: Arc::new(Mutex::new(Vec::new())),
             validate_script: Arc::new(Mutex::new(Vec::new())),
@@ -342,6 +346,12 @@ impl MockRuntimeBuilder {
         self.exec_piped_script = Some(script.to_string());
         self
     }
+    /// ONE-SHOT hang: the first `container_exec_piped` call returns a real
+    /// `sh -c "sleep <secs>"` child (alive, zero stdout); later calls fall through.
+    pub fn with_exec_piped_hang(mut self, sleep_secs: u64) -> Self {
+        self.exec_piped_hang_secs = Some(sleep_secs);
+        self
+    }
     /// Makes `container_exec_piped` fail with `msg`.
     pub fn with_exec_piped_error(mut self, msg: &str) -> Self {
         self.exec_piped_error = Some(msg.to_string());
@@ -403,6 +413,8 @@ impl MockRuntimeBuilder {
             build_panic_substrings: self.build_panic_substrings,
             container_exec_program: self.container_exec_program,
             exec_piped_script: self.exec_piped_script,
+            exec_piped_hang_secs: self.exec_piped_hang_secs,
+            exec_piped_hang_used: self.exec_piped_hang_used,
             exec_piped_error: self.exec_piped_error,
             exec_piped_failure_queue: self.exec_piped_failure_queue,
             validate_script: self.validate_script,
@@ -441,6 +453,8 @@ struct MockRuntime {
     build_panic_substrings: Vec<String>,
     container_exec_program: String,
     exec_piped_script: Option<String>,
+    exec_piped_hang_secs: Option<u64>,
+    exec_piped_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -505,6 +519,16 @@ impl ContainerRuntime for MockRuntime {
             container: container.to_string(),
             argv: cmd.iter().map(|s| s.to_string()).collect(),
         });
+        if let Some(secs) = self.exec_piped_hang_secs {
+            let mut used = self.exec_piped_hang_used.lock().unwrap();
+            if !*used {
+                *used = true;
+                // SSOT-allow: test fixture spawn
+                let mut c = Command::new("sh");
+                c.args(["-c", &format!("sleep {secs}")]);
+                return Ok(c);
+            }
+        }
         if let Some(err) = &self.exec_piped_error {
             anyhow::bail!("{err}");
         }
@@ -940,5 +964,25 @@ mod tests {
             .output()
             .unwrap();
         assert!(out3.status.success());
+    }
+
+    #[test]
+    fn exec_piped_hang_is_one_shot_and_spawns_live_child() {
+        let (rt, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .with_exec_piped_script("second-call")
+            .build();
+        let mut first = rt.container_exec_piped("c", &["x"]).unwrap();
+        let mut child = first.spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(child.try_wait().unwrap().is_none(), "first call must hang");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let out = rt
+            .container_exec_piped("c", &["x"])
+            .unwrap()
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "second-call");
     }
 }
