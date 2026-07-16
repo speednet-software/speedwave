@@ -231,7 +231,8 @@ pub fn invalidate_all_caches() {
 }
 
 /// True when trimmed `text` is exactly `/` — the slash-menu trigger. SSOT for
-/// the "lone slash" rule (mirrored in TS composer `canSubmit`).
+/// the "lone slash" rule (mirrored in TS `isBareSlash`, slash.service.ts;
+/// consumed by composer `canSubmit` and `chat-state.service.ts`).
 pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }
@@ -846,6 +847,37 @@ mod tests {
         // Empty is blank, not the slash trigger — callers handle blank separately.
         assert!(!is_bare_slash(""));
         assert!(!is_bare_slash("   "));
+    }
+
+    #[test]
+    fn is_bare_slash_matches_ts_mirror() {
+        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
+        // TS `isBareSlash` in slash.service.ts must stay byte-identical in behavior.
+        let src = include_str!("../../../desktop/src/src/app/chat/slash/slash.service.ts");
+        let re = regex::Regex::new(
+            r"export function isBareSlash\(text: string\): boolean \{\s*return text\.trim\(\) === '/';\s*\}",
+        )
+        .unwrap();
+        assert!(
+            re.is_match(src),
+            "slash.service.ts::isBareSlash must stay `text.trim() === '/'` to match Rust is_bare_slash"
+        );
+    }
+
+    #[test]
+    fn is_bare_slash_doc_comment_names_its_actual_ts_mirror() {
+        let src = include_str!("slash.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let doc_window = lines
+            .windows(2)
+            .find(|w| w[0].contains("SSOT for") && w[1].contains("lone slash"))
+            .map(|w| format!("{} {}", w[0], w[1]))
+            .expect("is_bare_slash doc comment must exist");
+        assert!(
+            doc_window.contains("isBareSlash"),
+            "doc comment must name the real mirror (slash.service.ts::isBareSlash), \
+             not composer canSubmit (canSubmit only consumes it): {doc_window:?}"
+        );
     }
 
     fn sample_init_json() -> String {
