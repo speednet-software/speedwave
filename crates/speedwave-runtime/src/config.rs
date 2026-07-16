@@ -35,6 +35,17 @@ impl LlmProviderKind {
     pub fn is_anthropic(self) -> bool {
         matches!(self, Self::AnthropicOauth | Self::AnthropicApiKey)
     }
+
+    /// Proxy-route/usage-JSONL wire string; intentionally diverges from the
+    /// config serde repr for OpenRouter (`openrouter` vs `open_router`).
+    pub fn wire_str(&self) -> &'static str {
+        match self {
+            Self::AnthropicOauth => "anthropic_oauth",
+            Self::AnthropicApiKey => "anthropic_api_key",
+            Self::Local => "local",
+            Self::OpenRouter => "openrouter",
+        }
+    }
 }
 
 /// SSOT predicate (ADR-073): a `provider/model`-shaped id is foreign to
@@ -2115,6 +2126,43 @@ mod tests {
         assert_eq!(
             rust_kinds, ts_kinds,
             "TS LlmProviderKind union must match Rust LlmProviderKind serde strings"
+        );
+    }
+
+    fn serde_str(kind: LlmProviderKind) -> String {
+        serde_json::to_value(kind)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn wire_str_matches_serde_for_all_variants() {
+        // Anthropic kinds: wire_str() IS the serde repr (this pins the
+        // anthropic_apikey -> anthropic_api_key bug fix).
+        for kind in [
+            LlmProviderKind::AnthropicOauth,
+            LlmProviderKind::AnthropicApiKey,
+        ] {
+            assert_eq!(
+                kind.wire_str(),
+                serde_str(kind),
+                "wire_str() must match serde snake_case output for {kind:?}"
+            );
+        }
+
+        // Local/OpenRouter: wire_str() is the established proxy/usage-JSONL
+        // literal, pinned independently of serde.
+        assert_eq!(LlmProviderKind::Local.wire_str(), "local");
+        assert_eq!(LlmProviderKind::OpenRouter.wire_str(), "openrouter");
+
+        // OpenRouter's proxy/JSONL wire string deliberately differs from the
+        // config serde repr (deployed usage JSONL already carries "openrouter").
+        assert_ne!(
+            LlmProviderKind::OpenRouter.wire_str(),
+            serde_str(LlmProviderKind::OpenRouter),
+            "OpenRouter wire_str() divergence from serde is intentional; do not silently align them"
         );
     }
 
