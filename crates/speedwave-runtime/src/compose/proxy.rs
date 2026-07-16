@@ -104,8 +104,8 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
     // OAuth vs API key render the same passthrough route; the kind is learned
     // host-side from the active provider (ADR-073) — never sniffed in the proxy.
     let anthropic_kind = match llm.active_provider().map(|p| p.kind) {
-        Some(LlmProviderKind::AnthropicApiKey) => "anthropic_apikey",
-        _ => "anthropic_oauth",
+        Some(LlmProviderKind::AnthropicApiKey) => LlmProviderKind::AnthropicApiKey.wire_str(),
+        _ => LlmProviderKind::AnthropicOauth.wire_str(),
     };
 
     // Anthropic passthrough is always first — bare model names resolve here and
@@ -425,7 +425,7 @@ mod tests {
     }
 
     /// The anthropic passthrough route's kind reflects the active provider:
-    /// `anthropic_apikey` when the active entry is an API key, else oauth.
+    /// `anthropic_api_key` when the active entry is an API key, else oauth.
     #[test]
     fn anthropic_route_kind_reflects_active_provider() {
         let mut cfg = full_provider_mix();
@@ -435,7 +435,7 @@ mod tests {
         });
         let out = render_proxy_config(&cfg);
         assert!(out.contains(r#""prefix":"anthropic""#));
-        assert!(out.contains(r#""provider_kind":"anthropic_apikey""#));
+        assert!(out.contains(r#""provider_kind":"anthropic_api_key""#));
     }
 
     /// A local route carries its `provider_kind`/`provider_id`.
