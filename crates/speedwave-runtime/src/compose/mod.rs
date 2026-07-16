@@ -11755,6 +11755,85 @@ services:
     }
 
     #[test]
+    fn plugin_service_env_carries_speedwave_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("verplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("verplug", Some("verplug"), &plugin_dir, None);
+        let integrations = fixture_integrations_with_enabled("verplug");
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let env = get_service_env_seq(&doc, &plugin::derive_compose_name("verplug"));
+        let expected = format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            env.iter().any(|v| v == &expected),
+            "plugin service must receive the app version. Got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_with_reserved_speedwave_version_extra_env_fails_render() {
+        // Render-time re-validation (ADR-051) rejects a manifest installed before the
+        // key became reserved — the injected value is never shadowed by a stale duplicate.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("staleplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "staleplug".into(),
+            service_id: Some("staleplug".into()),
+            slug: "staleplug".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(std::collections::HashMap::from([(
+                "SPEEDWAVE_VERSION".to_string(),
+                "9.9.9".to_string(),
+            )])),
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let vp = plugin::VerifiedPlugin::new(
+            manifest,
+            plugin_dir,
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let integrations = fixture_integrations_with_enabled("staleplug");
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let err = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp])
+            .expect_err("reserved extra_env key must fail the render");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn credentials_digest_pass_sits_between_filter_and_env_hardening() {
         let source = include_str!("mod.rs");
         let filter_pos = source
