@@ -15,6 +15,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
+/// Cap on the SSE sniff buffer. A partial line past this is not a real usage
+/// frame; drop it so a newline-free upstream cannot grow the buffer unbounded.
+const MAX_SNIFF_BUF: usize = 1024 * 1024;
+
+/// Drops the sniff buffer if a not-yet-complete line exceeds `max`. Keeps RAM
+/// flat against a newline-free upstream; the verbatim byte relay is separate.
+fn bound_sniff_buffer(buf: &mut String, max: usize) {
+    if buf.len() > max {
+        buf.clear();
+    }
+}
+
 /// Drain all complete (`\n`-terminated) lines from `buf`, CRLF-stripped.
 /// Any remaining incomplete line stays in `buf`.
 pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
@@ -284,6 +296,8 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                                 }
                             }
                         }
+                        // Only sniffing is bounded; the byte relay below stays verbatim.
+                        bound_sniff_buffer(&mut line_buf, MAX_SNIFF_BUF);
                     }
                     // Forward chunk immediately — no buffering.
                     if tx.send(Ok(bytes)).await.is_err() {
@@ -605,6 +619,44 @@ mod tests {
             buf.is_empty(),
             "buffer must be empty after complete line consumed"
         );
+    }
+
+    #[test]
+    fn sniff_buffer_is_bounded_against_newlineless_stream() {
+        let max = 64;
+        let mut buf = String::new();
+        // No newline: drain yields nothing, buffer would grow unbounded.
+        buf.push_str(&"x".repeat(max + 10));
+        assert!(drain_complete_lines(&mut buf).is_empty());
+        bound_sniff_buffer(&mut buf, max);
+        assert!(buf.is_empty(), "over-cap partial line must be dropped");
+
+        // A partial line UNDER the cap is preserved (real split frame).
+        buf.push_str("data: {\"type\":\"mes");
+        bound_sniff_buffer(&mut buf, max);
+        assert_eq!(
+            buf, "data: {\"type\":\"mes",
+            "under-cap partial must survive"
+        );
+    }
+
+    #[test]
+    fn sniff_recovers_after_buffer_reset() {
+        let max = 64;
+        let mut buf = String::new();
+        let mut acc = UsageAcc::default();
+        buf.push_str(&"y".repeat(max + 10));
+        bound_sniff_buffer(&mut buf, max);
+        // A complete frame after the reset still parses.
+        buf.push_str("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n");
+        for line in drain_complete_lines(&mut buf) {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(data) {
+                    sniff(&frame, &mut acc);
+                }
+            }
+        }
+        assert_eq!(acc.completion_tokens, 7, "sniffing must resume after reset");
     }
 
     #[test]

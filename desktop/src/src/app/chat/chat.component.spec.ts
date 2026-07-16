@@ -674,9 +674,9 @@ describe('ChatComponent', () => {
       };
 
       expect(component.showHistory).toBe(false);
-      await component.toggleHistory();
+      component.toggleHistory();
       expect(component.showHistory).toBe(true);
-      await component.toggleHistory();
+      component.toggleHistory();
       expect(component.showHistory).toBe(false);
     });
   });
@@ -690,9 +690,9 @@ describe('ChatComponent', () => {
       };
 
       expect(component.showMemory).toBe(false);
-      await component.toggleMemory();
+      component.toggleMemory();
       expect(component.showMemory).toBe(true);
-      await component.toggleMemory();
+      component.toggleMemory();
       expect(component.showMemory).toBe(false);
     });
   });
@@ -856,6 +856,23 @@ describe('ChatComponent', () => {
       expect(invokeSpy).not.toHaveBeenCalled();
     });
 
+    it('leaves scheme-less hrefs (fragments, relative links) to the WebView', () => {
+      for (const href of ['#anchor', './relative', 'relative/path', '../up']) {
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+        const anchor = document.createElement('a');
+        anchor.setAttribute('href', href);
+        const event = new MouseEvent('click', { bubbles: true });
+        Object.defineProperty(event, 'target', { value: anchor });
+        const preventSpy = vi.spyOn(event, 'preventDefault');
+
+        component.onLinkClick(event);
+
+        expect(preventSpy).not.toHaveBeenCalled();
+        expect(invokeSpy).not.toHaveBeenCalled();
+        invokeSpy.mockRestore();
+      }
+    });
+
     it('handles clicks on elements inside a link (bubbling)', () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
       const anchor = document.createElement('a');
@@ -870,6 +887,40 @@ describe('ChatComponent', () => {
 
       expect(preventSpy).toHaveBeenCalled();
       expect(invokeSpy).toHaveBeenCalledWith('open_url', { url: 'https://example.com/docs' });
+    });
+
+    it('blocks dangerous schemes without navigating or opening', () => {
+      for (const href of [
+        'data:text/html,<script>alert(1)</script>',
+        'vbscript:msgbox(1)',
+        'javascript:alert(1)',
+        'file:///etc/passwd',
+      ]) {
+        const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+        const anchor = document.createElement('a');
+        anchor.setAttribute('href', href);
+        const event = new MouseEvent('click', { bubbles: true });
+        Object.defineProperty(event, 'target', { value: anchor });
+        const preventSpy = vi.spyOn(event, 'preventDefault');
+
+        component.onLinkClick(event);
+
+        expect(preventSpy).toHaveBeenCalled();
+        expect(invokeSpy).not.toHaveBeenCalled();
+        invokeSpy.mockRestore();
+      }
+    });
+
+    it('treats scheme case-insensitively (uppercase HTTPS opens externally)', () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', 'HTTPS://example.com/x');
+      const event = new MouseEvent('click', { bubbles: true });
+      Object.defineProperty(event, 'target', { value: anchor });
+
+      component.onLinkClick(event);
+
+      expect(invokeSpy).toHaveBeenCalledWith('open_url', { url: 'HTTPS://example.com/x' });
     });
   });
 

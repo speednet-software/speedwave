@@ -15,6 +15,8 @@ pub(crate) struct DiagnosticsInput {
     pub compose_path: Option<std::path::PathBuf>,
     /// Path to the Claude session log file.
     pub claude_session_log: Option<std::path::PathBuf>,
+    /// Path to the container entrypoint's startup diagnostics log.
+    pub entrypoint_log: Option<std::path::PathBuf>,
 }
 
 /// Writes one ZIP entry; content always passes through `log_sanitizer::sanitize()` first
@@ -83,12 +85,31 @@ pub(crate) fn build_diagnostics_zip(
         (&input.mcp_os_log, "mcp-os"),
         (&input.claude_session_log, "claude"),
         (&input.compose_path, "compose-yml"),
+        (&input.entrypoint_log, "entrypoint"),
     ];
     for (maybe_path, key) in single_files {
         if let Some(path) = maybe_path {
-            if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(path) {
+            // claude-home is container-writable: the no-follow read (Unix O_NOFOLLOW,
+            // Windows reparse rejection) keeps symlink-swapped host files out of the ZIP.
+            match speedwave_runtime::fs_perms::read_regular_file_no_follow(path) {
+                Ok(Some(content)) => {
                     write_sanitized_entry(&mut zip, options, zip_entry(key), &content)?;
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    let reason = speedwave_runtime::log_sanitizer::sanitize(&reason);
+                    log::warn!(
+                        "diagnostics source {} is unreadable, recording a placeholder: {reason}",
+                        path.display()
+                    );
+                    // Placeholder entry so the ZIP records WHY a source is absent.
+                    let name = format!("{}.unavailable.txt", zip_entry(key));
+                    write_sanitized_entry(
+                        &mut zip,
+                        options,
+                        &name,
+                        &format!("unavailable: {reason}\n"),
+                    )?;
                 }
             }
         }
@@ -146,6 +167,7 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             mcp_os_log: resolve("mcp-os"),
             compose_path: resolve("compose-yml"),
             claude_session_log: resolve("claude"),
+            entrypoint_log: resolve("entrypoint"),
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -248,6 +270,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -316,6 +339,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -360,6 +384,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: Some(compose_path),
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -400,6 +425,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -430,6 +456,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -457,6 +484,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -484,6 +512,7 @@ mod tests {
             mcp_os_log: Some(mcp_os_log),
             compose_path: None,
             claude_session_log: None,
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -517,6 +546,7 @@ mod tests {
             mcp_os_log: None,
             compose_path: None,
             claude_session_log: Some(session_log),
+            entrypoint_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -530,6 +560,34 @@ mod tests {
         let content = read_zip_entry(&zip_path, "claude/claude-session.log").unwrap();
         assert!(content.contains("SESSION: started"), "content: {content}");
         assert!(content.contains("TOOL: start"), "content: {content}");
+    }
+
+    #[test]
+    fn diagnostics_zip_includes_entrypoint_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join(".speedwave-entrypoint.log");
+        std::fs::write(
+            &log,
+            "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n",
+        )
+        .unwrap();
+        let out = tmp.path().join("diag.zip");
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: None,
+            entrypoint_log: Some(log),
+        };
+        build_diagnostics_zip(&out, &input).unwrap();
+
+        let names = zip_entry_names(&out);
+        assert!(
+            names.iter().any(|n| n == "claude/entrypoint.log"),
+            "got: {names:?}"
+        );
     }
 
     /// Matrix guard: a secret planted in EVERY textual source must be redacted
@@ -557,6 +615,7 @@ mod tests {
             "MCP_SLACK_AUTH_TOKEN=550e8400-e29b-41d4-a716-446655440000",
             "password=hunter2hunter2",
             "Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "xoxp-another-secret-token-value",
         ];
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
@@ -566,6 +625,7 @@ mod tests {
             compose_path: Some(mk("compose.yml", secrets[0])),
             // Carries the Bearer token (secrets[4]).
             claude_session_log: Some(mk("claude.log", secrets[4])),
+            entrypoint_log: Some(mk("entrypoint.log", secrets[5])),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -581,6 +641,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An unreadable source must leave a visible `.unavailable.txt` placeholder
+    /// instead of silently vanishing; readable sources next to it are unaffected.
+    #[test]
+    fn diagnostics_zip_records_placeholder_for_unreadable_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-unavailable.zip");
+
+        // A directory is rejected by read_regular_file_no_follow on every platform.
+        let unreadable = tmp.path().join("compose.yml");
+        std::fs::create_dir(&unreadable).unwrap();
+        let readable = tmp.path().join("mcp.log");
+        std::fs::write(&readable, "mcp-os log content").unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: Some(readable),
+            compose_path: Some(unreadable),
+            claude_session_log: None,
+            entrypoint_log: None,
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&"containers/compose.yml.unavailable.txt".to_string()),
+            "unreadable source must leave a placeholder entry: {names:?}"
+        );
+        assert!(
+            !names.contains(&"containers/compose.yml".to_string()),
+            "no regular entry for the unreadable source: {names:?}"
+        );
+        let placeholder =
+            read_zip_entry(&zip_path, "containers/compose.yml.unavailable.txt").unwrap();
+        assert!(
+            placeholder.starts_with("unavailable: "),
+            "placeholder must carry the reason: {placeholder}"
+        );
+
+        // The readable source next to it is packed normally, with no placeholder.
+        let mcp_entry = format!("mcp-os/{}", speedwave_runtime::consts::MCP_OS_LOG_FILE);
+        assert!(
+            names.contains(&mcp_entry),
+            "readable source must be packed unchanged: {names:?}"
+        );
+        let placeholders: Vec<&String> = names
+            .iter()
+            .filter(|n| n.ends_with(".unavailable.txt"))
+            .collect();
+        assert_eq!(
+            placeholders,
+            vec!["containers/compose.yml.unavailable.txt"],
+            "only the unreadable source gets a placeholder"
+        );
+    }
+
+    /// A missing source stays absent: no entry AND no placeholder.
+    #[test]
+    fn diagnostics_zip_missing_source_leaves_no_placeholder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-missing.zip");
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: Some(tmp.path().join("nope.log")),
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: None,
+            entrypoint_log: None,
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+        let names = zip_entry_names(&zip_path);
+        assert_eq!(
+            names,
+            vec!["system-info.txt"],
+            "a missing source must leave neither entry nor placeholder"
+        );
+    }
+
+    /// The failure reason embeds the source path; it must pass the sanitizer
+    /// before landing in the placeholder entry.
+    #[test]
+    fn diagnostics_zip_placeholder_reason_is_sanitized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-placeholder-redact.zip");
+        // Token-shaped path segment; a directory fails the no-follow read everywhere.
+        let unreadable = tmp.path().join("xoxb-1234567890-abcdefghij");
+        std::fs::create_dir(&unreadable).unwrap();
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: Some(unreadable),
+            claude_session_log: None,
+            entrypoint_log: None,
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+        let placeholder =
+            read_zip_entry(&zip_path, "containers/compose.yml.unavailable.txt").unwrap();
+        assert!(
+            !placeholder.contains("xoxb-1234567890-abcdefghij"),
+            "placeholder reason must be sanitized: {placeholder}"
+        );
     }
 
     /// Parity: every ZIP entry must trace to a registry `zip_entry`. A stray
@@ -605,15 +772,20 @@ mod tests {
             mcp_os_log: Some(mk("mcp.log")),
             compose_path: Some(mk("compose.yml")),
             claude_session_log: Some(mk("claude.log")),
+            entrypoint_log: Some(mk("entrypoint.log")),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
         let registry_entries: Vec<&str> = DIAGNOSTIC_SOURCES.iter().map(|s| s.zip_entry).collect();
         for name in zip_entry_names(&zip_path) {
-            // system-info.txt is the non-source trailing write; `logs/<file>` are dynamic.
+            // system-info.txt is the non-source trailing write; `logs/<file>` are dynamic;
+            // `<zip_entry>.unavailable.txt` is the unreadable-source placeholder.
             let traced = name == "system-info.txt"
                 || name.starts_with("logs/")
-                || registry_entries.contains(&name.as_str());
+                || registry_entries.contains(&name.as_str())
+                || name
+                    .strip_suffix(".unavailable.txt")
+                    .is_some_and(|base| registry_entries.contains(&base));
             assert!(
                 traced,
                 "ZIP entry '{name}' does not trace to any DIAGNOSTIC_SOURCES.zip_entry"

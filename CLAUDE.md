@@ -30,6 +30,7 @@ Every change must work on **both macOS and Windows**.
 - `mcp-servers.md` — worker policy + the new-worker checklist.
 - `native-macos.md` — native Swift OS integrations (Mail/Calendar/Reminders/Notes via AppleEvents), TCC permission gates, host-side Whisper transcription (macOS-only invariants).
 - `images-builds.md` — image build/rebuild rules (content-addressed tags, lazy builds, tzdata).
+- `e2e-rigs.md` — rig pipeline discipline (spec-phase split, live window, Windows transport rules, bats suite contracts).
 - `host-workers.md` — host-side worker/bridge rules (single supervisor, firewall, exit 137).
 - `desktop-ui.md` — Angular/Tauri UI rules (zoneless signals, Rust↔TS mirrors, CSP).
 - `logging.md` — the `log` facade, sanitizer SSOT, diagnostics registry.

@@ -47,14 +47,18 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `$\r$\n`
   FileWrite $0 `param($\r$\n`
   FileWrite $0 `  [ValidateSet('full', 'runtime')]$\r$\n`
-  FileWrite $0 `  [string]$$Mode = 'full'$\r$\n`
+  FileWrite $0 `  [string]$$Mode = 'full',$\r$\n`
+  FileWrite $0 `  # Params override env; the WiX CA passes paths as args (never interpolated$\r$\n`
+  FileWrite $0 `  # into a -Command literal) while NSIS/Tauri callers still use env vars.$\r$\n`
+  FileWrite $0 `  [string]$$InstDir,$\r$\n`
+  FileWrite $0 `  [string]$$DataDir$\r$\n`
   FileWrite $0 `)$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$ErrorActionPreference = 'Stop'$\r$\n`
   FileWrite $0 `$\r$\n`
-  FileWrite $0 `$$instDir = $$env:SPW_INSTDIR$\r$\n`
+  FileWrite $0 `$$instDir = if ($$InstDir) { $$InstDir } else { $$env:SPW_INSTDIR }$\r$\n`
   FileWrite $0 `if (-not $$instDir) { Write-Error 'SPW_INSTDIR not set'; exit 2 }$\r$\n`
-  FileWrite $0 `$$dataDir = $$env:SPW_DATA_DIR$\r$\n`
+  FileWrite $0 `$$dataDir = if ($$DataDir) { $$DataDir } else { $$env:SPW_DATA_DIR }$\r$\n`
   FileWrite $0 `if (-not $$dataDir) { Write-Error 'SPW_DATA_DIR not set'; exit 2 }$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `$$instDir = $$instDir.TrimEnd('\')$\r$\n`

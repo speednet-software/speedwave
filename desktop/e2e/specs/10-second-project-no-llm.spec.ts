@@ -51,7 +51,18 @@ describe('No-LLM Chat Gating (second project)', function () {
 
   it('navigates to settings from the block link', async function () {
     this.timeout(30_000);
-    await (await $('[data-testid="chat-view-no-provider"] a')).click();
-    await $('[data-testid="settings-title"]').waitForExist({ timeout: 15_000 });
+    // WebKit can throw a stale-element JS exception mid-navigation; re-fetch and retry.
+    await browser.waitUntil(
+      async () => {
+        try {
+          await (await $('[data-testid="chat-view-no-provider"] a')).click();
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 15_000, interval: 500 }
+    );
+    await $('[data-testid="settings-title"]').waitForExist({ timeout: 30_000 });
   });
 });

@@ -46,6 +46,8 @@ export {
 export {
   loadToken,
   loadTokenFile,
+  loadPluginSettings,
+  PLUGIN_SETTINGS_FILE,
   tokensDir,
   BASE_SAFE_ENV_KEYS,
   validateJSONRPCMessage,

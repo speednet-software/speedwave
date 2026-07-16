@@ -1,6 +1,8 @@
 //! Drift detector: every `SecurityExpectedPaths::compute` call site must chain
 //! `.with_telemetry_locked(...)` or the MDM mount requirement silently degrades.
 
+#![expect(clippy::expect_used, reason = "test code")]
+
 use std::path::{Path, PathBuf};
 
 const SCAN_ROOTS: &[&str] = &[

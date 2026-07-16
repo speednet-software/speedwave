@@ -5,14 +5,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { withSetupGuidance } from '@speedwave/mcp-shared';
 import axios, { AxiosError } from 'axios';
-import { RedmineClient, initializeRedmineClient, ProjectScopeError } from './client.js';
+import {
+  RedmineClient,
+  initializeRedmineClient,
+  ProjectScopeError,
+  isRetryable,
+} from './client.js';
 import type {
   RedmineConfig,
   RedmineIssue,
   RedmineTimeEntry,
   RedmineJournal,
   RedmineUser,
-  RedmineMappings,
   RedmineProjectConfig,
 } from './client.js';
 import fs from 'fs/promises';
@@ -68,11 +72,17 @@ describe('RedmineClient', () => {
       expect(mockedAxios.create).toHaveBeenCalledWith({
         baseURL: 'https://redmine.example.com',
         timeout: 30000,
+        maxRedirects: 0,
         headers: {
           'X-Redmine-API-Key': 'test-api-key-123',
           'Content-Type': 'application/json',
         },
       });
+    });
+
+    it('should disable redirects so the API key is never leaked cross-origin', () => {
+      const createArg = (mockedAxios.create as any).mock.calls[0][0];
+      expect(createArg.maxRedirects).toBe(0);
     });
 
     it('should store config and mappings from projectConfig', () => {
@@ -91,6 +101,42 @@ describe('RedmineClient', () => {
 
     it('should setup retry interceptor', () => {
       expect(mockInterceptors.response.use).toHaveBeenCalled();
+    });
+  });
+
+  describe('isRetryable', () => {
+    const err = (method: string, status?: number): AxiosError =>
+      ({
+        config: { method },
+        response: status === undefined ? undefined : { status },
+      }) as unknown as AxiosError;
+
+    it('retries idempotent GET/HEAD on 5xx, 429, and network errors', () => {
+      expect(isRetryable(err('get', 503))).toBe(true);
+      expect(isRetryable(err('head', 500))).toBe(true);
+      expect(isRetryable(err('get', 429))).toBe(true);
+      expect(isRetryable(err('get', undefined))).toBe(true);
+    });
+
+    it('never retries non-idempotent POST/PUT/DELETE (avoids duplicate mutations)', () => {
+      for (const m of ['post', 'put', 'delete', 'patch']) {
+        expect(isRetryable(err(m, 503))).toBe(false);
+        expect(isRetryable(err(m, 429))).toBe(false);
+        expect(isRetryable(err(m, undefined))).toBe(false);
+      }
+    });
+
+    it('does not retry idempotent reads on non-transient statuses', () => {
+      expect(isRetryable(err('get', 400))).toBe(false);
+      expect(isRetryable(err('get', 404))).toBe(false);
+      expect(isRetryable(err('get', 401))).toBe(false);
+    });
+
+    it('never retries redirect responses, which teach a host_url fix instead', () => {
+      for (const status of [301, 302, 303, 307, 308]) {
+        expect(isRetryable(err('get', status))).toBe(false);
+        expect(isRetryable(err('head', status))).toBe(false);
+      }
     });
   });
 
@@ -1844,9 +1890,6 @@ describe('RedmineClient', () => {
     it('should call axios instance with config on retry after delay', async () => {
       vi.useFakeTimers();
 
-      const interceptorCall = mockInterceptors.response.use.mock.calls[0];
-      const errorHandler = interceptorCall[1];
-
       // Make mockAxiosInstance callable as a function (it is used as this.client(config))
       const callableInstance = Object.assign(
         vi.fn().mockResolvedValue({ data: { retried: true } }),
@@ -1878,6 +1921,150 @@ describe('RedmineClient', () => {
       expect(callableInstance).toHaveBeenCalledWith(mockError.config);
 
       vi.useRealTimers();
+    });
+  });
+
+  // ── Redirect Handling ──────────────────────────────────────────────────────────────────────────
+
+  describe('redirect handling (maxRedirects: 0)', () => {
+    /** Build a client for `url` and return the response-error interceptor it registered. */
+    function errorHandlerFor(url: string): (error: unknown) => Promise<unknown> {
+      void new RedmineClient({ url, apiKey: 'test-api-key-123' });
+      const calls = mockInterceptors.response.use.mock.calls;
+      return calls[calls.length - 1][1];
+    }
+
+    /** Build an Axios-like redirect error for the interceptor under test. */
+    function redirectResponseError(status: number, headers: Record<string, string>) {
+      return {
+        config: { method: 'get' } as Record<string, unknown>,
+        response: { status, headers },
+        message: `Request failed with status code ${status}`,
+      };
+    }
+
+    /** Run the handler and return its rejection reason. */
+    async function rejectionOf(
+      handler: (error: unknown) => Promise<unknown>,
+      error: unknown
+    ): Promise<Error> {
+      return (await handler(error).then(
+        () => {
+          throw new Error('expected the interceptor to reject');
+        },
+        (e: unknown) => e
+      )) as Error;
+    }
+
+    it('teaches the https origin when an http host_url answers a same-origin 301 to https', async () => {
+      const handler = errorHandlerFor('http://redmine.example.com');
+      const error = redirectResponseError(301, {
+        location: 'https://redmine.example.com/issues.json',
+      });
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection).toBeInstanceOf(Error);
+      expect(rejection.message).toContain('HTTP 301');
+      expect(rejection.message).toContain('Redirects are not followed');
+      expect(rejection.message).toContain('API key');
+      expect(rejection.message).toContain('Update host_url to https://redmine.example.com.');
+      expect(rejection.message).not.toContain('/issues.json');
+    });
+
+    it('names the www origin when the host answers 301 to its www. variant', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(301, { location: 'https://www.redmine.example.com/' });
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection.message).toContain('Update host_url to https://www.redmine.example.com.');
+    });
+
+    it('names only the origin of a cross-origin redirect, never its path, query, or fragment', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(302, {
+        location: 'https://sso.corp.example/login?next=%2Fissues#top',
+      });
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection.message).toContain('Update host_url to https://sso.corp.example.');
+      expect(rejection.message).not.toContain('/login');
+      expect(rejection.message).not.toContain('next=');
+      expect(rejection.message).not.toContain('#top');
+    });
+
+    it('still explains the redirect clearly when the Location header is missing', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(302, {});
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection).toBeInstanceOf(Error);
+      expect(rejection.message).toContain('HTTP 302');
+      expect(rejection.message).toContain('without a usable Location header');
+      expect(rejection.message).toContain('update host_url');
+      expect(rejection.message).not.toContain('undefined');
+    });
+
+    it('falls back to the missing-Location message when Location is unparseable', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(301, { location: 'http://' });
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection.message).toContain('without a usable Location header');
+      expect(rejection.message).not.toContain('Update host_url to');
+    });
+
+    it('resolves a relative Location against the configured base URL', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(303, { location: '/sso/login' });
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection.message).toContain('Update host_url to https://redmine.example.com.');
+      expect(rejection.message).not.toContain('/sso/login');
+    });
+
+    it('reads a capitalized Location header from a non-normalizing transport', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(307, { Location: 'https://new.redmine.example.com' });
+
+      const rejection = await rejectionOf(handler, error);
+
+      expect(rejection.message).toContain('Update host_url to https://new.redmine.example.com.');
+    });
+
+    it('rejects a redirect immediately without consuming idempotent retries', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const error = redirectResponseError(308, { location: 'https://elsewhere.example.com' });
+
+      await expect(handler(error)).rejects.toThrow('Update host_url');
+      expect(error.config.__retryCount).toBeUndefined();
+    });
+
+    it('passes a non-redirect error through unchanged', async () => {
+      const handler = errorHandlerFor('https://redmine.example.com');
+      const notFound = {
+        config: { method: 'get' },
+        response: { status: 404, headers: {} },
+        message: 'Request failed with status code 404',
+      };
+
+      await expect(handler(notFound)).rejects.toBe(notFound);
+    });
+
+    it('leaves the non-redirect happy path unchanged', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: { issues: [], total_count: 0 } });
+
+      const result = await client.listIssues();
+
+      expect(result).toEqual({ issues: [], total_count: 0 });
+      const successHandler = mockInterceptors.response.use.mock.calls[0][0];
+      const response = { status: 200, data: { ok: true } };
+      expect(successHandler(response)).toBe(response);
     });
   });
 

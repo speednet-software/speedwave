@@ -896,7 +896,7 @@ impl std::fmt::Debug for ResolvedTelemetry {
 
 impl ResolvedTelemetry {
     /// All-off value used as the fail-closed placeholder when resolution fails;
-    /// the invalid policy is hard-stopped at boot, not carried onward.
+    /// boot hard-stops MDM-implicated failures and degrades user-layer endpoint ones here.
     pub fn disabled() -> Self {
         Self::default()
     }
@@ -928,6 +928,42 @@ fn warn_on_protocol_port_mismatch(protocol: OtlpProtocol, port: Option<u16>) {
         );
     }
 }
+
+/// Endpoint as safe-to-log text: userinfo is stripped so a URL rejected for
+/// embedded credentials never carries them into logs or error messages.
+fn redact_url_userinfo(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut u) => {
+            if u.password().is_some() || !u.username().is_empty() {
+                let _ = u.set_password(None);
+                let _ = u.set_username("");
+            }
+            u.to_string()
+        }
+        Err(_) => "<unparseable URL>".to_string(),
+    }
+}
+
+/// OTLP endpoint rejected by URL validation, with layer provenance so the boot
+/// gate can degrade a user-layer rejection while an MDM-locked one stays fatal.
+#[derive(Debug)]
+struct InvalidOtlpEndpoint {
+    endpoint: String,
+    reason: String,
+    mdm_locked: bool,
+}
+
+impl std::fmt::Display for InvalidOtlpEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid OTLP endpoint '{}': {}",
+            self.endpoint, self.reason
+        )
+    }
+}
+
+impl std::error::Error for InvalidOtlpEndpoint {}
 
 /// Merges the user and MDM telemetry layers per-field (MDM wins + locks), then
 /// gates: `enabled=false` suppresses output, `enabled=true` w/o endpoint fails closed.
@@ -1081,7 +1117,13 @@ pub fn resolve_telemetry(
             ep,
             crate::url_validation::PrivatePolicy::AllowLoopback,
         )
-        .map_err(|e| anyhow::anyhow!("invalid OTLP endpoint: {e}"))?,
+        .map_err(|reason| {
+            anyhow::Error::new(InvalidOtlpEndpoint {
+                endpoint: redact_url_userinfo(ep),
+                reason,
+                mdm_locked: managed.is_some_and(|m| m.endpoint.is_some()),
+            })
+        })?,
         None => anyhow::bail!("telemetry enabled but no OTLP endpoint configured"),
     };
     if let Some(h) = &headers_opt {
@@ -1125,21 +1167,45 @@ fn telemetry_error_implicates_mdm(
     managed.is_some() && resolve_telemetry(user, None).is_ok()
 }
 
-/// Global boot gate: resolves the telemetry policy once so every MDM error class
-/// fails closed at startup. A malformed user config degrades to defaults (ADR-076).
+/// Boot-gate decision, split from disk loading for testability: a user-layer
+/// endpoint rejection degrades to disabled telemetry; MDM failures stay fatal.
+fn check_telemetry_policy(
+    user: Option<&TelemetryConfig>,
+    managed: Option<&ManagedTelemetryConfig>,
+) -> anyhow::Result<()> {
+    let Err(e) = resolve_telemetry(user, managed) else {
+        return Ok(());
+    };
+    if let Some(ep) = e.downcast_ref::<InvalidOtlpEndpoint>() {
+        // An MDM-set endpoint failing validation IS an org policy error.
+        if ep.mdm_locked {
+            return Err(e);
+        }
+        // MDM forcing enabled=true means disabling would erase the org mandate.
+        if managed.and_then(|m| m.enabled) != Some(true) {
+            log::error!(
+                "disabling telemetry for this run: user OTLP endpoint '{}' was rejected: {}",
+                ep.endpoint,
+                ep.reason
+            );
+            return Ok(());
+        }
+    }
+    if telemetry_error_implicates_mdm(user, managed) {
+        return Err(e);
+    }
+    // A pure user-config error must not be mislabeled as an org policy error.
+    Err(anyhow::anyhow!(
+        "invalid local telemetry configuration (no organization policy involved): {e}"
+    ))
+}
+
+/// Global boot gate (ADR-076): every MDM-implicated error class fails closed at
+/// startup; a user-layer endpoint rejection logs and degrades instead.
 pub fn check_telemetry_policy_at_boot() -> anyhow::Result<()> {
     let user = load_user_config().unwrap_or_default();
     let managed = crate::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
-    if let Err(e) = resolve_telemetry(user.telemetry.as_ref(), managed.as_ref()) {
-        if telemetry_error_implicates_mdm(user.telemetry.as_ref(), managed.as_ref()) {
-            return Err(e);
-        }
-        // A pure user-config error must not be mislabeled as an org policy error.
-        return Err(anyhow::anyhow!(
-            "invalid local telemetry configuration (no organization policy involved): {e}"
-        ));
-    }
-    Ok(())
+    check_telemetry_policy(user.telemetry.as_ref(), managed.as_ref())
 }
 
 /// Top-level user config at `~/.speedwave/config.json` (highest merge priority).
@@ -1393,8 +1459,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
         flags.push(crate::prompts::local_llm_skills_nudge().to_string());
     }
 
-    // Fail-closed: an unresolvable policy degrades to disabled(); the invalid
-    // policy is hard-stopped at boot by check_telemetry_policy_at_boot.
+    // Fail-closed: an unresolvable policy degrades to disabled(). MDM-implicated
+    // failures hard-stop at boot; a user-layer bad endpoint only logs there.
     let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
     let claude = ResolvedClaudeConfig {
@@ -2557,6 +2623,182 @@ mod tests {
         };
         assert!(resolve_telemetry(None, Some(&managed)).is_err());
         assert!(telemetry_error_implicates_mdm(None, Some(&managed)));
+    }
+
+    // ── telemetry: boot-gate degradation vs MDM fatality ────────────────────
+
+    #[test]
+    fn resolve_telemetry_endpoint_error_carries_layer_provenance() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://198.18.0.10:4318".into()),
+            ..Default::default()
+        };
+        let err = resolve_telemetry(Some(&user), None).unwrap_err();
+        let ep = err.downcast_ref::<InvalidOtlpEndpoint>().unwrap();
+        // Redaction normalizes the URL (trailing slash), so match on the host.
+        assert!(ep.endpoint.contains("198.18.0.10:4318"), "{}", ep.endpoint);
+        assert!(!ep.reason.is_empty());
+        assert!(!ep.mdm_locked);
+
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://169.254.169.254/".into()),
+            ..Default::default()
+        };
+        let err = resolve_telemetry(None, Some(&managed)).unwrap_err();
+        let ep = err.downcast_ref::<InvalidOtlpEndpoint>().unwrap();
+        assert!(ep.mdm_locked, "MDM-set endpoint must carry MDM provenance");
+    }
+
+    #[test]
+    fn endpoint_error_never_carries_embedded_credentials() {
+        // The creds-rejection reason must not smuggle the password back into
+        // the error message or the boot-check log line.
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://admin:s3cr3t-pw@collector.example.com:4318".into()),
+            ..Default::default()
+        };
+        let err = resolve_telemetry(Some(&user), None).unwrap_err();
+        assert!(!err.to_string().contains("s3cr3t-pw"), "leaked: {err}");
+        let ep = err.downcast_ref::<InvalidOtlpEndpoint>().unwrap();
+        assert!(!ep.endpoint.contains("s3cr3t-pw"));
+        assert!(!ep.reason.contains("s3cr3t-pw"));
+        assert_eq!(redact_url_userinfo("not a url"), "<unparseable URL>");
+        assert_eq!(
+            redact_url_userinfo("https://c.example.com:4318/"),
+            "https://c.example.com:4318/"
+        );
+    }
+
+    #[test]
+    fn boot_check_degrades_user_layer_invalid_endpoint() {
+        // A stored endpoint reclassified by a validator tightening (RFC 2544,
+        // link-local) must not brick startup; resolve stays strict for save paths.
+        for endpoint in ["http://198.18.0.10:4318", "https://169.254.169.254/"] {
+            let user = TelemetryConfig {
+                enabled: Some(true),
+                endpoint: Some(endpoint.into()),
+                export_metrics: Some(true),
+                ..Default::default()
+            };
+            assert!(resolve_telemetry(Some(&user), None).is_err());
+            assert!(
+                check_telemetry_policy(Some(&user), None).is_ok(),
+                "user-layer endpoint {endpoint} must degrade, not hard-stop boot"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_check_degrades_user_endpoint_when_mdm_locks_unrelated_field() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://198.19.0.1:4318".into()),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            log_user_prompts: Some(false),
+            ..Default::default()
+        };
+        assert!(
+            check_telemetry_policy(Some(&user), Some(&managed)).is_ok(),
+            "MDM locking only a privacy gate must not make a user endpoint fatal"
+        );
+    }
+
+    #[test]
+    fn boot_check_stays_fatal_for_mdm_locked_invalid_endpoint() {
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://198.18.0.10:4318".into()),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(None, Some(&managed)).is_err());
+        // Enable from the user layer, endpoint from MDM: still an org policy error.
+        let user_on = TelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let endpoint_only = ManagedTelemetryConfig {
+            endpoint: Some("http://198.18.0.10:4318".into()),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(Some(&user_on), Some(&endpoint_only)).is_err());
+    }
+
+    #[test]
+    fn boot_check_stays_fatal_when_mdm_forces_telemetry_on() {
+        // MDM mandates telemetry; degrading a broken user endpoint to disabled
+        // would silently erase the org policy.
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://198.18.0.10:4318".into()),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(Some(&user), Some(&managed)).is_err());
+        assert!(check_telemetry_policy(None, Some(&managed)).is_err());
+    }
+
+    #[test]
+    fn boot_check_ok_for_valid_and_disabled_configs() {
+        assert!(check_telemetry_policy(None, None).is_ok());
+        let valid = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://collector.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(Some(&valid), None).is_ok());
+        let off_with_bad_endpoint = TelemetryConfig {
+            enabled: Some(false),
+            endpoint: Some("http://198.18.0.10:4318".into()),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(Some(&off_with_bad_endpoint), None).is_ok());
+    }
+
+    #[test]
+    fn boot_check_mdm_valid_endpoint_wins_over_user_invalid() {
+        let user = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("http://198.18.0.10:4318".into()),
+            ..Default::default()
+        };
+        let managed = ManagedTelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://corp.example.com:4318".into()),
+            export_metrics: Some(true),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(Some(&user), Some(&managed)).is_ok());
+        let r = resolve_telemetry(Some(&user), Some(&managed)).unwrap();
+        assert_eq!(r.endpoint.as_deref(), Some("https://corp.example.com:4318"));
+    }
+
+    #[test]
+    fn boot_check_other_user_errors_stay_fatal() {
+        // Only the endpoint-validation class degrades; the rest keep hard-stopping.
+        let no_endpoint = TelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let err = check_telemetry_policy(Some(&no_endpoint), None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid local telemetry configuration"));
+        let zero_interval = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://collector.example.com:4318".into()),
+            metric_export_interval_ms: Some(0),
+            ..Default::default()
+        };
+        assert!(check_telemetry_policy(Some(&zero_interval), None).is_err());
     }
 
     #[test]

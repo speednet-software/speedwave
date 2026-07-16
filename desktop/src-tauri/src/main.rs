@@ -30,6 +30,7 @@ mod ide_bridge_cmd;
 mod integrations_cmd;
 mod llm_cmd;
 mod logging_cmd;
+mod mirror_relay;
 mod oauth_cmd;
 mod oauth_flow;
 mod oauth_login_cmd;
@@ -120,6 +121,27 @@ pub(crate) fn stash_cleanup_handle(
 }
 
 const MAIN_WINDOW_LABEL: &str = "main";
+
+/// True when `url` is the app's own origin. Blocks a model-generated link from
+/// replacing the trusted UI: only the bundled app or the dev server may load.
+fn is_own_origin(url: &url::Url) -> bool {
+    match url.scheme() {
+        // Bundled app origin (tauri://localhost on macOS, http://tauri.localhost on Windows).
+        "tauri" => true,
+        "http" | "https" => matches!(url.host_str(), Some("localhost") | Some("tauri.localhost")),
+        _ => false,
+    }
+}
+
+/// Log-safe rendition of a blocked navigation target: scheme and host only — the
+/// path/query can carry model-generated or sensitive content and is never logged.
+fn blocked_navigation_origin(url: &url::Url) -> String {
+    format!(
+        "{}://{}",
+        url.scheme(),
+        url.host_str().unwrap_or("<no-host>")
+    )
+}
 
 /// Stop flag for the mcp-os watchdog thread. Set during app exit cleanup
 /// to prevent the watchdog from respawning mcp-os during shutdown.
@@ -257,6 +279,33 @@ fn plugin_bridge_get_status(
     })
 }
 
+/// Action decided by one mcp-os watchdog health tick.
+#[derive(Debug, PartialEq, Eq)]
+enum HealthOutcome {
+    Alive,
+    ShouldRespawn,
+    Cooldown,
+}
+
+/// Pure per-tick health decision: maps process liveness + the consecutive-unhealthy
+/// count to the action and the next count.
+fn mcp_os_health_outcome(
+    alive: bool,
+    consecutive_unhealthy: u32,
+    max_unhealthy: u32,
+) -> (HealthOutcome, u32) {
+    if alive {
+        (HealthOutcome::Alive, 0)
+    } else {
+        let n = consecutive_unhealthy + 1;
+        if n >= max_unhealthy {
+            (HealthOutcome::Cooldown, 0)
+        } else {
+            (HealthOutcome::ShouldRespawn, n)
+        }
+    }
+}
+
 /// mcp-os watchdog thread.
 fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
@@ -266,49 +315,70 @@ fn start_mcp_os_watchdog(mcp_os: SharedMcpOs, app_handle: tauri::AppHandle) {
         const COOLDOWN: Duration = Duration::from_secs(300);
         let mut consecutive_unhealthy: u32 = 0;
 
+        // Decide + mutate under the lock (relay ops inside the wrapper are fire-and-
+        // forget); run the compose recreate and the cooldown sleep AFTER releasing it.
+        enum Tick {
+            Respawned(u16),
+            Cooldown,
+            Nothing,
+            Stop,
+        }
         loop {
             std::thread::sleep(CHECK_INTERVAL);
             if WATCHDOG_STOP.load(Ordering::Relaxed) {
                 break;
             }
 
-            match mcp_os.lock() {
+            let action = match mcp_os.lock() {
+                Err(e) => {
+                    log::error!("mcp-os watchdog mutex poisoned: {e}");
+                    Tick::Stop
+                }
                 Ok(mut guard) => match *guard {
-                    None => break,
+                    None => Tick::Stop,
                     Some(ref mut proc) => {
-                        if proc.is_alive() {
-                            consecutive_unhealthy = 0;
-                            continue;
-                        }
-
-                        consecutive_unhealthy += 1;
-
-                        if consecutive_unhealthy >= MAX_UNHEALTHY {
-                            log::error!(
-                                "mcp-os unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
-                            );
-                            std::thread::sleep(COOLDOWN);
-                            consecutive_unhealthy = 0;
-                            continue;
-                        }
-
-                        log::warn!(
-                            "mcp-os process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                        // `is_alive` re-ensures a live worker's relay, so a distro restart
+                        // (which this host process outlives) self-heals it (ADR-080).
+                        let (outcome, next) = mcp_os_health_outcome(
+                            proc.is_alive(),
+                            consecutive_unhealthy,
+                            MAX_UNHEALTHY,
                         );
-                        match proc.respawn() {
-                            Ok(port) => {
-                                log::info!("mcp-os respawned (port {port})");
-                                reconcile::reconcile_compose_port(&app_handle);
-                            }
-                            Err(e) => {
-                                log::error!("mcp-os respawn failed: {e}");
+                        consecutive_unhealthy = next;
+                        match outcome {
+                            HealthOutcome::Alive => Tick::Nothing,
+                            HealthOutcome::Cooldown => Tick::Cooldown,
+                            HealthOutcome::ShouldRespawn => {
+                                log::warn!(
+                                    "mcp-os process unhealthy ({consecutive_unhealthy}/{MAX_UNHEALTHY}), respawning"
+                                );
+                                // The wrapper swaps the relay on respawn (ADR-080).
+                                match proc.respawn() {
+                                    Ok(new) => Tick::Respawned(new),
+                                    Err(e) => {
+                                        log::error!("mcp-os respawn failed: {e}");
+                                        Tick::Nothing
+                                    }
+                                }
                             }
                         }
                     }
                 },
-                Err(e) => {
-                    log::error!("mcp-os watchdog mutex poisoned: {e}");
-                    break;
+            };
+
+            match action {
+                Tick::Stop => break,
+                Tick::Nothing => {}
+                Tick::Respawned(new) => {
+                    log::info!("mcp-os respawned (port {new})");
+                    reconcile::reconcile_compose_port(&app_handle);
+                }
+                Tick::Cooldown => {
+                    // Counter already reset by mcp_os_health_outcome.
+                    log::error!(
+                        "mcp-os unhealthy for {MAX_UNHEALTHY} consecutive checks, cooling down"
+                    );
+                    std::thread::sleep(COOLDOWN);
                 }
             }
         }
@@ -358,8 +428,11 @@ fn ensure_mcp_os_running(mcp_os: &SharedMcpOs, app_handle: &tauri::AppHandle) {
         let script_str = script_path.to_string_lossy().to_string();
         match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
             Ok(proc) => {
-                log::info!("mcp-os started (port {})", proc.port());
-                *guard = Some(proc);
+                // The wrapper ensures the guest relay, so containers reach this host
+                // worker under WSL2 mirrored mode (ADR-080; no-op otherwise).
+                let worker = crate::mirror_relay::RelayedWorker::new(proc);
+                log::info!("mcp-os started (port {})", worker.port());
+                *guard = Some(worker);
                 drop(guard); // release before spawning watchdog thread
                 WATCHDOG_STOP.store(false, Ordering::Relaxed);
                 start_mcp_os_watchdog(mcp_os.clone(), app_handle.clone());
@@ -427,19 +500,27 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         speedwave_runtime::compose::oauth_consumer_service_ids(&resolved, &installed);
     oauth_consumers.sort();
 
+    // A stopped worker's relay rides `RetiredRelay`: torn down when the guard drops
+    // on any exit path, unless a port-reusing replacement adopts it (ADR-080).
+    let mut retired_relay: Option<crate::mirror_relay::RetiredRelay> = None;
+
     // A running worker's consumer set is fixed at spawn; reconcile against the desired set.
     if let Some(running) = map.get(project) {
-        let mut current: Vec<String> = running.spec().consumers().to_vec();
+        let mut current: Vec<String> = running.inner().spec().consumers().to_vec();
         current.sort();
         match oauth_reconcile_action(&current, &oauth_consumers) {
-            OauthReconcile::NoChange => return false,
+            OauthReconcile::NoChange => {
+                // Re-ensure the live worker's relay: a WSL distro restart wipes it while
+                // the worker (host process) survives (ADR-080; async no-op off Windows).
+                running.ensure_relay();
+                return false;
+            }
             OauthReconcile::Respawn { clear_bearer_map } => {
                 log::info!(
                     "oauth worker for '{project}' consumer set changed ({current:?} -> {oauth_consumers:?}); respawning"
                 );
-                if let Some(mut proc) = map.remove(project) {
-                    let _ = proc.stop();
-                    proc.cleanup_files();
+                if let Some(proc) = map.remove(project) {
+                    retired_relay = Some(proc.stop_for_replacement(&format!("oauth[{project}]")));
                 }
                 if clear_bearer_map {
                     // Drop the stale bearer-map so compose stops injecting into orphaned containers.
@@ -456,6 +537,8 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
 
     if oauth_consumers.is_empty() {
+        // No replacement worker follows — `retired_relay` drops here and tears down
+        // the stopped worker's relay asynchronously.
         log::debug!(
             "no oauth-consuming integration enabled for '{project}' — not spawning oauth worker"
         );
@@ -483,11 +566,15 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
         &consumer_refs,
     ) {
         Ok(proc) => {
-            log::info!(
-                "oauth worker for '{project}' started (port {})",
-                proc.port()
-            );
-            map.insert(project.to_string(), proc);
+            // The wrapper ensures the new relay (WORKER_OAUTH_URL reaches the guest relay
+            // under mirrored mode); a port-reusing replacement adopts the retired one.
+            let worker = crate::mirror_relay::RelayedWorker::new(proc);
+            let port = worker.port();
+            log::info!("oauth worker for '{project}' started (port {port})");
+            if let Some(retired) = retired_relay.as_mut() {
+                retired.adopt_port(port);
+            }
+            map.insert(project.to_string(), worker);
             drop(map);
             OAUTH_WATCHDOG_STOP.store(false, Ordering::Relaxed);
             true
@@ -499,8 +586,8 @@ pub(crate) fn ensure_oauth_running(oauth_arc: &SharedOauth, project: &str) -> bo
     }
 }
 
-/// Decide which per-project workers in the map are unhealthy, respawn them,
-/// and return the names of those whose consumer containers must be recreated.
+/// Decide which per-project workers in the map are unhealthy and respawn them;
+/// returns the respawned project names so callers recreate consumer containers.
 fn sweep_per_project_workers<P>(
     workers: &mut std::collections::HashMap<String, P>,
     log_prefix: &str,
@@ -508,45 +595,44 @@ fn sweep_per_project_workers<P>(
 where
     P: WatchdogWorker,
 {
-    if workers.is_empty() {
-        return Vec::new();
-    }
-    let names: Vec<String> = workers.keys().cloned().collect();
     let mut respawned = Vec::new();
+    let names: Vec<String> = workers.keys().cloned().collect();
     for name in names {
-        let alive = workers.get(&name).map(|p| p.is_alive()).unwrap_or(false);
-        if alive {
+        let Some(proc) = workers.get_mut(&name) else {
+            continue;
+        };
+        // The relay lifecycle rides these calls: a live probe re-ensures the relay,
+        // a respawn swaps it (`mirror_relay::RelayedWorker`, ADR-080).
+        if proc.is_alive() {
             continue;
         }
-        if let Some(proc) = workers.get_mut(&name) {
-            log::warn!("{log_prefix} worker for '{name}' unhealthy — respawning");
-            match proc.respawn() {
-                Ok(port) => {
-                    log::info!("{log_prefix} respawned '{name}' (port {port})");
-                    respawned.push(name);
-                }
-                Err(e) => {
-                    log::error!("{log_prefix} respawn for '{name}' failed: {e}");
-                }
+        log::warn!("{log_prefix} worker for '{name}' unhealthy — respawning");
+        match proc.respawn() {
+            Ok(new_port) => {
+                log::info!("{log_prefix} respawned '{name}' (port {new_port})");
+                respawned.push(name);
+            }
+            Err(e) => {
+                log::error!("{log_prefix} respawn for '{name}' failed: {e}");
             }
         }
     }
     respawned
 }
 
-/// Trait abstracting the watchdog's view of a managed worker. Implemented by every host-side
-/// worker manager supervised by a watchdog — `OauthProcess` is the per-project one today.
+/// Trait abstracting the watchdog's view of a managed worker. The production impl is
+/// `mirror_relay::RelayedWorker`, whose probe/respawn carry the ADR-080 relay lifecycle.
 pub(crate) trait WatchdogWorker {
     fn is_alive(&self) -> bool;
     fn respawn(&mut self) -> anyhow::Result<u16>;
 }
 
-impl WatchdogWorker for speedwave_runtime::oauth_process::OauthProcess {
+impl<I: mirror_relay::RelayWorkerInner> WatchdogWorker for mirror_relay::RelayedWorker<I> {
     fn is_alive(&self) -> bool {
-        speedwave_runtime::oauth_process::OauthProcess::is_alive(self)
+        mirror_relay::RelayedWorker::is_alive(self)
     }
     fn respawn(&mut self) -> anyhow::Result<u16> {
-        speedwave_runtime::oauth_process::OauthProcess::respawn(self)
+        mirror_relay::RelayedWorker::respawn(self)
     }
 }
 
@@ -567,8 +653,9 @@ fn start_per_project_watchdog<P>(
             if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            // Respawn under the lock; defer container recreate until after release.
-            let respawned: Vec<String> = {
+            // Respawn under the lock (the wrapper's relay ops are fire-and-forget);
+            // defer the container recreate until after release.
+            let respawned = {
                 let mut map = match workers.lock() {
                     Ok(g) => g,
                     Err(e) => {
@@ -783,7 +870,20 @@ fn main() {
         }
     }
 
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(
+        tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
+            .on_navigation(|_webview, url| {
+                let allowed = is_own_origin(url);
+                if !allowed {
+                    log::warn!(
+                        "blocked navigation to non-app origin: {}",
+                        blocked_navigation_origin(url)
+                    );
+                }
+                allowed
+            })
+            .build(),
+    );
 
     // WebDriver server for E2E tests on 127.0.0.1:4445; only compiled under the "e2e" feature.
     #[cfg(feature = "e2e")]
@@ -913,10 +1013,12 @@ fn main() {
                     let script_str = script_path.to_string_lossy().to_string();
                     match speedwave_runtime::mcp_os_process::McpOsProcess::spawn(&script_str) {
                         Ok(proc) => {
-                            let new_port = proc.port();
-                            log::info!("mcp-os process started (port {new_port})");
+                            // The wrapper ensures the guest relay — containers reach this
+                            // host worker under WSL2 mirrored mode (ADR-080; no-op otherwise).
+                            let worker = crate::mirror_relay::RelayedWorker::new(proc);
+                            log::info!("mcp-os process started (port {})", worker.port());
                             if let Ok(mut guard) = mcp_os.lock() {
-                                *guard = Some(proc);
+                                *guard = Some(worker);
                             }
 
                             // Compose regen + recreate so hub picks up new mcp-os port.
@@ -1219,6 +1321,7 @@ fn main() {
             transcription_cmd::list_audio_sources,
             transcription_cmd::start_transcription,
             transcription_cmd::stop_transcription,
+            transcription_cmd::resume_transcription,
             transcription_cmd::subscribe_transcript,
             transcription_cmd::list_transcripts,
             transcription_cmd::get_transcript,
@@ -1393,6 +1496,56 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    // -- is_own_origin (WebView navigation guard) --
+
+    #[test]
+    fn is_own_origin_allows_app_and_dev_origins() {
+        for u in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "http://localhost:4270/",
+            "https://localhost/",
+        ] {
+            assert!(
+                is_own_origin(&url::Url::parse(u).unwrap()),
+                "must allow own origin: {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_own_origin_blocks_foreign_and_dangerous_schemes() {
+        for u in [
+            "https://evil.example.com/phish",
+            "http://169.254.169.254/",
+            "data:text/html,<h1>hi</h1>",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                !is_own_origin(&url::Url::parse(u).unwrap()),
+                "must block non-app navigation: {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_navigation_origin_carries_scheme_and_host_only() {
+        let url = url::Url::parse("https://evil.example.com/phish?token=secret#frag").unwrap();
+        assert_eq!(blocked_navigation_origin(&url), "https://evil.example.com");
+        let no_host = url::Url::parse("data:text/html,<h1>hi</h1>").unwrap();
+        assert_eq!(blocked_navigation_origin(&no_host), "data://<no-host>");
+        let file = url::Url::parse("file:///etc/passwd").unwrap();
+        let logged = blocked_navigation_origin(&file);
+        assert!(
+            logged.starts_with("file://"),
+            "scheme must be logged: {logged}"
+        );
+        assert!(
+            !logged.contains("passwd"),
+            "the path must never reach the log: {logged}"
+        );
+    }
+
     // -- log_panic_with_fallback --
 
     #[test]
@@ -1531,7 +1684,8 @@ mod tests {
     }
 
     // ── sweep_per_project_workers: covers watchdog selection without real subprocesses ──
-    // The fake implements WatchdogWorker; the helper is reused by the oauth watchdog in production.
+    // The fake implements WatchdogWorker; production workers are `mirror_relay::RelayedWorker`,
+    // whose relay lifecycle is pinned by `relayed_worker_drives_the_full_relay_lifecycle`.
 
     struct FakeWorker {
         alive: bool,
@@ -1553,7 +1707,7 @@ mod tests {
         }
         fn respawn(&mut self) -> anyhow::Result<u16> {
             self.respawn_calls.set(self.respawn_calls.get() + 1);
-            // After a successful respawn the fake reports alive=true (matches real OauthProcess).
+            // After a successful respawn the fake reports alive=true (matches real workers).
             match &self.respawn_result {
                 Ok(p) => {
                     self.alive = true;
@@ -1585,9 +1739,9 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert("a".to_string(), FakeWorker::new(false, Ok(1111)));
         map.insert("b".to_string(), FakeWorker::new(false, Ok(2222)));
-        let mut respawned = sweep_per_project_workers(&mut map, "test");
-        respawned.sort();
-        assert_eq!(respawned, vec!["a".to_string(), "b".to_string()]);
+        let mut names = sweep_per_project_workers(&mut map, "test");
+        names.sort();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -1614,6 +1768,27 @@ mod tests {
         assert_eq!(respawned, vec!["dead".to_string()]);
         assert_eq!(map["alive"].respawn_calls.get(), 0);
         assert_eq!(map["dead"].respawn_calls.get(), 1);
+    }
+
+    #[test]
+    fn mcp_os_health_outcome_transitions() {
+        use super::{mcp_os_health_outcome, HealthOutcome};
+        // Alive resets the unhealthy counter.
+        assert_eq!(mcp_os_health_outcome(true, 3, 5), (HealthOutcome::Alive, 0));
+        // Unhealthy below the cap → respawn, counter increments.
+        assert_eq!(
+            mcp_os_health_outcome(false, 0, 5),
+            (HealthOutcome::ShouldRespawn, 1)
+        );
+        assert_eq!(
+            mcp_os_health_outcome(false, 3, 5),
+            (HealthOutcome::ShouldRespawn, 4)
+        );
+        // Reaching the cap → cooldown, counter resets (no respawn-storm).
+        assert_eq!(
+            mcp_os_health_outcome(false, 4, 5),
+            (HealthOutcome::Cooldown, 0)
+        );
     }
 
     /// Structural test: all exit paths must use `join_with_exit_watchdog`

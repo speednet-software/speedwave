@@ -6,7 +6,6 @@ use crate::types::{
     IntegrationsResponse, OsIntegrationStatusEntry,
 };
 use speedwave_runtime::config;
-use speedwave_runtime::log_sanitizer;
 use speedwave_runtime::plugin;
 
 /// Re-auth banner trigger (SharePoint, Slack). ScopeMismatch, Stale, and an
@@ -274,6 +273,11 @@ fn save_redmine_credentials(
             return Err(format!("field '{}' not allowed for service 'redmine'", key));
         }
         validate_credential_field(key, value)?;
+        // Enforce SSRF policy on save too: the frontend only validates on the
+        // Validate button, but save is directly invocable from the webview.
+        if key == "host_url" {
+            crate::redmine_api_cmd::validate_redmine_host_url(value)?;
+        }
 
         if redmine_config_json_fields().contains(&key.as_str()) {
             config_obj[key] = serde_json::Value::String(value.clone());
@@ -1200,12 +1204,12 @@ pub fn ensure_project_images_built(
         .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
     speedwave_runtime::build::build_missing_images_locked(rt, &enabled, &manifest)
-        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+        .map_err(|e| speedwave_runtime::build::user_facing_engine_error(&e))?;
 
     // Plugin images must also be built outside the compose lock (ADR-066).
     let enabled_plugin_ids = integrations.enabled_plugin_service_ids();
     speedwave_runtime::plugin::ensure_plugin_images(rt, &enabled_plugin_ids)
-        .map_err(|e| log_sanitizer::sanitize(&format!("{e:#}")))?;
+        .map_err(|e| speedwave_runtime::build::user_facing_engine_error(&e))?;
     Ok(())
 }
 
@@ -2066,6 +2070,28 @@ mod tests {
         let result = save_redmine_credentials(tmp.path(), &creds, allowed);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    #[test]
+    fn save_redmine_credentials_rejects_ssrf_host_url() {
+        // Save is directly invocable from the webview without the Validate step,
+        // so the SSRF policy must be enforced here too (loopback + metadata).
+        let allowed = &["api_key", "host_url", "project_id", "config.json"];
+        for bad in [
+            "http://127.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "file:///etc/passwd",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut creds = std::collections::HashMap::new();
+            creds.insert("host_url".to_string(), bad.to_string());
+            let result = save_redmine_credentials(tmp.path(), &creds, allowed);
+            assert!(result.is_err(), "must reject host_url {bad}");
+            assert!(
+                !tmp.path().join("config.json").exists(),
+                "no config.json must be written for a rejected host_url {bad}"
+            );
+        }
     }
 
     #[test]

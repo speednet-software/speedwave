@@ -132,6 +132,72 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Test-only: makes an existing file unreadable by its own owner via a real OS artifact
+/// (Unix `chmod 0o000`; Windows a protected empty DACL) — not a mocked error path.
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture: setup failure must panic, not be swallowed"
+)]
+pub(crate) fn make_unreadable_for_test(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 0o000 on test artifact must succeed");
+    }
+
+    #[cfg(windows)]
+    {
+        set_windows_acl_empty_for_test(path).expect("empty-DACL test artifact must succeed");
+    }
+}
+
+/// Test-only: replaces the DACL with a protected, empty one — zero ACEs denies even the
+/// owner (icacls `/inheritance:r` would keep `set_windows_acl_owner_only`'s explicit ACE).
+#[cfg(all(windows, test))]
+#[expect(
+    unsafe_code,
+    reason = "Windows DACL FFI boundary; every block carries a SAFETY comment"
+)]
+fn set_windows_acl_empty_for_test(path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        InitializeAcl, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    unsafe {
+        let mut acl: ACL = std::mem::zeroed();
+        let acl_size = std::mem::size_of::<ACL>() as u32;
+        // SAFETY: `acl` is a stack-local ACL header sized exactly for zero ACEs;
+        // InitializeAcl only writes within `acl_size` bytes of `&mut acl`.
+        if InitializeAcl(&mut acl, acl_size, ACL_REVISION) == 0 {
+            return Err("InitializeAcl failed".to_string());
+        }
+        let wide_path: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: wide_path is NUL-terminated UTF-16 and `acl` is a validly
+        // initialized empty ACL that outlives this call.
+        let rc = SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &acl,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: rc={rc}"));
+        }
+        Ok(())
+    }
+}
+
 /// Flushes file data to stable media. macOS: `F_FULLFSYNC` with fallback to `fsync` then
 /// best-effort no-op on unsupported fs (SMB/NFS). Other Unix: `fsync`. Windows: no-op.
 #[cfg(unix)]
@@ -381,6 +447,59 @@ pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Durat
     removed
 }
 
+/// Reads a file without following a final-component symlink (Unix `O_NOFOLLOW`; Windows
+/// `FILE_FLAG_OPEN_REPARSE_POINT` + handle reparse check); regular-file confirmed via the handle.
+pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW: open fails (ELOOP) on a final-component symlink.
+        // O_NONBLOCK: a FIFO/device opened read-only must not block waiting for
+        // a writer — the is_file() check below rejects it either way.
+        opts.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT (0x0020_0000): open the reparse point
+        // itself, never its target; the handle metadata check below rejects it.
+        opts.custom_flags(0x0020_0000);
+    }
+    let mut file = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot open {}: {e}", path.display())),
+    };
+    // Confirm regular file via the OPEN HANDLE (no path re-resolution).
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    #[cfg(windows)]
+    {
+        // Same Err a unix O_NOFOLLOW ELOOP produces: a name-surrogate reparse
+        // point (symlink/junction) redirects to another path and is refused.
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "cannot open {}: refusing symlink/junction",
+                path.display()
+            ));
+        }
+    }
+    if !meta.file_type().is_file() {
+        return Err(format!("not a regular file: {}", path.display()));
+    }
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(Some(buf))
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -389,6 +508,136 @@ pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Durat
 )]
 mod tests {
     use super::*;
+
+    // Unix: root bypasses mode 0o000, so this test relies on CI running unprivileged;
+    // we deliberately don't gate it — revisit if a root-run flake ever appears.
+    #[test]
+    fn make_unreadable_for_test_actually_blocks_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("t");
+        std::fs::write(&p, "x").unwrap();
+        make_unreadable_for_test(&p);
+        let err = std::fs::read(&p).expect_err("read must fail on the planted artifact");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn read_no_follow_reads_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.txt");
+        std::fs::write(&path, "line1\nline2\n").unwrap();
+        assert_eq!(
+            read_regular_file_no_follow(&path).unwrap(),
+            Some("line1\nline2\n".to_string())
+        );
+    }
+
+    #[test]
+    fn read_no_follow_returns_none_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_regular_file_no_follow(&dir.path().join("nope")).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_no_follow_rejects_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "sk-ant-SECRET\n").unwrap();
+        let link = dir.path().join("log.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert!(
+            read_regular_file_no_follow(&link).is_err(),
+            "a symlinked source must not be followed"
+        );
+    }
+
+    /// Plants a directory junction (`mklink /J`, no privilege needed) at
+    /// `base/log.txt` and asserts the no-follow read rejects it.
+    #[cfg(windows)]
+    fn assert_junction_rejected(base: &Path) {
+        let target = base.join("real");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("secret.txt"), "sk-ant-SECRET\n").unwrap();
+        let junction = base.join("log.txt");
+        // mklink is a cmd builtin; /J junctions need no privilege (unlike symlinks).
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("cmd /C mklink /J must spawn");
+        assert!(status.success(), "junction creation must succeed");
+        // Assert the plant: the junction is a name-surrogate reparse point.
+        let planted = std::fs::symlink_metadata(&junction).expect("junction must exist");
+        assert!(
+            planted.file_type().is_symlink(),
+            "planted junction must read as a reparse point"
+        );
+        let r = read_regular_file_no_follow(&junction);
+        assert!(
+            r.is_err(),
+            "a final-component junction must be rejected: {r:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_no_follow_rejects_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "sk-ant-SECRET\n").unwrap();
+        let link = dir.path().join("log.txt");
+        if let Err(e) = std::os::windows::fs::symlink_file(&secret, &link) {
+            // 1314 = ERROR_PRIVILEGE_NOT_HELD (no Developer Mode/admin): fall
+            // back to a junction, which needs no privilege, for the same check.
+            assert_eq!(
+                e.raw_os_error(),
+                Some(1314),
+                "unexpected symlink_file failure: {e}"
+            );
+            assert_junction_rejected(dir.path());
+            return;
+        }
+        let r = read_regular_file_no_follow(&link);
+        assert!(r.is_err(), "a symlinked source must not be followed: {r:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_no_follow_rejects_a_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_junction_rejected(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_no_follow_rejects_a_fifo() {
+        use std::os::unix::fs::FileTypeExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("log.txt");
+        // Skip if mkfifo is unavailable; assert the type check when present.
+        if std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            assert!(std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo());
+            // O_NOFOLLOW opens the fifo (not a symlink); the handle-based
+            // is_file() check must still reject it.
+            let r = read_regular_file_no_follow(&fifo);
+            assert!(r.is_err(), "a non-regular file must be rejected: {r:?}");
+        }
+    }
 
     #[test]
     fn writes_content_to_new_file() {

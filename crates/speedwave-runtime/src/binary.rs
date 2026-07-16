@@ -259,6 +259,75 @@ pub fn run_with_timeout(
     }
 }
 
+/// Spawns `wsl.exe` with `args`, optionally feeding `stdin` (the reparse-safe `bash -s`
+/// pattern), bounded by `timeout`. Decode output with `runtime::decode_wsl_output`.
+pub fn run_wsl_bounded(
+    args: &[&str],
+    stdin: Option<&str>,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    let mut cmd = system_command("wsl.exe");
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = cmd.spawn()?;
+    if let Some(script) = stdin {
+        if let Some(mut pipe) = child.stdin.take() {
+            use std::io::Write;
+            pipe.write_all(script.as_bytes())?;
+        }
+    }
+    wait_with_output_timeout(child, timeout)
+}
+
+/// Waits for a spawned `child` (piped stdout/stderr) at most `timeout`, draining pipes on
+/// threads; kills + errors on expiry. For callers that must feed stdin before waiting.
+pub fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    debug_assert!(
+        child.stdout.is_some() && child.stderr.is_some(),
+        "wait_with_output_timeout requires Stdio::piped() stdout AND stderr; \
+         an unpiped child silently yields empty output"
+    );
+    fn drain<R: std::io::Read + Send + 'static>(
+        pipe: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = pipe {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if start.elapsed() >= timeout => {
+                if let Err(e) = child.kill() {
+                    log::warn!("failed to kill timed-out child process: {e}");
+                }
+                let _ = child.wait();
+                anyhow::bail!("child process timed out after {}s", timeout.as_secs());
+            }
+            None => std::thread::sleep(TIMEOUT_POLL_INTERVAL),
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 /// Runs a command with a timeout, capturing stdout + stderr; kills on deadline. Concurrent reader
 /// threads drain pipes, avoiding the `run_with_timeout` buffer-fill deadlock. Forces piped stdio.
 pub fn run_with_timeout_capture(
@@ -841,6 +910,68 @@ pub(crate) mod tests {
             elapsed < Duration::from_secs(5),
             "should not wait for the full 60s, elapsed: {elapsed:?}"
         );
+    }
+
+    fn spawn_shell(script: &str) -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C").arg(script);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(script);
+            c
+        };
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn shell child")
+    }
+
+    #[test]
+    fn wait_with_output_timeout_captures_fast_child_output() {
+        let child = spawn_shell("echo drained");
+        let out = wait_with_output_timeout(child, std::time::Duration::from_secs(30))
+            .expect("fast child");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("drained"));
+    }
+
+    #[test]
+    fn wait_with_output_timeout_kills_and_errors_on_expiry() {
+        let script = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        let child = spawn_shell(script);
+        let err = wait_with_output_timeout(child, std::time::Duration::from_millis(200))
+            .expect_err("must time out");
+        assert!(err.to_string().contains("timed out"));
+    }
+
+    #[test]
+    #[cfg(all(unix, debug_assertions))]
+    #[should_panic(expected = "requires Stdio::piped()")]
+    fn wait_with_output_timeout_rejects_unpiped_child_in_debug() {
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn unpiped child");
+        let _ = wait_with_output_timeout(child, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn run_wsl_bounded_errors_off_windows_instead_of_hanging() {
+        // wsl.exe does not exist off Windows — the helper must surface a spawn
+        // error, never panic or block.
+        let err = super::run_wsl_bounded(
+            &["--list", "--running", "--quiet"],
+            None,
+            std::time::Duration::from_secs(1),
+        )
+        .expect_err("wsl.exe must not spawn off Windows");
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]

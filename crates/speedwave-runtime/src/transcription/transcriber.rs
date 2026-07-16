@@ -59,6 +59,27 @@ pub struct Word {
     pub end: Duration,
 }
 
+/// Which captured channel a segment was decoded from. Deterministic channel
+/// attribution, not speaker diarization (ADR-075 stays in force).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSource {
+    /// The system loopback ("the meeting").
+    System,
+    /// The user's microphone ("you").
+    Mic,
+}
+
+impl TranscriptSource {
+    /// Reader-facing channel label (channel attribution, not speaker identity).
+    pub fn label(self) -> &'static str {
+        match self {
+            TranscriptSource::System => "Meeting",
+            TranscriptSource::Mic => "You",
+        }
+    }
+}
+
 /// One transcript segment: a span of audio, its text, and optional per-word
 /// timings. (Speaker diarization was removed — ADR-075.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -71,6 +92,10 @@ pub struct Segment {
     pub text: String,
     /// Per-word timings (empty unless requested).
     pub words: Vec<Word>,
+    /// Channel this was decoded from (`None` on single-channel captures and
+    /// pre-Amendment-9 transcripts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TranscriptSource>,
 }
 
 /// Transcriber errors.
@@ -117,10 +142,101 @@ pub trait Transcriber: Send {
     }
 }
 
+/// Tolerance when matching a decoded segment against VAD speech spans — VAD
+/// edges and Whisper timestamps disagree by up to a few hundred ms.
+const VAD_OVERLAP_TOLERANCE: Duration = Duration::from_millis(200);
+
+/// Standalone Silero VAD (whisper.cpp GGML build). Runs on the raw decode
+/// window, so Whisper timestamps are never remapped (ADR-056 Amendment 8).
+struct SileroVad {
+    ctx: whisper_rs::WhisperVadContext,
+}
+
+impl SileroVad {
+    /// Loads the GGML Silero model at `model_path`.
+    fn load(model_path: &Path) -> Result<Self, TranscribeError> {
+        let path = model_path
+            .to_str()
+            .ok_or_else(|| TranscribeError::ModelLoad {
+                model: "silero-vad".to_string(),
+                detail: "non-UTF-8 model path".to_string(),
+            })?;
+        if !model_path.is_file() {
+            return Err(TranscribeError::ModelMissing("silero-vad".to_string()));
+        }
+        let ctx = whisper_rs::WhisperVadContext::new(
+            path,
+            whisper_rs::WhisperVadContextParams::default(),
+        )
+        .map_err(|e| TranscribeError::ModelLoad {
+            model: "silero-vad".to_string(),
+            detail: e.to_string(),
+        })?;
+        Ok(Self { ctx })
+    }
+
+    /// Speech spans in `pcm` (16 kHz mono), window-relative. Whisper.cpp default
+    /// tuning: threshold 0.5, min speech 250 ms, min silence 100 ms, pad 30 ms.
+    fn speech_spans(&mut self, pcm: &[f32]) -> Result<Vec<(Duration, Duration)>, TranscribeError> {
+        let segments = self
+            .ctx
+            .segments_from_samples(whisper_rs::WhisperVadParams::default(), pcm)
+            .map_err(|e| TranscribeError::Inference(format!("silero vad: {e}")))?;
+        // whisper.cpp VAD timestamps are centiseconds.
+        Ok(segments
+            .map(|s| {
+                (
+                    Duration::from_secs_f32(s.start.max(0.0) / 100.0),
+                    Duration::from_secs_f32(s.end.max(0.0) / 100.0),
+                )
+            })
+            .collect())
+    }
+}
+
+/// `true` when `[start, end]` overlaps any VAD speech span, padded by
+/// [`VAD_OVERLAP_TOLERANCE`] on both edges.
+fn overlaps_speech(spans: &[(Duration, Duration)], start: Duration, end: Duration) -> bool {
+    spans
+        .iter()
+        .any(|(s, e)| start < *e + VAD_OVERLAP_TOLERANCE && *s < end + VAD_OVERLAP_TOLERANCE)
+}
+
+/// The VAD gate's verdict on a span of the decode window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VadDecision {
+    /// The span overlaps speech, or no gate is active (degraded) — keep it.
+    Keep,
+    /// VAD heard speech elsewhere but none under this span — drop it.
+    Drop,
+    /// VAD heard no speech anywhere in the window — skip the decode entirely.
+    SkipWindow,
+}
+
+/// Pure VAD gate: `spans` is the window's speech spans (`None` = the gate is
+/// unavailable this window and decoding degrades to the signal-only checks).
+fn vad_decision(spans: Option<&[(Duration, Duration)]>, span: (Duration, Duration)) -> VadDecision {
+    match spans {
+        None => VadDecision::Keep,
+        Some([]) => VadDecision::SkipWindow,
+        Some(spans) if overlaps_speech(spans, span.0, span.1) => VadDecision::Keep,
+        Some(_) => VadDecision::Drop,
+    }
+}
+
+/// One-shot latch for VAD-failure warnings: `true` (warn) only on the first
+/// failure; the latch stays tripped for the rest of the recording.
+fn vad_failure_should_warn(already_warned: &mut bool) -> bool {
+    !std::mem::replace(already_warned, true)
+}
+
 /// Whisper speech-to-text via whisper.cpp. Holds a loaded context for one
 /// model; create one per recording.
 pub struct WhisperCppTranscriber {
     ctx: whisper_rs::WhisperContext,
+    vad: Option<SileroVad>,
+    /// One-shot latch so a persistently failing VAD warns once, not per window.
+    vad_warned: bool,
     model_label: String,
 }
 
@@ -144,8 +260,17 @@ impl WhisperCppTranscriber {
         })?;
         Ok(Self {
             ctx,
+            vad: None,
+            vad_warned: false,
             model_label: label,
         })
+    }
+
+    /// Attaches the Silero VAD gate (ADR-056 Amendment 8). Without it the
+    /// transcriber falls back to the signal-only hallucination gates below.
+    pub fn enable_vad(&mut self, vad_model_path: &Path) -> Result<(), TranscribeError> {
+        self.vad = Some(SileroVad::load(vad_model_path)?);
+        Ok(())
     }
 
     /// Loads catalogue model `key` from `whisper_dir`; `ModelMissing` if absent.
@@ -170,6 +295,27 @@ impl WhisperCppTranscriber {
     ) -> Result<Vec<Segment>, TranscribeError> {
         // Near-silent input makes Whisper emit trained-in filler ("Dziękuję"/"Thank you") — skip.
         if pcm.is_empty() || is_silent(pcm) {
+            return Ok(Vec::new());
+        }
+        // VAD gate: no speech in the window = no decode. A VAD failure degrades
+        // this window to the signal-only gates and retries next window (warn once).
+        let speech_spans = match self.vad.as_mut().map(|v| v.speech_spans(pcm)) {
+            Some(Ok(spans)) => Some(spans),
+            Some(Err(e)) => {
+                if vad_failure_should_warn(&mut self.vad_warned) {
+                    log::warn!(
+                        target: "transcription::transcriber",
+                        "silero vad failed ({e}) — decoding without the gate; retrying on later windows"
+                    );
+                }
+                None
+            }
+            None => None,
+        };
+        let window_end = Duration::from_secs_f64(pcm.len() as f64 / f64::from(SAMPLE_RATE_HZ));
+        if vad_decision(speech_spans.as_deref(), (Duration::ZERO, window_end))
+            == VadDecision::SkipWindow
+        {
             return Ok(Vec::new());
         }
         let mut state = self
@@ -215,12 +361,17 @@ impl WhisperCppTranscriber {
                 seg.start_timestamp(),
                 seg.end_timestamp()
             );
-            if is_hallucinated(no_speech, seg_rms) {
-                continue;
-            }
             // whisper_rs timestamps are centiseconds.
             let start = cs_to_duration(seg.start_timestamp());
             let end = cs_to_duration(seg.end_timestamp());
+            if is_hallucinated(no_speech, seg_rms) {
+                continue;
+            }
+            // A segment over a span VAD heard no speech in is a hallucination,
+            // whatever its text — drop it.
+            if vad_decision(speech_spans.as_deref(), (start, end)) != VadDecision::Keep {
+                continue;
+            }
             let text = format!("{seg}").trim().to_string();
             if text.is_empty() {
                 continue;
@@ -230,6 +381,7 @@ impl WhisperCppTranscriber {
                 end,
                 text,
                 words: Vec::new(),
+                source: None,
             });
         }
         if opts.word_timestamps {
@@ -346,6 +498,7 @@ impl Transcriber for MockTranscriber {
                 end: Duration::from_secs_f32(((i + 1) as f32 * self.seg_secs).min(total)),
                 text: self.text_template.replace("{n}", &i.to_string()),
                 words: Vec::new(),
+                source: None,
             })
             .collect())
     }
@@ -396,6 +549,143 @@ mod tests {
         // Thresholds are strict: exactly-at values are kept.
         assert!(!is_hallucinated(0.3, 0.001));
         assert!(!is_hallucinated(0.6, 0.0055));
+    }
+
+    #[test]
+    fn overlaps_speech_matches_within_tolerance_only() {
+        let spans = vec![
+            (Duration::from_secs(1), Duration::from_secs(3)),
+            (Duration::from_secs(10), Duration::from_secs(12)),
+        ];
+        // Fully inside a span.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_millis(1500),
+            Duration::from_millis(2500)
+        ));
+        // Straddling a span edge.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_millis(2500),
+            Duration::from_millis(4000)
+        ));
+        // Within the 200 ms tolerance before a span starts.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_millis(700),
+            Duration::from_millis(900)
+        ));
+        // In the silence gap, farther than the tolerance from both spans.
+        assert!(!overlaps_speech(
+            &spans,
+            Duration::from_millis(5000),
+            Duration::from_millis(8000)
+        ));
+        // Past the last span.
+        assert!(!overlaps_speech(
+            &spans,
+            Duration::from_secs(20),
+            Duration::from_secs(21)
+        ));
+        // No spans at all never matches.
+        assert!(!overlaps_speech(
+            &[],
+            Duration::ZERO,
+            Duration::from_secs(1)
+        ));
+        // A zero-length segment inside a span still matches.
+        assert!(overlaps_speech(
+            &spans,
+            Duration::from_secs(2),
+            Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn vad_decision_covers_keep_drop_and_skip() {
+        let spans = vec![(Duration::from_secs(1), Duration::from_secs(3))];
+        // Overlapping speech → keep.
+        assert_eq!(
+            vad_decision(
+                Some(&spans),
+                (Duration::from_secs(2), Duration::from_secs(4))
+            ),
+            VadDecision::Keep
+        );
+        // Speech elsewhere, none under the span → drop.
+        assert_eq!(
+            vad_decision(
+                Some(&spans),
+                (Duration::from_secs(10), Duration::from_secs(12))
+            ),
+            VadDecision::Drop
+        );
+        // No speech anywhere in the window → skip the decode entirely.
+        assert_eq!(
+            vad_decision(Some(&[]), (Duration::ZERO, Duration::from_secs(12))),
+            VadDecision::SkipWindow
+        );
+        // Gate unavailable (VAD failed/absent) → degrade to keep.
+        assert_eq!(
+            vad_decision(None, (Duration::from_secs(10), Duration::from_secs(12))),
+            VadDecision::Keep
+        );
+    }
+
+    #[test]
+    fn vad_failure_warn_latch_fires_once_and_stays_tripped() {
+        let mut warned = false;
+        assert!(vad_failure_should_warn(&mut warned), "first failure warns");
+        assert!(warned, "the latch trips on the first failure");
+        assert!(
+            !vad_failure_should_warn(&mut warned),
+            "later failures stay quiet"
+        );
+        assert!(!vad_failure_should_warn(&mut warned));
+        assert!(warned);
+    }
+
+    #[test]
+    fn transcript_source_labels_match_live_transcript_component() {
+        // The Angular live view re-derives the You/Meeting channel labels in a
+        // ternary; pin its literals to `TranscriptSource::label()` (the SSOT).
+        let src = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
+        );
+        for (variant, ts_tag) in [
+            (TranscriptSource::Mic, "mic"),
+            (TranscriptSource::System, "system"),
+        ] {
+            let expr = format!("seg.source === '{ts_tag}' ? '{}'", variant.label());
+            assert!(
+                src.contains(&expr),
+                "live-transcript.component.ts must label the {ts_tag} channel '{}' (expected fragment: {expr})",
+                variant.label()
+            );
+        }
+    }
+
+    #[test]
+    fn silero_vad_load_reports_missing_and_corrupt_models() {
+        let err = match SileroVad::load(Path::new("/no/such/vad.bin")) {
+            Ok(_) => panic!("expected load to fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, TranscribeError::ModelMissing(ref m) if m == "silero-vad"),
+            "got {err}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vad.bin");
+        std::fs::write(&path, b"not a ggml vad model").unwrap();
+        let err = match SileroVad::load(&path) {
+            Ok(_) => panic!("expected load to fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, TranscribeError::ModelLoad { ref model, .. } if model == "silero-vad"),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -498,6 +788,7 @@ mod tests {
                 start: Duration::from_millis(1230),
                 end: Duration::from_millis(2000),
             }],
+            source: None,
         };
         assert_eq!(
             serde_json::from_str::<Segment>(&serde_json::to_string(&seg).unwrap()).unwrap(),

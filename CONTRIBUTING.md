@@ -31,6 +31,8 @@ cd speedwave
 make setup-dev
 ```
 
+Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain via Chocolatey; requires admin and self-elevates), then open a **new** Git Bash and run `make setup-dev`.
+
 ### Running Tests
 
 The required CI checks on every PR to `dev`/`main` (macOS + Windows) are the test and quality gate; the commands below are optional for a local pass. The pre-push hook runs only `make check-fmt` (fast format check, no builds/tests).

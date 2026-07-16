@@ -2,11 +2,17 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  ElementRef,
+  Injector,
+  afterNextRender,
   computed,
+  effect,
   inject,
   input,
   output,
   signal,
+  untracked,
+  viewChild,
 } from '@angular/core';
 import { Router } from '@angular/router';
 
@@ -22,9 +28,20 @@ function fmtTs(secs: number): string {
   return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
+/**
+ * Chronological comparator on segment start times.
+ * @param a - left segment
+ * @param b - right segment
+ */
+function bySegmentStart(a: Segment, b: Segment): number {
+  return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
+}
+
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
+  /** Channel label ('You' / 'Meeting') on paired captures, else null. */
+  speaker: string | null;
   text: string;
 }
 
@@ -52,7 +69,12 @@ interface TranscriptLine {
         </div>
       }
 
-      <div class="flex-1 overflow-y-auto" data-testid="transcript-body">
+      <div
+        #body
+        class="flex-1 overflow-y-auto"
+        data-testid="transcript-body"
+        (scroll)="onBodyScroll()"
+      >
         @if (lines().length === 0) {
           <p class="text-[12px] text-[var(--ink-mute)]">No transcript yet.</p>
         }
@@ -60,13 +82,20 @@ interface TranscriptLine {
           <div class="mb-2">
             <div class="mb-0.5 flex items-center gap-1 text-[11px]">
               <span class="text-[var(--ink-mute)]">{{ line.startLabel }}</span>
+              @if (line.speaker) {
+                <span
+                  class="rounded bg-[var(--bg-2)] px-1 font-medium text-[var(--ink-mute)]"
+                  data-testid="line-speaker"
+                  >{{ line.speaker }}</span
+                >
+              }
             </div>
             <p class="text-[13px] leading-relaxed text-[var(--ink)]">{{ line.text }}</p>
           </div>
         }
         @if (draft()) {
           <p
-            class="mb-2 text-[13px] italic leading-relaxed text-[var(--ink-mute)]"
+            class="mb-2 whitespace-pre-line text-[13px] italic leading-relaxed text-[var(--ink-mute)]"
             data-testid="live-draft"
           >
             {{ draft() }}
@@ -115,13 +144,19 @@ export class LiveTranscriptComponent {
     return s.final_segments ?? s.live_segments;
   });
 
-  /** Segments rendered as plain timestamped lines. */
-  readonly lines = computed<TranscriptLine[]>(() =>
-    this.segments().map((seg) => ({
+  /**
+   * Segments as timestamped lines, chronological — per-channel decode cycles
+   * can append a mic segment after a later system one (or vice versa).
+   */
+  readonly lines = computed<TranscriptLine[]>(() => {
+    // Sort a copy: the stored order is append order, and sort() is stable.
+    const ordered = [...this.segments()].sort(bySegmentStart);
+    return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
+      speaker: seg.source === 'mic' ? 'You' : seg.source === 'system' ? 'Meeting' : null,
       text: seg.text.trim(),
-    }))
-  );
+    }));
+  });
 
   /** Lifecycle state of the active session ('' if none). */
   readonly status = computed(() => this.session()?.status.state ?? '');
@@ -139,6 +174,68 @@ export class LiveTranscriptComponent {
   private readonly transcription = inject(TranscriptionService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly router = inject(Router);
+  private readonly injector = inject(Injector);
+
+  /** The scrollable transcript body. */
+  private readonly body = viewChild<ElementRef<HTMLDivElement>>('body');
+  /** False once the user scrolls up; re-arms when they return to the bottom. */
+  private readonly stickToBottom = signal(true);
+  /** Id-only view of the session, so snapshot updates don't retrigger effects. */
+  private readonly sessionId = computed(() => this.session()?.id ?? '');
+
+  /** Wires the auto-scroll effects (constructor = injection context). */
+  constructor() {
+    // A newly opened session starts pinned: live tail while recording, top when
+    // reading a finished transcript (never inherit the previous session's scroll).
+    effect(() => {
+      this.sessionId();
+      this.stickToBottom.set(true);
+      if (untracked(() => this.status()) === 'recording') {
+        this.scrollToBottom();
+      } else {
+        this.scrollToTop();
+      }
+    });
+    // Follow the live tail while recording, unless the user scrolled up to read.
+    effect(() => {
+      this.lines();
+      this.draft();
+      if (this.status() === 'recording' && this.stickToBottom()) this.scrollToBottom();
+    });
+  }
+
+  /** Tracks whether the user sits at (within 50 px of) the bottom. */
+  onBodyScroll(): void {
+    const el = this.body()?.nativeElement;
+    if (!el) return;
+    this.stickToBottom.set(el.scrollHeight - el.scrollTop - el.clientHeight < 50);
+  }
+
+  /** Pins the transcript body to the bottom after Angular commits new lines. */
+  private scrollToBottom(): void {
+    afterNextRender(
+      {
+        write: () => {
+          const el = this.body()?.nativeElement;
+          if (el) el.scrollTop = el.scrollHeight;
+        },
+      },
+      { injector: this.injector }
+    );
+  }
+
+  /** Resets the transcript body to the top (opening a finished session). */
+  private scrollToTop(): void {
+    afterNextRender(
+      {
+        write: () => {
+          const el = this.body()?.nativeElement;
+          if (el) el.scrollTop = 0;
+        },
+      },
+      { injector: this.injector }
+    );
+  }
 
   /** Confirms, drops the transcript into the chat, then opens the chat tab. */
   async sendToChat(): Promise<void> {

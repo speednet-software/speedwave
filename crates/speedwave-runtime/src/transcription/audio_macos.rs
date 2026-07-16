@@ -11,7 +11,7 @@ use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError,
 };
-use super::mix::{MixBuffer, MixSource, CHUNK_SAMPLES};
+use super::mix::{MixBuffer, MixSource, PairedPcm, CHUNK_SAMPLES};
 
 /// Name of the bundled CLI (resolved via `binary::command`).
 const CLI_NAME: &str = "audio-capture-cli";
@@ -285,6 +285,7 @@ impl AudioStream for PassthroughCliStream {
                     }
                     return Ok(Some(AudioChunk {
                         samples,
+                        mic: None,
                         offset: Duration::from_nanos(offset_ns),
                     }));
                 }
@@ -299,7 +300,7 @@ impl AudioStream for PassthroughCliStream {
 }
 
 /// `AudioStream` for a mixed CLI run: `raw` feeds frames (stream 0 = system,
-/// 1 = mic) into `mix`, which sums them into one mono stream (ADR-056 dec. 15).
+/// 1 = mic) into `mix`, which pairs them into aligned channels (ADR-056 Am. 9).
 struct MixedCliStream {
     raw: CliRawReader,
     mix: MixBuffer,
@@ -317,9 +318,10 @@ impl AudioStream for MixedCliStream {
         let want = CHUNK_SAMPLES;
         loop {
             let start_ns = self.mix.offset_ns();
-            if let Some(samples) = self.mix.pop(1, want) {
+            if let Some(PairedPcm { system: sys, mic }) = self.mix.pop_pair(1, want) {
                 return Ok(Some(AudioChunk {
-                    samples,
+                    samples: sys,
+                    mic: Some(mic),
                     offset: Duration::from_nanos(start_ns),
                 }));
             }
@@ -327,9 +329,10 @@ impl AudioStream for MixedCliStream {
                 None => {
                     let start_ns = self.mix.offset_ns();
                     self.mix.finish();
-                    if let Some(samples) = self.mix.pop(1, usize::MAX) {
+                    if let Some(PairedPcm { system: sys, mic }) = self.mix.pop_pair(1, usize::MAX) {
                         return Ok(Some(AudioChunk {
-                            samples,
+                            samples: sys,
+                            mic: Some(mic),
                             offset: Duration::from_nanos(start_ns),
                         }));
                     }
@@ -687,25 +690,30 @@ mod tests {
     }
 
     #[test]
-    fn mixed_stream_sums_stream_0_and_stream_1_then_drains_at_eof() {
-        // Two equal-length runs at offset 0 → 0.5·sys + 0.5·mic.
+    fn mixed_stream_pairs_stream_0_and_stream_1_then_drains_at_eof() {
+        // Two equal-length runs at offset 0 → an aligned (system, mic) pair.
         let mut bytes = frame(0, 0, &[1.0; 4]);
         bytes.extend_from_slice(&frame(1, 0, &[1.0; 4]));
-        // A tail on the system side only — drained at EOF as silence-padded mic.
+        // A tail on the system side only — drained at EOF with a zero-padded mic.
         bytes.extend_from_slice(&frame(0, 250_000, &[0.6; 4])); // 250µs → index 4
         let mut stream = MixedCliStream {
             raw: raw_reader_over(&bytes),
             mix: MixBuffer::new(),
         };
-        // First chunk: the aligned 4 samples (both sides), summed to 1.0.
+        // First chunk: the aligned 4 samples on each channel, unmixed.
         let c1 = stream.next_chunk().unwrap().unwrap();
         assert_eq!(c1.samples.len(), 4);
         assert!(c1.samples.iter().all(|&s| (s - 1.0).abs() < 1e-5));
+        // Paired capture always carries the mic channel.
+        let mic1 = c1.mic.unwrap();
+        assert!(mic1.iter().all(|&s| (s - 1.0).abs() < 1e-5));
         assert_eq!(c1.offset, Duration::from_nanos(0));
-        // Next: EOF → finish() → drains the system-only tail (0.5·0.6 = 0.3).
+        // Next: EOF → finish() → drains the system-only tail; mic pads as zeros.
         let c2 = stream.next_chunk().unwrap().unwrap();
         assert_eq!(c2.samples.len(), 4);
-        assert!(c2.samples.iter().all(|&s| (s - 0.3).abs() < 1e-5));
+        assert!(c2.samples.iter().all(|&s| (s - 0.6).abs() < 1e-5));
+        let mic2 = c2.mic.unwrap(); // present even when zero-padded
+        assert!(mic2.iter().all(|&s| s.abs() < 1e-6));
         assert!(stream.next_chunk().unwrap().is_none());
     }
 }

@@ -69,12 +69,15 @@ impl CaptureCapabilities {
     }
 }
 
-/// One chunk of captured PCM: 16 kHz mono `f32` samples in `[-1.0, 1.0]`, plus the offset of
-/// this chunk's first sample from recording start. `Mixed` sources are already backend-mixed.
+/// One chunk of captured PCM: 16 kHz `f32` samples in `[-1.0, 1.0]`, plus the offset of this
+/// chunk's first sample from recording start. `Mixed` sources deliver both channels, paired.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
-    /// 16 kHz mono samples, `[-1.0, 1.0]`.
+    /// 16 kHz mono samples: the only channel, or the system side when `mic` is set.
     pub samples: Vec<f32>,
+    /// Mic-side samples index-aligned with `samples` (`Mixed` captures only) —
+    /// decoded separately so quiet speech never competes with loud playback.
+    pub mic: Option<Vec<f32>>,
     /// Offset of `samples[0]` from the start of capture.
     pub offset: Duration,
 }
@@ -113,6 +116,9 @@ pub enum CaptureWarning {
     MicrophoneStalled,
     /// System audio stopped delivering; recording continues with the mic only.
     SystemAudioStalled,
+    /// A registered audio part contributed nothing to the offline pass — the
+    /// finalized transcript is missing that span (resumed parts, ADR-056 Am. 10).
+    RecordingPartMissing,
 }
 
 /// A capture-health transition: a warning raised, or a prior one recovered.
@@ -298,6 +304,7 @@ impl AudioStream for FilePlaybackStream {
         let end = (self.pos + self.frames_per_chunk).min(self.samples.len());
         let chunk = AudioChunk {
             samples: self.samples[self.pos..end].to_vec(),
+            mic: None,
             offset: Duration::from_micros(
                 (self.pos as u128 * 1_000_000 / SAMPLE_RATE_HZ as u128) as u64,
             ),
@@ -310,6 +317,23 @@ impl AudioStream for FilePlaybackStream {
 /// Parses a WAV file into mono `f32` samples (no resampling). Returns the downmixed samples and
 /// the file's sample rate so callers can choose to resample or trust it.
 pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureError> {
+    let (channels, rate) = parse_wav_to_channels_f32(path)?;
+    let mono = match channels.len() {
+        0 => Vec::new(),
+        1 => channels.into_iter().next().unwrap_or_default(),
+        n => {
+            let len = channels.iter().map(Vec::len).min().unwrap_or(0);
+            (0..len)
+                .map(|i| channels.iter().map(|ch| ch[i]).sum::<f32>() / n as f32)
+                .collect()
+        }
+    };
+    Ok((mono, rate))
+}
+
+/// Parses a WAV file into per-channel `f32` samples (no resampling, no downmix).
+/// Returns one `Vec` per channel plus the file's sample rate.
+pub fn parse_wav_to_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, u32), CaptureError> {
     let mut reader = hound::WavReader::open(path)
         .map_err(|e| CaptureError::Failed(format!("open WAV {}: {e}", path.display())))?;
     let spec = reader.spec();
@@ -330,15 +354,26 @@ pub fn parse_wav_to_mono_f32(path: &Path) -> Result<(Vec<f32>, u32), CaptureErro
         }
     };
     let channels = spec.channels.max(1) as usize;
-    let mono = if channels == 1 {
-        interleaved
-    } else {
-        interleaved
-            .chunks(channels)
-            .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
-            .collect()
-    };
-    Ok((mono, spec.sample_rate))
+    let mut out = vec![Vec::with_capacity(interleaved.len() / channels); channels];
+    for frame in interleaved.chunks(channels) {
+        for (ch, &s) in frame.iter().enumerate() {
+            out[ch].push(s);
+        }
+    }
+    Ok((out, spec.sample_rate))
+}
+
+/// Duration of a WAV file from its header (`None` when unreadable or the header
+/// carries a zero sample rate). Never decodes samples — cheap on long recordings.
+pub fn wav_duration(path: &Path) -> Option<Duration> {
+    let reader = hound::WavReader::open(path).ok()?;
+    let rate = reader.spec().sample_rate;
+    if rate == 0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(
+        f64::from(reader.duration()) / f64::from(rate),
+    ))
 }
 
 /// File-backed dev path: parse + resample to 16 kHz.
@@ -459,6 +494,10 @@ mod tests {
             (CaptureWarning::SystemAudioSilent, "system_audio_silent"),
             (CaptureWarning::MicrophoneStalled, "microphone_stalled"),
             (CaptureWarning::SystemAudioStalled, "system_audio_stalled"),
+            (
+                CaptureWarning::RecordingPartMissing,
+                "recording_part_missing",
+            ),
         ] {
             assert_eq!(
                 serde_json::to_string(&variant).unwrap(),
@@ -670,6 +709,61 @@ mod tests {
             stream.next_chunk().unwrap().is_none(),
             "no samples → no chunks"
         );
+    }
+
+    /// Hand-crafts a minimal 16-bit mono PCM WAV so headers hound's writer
+    /// refuses (e.g. a zero sample rate) can still be planted.
+    fn write_raw_wav(path: &Path, rate: u32, frames: u32) {
+        let data_len = frames * 2;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&rate.saturating_mul(2).to_le_bytes()); // byte rate
+        b.extend_from_slice(&2u16.to_le_bytes()); // block align
+        b.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data_len.to_le_bytes());
+        b.resize(b.len() + data_len as usize, 0);
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn wav_duration_reads_the_header_of_a_valid_file() {
+        // 0.5 s mono at 16 kHz, and 0.25 s stereo (duration is per channel).
+        let (_g1, mono) = write_temp_wav(&vec![0.1f32; 8_000], 16_000, 1);
+        assert_eq!(wav_duration(&mono), Some(Duration::from_millis(500)));
+        let (_g2, stereo) = write_temp_wav(&vec![0.1f32; 4_000], 16_000, 2);
+        assert_eq!(wav_duration(&stereo), Some(Duration::from_millis(250)));
+        // A header-only WAV is a valid zero-length recording.
+        let (_g3, empty) = write_temp_wav(&[], 16_000, 1);
+        assert_eq!(wav_duration(&empty), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn wav_duration_rejects_a_zero_sample_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-rate.wav");
+        write_raw_wav(&path, 0, 100);
+        assert_eq!(wav_duration(&path), None, "rate 0 must never divide");
+        // Sanity: the same raw shape with a real rate parses.
+        let ok = dir.path().join("ok.wav");
+        write_raw_wav(&ok, 16_000, 8_000);
+        assert_eq!(wav_duration(&ok), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn wav_duration_is_none_for_unreadable_or_corrupt_files() {
+        assert_eq!(wav_duration(Path::new("/no/such/file.wav")), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("garbage.wav");
+        std::fs::write(&path, vec![0xAAu8; 200]).unwrap();
+        assert_eq!(wav_duration(&path), None);
     }
 
     #[test]

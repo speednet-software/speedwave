@@ -16,7 +16,7 @@ On macOS, Lima manages the containerd VM using Apple Virtualization Framework (`
 
 ## Where it lives in code
 
-- VM config (`vmType: vz`, Rosetta, vzNAT network, virtiofs mounts, boot-time netplan provision script) — `lima_config()` in `desktop/src-tauri/src/setup_wizard.rs`. The `vmType` is written directly into the YAML string; there is no `cfg!(target_os = ...)` branch selecting it.
+- VM config (`vmType: vz`, Rosetta, vzNAT network, virtiofs mounts, boot-time provision scripts: the netplan route-metric fix and the lima-guestagent `CAP_SYS_TIME` drop-in) — `lima_config()` in `crates/speedwave-runtime/src/provision.rs`. The `vmType` is written directly into the YAML string; there is no `cfg!(target_os = ...)` branch selecting it.
 - Home mount — the config mounts the entire host home directory (`location: "~"`, `writable: true`), not a narrower `~/.speedwave` subtree.
 - Networking — `networks: - vzNAT: true`[^5]; the VM inherits the host routing table (and VPN tunnels). There is no Lima port-forwarding / `guestPortRange` configuration. Container-to-host reach uses the static vzNAT host IP `consts::LIMA_VZ_HOST_IP` (`192.168.5.2`).
 - Isolated `LIMA_HOME` (`~/.speedwave/lima`) — `binary::lima_home()` in `crates/speedwave-runtime/src/binary.rs`, set as an env var on every `limactl` invocation by `binary::command()`.

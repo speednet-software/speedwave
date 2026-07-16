@@ -291,7 +291,7 @@ pub struct PluginManifest {
 }
 
 /// Host-bridge declaration in `plugin.json`. Desktop reads this at startup and spawns a
-/// `HostBridge` per these fields; `compose::apply_plugins` injects `{url_env}`/`{token_env}`.
+/// `HostBridge` per these fields; `compose::apply_plugins_from_verified` injects `{url_env}`/`{token_env}`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HostBridgeManifest {
     /// Env var name for the bridge URL injected into the container worker.
@@ -410,6 +410,12 @@ pub struct PluginManifestSummary {
 /// Returns `~/.speedwave/plugins/`
 pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir().join("plugins"))
+}
+
+/// The claude-resources dir a plugin's `/speedwave/plugins/<slug>` mount must come from —
+/// shared by the renderer (`compose/plugins.rs`) and `SecurityCheck::check_claude_workspace_mount`.
+pub fn plugin_claude_resources_dir(plugin_dir: &Path) -> PathBuf {
+    plugin_dir.join("claude-resources")
 }
 
 /// Returns the base directory for mutable per-plugin state — default `~/.speedwave/plugin-state/`.
@@ -650,6 +656,37 @@ pub fn token_dir(project: &str, service_id: &str) -> anyhow::Result<PathBuf> {
 /// can bypass the `consts::data_dir()` OnceLock.
 pub fn token_dir_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
     data_dir.join("tokens").join(project).join(service_id)
+}
+
+/// Path to a plugin's non-secret settings file in its token dir, mounted `:ro` at
+/// `/tokens/_settings.json`; `data_dir`-parameterised for tests. Secrets stay in `auth_fields`.
+pub fn settings_file_in(data_dir: &Path, project: &str, service_id: &str) -> PathBuf {
+    token_dir_in(data_dir, project, service_id).join(consts::PLUGIN_SETTINGS_FILE)
+}
+
+/// Writes the (caller-validated) settings JSON into the per-plugin token dir, owner-only and
+/// fsync-before-rename. Never a secret channel — those go to `auth_fields` files.
+pub fn write_settings_file(
+    project: &str,
+    service_id: &str,
+    settings: &serde_json::Value,
+) -> anyhow::Result<()> {
+    write_settings_file_in(consts::data_dir(), project, service_id, settings)
+}
+
+/// `data_dir`-parameterised variant of [`write_settings_file`] for tests.
+pub fn write_settings_file_in(
+    data_dir: &Path,
+    project: &str,
+    service_id: &str,
+    settings: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let dir = token_dir_in(data_dir, project, service_id);
+    crate::fs_perms::ensure_owner_only_dir(&dir)?;
+    let path = dir.join(consts::PLUGIN_SETTINGS_FILE);
+    let body = serde_json::to_string_pretty(settings)? + "\n";
+    crate::fs_perms::write_restricted_file(&path, &body)?;
+    Ok(())
 }
 
 /// Host-only OAuth state `~/.speedwave/oauth/<project>/<service_id>.json`
@@ -981,6 +1018,13 @@ pub(crate) fn validate_manifest(
         {
             anyhow::bail!(
                 "Invalid auth_field key '{}': must not contain path separators, '..', or null bytes",
+                field.key
+            );
+        }
+        // The settings file shares the token dir with credential files — reserve its name.
+        if field.key == consts::PLUGIN_SETTINGS_FILE {
+            anyhow::bail!(
+                "auth_field key '{}' is reserved for the plugin settings file",
                 field.key
             );
         }
@@ -2699,11 +2743,46 @@ fn yaml_quote_entry(entry: &str) -> String {
     }
 }
 
+/// ZIP-bomb caps enforced by [`extract_zip`]; defaults are the `consts` SSOT values.
+/// Production callers never override them; tests inject small values to hit the boundaries.
+struct ZipExtractionLimits {
+    max_entries: usize,
+    max_total_uncompressed: u64,
+    max_compression_ratio: u64,
+}
+
+impl Default for ZipExtractionLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: crate::consts::PLUGIN_ZIP_MAX_ENTRIES,
+            max_total_uncompressed: crate::consts::PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED,
+            max_compression_ratio: crate::consts::PLUGIN_ZIP_MAX_COMPRESSION_RATIO,
+        }
+    }
+}
+
 fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
+    extract_zip_with_limits(zip_path, dest, &ZipExtractionLimits::default())
+}
+
+fn extract_zip_with_limits(
+    zip_path: &Path,
+    dest: &Path,
+    limits: &ZipExtractionLimits,
+) -> anyhow::Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    // Pre-validate: reject dangerous entries before writing anything to disk.
+    if archive.len() > limits.max_entries {
+        anyhow::bail!(
+            "Plugin archive has too many entries ({} > {})",
+            archive.len(),
+            limits.max_entries
+        );
+    }
+
+    // Pre-validate: reject dangerous entries and ZIP bombs before writing to disk.
+    let mut total_uncompressed: u64 = 0;
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
         let name = entry.name().to_owned();
@@ -2717,6 +2796,21 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
         }
         if entry.is_symlink() {
             anyhow::bail!("Rejected symlink entry '{}' in plugin archive", name);
+        }
+        let uncompressed = entry.size();
+        let compressed = entry.compressed_size();
+        if compressed > 0 && uncompressed / compressed > limits.max_compression_ratio {
+            anyhow::bail!(
+                "Rejected ZIP entry '{}' with excessive compression ratio",
+                name
+            );
+        }
+        total_uncompressed = total_uncompressed.saturating_add(uncompressed);
+        if total_uncompressed > limits.max_total_uncompressed {
+            anyhow::bail!(
+                "Plugin archive exceeds the uncompressed size limit ({} bytes)",
+                limits.max_total_uncompressed
+            );
         }
     }
 
@@ -6473,6 +6567,102 @@ mod tests {
         );
     }
 
+    // --- Plugin settings-file delivery (contract: /tokens/_settings.json) ---
+
+    #[test]
+    fn test_settings_file_path_is_inside_token_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = settings_file_in(tmp.path(), "myproject", "example-plugin");
+        assert!(
+            path.ends_with("tokens/myproject/example-plugin/_settings.json"),
+            "settings file must live in the plugin token dir, got: {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            consts::PLUGIN_SETTINGS_FILE
+        );
+    }
+
+    #[test]
+    fn test_write_settings_file_roundtrips_validated_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = serde_json::json!({ "scope": "read", "page_size": 50, "verbose": true });
+        write_settings_file_in(tmp.path(), "proj", "example-plugin", &settings).unwrap();
+
+        let path = settings_file_in(tmp.path(), "proj", "example-plugin");
+        let read_back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, settings);
+    }
+
+    #[test]
+    fn test_write_settings_file_creates_token_dir_and_owner_only_perms() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({})).unwrap();
+        let path = settings_file_in(tmp.path(), "proj", "svc");
+        assert!(path.exists(), "settings file must be created");
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "{}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "settings file must be owner-only");
+        }
+    }
+
+    #[test]
+    fn test_write_settings_file_overwrites_previous_on_resave() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({ "n": 1 })).unwrap();
+        write_settings_file_in(tmp.path(), "proj", "svc", &serde_json::json!({ "n": 2 })).unwrap();
+        let path = settings_file_in(tmp.path(), "proj", "svc");
+        let read_back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, serde_json::json!({ "n": 2 }));
+    }
+
+    #[test]
+    fn test_validate_manifest_rejects_settings_file_as_auth_key() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            service_id: None,
+            slug: "test-reserved".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: TokenMount::ReadOnly,
+            auth_fields: vec![AuthFieldDef {
+                key: consts::PLUGIN_SETTINGS_FILE.to_string(),
+                label: "Collision".to_string(),
+                field_type: "text".to_string(),
+                placeholder: "".to_string(),
+                is_secret: false,
+                required: true,
+                description: None,
+                validation: None,
+                oauth_flow: false,
+            }],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_manifest(&manifest, tmp.path())
+            .expect_err("an auth_field named _settings.json must be rejected")
+            .to_string();
+        assert!(err.contains("reserved"), "unexpected error: {err}");
+    }
+
     // --- Zip Slip security tests (issue #36) ---
 
     #[test]
@@ -6501,6 +6691,126 @@ mod tests {
         assert!(extract_dir.join("plugin.json").exists());
         assert!(extract_dir.join("Containerfile").exists());
         assert!(validate_extracted_paths(&extract_dir).is_ok());
+    }
+
+    #[test]
+    fn test_extract_zip_rejects_compression_ratio_bomb() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("bomb.zip");
+        let extract_dir = tmp.path().join("extracted");
+        std::fs::create_dir_all(&extract_dir).unwrap();
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("bomb", options).unwrap();
+        // 8 MiB of zeros deflates to a few KiB — ratio well past the cap.
+        writer.write_all(&vec![0u8; 8 * 1024 * 1024]).unwrap();
+        let buf = writer.finish().unwrap();
+        std::fs::write(&zip_path, buf.into_inner()).unwrap();
+
+        let err = extract_zip(&zip_path, &extract_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("compression ratio"),
+            "a high-ratio entry must be rejected: {err}"
+        );
+        assert!(
+            !extract_dir.join("bomb").exists(),
+            "bomb must not be written before the ratio check rejects it"
+        );
+    }
+
+    /// Writes a ZIP of Stored (ratio-1) entries so only the cap under test can trip.
+    fn write_stored_zip(zip_path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, content) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        let buf = writer.finish().unwrap();
+        std::fs::write(zip_path, buf.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn test_extract_zip_entry_count_at_limit_passes_one_over_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("entries.zip");
+        write_stored_zip(&zip_path, &[("a.txt", b"a"), ("b.txt", b"b")]);
+
+        let ok_dir = tmp.path().join("ok");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        let at_limit = ZipExtractionLimits {
+            max_entries: 2,
+            ..Default::default()
+        };
+        extract_zip_with_limits(&zip_path, &ok_dir, &at_limit)
+            .expect("an archive with exactly max_entries entries must extract");
+        assert!(ok_dir.join("a.txt").exists() && ok_dir.join("b.txt").exists());
+
+        let err_dir = tmp.path().join("err");
+        std::fs::create_dir_all(&err_dir).unwrap();
+        let one_under = ZipExtractionLimits {
+            max_entries: 1,
+            ..Default::default()
+        };
+        let err = extract_zip_with_limits(&zip_path, &err_dir, &one_under)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Plugin archive has too many entries (2 > 1)");
+        assert!(
+            !err_dir.join("a.txt").exists(),
+            "nothing may be written once the entry cap rejects the archive"
+        );
+    }
+
+    #[test]
+    fn test_extract_zip_total_uncompressed_at_limit_passes_one_over_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("total.zip");
+        // Two stored entries of 10 bytes each: total uncompressed is exactly 20.
+        write_stored_zip(&zip_path, &[("a.bin", &[0u8; 10]), ("b.bin", &[0u8; 10])]);
+
+        let ok_dir = tmp.path().join("ok");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        let at_limit = ZipExtractionLimits {
+            max_total_uncompressed: 20,
+            ..Default::default()
+        };
+        extract_zip_with_limits(&zip_path, &ok_dir, &at_limit)
+            .expect("an archive totalling exactly max_total_uncompressed must extract");
+        assert!(ok_dir.join("a.bin").exists() && ok_dir.join("b.bin").exists());
+
+        let err_dir = tmp.path().join("err");
+        std::fs::create_dir_all(&err_dir).unwrap();
+        let one_under = ZipExtractionLimits {
+            max_total_uncompressed: 19,
+            ..Default::default()
+        };
+        let err = extract_zip_with_limits(&zip_path, &err_dir, &one_under)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Plugin archive exceeds the uncompressed size limit (19 bytes)"
+        );
+        assert!(
+            !err_dir.join("a.bin").exists(),
+            "nothing may be written once the size cap rejects the archive"
+        );
     }
 
     #[test]
