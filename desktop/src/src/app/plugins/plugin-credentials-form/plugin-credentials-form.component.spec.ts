@@ -236,6 +236,86 @@ describe('PluginCredentialsFormComponent', () => {
     expect(oauthInput.placeholder).toBe('exmcp_...'); // not configured → original placeholder
   });
 
+  // ── Read-back of non-secret values (config, not secrets) ────────────────
+
+  it('prefills a non-secret field from currentValues, keeping the manifest placeholder', () => {
+    const fields: PluginAuthField[] = [
+      {
+        key: 'base_url',
+        label: 'Base URL',
+        field_type: 'text',
+        placeholder: 'https://api.example.com',
+        is_secret: false,
+        required: true,
+      },
+    ];
+    fixture.componentRef.setInput('authFields', fields);
+    fixture.componentRef.setInput('configuredFields', ['base_url']);
+    fixture.componentRef.setInput('currentValues', { base_url: 'https://tenant.example.com' });
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-base_url"]'
+    ) as HTMLInputElement;
+    expect(input.value).toBe('https://tenant.example.com');
+    // Non-secret prefilled → manifest placeholder, never the masked "stored" hint.
+    expect(input.placeholder).toBe('https://api.example.com');
+  });
+
+  it('never reads back a secret field, even if currentValues carries a value', () => {
+    const fields: PluginAuthField[] = [
+      {
+        key: 'api_key',
+        label: 'API key',
+        field_type: 'password',
+        placeholder: 'sk-...',
+        is_secret: true,
+        required: true,
+      },
+    ];
+    fixture.componentRef.setInput('authFields', fields);
+    fixture.componentRef.setInput('configuredFields', ['api_key']);
+    // Defense-in-depth: a value here must still never prefill a secret input.
+    fixture.componentRef.setInput('currentValues', { api_key: 'sk-must-not-render' });
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector(
+      '[data-testid="cred-input-api_key"]'
+    ) as HTMLInputElement;
+    expect(input.value).toBe('');
+    expect(input.placeholder).toContain('stored');
+  });
+
+  it('lets a prefilled non-secret value be edited and re-saved', () => {
+    const fields: PluginAuthField[] = [
+      {
+        key: 'base_url',
+        label: 'Base URL',
+        field_type: 'text',
+        placeholder: 'https://api.example.com',
+        is_secret: false,
+        required: true,
+      },
+    ];
+    fixture.componentRef.setInput('authFields', fields);
+    fixture.componentRef.setInput('configuredFields', ['base_url']);
+    fixture.componentRef.setInput('currentValues', { base_url: 'https://old.example.com' });
+    fixture.detectChanges();
+
+    const saveSpy = vi.fn<(event: PluginSaveCredentialsEvent) => void>();
+    component.save.subscribe(saveSpy);
+
+    setInputValue(fixture, '[data-testid="cred-input-base_url"]', 'https://new.example.com');
+    fixture.detectChanges();
+    (
+      fixture.nativeElement.querySelector(
+        '[data-testid="plugin-credentials-form"]'
+      ) as HTMLFormElement
+    ).dispatchEvent(new Event('submit'));
+
+    expect(saveSpy).toHaveBeenCalledWith({ credentials: { base_url: 'https://new.example.com' } });
+  });
+
   it('renders required marker for required fields and not for optional', () => {
     fixture.componentRef.setInput('authFields', makeAuthFields());
     fixture.detectChanges();

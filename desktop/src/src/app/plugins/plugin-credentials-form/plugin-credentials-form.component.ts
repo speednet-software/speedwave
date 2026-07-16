@@ -9,7 +9,7 @@ import { LoggerService } from '../../services/logger.service';
 import { OauthConnectComponent } from '../../shared/oauth-connect/oauth-connect.component';
 import { OAuthFlowStatus } from '../../models/integration';
 
-/** Renders a form for a plugin's `auth_fields[]`; emits the filled subset on submit and a separate event on full reset. Stored token values are never read back; inputs render empty. */
+/** Renders a form for a plugin's `auth_fields[]`; emits the filled subset on submit and a separate event on full reset. Non-secret values are prefilled from `currentValues`; secret fields stay write-only (rendered empty). */
 @Component({
   selector: 'app-plugin-credentials-form',
   imports: [CommonModule, OauthConnectComponent],
@@ -80,9 +80,7 @@ import { OAuthFlowStatus } from '../../models/integration';
               <textarea
                 [id]="'cred-' + field.key"
                 rows="3"
-                [placeholder]="
-                  isConfigured(field.key) ? '•••••••• stored — type to replace' : field.placeholder
-                "
+                [placeholder]="storedPlaceholder(field)"
                 [value]="getValue(field.key)"
                 (input)="onFieldInput(field.key, $event)"
                 (blur)="onFieldBlur(field, $event)"
@@ -101,9 +99,7 @@ import { OAuthFlowStatus } from '../../models/integration';
               <input
                 [id]="'cred-' + field.key"
                 [type]="field.field_type === 'password' ? 'password' : 'text'"
-                [placeholder]="
-                  isConfigured(field.key) ? '•••••••• stored — type to replace' : field.placeholder
-                "
+                [placeholder]="storedPlaceholder(field)"
                 [value]="getValue(field.key)"
                 (input)="onFieldInput(field.key, $event)"
                 (blur)="onFieldBlur(field, $event)"
@@ -188,6 +184,11 @@ export class PluginCredentialsFormComponent {
    * `PluginStatusEntry.configured_fields`); drives the "✓ set" badge + clear button.
    */
   readonly configuredFields = input<string[]>([]);
+  /**
+   * Stored non-secret values keyed by `auth_fields[].key`, from
+   * `PluginStatusEntry.current_values`; the host never includes secret keys.
+   */
+  readonly currentValues = input<Record<string, string>>({});
   readonly save = output<PluginSaveCredentialsEvent>();
   /**
    * Fires when the user requests a full reset; host clears ALL credentials.
@@ -318,18 +319,29 @@ export class PluginCredentialsFormComponent {
   }
 
   /**
-   * Local edit buffer. Never seeded from server (secrets are write-only);
-   * cleared after a successful save.
+   * Masked "stored" hint only for a configured secret; otherwise the manifest
+   * placeholder — a non-secret shows its prefilled value, not this hint.
+   * @param field the auth field being rendered
    */
+  storedPlaceholder(field: PluginAuthField): string {
+    return this.isConfigured(field.key) && field.is_secret
+      ? '•••••••• stored — type to replace'
+      : field.placeholder;
+  }
+
+  /** Local edit buffer for typed values; cleared after a successful save. Never seeded — display falls back to `currentValues` via `getValue`. */
   private values: Record<string, string> = {};
 
   /**
-   * Returns the current edit-buffer value for a field key
-   * (`auth_fields[].key`), or `''` when nothing has been typed yet.
+   * Value shown in a field's input: what the user typed, else the stored
+   * non-secret value. Secrets are never read back — they render empty.
    * @param key the `auth_fields[].key` identifying the field
    */
   getValue(key: string): string {
-    return this.values[key] ?? '';
+    const typed = this.values[key];
+    if (typed !== undefined) return typed;
+    if (this.authFields().find((f) => f.key === key)?.is_secret) return '';
+    return this.currentValues()[key] ?? '';
   }
 
   /**

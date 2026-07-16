@@ -28,6 +28,7 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) enabled: bool,
     pub(crate) configured: bool,
     pub(crate) auth_fields: Vec<plugin::AuthFieldDef>,
+    /// Stored non-secret values for prefilling the form; secret fields are never included.
     pub(crate) current_values: HashMap<String, String>,
     /// Keys of `auth_fields` with a non-empty value stored on disk.
     /// Metadata only — secret contents are NOT read, only existence + non-zero length.
