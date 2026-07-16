@@ -233,6 +233,7 @@ const PLAN_MODE_PREFIX =
       <app-slash-menu
         [open]="true"
         [query]="slashQuery()"
+        [projectId]="projectState.activeProject() ?? ''"
         (selected)="applySelection($event)"
         (closed)="closeSlash()"
       />
@@ -285,7 +286,7 @@ export class ComposerComponent implements AfterViewInit {
   readonly slashOpenChange = output<boolean>();
 
   readonly slashService = inject(SlashService);
-  private readonly projectState = inject(ProjectStateService);
+  protected readonly projectState = inject(ProjectStateService);
   private readonly preprocessor = inject(ImagePreprocessorService);
 
   /** Reactive control holding the current textarea value. */

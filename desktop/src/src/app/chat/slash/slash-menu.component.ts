@@ -4,6 +4,7 @@ import {
   computed,
   effect,
   inject,
+  input,
   model,
   output,
   signal,
@@ -69,14 +70,31 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 
       <!-- Body: grouped list, status states. -->
       <div class="max-h-72 overflow-y-auto py-1">
-        @if (service.isLoadingEmpty()) {
+        @if (service.unavailable() && filtered().length === 0) {
           <div
-            data-testid="slash-menu-loading"
-            class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
-            role="status"
-            aria-live="polite"
+            data-testid="slash-popover-unavailable"
+            class="mono flex flex-col items-start gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
           >
-            discovering…
+            <span>slash commands unavailable</span>
+            <button
+              type="button"
+              data-testid="slash-popover-retry"
+              class="mono rounded border border-[var(--line-strong)] px-2 py-1 text-[10px] text-[var(--ink)] hover-bg"
+              (click)="retry()"
+            >
+              retry
+            </button>
+          </div>
+        } @else if (service.isLoadingEmpty()) {
+          <div data-testid="slash-popover-loading">
+            <div
+              data-testid="slash-menu-loading"
+              class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+              role="status"
+              aria-live="polite"
+            >
+              discovering…
+            </div>
           </div>
         } @else if (filtered().length === 0) {
           <div
@@ -149,18 +167,13 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
         }
       </div>
 
-      <!-- Footer: keybind hints + offline-fallback indicator. -->
+      <!-- Footer: keybind hints. -->
       <div
         class="mono flex items-center gap-4 border-t border-[var(--line)] px-3 py-1.5 text-[10px] text-[var(--ink-mute)]"
       >
         <span><span class="kbd">↑↓</span> navigate</span>
         <span><span class="kbd">↵</span> select</span>
         <span><span class="kbd">tab</span> complete</span>
-        @if (service.source() === 'Unavailable') {
-          <span class="text-[var(--amber)]" data-testid="slash-menu-fallback"
-            >offline · commands unavailable</span
-          >
-        }
         <span class="ml-auto"><span class="kbd">esc</span> close</span>
       </div>
     </div>
@@ -171,6 +184,8 @@ export class SlashMenuComponent {
   readonly query = model('');
   /** Whether the popover is visible. Two-way bindable. */
   readonly open = model(false);
+  /** Project id used to retry discovery when the backend reports unavailable. */
+  readonly projectId = input('');
 
   /** Fires when the user picks a command (Enter or click). */
   readonly selected = output<SlashCommand>();
@@ -265,6 +280,11 @@ export class SlashMenuComponent {
    */
   select(cmd: SlashCommand): void {
     this.selected.emit(cmd);
+  }
+
+  /** Re-runs discovery for the current `projectId` after an unavailable result. */
+  retry(): void {
+    void this.service.refresh(this.projectId());
   }
 
   /**

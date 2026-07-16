@@ -17,6 +17,7 @@ class SlashServiceStub {
   readonly discovering = signal(false);
   readonly source = signal<string | null>(null);
   readonly error = signal<string | null>(null);
+  readonly unavailable = signal(false);
   readonly isLoadingEmpty = signal(false);
   refresh = vi.fn(async () => undefined);
   filter(_query: string): readonly unknown[] {

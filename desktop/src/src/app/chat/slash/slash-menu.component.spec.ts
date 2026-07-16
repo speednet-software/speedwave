@@ -10,6 +10,7 @@ class FakeSlashService {
   discovering = signal(false);
   source = signal<DiscoverySource | null>(null);
   error = signal<string | null>(null);
+  unavailable = signal(false);
   isLoadingEmpty = () => this.discovering() && this.commands().length === 0;
   refresh = vi.fn();
   invalidate = vi.fn();
@@ -209,14 +210,6 @@ describe('SlashMenuComponent', () => {
       expect(component.badgeText(cmd('a', 'Agent'))).toBe('agent');
       expect(component.badgeText(cmd('c', 'Command'))).toBe('cmd');
     });
-
-    it('renders fallback footer when source is Unavailable', () => {
-      service.commands.set([cmd('help', 'Builtin')]);
-      service.source.set('Unavailable');
-      fixture.detectChanges();
-      const el = fixture.nativeElement as HTMLElement;
-      expect(el.querySelector('[data-testid="slash-menu-fallback"]')).not.toBeNull();
-    });
   });
 
   describe('click interaction', () => {
@@ -227,6 +220,61 @@ describe('SlashMenuComponent', () => {
       component.selected.subscribe(spy);
       component.select(cmd('beta'));
       expect(spy).toHaveBeenCalledWith(expect.objectContaining({ name: 'beta' }));
+    });
+  });
+
+  describe('loader state', () => {
+    it('renders slash-popover-loading while discovering with an empty list', () => {
+      service.discovering.set(true);
+      service.commands.set([]);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="slash-popover-loading"]')).not.toBeNull();
+      expect(el.querySelector('[data-testid="slash-popover-unavailable"]')).toBeNull();
+    });
+
+    it('does not render the loader once commands arrive, even if discovering flips true again', () => {
+      service.commands.set([cmd('clear')]);
+      service.discovering.set(true);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="slash-popover-loading"]')).toBeNull();
+      const items = el.querySelectorAll('[data-testid="slash-menu-item"]');
+      expect(items.length).toBe(1);
+    });
+  });
+
+  describe('unavailable state', () => {
+    it('renders slash-popover-unavailable with a retry button when the service reports unavailable', () => {
+      service.unavailable.set(true);
+      service.commands.set([]);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="slash-popover-unavailable"]')).not.toBeNull();
+      expect(el.querySelector('[data-testid="slash-popover-retry"]')).not.toBeNull();
+      expect(el.querySelector('[data-testid="slash-menu-loading"]')).toBeNull();
+    });
+
+    it('retry button calls service.refresh() again with the current projectId input', () => {
+      service.unavailable.set(true);
+      service.commands.set([]);
+      fixture.componentRef.setInput('projectId', 'acme');
+      fixture.detectChanges();
+
+      const el = fixture.nativeElement as HTMLElement;
+      const retry = el.querySelector('[data-testid="slash-popover-retry"]') as HTMLButtonElement;
+      retry.click();
+
+      expect(service.refresh).toHaveBeenCalledWith('acme');
+    });
+
+    it('list rendering still applies when unavailable is true but stale commands exist', () => {
+      service.unavailable.set(true);
+      service.commands.set([cmd('clear')]);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelectorAll('[data-testid="slash-menu-item"]').length).toBe(1);
+      expect(el.querySelector('[data-testid="slash-popover-unavailable"]')).toBeNull();
     });
   });
 });
