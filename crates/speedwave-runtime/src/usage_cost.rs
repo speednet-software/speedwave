@@ -1,6 +1,7 @@
 //! Host-side cost enrichment for the proxy usage JSONL (ADR-073): per-provider
 //! cost into an append-only `response_id` sidecar; the usage JSONL is never mutated.
 
+use crate::config::LlmProviderKind;
 use crate::usage::UsageRecord;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -131,10 +132,14 @@ pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher
         return CostEntry::new(id, None, CostSource::Failed);
     }
     let (cost_usd, cost_source) = match r.provider_kind.as_str() {
-        "anthropic_apikey" => match anthropic_catalog_cost(r) {
-            Some(c) => (Some(c), CostSource::Catalog),
-            None => (None, CostSource::Unknown),
-        },
+        // "anthropic_apikey" is the pre-fix wire string; historical usage JSONL
+        // rows still carry it, so both spellings must price identically.
+        s if s == "anthropic_apikey" || s == LlmProviderKind::AnthropicApiKey.wire_str() => {
+            match anthropic_catalog_cost(r) {
+                Some(c) => (Some(c), CostSource::Catalog),
+                None => (None, CostSource::Unknown),
+            }
+        }
         "anthropic_oauth" => (None, CostSource::Subscription),
         "local" => (None, CostSource::Free),
         // With a gen_id the cost is still fetchable later → `deferred` (retryable);
@@ -367,6 +372,30 @@ mod tests {
             .open(&path)
             .unwrap();
         writeln!(f, "{line}").unwrap();
+    }
+
+    #[test]
+    fn usage_cost_accepts_legacy_apikey_rows() {
+        // Pre-fix usage JSONL rows carry the old "anthropic_apikey" wire string;
+        // historical rows must still price from the catalog after the rename.
+        let legacy = compute_cost_with(
+            &record("anthropic_apikey", "claude-opus-4-8", 1_000_000, 0, 0, 0),
+            &|_| None,
+        );
+        let canonical = compute_cost_with(
+            &record(
+                LlmProviderKind::AnthropicApiKey.wire_str(),
+                "claude-opus-4-8",
+                1_000_000,
+                0,
+                0,
+                0,
+            ),
+            &|_| None,
+        );
+        assert_eq!(legacy.cost_source, CostSource::Catalog);
+        assert_eq!(canonical.cost_source, CostSource::Catalog);
+        assert_eq!(legacy.cost_usd, canonical.cost_usd);
     }
 
     #[test]
