@@ -1,5 +1,5 @@
 //! Slash command discovery: parses the `system/init` line from `claude -p`
-//! for commands, plugins, and agents (cached per project, hardcoded fallback).
+//! for commands, plugins, and agents (cached per project, single-flight per project).
 
 use crate::consts;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Hard cap on how long we wait for the `system/init` line from Claude Code
-/// before giving up and returning the hardcoded fallback.
+/// before giving up and returning `DiscoverySource::Unavailable`.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a cached discovery result stays valid before re-running discovery.
@@ -19,13 +19,13 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
 /// Indicates whether the discovery result came from Claude Code itself
-/// (`Init`) or from the hardcoded fallback list (`Fallback`).
+/// (`Init`) or discovery could not run (`Unavailable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiscoverySource {
     /// Discovered from the `system/init` event emitted by `claude -p`.
     Init,
-    /// Hardcoded fallback list: discovery timed out or the container was down.
-    Fallback,
+    /// Discovery timed out or the container was down; no commands to show.
+    Unavailable,
 }
 
 /// Classification of a slash command, used by the UI to render an
@@ -98,24 +98,120 @@ pub fn discover_slash_commands(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
 ) -> anyhow::Result<SlashDiscovery> {
+    discover_slash_commands_with_timeout(runtime, project, DISCOVERY_TIMEOUT)
+}
+
+/// Test seam for [`discover_slash_commands`] with an injectable timeout.
+/// Concurrent calls for the same project share one run via [`lead_discovery`];
+/// a failed run is never cached (returns `Unavailable` fresh every time).
+fn discover_slash_commands_with_timeout(
+    runtime: &crate::runtime::LockedRuntime,
+    project: &ProjectHandle,
+    timeout: Duration,
+) -> anyhow::Result<SlashDiscovery> {
     if let Some(cached) = cache_get(&project.name) {
         return Ok(cached);
     }
 
     let container = claude_container_name(&project.name);
-    let discovery = match run_discovery(runtime, &container) {
-        Ok(raw) => enrich_and_filter(raw, &project.dir),
+    let outcome = lead_discovery(&project.name, || {
+        run_discovery_with_timeout(runtime, &container, timeout).map_err(|e| e.to_string())
+    });
+
+    match outcome {
+        Ok(raw) => {
+            let discovery = enrich_and_filter(raw, &project.dir, consts::data_dir().as_path());
+            cache_put(&project.name, discovery.clone());
+            Ok(discovery)
+        }
         Err(err) => {
-            log::warn!(
-                "slash discovery failed for '{}': {err}; returning hardcoded fallback",
-                project.name
-            );
-            fallback_discovery()
+            log::warn!("slash discovery failed for '{}': {err}", project.name);
+            Ok(SlashDiscovery {
+                commands: vec![],
+                source: DiscoverySource::Unavailable,
+            })
+        }
+    }
+}
+
+/// One in-flight discovery slot: the shared result and a condvar so
+/// followers can wait without polling.
+struct InFlightSlot {
+    result: Mutex<Option<Result<RawDiscovery, String>>>,
+    ready: std::sync::Condvar,
+}
+
+fn in_flight_map() -> &'static Mutex<HashMap<String, std::sync::Arc<InFlightSlot>>> {
+    static MAP: OnceLock<Mutex<HashMap<String, std::sync::Arc<InFlightSlot>>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Publishes a leader-failure on drop when the leader never published a
+/// result (panic/cancel safety), then removes the slot from the map.
+struct LeaderGuard<'a> {
+    project: &'a str,
+    slot: std::sync::Arc<InFlightSlot>,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        {
+            let mut res = match self.slot.result.lock() {
+                Ok(r) => r,
+                Err(p) => p.into_inner(),
+            };
+            if res.is_none() {
+                *res = Some(Err("discovery leader failed".to_string()));
+            }
+        }
+        self.slot.ready.notify_all();
+        if let Ok(mut map) = in_flight_map().lock() {
+            map.remove(self.project);
+        }
+    }
+}
+
+/// Runs `run` at most once per `project` across concurrent callers: the
+/// first caller becomes the leader and executes `run`; concurrent callers
+/// for the same project block on the leader's result instead of re-running
+/// discovery. A leader panic still publishes `Err` to unblock followers
+/// (see [`LeaderGuard`]).
+fn lead_discovery(
+    project: &str,
+    run: impl FnOnce() -> Result<RawDiscovery, String>,
+) -> Result<RawDiscovery, String> {
+    let (slot, is_leader) = {
+        let mut map = in_flight_map().lock().unwrap_or_else(|p| p.into_inner());
+        match map.get(project) {
+            Some(slot) => (std::sync::Arc::clone(slot), false),
+            None => {
+                let slot = std::sync::Arc::new(InFlightSlot {
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                });
+                map.insert(project.to_string(), std::sync::Arc::clone(&slot));
+                (slot, true)
+            }
         }
     };
-
-    cache_put(&project.name, discovery.clone());
-    Ok(discovery)
+    if is_leader {
+        let guard = LeaderGuard {
+            project,
+            slot: std::sync::Arc::clone(&slot),
+        };
+        let outcome = run();
+        *guard.slot.result.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome.clone());
+        guard.slot.ready.notify_all();
+        drop(guard);
+        outcome
+    } else {
+        let mut res = slot.result.lock().unwrap_or_else(|p| p.into_inner());
+        while res.is_none() {
+            res = slot.ready.wait(res).unwrap_or_else(|p| p.into_inner());
+        }
+        res.clone()
+            .unwrap_or_else(|| Err("discovery leader failed".to_string()))
+    }
 }
 
 /// Invalidates the cached discovery for one project. Call on plugin
@@ -272,6 +368,9 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
 
 /// Runs `claude -p ... -- /` in `container` and returns the first parsed
 /// `system/init` event, killing the child once that line is captured.
+/// Test-only: production callers go through `run_discovery_with_timeout`
+/// directly (via `lead_discovery`) to inject a bounded timeout.
+#[cfg(test)]
 fn run_discovery(
     runtime: &crate::runtime::LockedRuntime,
     container: &str,
@@ -445,14 +544,34 @@ struct SlashFrontmatter {
 }
 
 /// Turns raw discovery into a filtered, enriched, sorted `SlashDiscovery`.
-fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
+/// Default-deny: a name with no plugin prefix, no agent match, no native-table
+/// hit, and no on-disk frontmatter hit anywhere is dropped.
+fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> SlashDiscovery {
     let personal_dir = personal_claude_dir();
     let mut commands: Vec<SlashCommand> = Vec::new();
 
     for name in raw.slash_commands {
         let (clean_name, plugin) = split_plugin_prefix(&name);
-        let mut kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
+        let is_agent = raw.agents.iter().any(|a| a == clean_name);
 
+        // Native allowlist hit (and not shadowed by a plugin/agent name): badge,
+        // description and the show-filter come straight from the allowlist entry.
+        if plugin.is_none() && !is_agent {
+            if let Some(native) = crate::native_slash::native_command(clean_name) {
+                if native.show {
+                    commands.push(SlashCommand {
+                        name: name.clone(),
+                        description: Some(native.description.to_string()),
+                        argument_hint: None,
+                        kind: native.badge,
+                        plugin: None,
+                    });
+                }
+                continue;
+            }
+        }
+
+        let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
         let (frontmatter, origin) = lookup_frontmatter(
             clean_name,
             plugin.as_deref(),
@@ -461,12 +580,31 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
             &raw.plugins,
         );
 
-        // Promote Command -> Skill when the file lived under skills/.
-        if matches!(origin, Some(FrontmatterOrigin::Skill)) && kind == SlashKind::Command {
-            kind = SlashKind::Skill;
-        }
+        // Plugin-prefixed and agent-matched names are kept even without an
+        // on-disk hit; everything else needs project/personal/plugin OR
+        // integration-resource provenance (default-deny for unknown natives).
+        let (frontmatter, kind) = if plugin.is_some() || is_agent {
+            (frontmatter, kind)
+        } else if let Some(origin) = origin {
+            let kind = if origin == FrontmatterOrigin::Skill {
+                SlashKind::Skill
+            } else {
+                SlashKind::Command
+            };
+            (frontmatter, kind)
+        } else if let Some((fm, origin)) = lookup_integration_frontmatter(clean_name, data_dir) {
+            let kind = if origin == FrontmatterOrigin::Skill {
+                SlashKind::Skill
+            } else {
+                SlashKind::Command
+            };
+            (fm, kind)
+        } else {
+            continue;
+        };
 
-        // Hide on `user-invocable: false` only, never `disable-model-invocation`.
+        // Hide on `user-invocable: false` only, never `disable-model-invocation`;
+        // this applies uniformly across every source, integration skills included.
         if matches!(frontmatter.user_invocable, Some(false)) {
             continue;
         }
@@ -513,8 +651,8 @@ fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Classifies a command by built-in list, plugin prefix, and `agents`
-/// presence. Default `Command` is the safest fallback (UI renders `cmd`).
+/// Classifies a command by plugin prefix, `agents` presence, and the native
+/// allowlist. Default `Command` is the safest fallback (UI renders `cmd`).
 fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKind {
     if plugin.is_some() {
         return SlashKind::Plugin;
@@ -522,30 +660,11 @@ fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKi
     if agents.iter().any(|a| a == name) {
         return SlashKind::Agent;
     }
-    if is_builtin_name(name) {
-        return SlashKind::Builtin;
+    if let Some(native) = crate::native_slash::native_command(name) {
+        return native.badge;
     }
     // Default; refined to Skill by enrich_and_filter when the file is under skills/.
     SlashKind::Command
-}
-
-fn is_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "help"
-            | "clear"
-            | "compact"
-            | "resume"
-            | "cost"
-            | "context"
-            | "memory"
-            | "model"
-            | "config"
-            | "review"
-            | "exit"
-            | "logout"
-            | "login"
-    )
 }
 
 /// Returns the first on-disk frontmatter hit and its origin (`None` when no
@@ -627,6 +746,51 @@ fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<(PathBuf, Frontm
     ));
 }
 
+/// Resolves `name` against the data-dir copy of `claude-resources`'s
+/// integration-scoped tree: `<data_dir>/claude-resources/<type>/integrations/<name>/`
+/// (mirrors the entrypoint symlink layout, `entrypoint.sh` + `consts.rs`'s
+/// `integrations_directories_match_known_service_keys`). `user-invocable: false`
+/// hides an integration skill exactly as it does for any other source.
+fn lookup_integration_frontmatter(
+    name: &str,
+    data_dir: &Path,
+) -> Option<(SlashFrontmatter, FrontmatterOrigin)> {
+    let base = data_dir.join("claude-resources");
+    let candidates = [
+        (
+            base.join("skills")
+                .join("integrations")
+                .join(name)
+                .join("SKILL.md"),
+            FrontmatterOrigin::Skill,
+        ),
+        (
+            base.join("commands")
+                .join("integrations")
+                .join(format!("{name}.md")),
+            FrontmatterOrigin::Command,
+        ),
+    ];
+
+    for (candidate, origin) in candidates {
+        match std::fs::read_to_string(&candidate) {
+            Ok(contents) => {
+                return Some((parse_frontmatter(&contents).unwrap_or_default(), origin));
+            }
+            Err(err) => {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    log::debug!(
+                        "slash: read_to_string('{}') failed: {err}",
+                        candidate.display()
+                    );
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Returns the user's personal `.claude/` directory when the home
 /// directory can be resolved; `None` otherwise.
 fn personal_claude_dir() -> Option<PathBuf> {
@@ -651,42 +815,6 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
         yaml.push('\n');
     }
     None
-}
-
-// Fallback
-
-fn fallback_discovery() -> SlashDiscovery {
-    let names = [
-        "help", "clear", "compact", "resume", "cost", "context", "memory",
-    ];
-    let commands = names
-        .iter()
-        .map(|name| SlashCommand {
-            name: (*name).to_string(),
-            description: Some(fallback_description(name).to_string()),
-            argument_hint: None,
-            kind: SlashKind::Builtin,
-            plugin: None,
-        })
-        .collect();
-
-    SlashDiscovery {
-        commands,
-        source: DiscoverySource::Fallback,
-    }
-}
-
-fn fallback_description(name: &str) -> &'static str {
-    match name {
-        "help" => "Show available commands",
-        "clear" => "Clear the conversation",
-        "compact" => "Compact the conversation to save context",
-        "resume" => "Resume the previous conversation",
-        "cost" => "Show the current session's cost",
-        "context" => "Show the current context window usage",
-        "memory" => "Open the project memory panel",
-        _ => "",
-    }
 }
 
 // Helpers
@@ -861,32 +989,25 @@ mod tests {
     }
 
     #[test]
-    fn is_builtin_name_matches_expected_list() {
-        assert!(is_builtin_name("help"));
-        assert!(is_builtin_name("clear"));
-        assert!(is_builtin_name("model"));
-        assert!(!is_builtin_name("my-skill"));
-    }
-
-    #[test]
-    fn fallback_discovery_returns_minimal_builtins() {
-        let d = fallback_discovery();
-        assert_eq!(d.source, DiscoverySource::Fallback);
-        assert!(d.commands.iter().any(|c| c.name == "help"));
-        assert!(d.commands.iter().all(|c| c.kind == SlashKind::Builtin));
-    }
-
-    #[test]
     fn enrich_merges_agents_and_sorts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        for skill in ["zzz-skill", "aaa-skill"] {
+            let skill_dir = tmp.path().join(".claude/skills").join(skill);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: d\n---\n").unwrap();
+        }
         let raw = RawDiscovery {
-            slash_commands: vec!["help".into(), "zzz-skill".into(), "aaa-skill".into()],
+            slash_commands: vec!["clear".into(), "zzz-skill".into(), "aaa-skill".into()],
             plugins: vec![],
             agents: vec!["code-review".into()],
         };
-        let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path());
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["aaa-skill", "code-review", "help", "zzz-skill"]);
+        assert_eq!(
+            names,
+            vec!["aaa-skill", "clear", "code-review", "zzz-skill"]
+        );
     }
 
     #[test]
@@ -900,11 +1021,20 @@ mod tests {
         )
         .unwrap();
 
+        let visible_dir = tmp.path().join(".claude/skills/visible");
+        std::fs::create_dir_all(&visible_dir).unwrap();
+        std::fs::write(
+            visible_dir.join("SKILL.md"),
+            "---\ndescription: shown\n---\nbody\n",
+        )
+        .unwrap();
+
         let raw = RawDiscovery {
             slash_commands: vec!["hidden".into(), "visible".into()],
             ..RawDiscovery::default()
         };
-        let d = enrich_and_filter(raw, tmp.path());
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["visible"]);
     }
@@ -925,7 +1055,8 @@ mod tests {
             slash_commands: vec!["user-only".into()],
             ..RawDiscovery::default()
         };
-        let d = enrich_and_filter(raw, tmp.path());
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].name, "user-only");
         assert_eq!(d.commands[0].description.as_deref(), Some("user only"));
@@ -947,7 +1078,8 @@ mod tests {
             slash_commands: vec!["myskill".into()],
             ..RawDiscovery::default()
         };
-        let d = enrich_and_filter(raw, tmp.path());
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].description.as_deref(), Some("from project"));
     }
@@ -955,22 +1087,27 @@ mod tests {
     #[test]
     fn enrich_classifies_plugin_and_agent_correctly() {
         let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
         let raw = RawDiscovery {
-            slash_commands: vec!["redmine:ticket".into(), "code-review".into(), "help".into()],
+            slash_commands: vec![
+                "redmine:ticket".into(),
+                "code-review".into(),
+                "clear".into(),
+            ],
             plugins: vec![PluginEntry {
                 name: "redmine".into(),
                 path: None,
             }],
             agents: vec!["code-review".into()],
         };
-        let d = enrich_and_filter(raw, tmp.path());
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         let by_name: HashMap<&str, &SlashCommand> =
             d.commands.iter().map(|c| (c.name.as_str(), c)).collect();
 
         assert_eq!(by_name["redmine:ticket"].kind, SlashKind::Plugin);
         assert_eq!(by_name["redmine:ticket"].plugin.as_deref(), Some("redmine"));
         assert_eq!(by_name["code-review"].kind, SlashKind::Agent);
-        assert_eq!(by_name["help"].kind, SlashKind::Builtin);
+        assert_eq!(by_name["clear"].kind, SlashKind::Builtin);
     }
 
     #[test]
@@ -981,7 +1118,8 @@ mod tests {
             agents: vec!["reviewer".into()],
         };
         let tmp = tempfile::tempdir().unwrap();
-        let d = enrich_and_filter(raw, tmp.path());
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
     }
 
@@ -1086,22 +1224,37 @@ mod tests {
     }
 
     #[test]
-    fn discover_slash_commands_returns_fallback_when_container_unavailable() {
+    fn failed_discovery_returns_unavailable_and_is_never_cached() {
         invalidate_all_caches();
-        let project = ProjectHandle::new(unique_project_name("fallback"), std::env::temp_dir());
-        let (runtime, _) = MockRuntimeBuilder::new()
+        let project = ProjectHandle::new(unique_project_name("nocache"), std::env::temp_dir());
+        let (failing, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
             .build();
-        let d = discover_slash_commands(&runtime, &project).unwrap();
-        assert_eq!(d.source, DiscoverySource::Fallback);
-        assert!(d.commands.iter().any(|c| c.name == "help"));
+        let first = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(first.source, DiscoverySource::Unavailable);
+        assert!(first.commands.is_empty());
+        let second = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(second.source, DiscoverySource::Unavailable);
+        assert_eq!(
+            handles.exec_calls.lock().unwrap().len(),
+            2,
+            "no failure caching"
+        );
     }
 
     #[test]
     fn discover_slash_commands_caches_results() {
         invalidate_all_caches();
         let script = format!("{}\n", sample_init_json());
-        let project = ProjectHandle::new(unique_project_name("cache"), std::env::temp_dir());
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: a test skill\n---\n",
+        )
+        .unwrap();
+        let project = ProjectHandle::new(unique_project_name("cache"), tmp.path());
         let (runtime, _) = MockRuntimeBuilder::new()
             .with_exec_piped_script(&script)
             .build();
@@ -1119,9 +1272,9 @@ mod tests {
         assert_eq!(first, second);
 
         invalidate_cache(&project.name);
-        // After invalidation, the failing runtime must produce Fallback.
+        // After invalidation, the failing runtime must produce Unavailable.
         let third = discover_slash_commands(&failing, &project).unwrap();
-        assert_eq!(third.source, DiscoverySource::Fallback);
+        assert_eq!(third.source, DiscoverySource::Unavailable);
     }
 
     #[test]
@@ -1139,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_kind_prefers_plugin_then_agent_then_builtin_then_command() {
+    fn classify_kind_prefers_plugin_then_agent_then_native_then_command() {
         let agents = vec!["my-agent".to_string()];
         assert_eq!(
             classify_kind("anything", Some("p"), &agents),
@@ -1176,6 +1329,76 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_discovery_runs_exactly_one_exec_and_shares_the_result() {
+        invalidate_all_caches();
+        let project = unique_project_name("single-flight");
+        // One-shot hang (2s) gates the leader long enough for followers to attach;
+        // 300ms injected timeout keeps the whole test far under the sleep.
+        let (runtime, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(2)
+            .with_exec_piped_script("")
+            .build();
+        let rt = &runtime;
+        let results: Vec<_> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        let handle = ProjectHandle::new(&project, std::env::temp_dir());
+                        discover_slash_commands_with_timeout(
+                            rt,
+                            &handle,
+                            std::time::Duration::from_millis(300),
+                        )
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let sources: Vec<_> = results.iter().map(|r| r.as_ref().unwrap().source).collect();
+        assert!(sources.iter().all(|s| *s == DiscoverySource::Unavailable));
+        let spawn_calls = handles
+            .exec_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.argv.iter().any(|a| a == consts::CLAUDE_BINARY))
+            .count();
+        assert_eq!(spawn_calls, 1, "followers must share the leader's run");
+    }
+
+    #[test]
+    fn leader_panic_publishes_error_instead_of_deadlocking_followers() {
+        // Real synchronization, not a sleep race: the leader's closure signals
+        // `started_tx` right before blocking on `release_rx`, so the main thread
+        // only spawns the follower after `lead_discovery` has synchronously
+        // inserted the slot (see `lead_discovery`) - the follower is thus
+        // guaranteed to attach to a live slot instead of racing to become a
+        // second leader. Dropping `release_tx` then unblocks the leader's
+        // `recv()`, which panics.
+        let project = unique_project_name("panic");
+        let p2 = project.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let leader = std::thread::spawn(move || {
+            let _ = lead_discovery(&p2, move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                panic!("boom")
+            });
+        });
+        started_rx
+            .recv()
+            .expect("leader must signal it has started");
+        let follower_project = project.clone();
+        let follower =
+            std::thread::spawn(move || lead_discovery(&follower_project, || unreachable!()));
+        drop(release_tx);
+        assert!(leader.join().is_err(), "leader must have panicked");
+        let res = follower.join().unwrap();
+        assert_eq!(res.unwrap_err(), "discovery leader failed");
+    }
+
+    #[test]
     fn skills_origin_promotes_command_to_skill_kind() {
         // A bare name under .claude/skills/ must surface as kind=Skill.
         let tmp = tempfile::tempdir().unwrap();
@@ -1193,8 +1416,119 @@ mod tests {
             plugins: vec![],
             agents: vec![],
         };
-        let discovery = enrich_and_filter(raw, &project);
+        let data_tmp = tempfile::tempdir().unwrap();
+        let discovery = enrich_and_filter(raw, &project, data_tmp.path());
         assert_eq!(discovery.commands.len(), 1);
         assert_eq!(discovery.commands[0].kind, SlashKind::Skill);
+    }
+
+    #[test]
+    fn enrich_shows_visible_native_with_allowlist_description() {
+        let raw = RawDiscovery {
+            slash_commands: vec!["clear".into()],
+            ..RawDiscovery::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert_eq!(d.commands.len(), 1);
+        assert_eq!(d.commands[0].kind, SlashKind::Builtin);
+        assert!(!d.commands[0]
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[test]
+    fn enrich_drops_hidden_native() {
+        let raw = RawDiscovery {
+            slash_commands: vec!["doctor".into()],
+            ..RawDiscovery::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert!(d.commands.is_empty());
+    }
+
+    #[test]
+    fn enrich_drops_unknown_unprefixed_unresolved_name() {
+        let raw = RawDiscovery {
+            slash_commands: vec!["mystery-cmd".into()],
+            ..RawDiscovery::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert!(d.commands.is_empty());
+    }
+
+    #[test]
+    fn enrich_keeps_plugin_prefixed_and_agents() {
+        let raw = RawDiscovery {
+            slash_commands: vec!["redmine:ticket".into()],
+            plugins: vec![PluginEntry {
+                name: "redmine".into(),
+                path: None,
+            }],
+            agents: vec!["my-agent".into()],
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        let names: Vec<&str> = d.commands.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"redmine:ticket"));
+        assert!(names.contains(&"my-agent"));
+        let by_name: HashMap<&str, &SlashCommand> =
+            d.commands.iter().map(|c| (c.name.as_str(), c)).collect();
+        assert_eq!(by_name["redmine:ticket"].kind, SlashKind::Plugin);
+        assert_eq!(by_name["my-agent"].kind, SlashKind::Agent);
+    }
+
+    #[test]
+    fn enrich_hides_integration_skill_declaring_user_invocable_false() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        let skill_dir = data_tmp
+            .path()
+            .join("claude-resources/skills/integrations/redmine");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: redmine skill\nuser-invocable: false\n---\n",
+        )
+        .unwrap();
+
+        let raw = RawDiscovery {
+            slash_commands: vec!["redmine".into()],
+            ..RawDiscovery::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert!(d.commands.is_empty());
+    }
+
+    #[test]
+    fn enrich_shows_integration_skill_without_user_invocable_key() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        let skill_dir = data_tmp
+            .path()
+            .join("claude-resources/skills/integrations/redmine");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: redmine skill\n---\n",
+        )
+        .unwrap();
+
+        let raw = RawDiscovery {
+            slash_commands: vec!["redmine".into()],
+            ..RawDiscovery::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert_eq!(d.commands.len(), 1);
+        assert_eq!(d.commands[0].kind, SlashKind::Skill);
+        assert_eq!(d.commands[0].description.as_deref(), Some("redmine skill"));
     }
 }

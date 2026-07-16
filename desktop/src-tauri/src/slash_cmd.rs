@@ -8,7 +8,7 @@ use speedwave_runtime::slash;
 use std::path::PathBuf;
 
 /// Lists every slash command Claude Code exposes for `project_id`. Returns cached results when
-/// fresh, else a built-in fallback list; the `source` field marks which.
+/// fresh, else runs discovery; the `source` field marks whether it succeeded.
 #[tauri::command]
 pub(crate) async fn list_slash_commands(
     project_id: String,
