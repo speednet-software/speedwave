@@ -6,7 +6,7 @@ use crate::types::BundleReconcileStatus;
 use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
-use speedwave_runtime::{build, bundle, config, log_sanitizer, plugin};
+use speedwave_runtime::{build, bundle, config, plugin};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -62,11 +62,13 @@ pub(crate) fn current_bridges_info() -> HostBridgesInfo {
     HostBridgesInfo { bridges }
 }
 
-/// Shared handle for the mcp-os process.
-pub(crate) type SharedMcpOs = Arc<Mutex<Option<mcp_os_process::McpOsProcess>>>;
+/// Shared handle for the mcp-os process; the ADR-080 relay lifecycle rides the wrapper.
+pub(crate) type SharedMcpOs =
+    Arc<Mutex<Option<crate::mirror_relay::RelayedWorker<mcp_os_process::McpOsProcess>>>>;
 
-/// Per-project `oauth` workers, keyed by project name (ADR-060).
-pub(crate) type SharedOauth = Arc<Mutex<HashMap<String, OauthProcess>>>;
+/// Per-project `oauth` workers, keyed by project name (ADR-060); relay rides the wrapper.
+pub(crate) type SharedOauth =
+    Arc<Mutex<HashMap<String, crate::mirror_relay::RelayedWorker<OauthProcess>>>>;
 
 /// Shared handle for the background auto-update check task.
 pub(crate) type SharedAutoCheckHandle = Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>;
@@ -82,10 +84,10 @@ pub(crate) struct ExitCleanupContext {
     pub(crate) auto_check_handle: SharedAutoCheckHandle,
 }
 
-/// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log).
-/// Generic best-effort teardown — one body for every `HashMap<project, HostMcpProcess<S>>`.
-fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
-    map: &Arc<Mutex<HashMap<String, speedwave_runtime::host_mcp_process::HostMcpProcess<S>>>>,
+/// Stop + remove a project's worker; cleans token/port/pid/config (keeps audit log) and
+/// tears down its guest relay (rides `RelayedWorker::stop` — ADR-080).
+fn teardown_worker_for_project<I: crate::mirror_relay::RelayWorkerInner>(
+    map: &Arc<Mutex<HashMap<String, crate::mirror_relay::RelayedWorker<I>>>>,
     project: &str,
     label: &str,
 ) {
@@ -96,12 +98,9 @@ fn teardown_worker_for_project<S: speedwave_runtime::host_mcp_process::WorkerSpe
             return;
         }
     };
-    if let Some(mut proc) = proc {
+    if let Some(proc) = proc {
         log::info!("tearing down {label}[{project}] worker");
-        if let Err(e) = proc.stop() {
-            log::warn!("stop error tearing down {label}[{project}]: {e}");
-        }
-        proc.cleanup_files();
+        stop_worker(&format!("{label}[{project}]"), proc);
     }
 }
 
@@ -300,12 +299,9 @@ fn restore_one_project(
             .map_err(|e| anyhow::anyhow!("compose_up_recreate failed for '{project}': {e}"))?;
         Ok(())
     })
-    // `{e:#}` keeps the whole context chain (an os error alone is undiagnosable);
-    // condense to a bounded banner, then sanitize before the string crosses IPC
-    // (chains carry nerdctl argv echoes, and engine failures can be unbounded).
-    .map_err(|e| {
-        speedwave_runtime::log_sanitizer::sanitize(&build::condense_engine_error(&format!("{e:#}")))
-    })
+    // The string crosses IPC: the helper keeps the whole context chain (an os
+    // error alone is undiagnosable), redacted and bounded.
+    .map_err(|e| build::user_facing_engine_error(&e))
 }
 
 /// Skip verdict for one project in a restore batch: `Permanent` drops it from
@@ -668,30 +664,30 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
             {
                 log::warn!("snapshotter recovery failed, restarting engine");
                 rt.restart_container_engine().map_err(|re| {
-                    let msg = log_sanitizer::sanitize(&format!(
+                    let msg = format!(
                         "Engine restart failed: {}",
-                        build::condense_engine_error(&format!("{re:#}"))
-                    ));
+                        build::user_facing_engine_error(&re)
+                    );
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
                 build::build_missing_images_locked(&rt, &enabled, &manifest).map_err(|e| {
-                    let msg = log_sanitizer::sanitize(&format!(
+                    let msg = format!(
                         "Image rebuild failed after engine restart: {}",
-                        build::condense_engine_error(&format!("{e:#}"))
-                    ));
+                        build::user_facing_engine_error(&e)
+                    );
                     log::error!("{msg}");
                     set_bundle_error(&mut state, msg)
                 })?;
             }
             Err(e) => {
-                // Full BuildKit output goes to the log; the banner gets the condensed,
-                // sanitized cause (chains carry nerdctl argv echoes incl. tokens).
+                // Full BuildKit output goes to the log; the banner gets the
+                // redacted, bounded cause via the owning helper.
                 log::error!("Image rebuild failed: {e:#}");
-                let msg = log_sanitizer::sanitize(&format!(
+                let msg = format!(
                     "Image rebuild failed: {}",
-                    build::condense_engine_error(&format!("{e:#}"))
-                ));
+                    build::user_facing_engine_error(&e)
+                );
                 return Err(set_bundle_error(&mut state, msg));
             }
         }
@@ -1075,9 +1071,9 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         match mcp_os.lock() {
             Ok(mut guard) => {
                 if let Some(proc) = guard.take() {
-                    let port = stop_worker("mcp-os", proc);
-                    // Symmetric with HostBridge::stop — drop the guest relay (ADR-080).
-                    crate::mirror_relay::remove_relay_for_port(port);
+                    // Relay teardown rides `RelayedWorker::stop`, symmetric with
+                    // HostBridge::stop (ADR-080).
+                    stop_worker("mcp-os", proc);
                 }
             }
             Err(e) => log::warn!("mcp-os cleanup skipped, mutex poisoned: {e}"),
@@ -1085,9 +1081,7 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
         match oauth.lock() {
             Ok(mut map) => {
                 for (project, proc) in map.drain() {
-                    let port = stop_worker(&format!("oauth[{project}]"), proc);
-                    // Symmetric with the relay ensured at oauth spawn (ADR-080).
-                    crate::mirror_relay::remove_relay_for_port(port);
+                    stop_worker(&format!("oauth[{project}]"), proc);
                 }
             }
             Err(e) => log::warn!("oauth cleanup skipped, map mutex poisoned: {e}"),
@@ -1105,18 +1099,16 @@ pub(crate) fn run_exit_cleanup(ctx: &ExitCleanupContext) -> Option<std::thread::
     Some(handle)
 }
 
-/// Stops a host worker and removes its lock/token files, returning its port so the
-/// caller can tear down the guest relay (sync on exit paths, async in watchdogs).
-pub(crate) fn stop_worker<S: speedwave_runtime::host_mcp_process::WorkerSpec>(
+/// Stops a host worker and removes its lock/token files. The guest relay teardown rides
+/// `RelayedWorker::stop` (synchronous — suits exit paths, ADR-080).
+pub(crate) fn stop_worker<I: crate::mirror_relay::RelayWorkerInner>(
     label: &str,
-    mut proc: speedwave_runtime::host_mcp_process::HostMcpProcess<S>,
-) -> u16 {
-    let port = proc.port();
+    mut proc: crate::mirror_relay::RelayedWorker<I>,
+) {
     if let Err(e) = proc.stop() {
         log::warn!("{label} stop error: {e}");
     }
     proc.cleanup_files();
-    port
 }
 
 /// Resolves the bundled resources directory from the executable's parent path
@@ -1157,24 +1149,7 @@ pub(crate) fn resolve_resources_dir(exe_parent: &std::path::Path) -> Option<std:
 )]
 mod tests {
     use super::*;
-
-    /// Clamps `pos` to the nearest char boundary at or after it, capped at `s.len()`.
-    fn char_boundary_at_or_after(s: &str, pos: usize) -> usize {
-        let mut end = pos.min(s.len());
-        while !s.is_char_boundary(end) {
-            end += 1;
-        }
-        end
-    }
-
-    /// Clamps `pos` to the nearest char boundary at or before it (saturating at 0).
-    fn char_boundary_at_or_before(s: &str, pos: usize) -> usize {
-        let mut start = pos.min(s.len());
-        while !s.is_char_boundary(start) {
-            start -= 1;
-        }
-        start
-    }
+    use speedwave_runtime::build::{char_boundary_at_or_after, char_boundary_at_or_before};
 
     #[test]
     fn container_cleanup_skips_teardown_while_cli_session_live() {
@@ -1225,15 +1200,6 @@ mod tests {
         assert!(
             wait_pos < build_pos,
             "teardown join must precede any restore work"
-        );
-        let tail = &source[fn_start..fn_start + 1600];
-        assert!(
-            tail.contains("log_sanitizer::sanitize"),
-            "restore errors cross IPC — the chain must be sanitized, not just flattened"
-        );
-        assert!(
-            tail.contains("condense_engine_error"),
-            "restore errors must be condensed to a bounded banner before crossing IPC"
         );
     }
 
@@ -2738,25 +2704,6 @@ mod tests {
             .find("Image rebuild failed: {}")
             .expect("Image rebuild failed bail path must exist");
         let bail_end = char_boundary_at_or_after(inner_fn, bail_pos + 200);
-        let bail_start = char_boundary_at_or_before(inner_fn, bail_pos.saturating_sub(120));
-        assert!(
-            inner_fn[bail_pos..bail_end].contains("condense_engine_error"),
-            "the bail banner must go through build::condense_engine_error, not the raw log"
-        );
-        assert!(
-            inner_fn[bail_start..bail_pos].contains("log_sanitizer::sanitize"),
-            "the bail banner crosses IPC — it must pass log_sanitizer::sanitize"
-        );
-        let restart_pos = inner_fn
-            .find("Image rebuild failed after engine restart: {}")
-            .expect("snapshotter-recovery rebuild bail must exist");
-        let restart_start = char_boundary_at_or_before(inner_fn, restart_pos.saturating_sub(120));
-        let restart_end = char_boundary_at_or_after(inner_fn, restart_pos + 200);
-        assert!(
-            inner_fn[restart_start..restart_end].contains("log_sanitizer::sanitize")
-                && inner_fn[restart_pos..restart_end].contains("condense_engine_error"),
-            "the engine-restart rebuild banner must be sanitized and condensed too"
-        );
         let applied_id_assignment_pos = inner_fn
             .find("state.applied_bundle_id = Some(manifest.bundle_id.clone())")
             .expect("applied_bundle_id assignment must exist");

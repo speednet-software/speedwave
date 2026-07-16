@@ -447,8 +447,8 @@ pub fn sweep_stale_atomic_write_temp_files(dir: &Path, min_age: std::time::Durat
     removed
 }
 
-/// Reads a file without following a final-component symlink (O_NOFOLLOW), then
-/// confirms regular-file via the open handle (atomic against a swap-race).
+/// Reads a file without following a final-component symlink (Unix `O_NOFOLLOW`; Windows
+/// `FILE_FLAG_OPEN_REPARSE_POINT` + handle reparse check); regular-file confirmed via the handle.
 pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String> {
     use std::io::Read;
 
@@ -464,6 +464,13 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
             (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
         );
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT (0x0020_0000): open the reparse point
+        // itself, never its target; the handle metadata check below rejects it.
+        opts.custom_flags(0x0020_0000);
+    }
     let mut file = match opts.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -473,6 +480,17 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
     let meta = file
         .metadata()
         .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    #[cfg(windows)]
+    {
+        // Same Err a unix O_NOFOLLOW ELOOP produces: a name-surrogate reparse
+        // point (symlink/junction) redirects to another path and is refused.
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "cannot open {}: refusing symlink/junction",
+                path.display()
+            ));
+        }
+    }
     if !meta.file_type().is_file() {
         return Err(format!("not a regular file: {}", path.display()));
     }
@@ -535,6 +553,66 @@ mod tests {
             read_regular_file_no_follow(&link).is_err(),
             "a symlinked source must not be followed"
         );
+    }
+
+    /// Plants a directory junction (`mklink /J`, no privilege needed) at
+    /// `base/log.txt` and asserts the no-follow read rejects it.
+    #[cfg(windows)]
+    fn assert_junction_rejected(base: &Path) {
+        let target = base.join("real");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("secret.txt"), "sk-ant-SECRET\n").unwrap();
+        let junction = base.join("log.txt");
+        // mklink is a cmd builtin; /J junctions need no privilege (unlike symlinks).
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("cmd /C mklink /J must spawn");
+        assert!(status.success(), "junction creation must succeed");
+        // Assert the plant: the junction is a name-surrogate reparse point.
+        let planted = std::fs::symlink_metadata(&junction).expect("junction must exist");
+        assert!(
+            planted.file_type().is_symlink(),
+            "planted junction must read as a reparse point"
+        );
+        let r = read_regular_file_no_follow(&junction);
+        assert!(
+            r.is_err(),
+            "a final-component junction must be rejected: {r:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_no_follow_rejects_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "sk-ant-SECRET\n").unwrap();
+        let link = dir.path().join("log.txt");
+        if let Err(e) = std::os::windows::fs::symlink_file(&secret, &link) {
+            // 1314 = ERROR_PRIVILEGE_NOT_HELD (no Developer Mode/admin): fall
+            // back to a junction, which needs no privilege, for the same check.
+            assert_eq!(
+                e.raw_os_error(),
+                Some(1314),
+                "unexpected symlink_file failure: {e}"
+            );
+            assert_junction_rejected(dir.path());
+            return;
+        }
+        let r = read_regular_file_no_follow(&link);
+        assert!(r.is_err(), "a symlinked source must not be followed: {r:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_no_follow_rejects_a_junction() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_junction_rejected(dir.path());
     }
 
     #[cfg(unix)]

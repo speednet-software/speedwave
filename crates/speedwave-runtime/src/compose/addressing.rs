@@ -43,6 +43,21 @@ impl HostAddressing {
             mode: AddressingMode::MirroredRelay,
         }
     }
+
+    /// IP a container's `host.docker.internal` resolves to.
+    pub fn gateway_ip(&self) -> &str {
+        &self.gateway_ip
+    }
+
+    /// Address the host process binds listeners on.
+    pub fn bind_address(&self) -> &str {
+        &self.bind_address
+    }
+
+    /// Explicit addressing mode of this snapshot.
+    pub fn mode(&self) -> AddressingMode {
+        self.mode
+    }
 }
 
 /// Test seam. Production: `LimaStatic` (macOS) / `WslDetector` (Windows).
@@ -327,17 +342,14 @@ mod host_addressing_impls {
     #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
     fn detect_wsl_gateway_ip() -> anyhow::Result<String> {
         let distro = crate::consts::wsl_distro_name();
-        let child = crate::binary::system_command("wsl.exe")
-            .args(["-d", distro, "--", "sh", "-c", "ip -4 route show default"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
         // Bounded: watchdog ticks (and the joins in `stop()`) reach this probe — a
         // wedged wsl.exe must never pin them indefinitely.
-        let output =
-            crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(15))
-                .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
+        let output = crate::binary::run_wsl_bounded(
+            &["-d", distro, "--", "sh", "-c", "ip -4 route show default"],
+            None,
+            std::time::Duration::from_secs(15),
+        )
+        .map_err(|e| anyhow::anyhow!("wsl.exe probe failed for distro '{distro}': {e}"))?;
         if !output.status.success() {
             anyhow::bail!(
                 "wsl.exe -d {distro} ip route returned status {} (stderr: {})",
@@ -507,6 +519,22 @@ mod resolver_tests {
 
     fn sample_addr() -> HostAddressing {
         HostAddressing::direct("172.24.48.1", "172.24.48.1")
+    }
+
+    #[test]
+    fn accessors_expose_constructor_fields() {
+        let direct = HostAddressing::direct("10.0.0.1", "127.0.0.1");
+        assert_eq!(direct.gateway_ip(), "10.0.0.1");
+        assert_eq!(direct.bind_address(), "127.0.0.1");
+        assert_eq!(direct.mode(), AddressingMode::Direct);
+
+        let mirrored = HostAddressing::mirrored_relay();
+        assert_eq!(
+            mirrored.gateway_ip(),
+            crate::consts::MIRROR_RELAY_GATEWAY_IP
+        );
+        assert_eq!(mirrored.bind_address(), "127.0.0.1");
+        assert_eq!(mirrored.mode(), AddressingMode::MirroredRelay);
     }
 
     #[test]

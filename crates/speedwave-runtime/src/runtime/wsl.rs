@@ -135,6 +135,20 @@ impl WslRuntime {
         self.run_in_distro(&["sh", "-c", &cmd], true).map(|_| ())
     }
 
+    /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
+    /// collisions, dead name-store reservations): clean + retry once per class.
+    fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
+    where
+        U: Fn() -> anyhow::Result<()>,
+    {
+        super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
+        )
+    }
+
     /// Chowns claude-home (incl. the nested .claude/ide mountpoint) to the container uid around
     /// every `up` — nerdctl root-creates missing bind-mount sources (ADR-052). Fail-open.
     fn ensure_claude_home_writable(&self, project: &str) {
@@ -447,14 +461,7 @@ impl ContainerRuntime for WslRuntime {
             )
             .map(|_| ())
         };
-        // Self-heal stale engine state from a prior dirty shutdown (CNI chain
-        // collisions, dead name-store reservations): clean + retry once per class.
-        let result = super::with_engine_state_heal(
-            project,
-            up,
-            |e| self.cleanup_stale_cni(e),
-            |e| self.cleanup_stale_name_store(e, project),
-        );
+        let result = self.up_with_heal(project, up);
         // AFTER up (even a failed one): hand back anything nerdctl root-created.
         self.ensure_claude_home_writable(project);
         result
@@ -677,12 +684,7 @@ impl ContainerRuntime for WslRuntime {
             )
             .map(|_| ())
         };
-        let result = super::with_engine_state_heal(
-            project,
-            up,
-            |e| self.cleanup_stale_cni(e),
-            |e| self.cleanup_stale_name_store(e, project),
-        );
+        let result = self.up_with_heal(project, up);
         self.ensure_claude_home_writable(project);
         result
     }
@@ -709,12 +711,7 @@ impl ContainerRuntime for WslRuntime {
             )
             .map(|_| ())
         };
-        let result = super::with_engine_state_heal(
-            project,
-            up,
-            |e| self.cleanup_stale_cni(e),
-            |e| self.cleanup_stale_name_store(e, project),
-        );
+        let result = self.up_with_heal(project, up);
         self.ensure_claude_home_writable(project);
         result
     }

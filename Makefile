@@ -573,8 +573,8 @@ test-e2e-plugin-tamper-release: build-cli-release
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
 
-# `env` prefix is load-bearing: the value is word-split at use sites, and a bare
-# `LIMA_HOME=… /path/limactl` from an expanded variable is NOT a shell assignment.
+# `env` prefix is load-bearing (word-split at use sites, not a shell assignment); the
+# bundled-limactl path mirrors scripts/e2e-vm.sh's MACOS_ENGINE_BATS_PREAMBLE and engine.ts::engineExec (manual alignment).
 ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave-dev -- sudo
 
 test-engine-contract:

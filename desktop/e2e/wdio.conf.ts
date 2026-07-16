@@ -64,9 +64,10 @@ export const config = {
 
   logLevel: 'warn',
 
-  // Fail fast on a broken external dependency: an exhausted OpenRouter account or
-  // an unreachable local LLM otherwise surfaces mid-suite as an unrelated timeout.
+  // Fail fast on a broken external dependency (exhausted OpenRouter account, unreachable
+  // local LLM) — except 'reset-only', which runs only 07 and needs no LLM at all.
   onPrepare: async function () {
+    if (process.env.SPW_E2E_SPEC_PHASE === 'reset-only') return;
     const failures = await runPreflight();
     if (failures.length === 0) return;
     const detail = failures.map((f) => `  ✖ ${f.service}: ${f.reason}`).join('\n');

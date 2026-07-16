@@ -81,6 +81,15 @@ WINDOWS_WSL_STAGING="/home/windows/speedwave-e2e"
 # Dedicated dir for the engine bats suites — other steps rm -rf the main staging dir.
 WINDOWS_CONTRACT_STAGING="/home/windows/speedwave-contract-suite"
 
+# Shared by both Windows engine-bats invocations: ensures bats-core, then points
+# ENGINE_EXEC at a nested wsl.exe hop into the Speedwave distro; no `$`, so it splices safely into a double-quoted ssh string.
+WINDOWS_BATS_ENGINE_PREAMBLE="command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --'"
+
+# Shared by both macOS engine-bats invocations: ensures bats-core, then restarts the Lima
+# VM via the bundled-limactl path — same literal as Makefile's ENGINE_CONTRACT_EXEC and engine.ts::engineExec (manual alignment; keep in sync).
+MACOS_ENGINE_BATS_PREAMBLE='command -v bats >/dev/null 2>&1 || brew install bats-core
+env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave'
+
 # Escapes a value for a PowerShell single-quoted literal (' doubled = literal ').
 ps_squote() {
     printf '%s' "$1" | sed "s/'/''/g"
@@ -565,7 +574,7 @@ SCRIPT
     if [ "$exit_code" -eq 0 ]; then
         echo "[windows] Running engine-contract suite (staging distro -> WSL interop -> Speedwave distro)..."
         # shellcheck disable=SC2086
-        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
+        ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/engine-contract.bats\"" || exit_code=$?
     fi
 
     # Update-dirty-state suite: needs the live 'e2e-test' project + running containers
@@ -586,7 +595,7 @@ SCRIPT
             # derivation; WSL interop never forwards it into speedwave.exe (no WSLENV).
             echo "[windows] Running update-dirty-state suite (staging distro -> WSL interop -> Speedwave distro)..."
             # shellcheck disable=SC2086
-            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"command -v bats >/dev/null || (sudo apt-get update -o Acquire::Retries=3 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bats); ENGINE_EXEC='env WSL_UTF8=1 wsl.exe -d Speedwave -u root --' SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
+            ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- bash -lc \"$WINDOWS_BATS_ENGINE_PREAMBLE SPW_E2E_PROJECT=e2e-test SPEEDWAVE_DATA_DIR=$windows_data_dir SPEEDWAVE_BIN=$windows_cli_path bats --print-output-on-failure $WINDOWS_CONTRACT_STAGING/update-dirty-state.bats\"" || exit_code=$?
         fi
     fi
 
@@ -846,31 +855,33 @@ SCRIPT
     # teardown-reaped, so it is safe to run before update-dirty-state mutates state.
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running engine-contract suite (production-style install: LIMA_HOME + speedwave VM)..."
-        macos_ssh bash <<'SCRIPT' || exit_code=$?
+        {
+            cat <<'SCRIPT_HEAD'
 set -euo pipefail
 eval "$(/opt/homebrew/bin/brew shellenv)"
-command -v bats >/dev/null 2>&1 || brew install bats-core
-# The app stops the Lima VM when it exits after the pre-reset suite; unlike WSL,
-# Lima has no on-demand start — bring the VM back before the engine preflight.
-env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave
+SCRIPT_HEAD
+            printf '%s\n' "$MACOS_ENGINE_BATS_PREAMBLE"
+            cat <<'SCRIPT_TAIL'
 ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 bats --print-output-on-failure /tmp/speedwave-e2e/engine-contract.bats
-SCRIPT
+SCRIPT_TAIL
+        } | macos_ssh bash || exit_code=$?
     fi
 
     if [ "$exit_code" -eq 0 ]; then
         echo "[macos] Running update-dirty-state suite (production-style install: LIMA_HOME + speedwave VM)..."
-        macos_ssh bash <<'SCRIPT' || exit_code=$?
+        {
+            cat <<'SCRIPT_HEAD'
 set -euo pipefail
 eval "$(/opt/homebrew/bin/brew shellenv)"
-command -v bats >/dev/null 2>&1 || brew install bats-core
-# The app stops the Lima VM when it exits after the pre-reset suite; unlike WSL,
-# Lima has no on-demand start — bring the VM back before the engine preflight.
-env LIMA_HOME="$HOME/.speedwave/lima" /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl start speedwave
+SCRIPT_HEAD
+            printf '%s\n' "$MACOS_ENGINE_BATS_PREAMBLE"
+            cat <<'SCRIPT_TAIL'
 SPEEDWAVE_BIN="$HOME/.local/bin/speedwave" \
 ENGINE_EXEC="env LIMA_HOME=$HOME/.speedwave/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave -- sudo" \
 SPW_E2E_PROJECT=e2e-test bats --print-output-on-failure /tmp/speedwave-e2e/update-dirty-state.bats
-SCRIPT
+SCRIPT_TAIL
+        } | macos_ssh bash || exit_code=$?
     fi
 
     if [ "$exit_code" -eq 0 ]; then

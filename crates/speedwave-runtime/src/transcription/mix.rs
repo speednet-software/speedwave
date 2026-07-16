@@ -92,6 +92,16 @@ pub enum MixSource {
     Mic,
 }
 
+/// One aligned pair of popped channels — named fields so a call site can never
+/// swap system and mic without the compiler noticing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairedPcm {
+    /// System-loopback samples.
+    pub system: Vec<f32>,
+    /// Microphone samples, index-aligned with `system`.
+    pub mic: Vec<f32>,
+}
+
 /// A bounded buffer that mixes two 16 kHz mono streams keyed by absolute sample
 /// index. One per mixed capture; capped at `MAX_BUFFERED_SAMPLES` per side.
 pub struct MixBuffer {
@@ -272,11 +282,7 @@ impl MixBuffer {
     /// Pops the next aligned channel pair of up to `max_samples`, or `None` if fewer than
     /// `min_samples` are ready (unless finished, then it returns the remainder). Both sides
     /// come back `take`-long (the shorter zero-padded) and clamped to ±1.
-    pub fn pop_pair(
-        &mut self,
-        min_samples: usize,
-        max_samples: usize,
-    ) -> Option<(Vec<f32>, Vec<f32>)> {
+    pub fn pop_pair(&mut self, min_samples: usize, max_samples: usize) -> Option<PairedPcm> {
         debug_assert!(
             min_samples <= max_samples,
             "min_samples must be ≤ max_samples"
@@ -293,14 +299,14 @@ impl MixBuffer {
             }
             out
         };
-        let sys = pad(&self.sys[..take.min(self.sys.len())]);
+        let system = pad(&self.sys[..take.min(self.sys.len())]);
         let mic = pad(&self.mic[..take.min(self.mic.len())]);
         let drop_sys = take.min(self.sys.len());
         self.sys.drain(..drop_sys);
         let drop_mic = take.min(self.mic.len());
         self.mic.drain(..drop_mic);
         self.base += take as u64;
-        Some((sys, mic))
+        Some(PairedPcm { system, mic })
     }
 
     /// The current running offset in nanoseconds (start of the next chunk).
@@ -324,10 +330,10 @@ pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, C
                         .then(|| b.pop_pair(1, want))
                         .flatten()
                 });
-                if let Some((sys, mic)) = chunk {
+                if let Some(pair) = chunk {
                     return Ok(Some(AudioChunk {
-                        samples: sys,
-                        mic: Some(mic),
+                        samples: pair.system,
+                        mic: Some(pair.mic),
                         offset: Duration::from_nanos(start_ns),
                     }));
                 }
@@ -384,7 +390,7 @@ mod tests {
         // Mic hasn't caught up — nothing ready.
         assert_eq!(b.pop_pair(1, 1000), None);
         b.push(MixSource::Mic, 0, &[1.0; 16]);
-        let (sys, mic) = b.pop_pair(1, 1000).unwrap();
+        let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys.len(), 16);
         assert_eq!(mic.len(), 16);
         assert!(sys.iter().all(|&s| (s - 1.0).abs() < 1e-6));
@@ -398,14 +404,17 @@ mod tests {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[1.0, 0.5, -0.5, 0.0]);
         b.push(MixSource::Mic, 0, &[1.0, 0.5, 0.5, 0.0]);
-        let (sys, mic) = b.pop_pair(1, 1000).unwrap();
+        let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys, vec![1.0, 0.5, -0.5, 0.0]);
         assert_eq!(mic, vec![1.0, 0.5, 0.5, 0.0]);
         // Boundary clamp: -1.0 on each side stays -1.0.
         let mut b2 = MixBuffer::new();
         b2.push(MixSource::System, 0, &[-1.0]);
         b2.push(MixSource::Mic, 0, &[-1.0]);
-        let (sys2, mic2) = b2.pop_pair(1, 1).unwrap();
+        let PairedPcm {
+            system: sys2,
+            mic: mic2,
+        } = b2.pop_pair(1, 1).unwrap();
         assert_eq!(sys2, vec![-1.0]);
         assert_eq!(mic2, vec![-1.0]);
     }
@@ -417,7 +426,7 @@ mod tests {
         b.push(MixSource::System, 0, &[1.0; 3]);
         b.push(MixSource::Mic, 0, &[1.0]);
         b.finish();
-        let (sys, mic) = b.pop_pair(1, 1000).unwrap();
+        let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys, vec![1.0, 1.0, 1.0]);
         assert_eq!(mic, vec![1.0, 0.0, 0.0]);
     }
@@ -428,9 +437,9 @@ mod tests {
         b.push(MixSource::System, 0, &[0.2; 100]);
         b.push(MixSource::Mic, 0, &[0.0; 100]);
         assert_eq!(b.pop_pair(200, 1000), None); // min not met (only 100 available)
-        let (sys, _mic) = b.pop_pair(30, 30).unwrap(); // min met, capped at 30
+        let PairedPcm { system: sys, .. } = b.pop_pair(30, 30).unwrap(); // min met, capped at 30
         assert_eq!(sys.len(), 30);
-        let (sys2, _mic2) = b.pop_pair(1, 1000).unwrap();
+        let PairedPcm { system: sys2, .. } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys2.len(), 70);
     }
 
@@ -440,7 +449,7 @@ mod tests {
         b.push(MixSource::System, 0, &[0.5; 10]);
         assert_eq!(b.pop_pair(1, 1000), None); // mic never arrives → nothing pops
         b.finish();
-        let (sys, mic) = b.pop_pair(1, 1000).unwrap();
+        let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys.len(), 10);
         assert!(sys.iter().all(|&s| (s - 0.5).abs() < 1e-6));
         assert!(mic.iter().all(|&s| s == 0.0));
@@ -460,7 +469,7 @@ mod tests {
         // A fresh in-future buffer (offset 2 ms = index 32) pops normally.
         b.push(MixSource::System, 2_000_000, &[0.4; 16]);
         b.push(MixSource::Mic, 2_000_000, &[0.0; 16]);
-        let (sys, _mic) = b.pop_pair(1, 1000).unwrap();
+        let PairedPcm { system: sys, .. } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys.len(), 16);
         // 0.4 RMS > LEVEL_TARGET_RMS (0.1) → gain 1.0.
         assert!(sys.iter().all(|&s| (s - 0.4).abs() < 1e-6));
@@ -479,7 +488,7 @@ mod tests {
         let mut b2 = MixBuffer::new();
         b2.push(MixSource::System, 0, &[1.0; 16]);
         b2.push(MixSource::Mic, 0, &[0.0; 16]);
-        assert_eq!(b2.pop_pair(1, 1000).unwrap().0.len(), 16);
+        assert_eq!(b2.pop_pair(1, 1000).unwrap().system.len(), 16);
     }
 
     #[test]
@@ -492,7 +501,7 @@ mod tests {
         // gets the full boost, as if the dropped chunk never existed.
         b.push(MixSource::System, 0, &[0.01; 16]);
         b.push(MixSource::Mic, 0, &[0.0; 16]);
-        let (sys, _mic) = b.pop_pair(1, 16).unwrap();
+        let PairedPcm { system: sys, .. } = b.pop_pair(1, 16).unwrap();
         // Estimate seeds at 0.01 → wants 10×, clamps to 8×; 0.01·8 = 0.08.
         assert!(sys.iter().all(|&s| (s - 0.08).abs() < 1e-6));
     }
@@ -503,7 +512,7 @@ mod tests {
         b.push(MixSource::System, 0, &[0.1; 16]);
         b.push(MixSource::System, 0, &[0.2; 16]); // same range → 0.3
         b.push(MixSource::Mic, 0, &[0.0; 16]);
-        let (sys, _mic) = b.pop_pair(1, 16).unwrap();
+        let PairedPcm { system: sys, .. } = b.pop_pair(1, 16).unwrap();
         assert!(sys.iter().all(|&s| (s - 0.3).abs() < 1e-6));
     }
 
@@ -523,7 +532,8 @@ mod tests {
         // Mic never delivers; system pushes 6 s (> 5 s gap) of audio.
         let six_secs = SAMPLE_RATE_HZ as usize * 6;
         b.push(MixSource::System, 0, &vec![0.8; six_secs]);
-        let (sys, mic) = b.pop_pair(1, six_secs).expect("mix flows without the mic");
+        let PairedPcm { system: sys, mic } =
+            b.pop_pair(1, six_secs).expect("mix flows without the mic");
         // ready = 6s − 5s gap = 1s; mic side pads as zeros.
         assert_eq!(sys.len(), SAMPLE_RATE_HZ as usize);
         assert!(sys.iter().all(|&s| (s - 0.8).abs() < 1e-6));
@@ -575,13 +585,16 @@ mod tests {
             vec![CaptureHealth::Cleared(CaptureWarning::MicrophoneStalled)]
         );
         // 6s+16 samples on mic vs 6s on sys → gap 16 ≪ DEAD_GAP → gate = min.
-        let (sys, mic) = b.pop_pair(1, usize::MAX).unwrap();
+        let PairedPcm { system: sys, mic } = b.pop_pair(1, usize::MAX).unwrap();
         // Drains up to sys_filled (6 s) minus already-popped base (1 s) = 5 s.
         assert_eq!(sys.len(), SAMPLE_RATE_HZ as usize * 5);
         assert!(sys.iter().all(|&s| (s - 0.8).abs() < 1e-6));
         assert!(mic.iter().all(|&s| s == 0.0));
         b.push(MixSource::System, 6_000_000_000, &[0.8; 16]);
-        let (sys2, mic2) = b.pop_pair(1, usize::MAX).unwrap();
+        let PairedPcm {
+            system: sys2,
+            mic: mic2,
+        } = b.pop_pair(1, usize::MAX).unwrap();
         assert_eq!(sys2.len(), 16);
         assert!(sys2.iter().all(|&s| (s - 0.8).abs() < 1e-6));
         assert!(mic2.iter().all(|&s| (s - 0.8).abs() < 1e-6));
@@ -648,7 +661,7 @@ mod tests {
         // Mic speech at RMS 0.02 (under LEVEL_TARGET_RMS) → 5× boost.
         b.push(MixSource::Mic, 0, &[0.02; 1600]);
         b.push(MixSource::System, 0, &[0.0; 1600]);
-        let (_sys, mic) = b.pop_pair(1, 1600).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, 1600).unwrap();
         // 0.02 × 5 (boost) = 0.1
         assert!(
             mic.iter().all(|&s| (s - 0.1).abs() < 1e-4),
@@ -687,7 +700,7 @@ mod tests {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[0.02; 1600]);
         b.push(MixSource::Mic, 0, &[0.0; 1600]);
-        let (sys, _mic) = b.pop_pair(1, 1600).unwrap();
+        let PairedPcm { system: sys, .. } = b.pop_pair(1, 1600).unwrap();
         assert!(
             sys.iter().all(|&s| (s - 0.1).abs() < 1e-4),
             "got {:?}",
@@ -701,7 +714,7 @@ mod tests {
         // RMS 0.005 wants a 20× boost — clamps to LEVEL_MAX_BOOST (8×).
         b.push(MixSource::Mic, 0, &[0.005; 1600]);
         b.push(MixSource::System, 0, &[0.0; 1600]);
-        let (_sys, mic) = b.pop_pair(1, 1600).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, 1600).unwrap();
         // 0.005 × 8 = 0.04
         assert!(
             mic.iter().all(|&s| (s - 0.04).abs() < 1e-4),
@@ -715,7 +728,7 @@ mod tests {
         let mut b = MixBuffer::new();
         b.push(MixSource::Mic, 0, &[0.4; 1600]);
         b.push(MixSource::System, 0, &[0.0; 1600]);
-        let (_sys, mic) = b.pop_pair(1, 1600).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, 1600).unwrap();
         // Gain clamps at 1.0 from below: 0.4 × 1 = 0.4.
         assert!(
             mic.iter().all(|&s| (s - 0.4).abs() < 1e-4),
@@ -734,7 +747,7 @@ mod tests {
         transient[100] = 0.9;
         b.push(MixSource::Mic, 100_000_000, &transient);
         b.push(MixSource::System, 0, &[0.0; 3200]);
-        let (_, mic) = b.pop_pair(1, usize::MAX).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
         assert!(mic.iter().all(|&s| s.abs() <= 1.0));
         // The whole chunk's gain is peak-limited to 1/0.9 ≈ 1.11, not 5x:
         // the transient lands just under full scale, unclipped.
@@ -763,7 +776,7 @@ mod tests {
             b.push(MixSource::Mic, i * 100_000_000, &[0.001; 1600]);
             b.push(MixSource::System, i * 100_000_000, &[0.0; 1600]);
         }
-        let (_sys, mic) = b.pop_pair(1, usize::MAX).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
         // No estimate formed → unity gain: 0.001.
         assert!(
             mic.iter().all(|&s| (s - 0.001).abs() < 1e-5),
@@ -779,7 +792,7 @@ mod tests {
         b.push(MixSource::Mic, 100_000_000, &[0.0; 1600]); // pause
         b.push(MixSource::Mic, 200_000_000, &[0.02; 1600]); // same level again
         b.push(MixSource::System, 0, &[0.0; 4800]);
-        let (_sys, mic) = b.pop_pair(1, usize::MAX).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
         // Both utterances get the held 5× boost; the pause stays zero.
         assert!(mic[..1600].iter().all(|&s| (s - 0.1).abs() < 1e-4));
         assert!(mic[1600..3200].iter().all(|&s| s.abs() < 1e-6));
@@ -795,7 +808,7 @@ mod tests {
             b.push(MixSource::Mic, i * 1_000_000_000, &[0.1; 16_000]);
         }
         b.push(MixSource::System, 0, &[0.0; 16_000 * 9]);
-        let (_sys, mic) = b.pop_pair(1, usize::MAX).unwrap();
+        let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
         let first = mic[0]; // 0.02 × 5 = 0.1
         let last = mic[mic.len() - 1];
         assert!((first - 0.1).abs() < 1e-4, "first {first}");
