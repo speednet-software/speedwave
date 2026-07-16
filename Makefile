@@ -147,17 +147,19 @@ setup-dev:
 		echo "     Install: brew install bats-core"; \
 	fi; \
 	\
-	if command -v wasm-pack >/dev/null 2>&1; then \
-		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
-	else \
-		echo "  ⬚  wasm-pack not found (needed for: crates/pii-engine-wasm/build-wasm.sh)"; \
-		echo "     Install: cargo install wasm-pack   (or: npm i -g wasm-pack)"; \
-	fi; \
+	echo ""; \
+	echo "── PII engine (WASM) ──"; \
 	if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then \
 		echo "  ✅ rustup target wasm32-unknown-unknown"; \
 	else \
-		echo "  ⬚  rustup target wasm32-unknown-unknown not installed (needed for: build-wasm.sh)"; \
-		echo "     Install: rustup target add wasm32-unknown-unknown"; \
+		echo "  📦 wasm32-unknown-unknown target not found, installing..."; \
+		rustup target add wasm32-unknown-unknown && echo "  ✅ wasm32-unknown-unknown installed" || { echo "  ❌ target install failed"; FAIL=1; }; \
+	fi; \
+	if command -v wasm-pack >/dev/null 2>&1; then \
+		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
+	else \
+		echo "  📦 wasm-pack not found, installing..."; \
+		npm install -g wasm-pack && echo "  ✅ wasm-pack installed" || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
 	fi; \
 	\
 	echo ""; \
