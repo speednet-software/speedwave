@@ -2118,6 +2118,26 @@ mod tests {
         );
     }
 
+    // ---- is_foreign_anthropic_model Rust<->TS mirror (ADR-073) --------------
+
+    #[test]
+    fn is_foreign_anthropic_model_matches_ts_mirror() {
+        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
+        // TS `isForeignModel` in llm-provider.component.ts must stay behavior-identical.
+        let src = include_str!(
+            "../../../desktop/src/src/app/settings/llm-provider/llm-provider.component.ts"
+        );
+        let re = regex::Regex::new(
+            r"isForeignModel\(model: string\): boolean \{\s*return model\.includes\('/'\);\s*\}",
+        )
+        .unwrap();
+        assert!(
+            re.is_match(src),
+            "llm-provider.component.ts::isForeignModel must stay `model.includes('/')` \
+             to match Rust is_foreign_anthropic_model"
+        );
+    }
+
     #[test]
     fn otlp_protocol_matches_ts() {
         let all = [
