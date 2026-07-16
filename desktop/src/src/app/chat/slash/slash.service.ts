@@ -10,6 +10,15 @@ export function isBareSlash(text: string): boolean {
   return text.trim() === '/';
 }
 
+/**
+ * True when `text` is blank or is the bare slash-menu trigger. Mirrors Rust SSOT
+ * `chat.rs::is_blank_or_slash_only` (Rust side operates on wire blocks, not raw text).
+ * @param text - Raw composer text to test.
+ */
+export function isBlankOrSlashOnly(text: string): boolean {
+  return text.trim().length === 0 || isBareSlash(text);
+}
+
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
 export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
 

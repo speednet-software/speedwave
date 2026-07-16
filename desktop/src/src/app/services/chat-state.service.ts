@@ -6,7 +6,7 @@ import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
-import { isBareSlash } from '../chat/slash/slash.service';
+import { isBlankOrSlashOnly } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
   isLocalProvider,
@@ -380,8 +380,7 @@ export class ChatStateService {
     if (!hasContent || this.isStreaming) return;
     // Drop whitespace-only or bare-slash input before streaming; hasContent
     // misses these and the backend would bail with a stray error bubble.
-    const isBlankOrSlash = chatInput.text.trim().length === 0 || isBareSlash(chatInput.text);
-    if (chatInput.attachments.length === 0 && isBlankOrSlash) return;
+    if (chatInput.attachments.length === 0 && isBlankOrSlashOnly(chatInput.text)) return;
     this.log.debug(`[chat-state] sendMessage: isStreaming=${this.isStreaming}`);
 
     const displayBlocks: MessageBlock[] = [];

@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { SlashService, isBareSlash, type SlashDiscovery } from './slash.service';
+import {
+  SlashService,
+  isBareSlash,
+  isBlankOrSlashOnly,
+  type SlashDiscovery,
+} from './slash.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
 
@@ -17,6 +22,30 @@ describe('isBareSlash', () => {
     expect(isBareSlash('hej')).toBe(false);
     expect(isBareSlash('')).toBe(false);
     expect(isBareSlash('   ')).toBe(false);
+  });
+});
+
+describe('isBlankOrSlashOnly', () => {
+  it('is true for empty and whitespace-only text', () => {
+    expect(isBlankOrSlashOnly('')).toBe(true);
+    expect(isBlankOrSlashOnly('   ')).toBe(true);
+    expect(isBlankOrSlashOnly('\n\t ')).toBe(true);
+  });
+
+  it('is true for a lone slash, with or without surrounding whitespace', () => {
+    expect(isBlankOrSlashOnly('/')).toBe(true);
+    expect(isBlankOrSlashOnly('  /  ')).toBe(true);
+    expect(isBlankOrSlashOnly('\n/\t')).toBe(true);
+  });
+
+  it('is false for a real slash command', () => {
+    expect(isBlankOrSlashOnly('/code-review')).toBe(false);
+    expect(isBlankOrSlashOnly('/clear')).toBe(false);
+  });
+
+  it('is false for ordinary text', () => {
+    expect(isBlankOrSlashOnly('hej')).toBe(false);
+    expect(isBlankOrSlashOnly('what is 2/3?')).toBe(false);
   });
 });
 
