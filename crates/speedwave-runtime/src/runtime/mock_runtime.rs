@@ -158,6 +158,8 @@ pub struct MockRuntimeBuilder {
     exec_piped_script: Option<String>,
     exec_piped_hang_secs: Option<u64>,
     exec_piped_hang_used: Arc<Mutex<bool>>,
+    exec_piped_orphan_hang_secs: Option<u64>,
+    exec_piped_orphan_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -221,6 +223,8 @@ impl MockRuntimeBuilder {
             exec_piped_script: None,
             exec_piped_hang_secs: None,
             exec_piped_hang_used: Arc::new(Mutex::new(false)),
+            exec_piped_orphan_hang_secs: None,
+            exec_piped_orphan_hang_used: Arc::new(Mutex::new(false)),
             exec_piped_error: None,
             exec_piped_failure_queue: Arc::new(Mutex::new(Vec::new())),
             validate_script: Arc::new(Mutex::new(Vec::new())),
@@ -352,6 +356,15 @@ impl MockRuntimeBuilder {
         self.exec_piped_hang_secs = Some(sleep_secs);
         self
     }
+    /// ONE-SHOT orphan hang: the first `container_exec_piped` call returns a
+    /// `sh -c "sleep <secs> & exit 0"` child. The shell exits immediately
+    /// (`child.wait()` returns) but the orphaned `sleep` inherits and holds
+    /// the stdout pipe write end open, so a reader blocked on it never sees
+    /// EOF. Later calls fall through.
+    pub fn with_exec_piped_orphan_hang(mut self, sleep_secs: u64) -> Self {
+        self.exec_piped_orphan_hang_secs = Some(sleep_secs);
+        self
+    }
     /// Makes `container_exec_piped` fail with `msg`.
     pub fn with_exec_piped_error(mut self, msg: &str) -> Self {
         self.exec_piped_error = Some(msg.to_string());
@@ -415,6 +428,8 @@ impl MockRuntimeBuilder {
             exec_piped_script: self.exec_piped_script,
             exec_piped_hang_secs: self.exec_piped_hang_secs,
             exec_piped_hang_used: self.exec_piped_hang_used,
+            exec_piped_orphan_hang_secs: self.exec_piped_orphan_hang_secs,
+            exec_piped_orphan_hang_used: self.exec_piped_orphan_hang_used,
             exec_piped_error: self.exec_piped_error,
             exec_piped_failure_queue: self.exec_piped_failure_queue,
             validate_script: self.validate_script,
@@ -455,6 +470,8 @@ struct MockRuntime {
     exec_piped_script: Option<String>,
     exec_piped_hang_secs: Option<u64>,
     exec_piped_hang_used: Arc<Mutex<bool>>,
+    exec_piped_orphan_hang_secs: Option<u64>,
+    exec_piped_orphan_hang_used: Arc<Mutex<bool>>,
     exec_piped_error: Option<String>,
     exec_piped_failure_queue: Arc<Mutex<Vec<String>>>,
     validate_script: Arc<Mutex<Vec<Result<(), String>>>>,
@@ -526,6 +543,16 @@ impl ContainerRuntime for MockRuntime {
                 // SSOT-allow: test fixture spawn
                 let mut c = Command::new("sh");
                 c.args(["-c", &format!("sleep {secs}")]);
+                return Ok(c);
+            }
+        }
+        if let Some(secs) = self.exec_piped_orphan_hang_secs {
+            let mut used = self.exec_piped_orphan_hang_used.lock().unwrap();
+            if !*used {
+                *used = true;
+                // SSOT-allow: test fixture spawn
+                let mut c = Command::new("sh");
+                c.args(["-c", &format!("sleep {secs} & exit 0")]);
                 return Ok(c);
             }
         }

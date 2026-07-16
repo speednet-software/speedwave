@@ -357,9 +357,12 @@ fn run_discovery_with_timeout(
             if saw_lines {
                 anyhow::bail!("no system/init event in stdout before EOF");
             }
+            let code = status
+                .ok()
+                .and_then(|s| s.code())
+                .map_or_else(|| "unknown".to_string(), |c| c.to_string());
             anyhow::bail!(
-                "exited without output (exit status {:?} after {}ms)",
-                status.map(|s| s.code()),
+                "exited without output (exit status {code} after {}ms)",
                 start.elapsed().as_millis()
             );
         }
@@ -373,7 +376,17 @@ fn run_discovery_with_timeout(
             reap_in_container_bounded(runtime, container, &instance_id);
             let _ = child.kill();
             let _ = child.wait();
-            let _ = reader.join();
+            // The reap kills by env marker, not by pipe fd: if the in-container
+            // process still holds the write end, the reader never sees EOF and
+            // joining would hang again. Wait briefly, then detach instead of blocking.
+            if rx.recv_timeout(Duration::from_secs(2)).is_ok() {
+                let _ = reader.join();
+            } else {
+                log::warn!(
+                    "discovery reap: reader thread detached for '{container}' \
+                     (in-container process may still hold the output pipe)"
+                );
+            }
             anyhow::bail!("timed out after {}s with no init", timeout.as_secs())
         }
     }
@@ -1048,6 +1061,28 @@ mod tests {
             reap_argv.contains("SPW_SESSION_INSTANCE_ID"),
             "reap must target the marker: {reap_argv}"
         );
+    }
+
+    #[test]
+    fn run_discovery_detaches_blocked_reader_when_pipe_survives_kill() {
+        let (runtime, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_orphan_hang(30)
+            .with_exec_piped_script("")
+            .build();
+        let start = std::time::Instant::now();
+        let err = run_discovery_with_timeout(
+            &runtime,
+            "test-container",
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("must time out even when the pipe survives the kill");
+        assert!(err.to_string().starts_with("timed out"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must not hang on an orphaned reader thread"
+        );
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "spawn + reap expected, got {calls:?}");
     }
 
     #[test]
