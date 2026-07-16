@@ -87,6 +87,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-078](ADR-078-claude-hook-registration.md)                         | Claude Code hook registration — hooks.json declarations merged into settings.json at container start                        | Accepted                                               |
 | [ADR-079](ADR-079-identity-metadata-and-teaching-errors.md)            | Identity metadata trio and the teaching-error contract: `_meta` identity companions + structured validation errors          | Accepted                                               |
 | [ADR-080](ADR-080-wsl2-mirrored-container-host-relay.md)               | Container↔host relay for WSL2 mirrored networking — loopback bind + guest-side socat relay so containers reach host bridges | Accepted                                               |
+| [ADR-081](ADR-081-plugin-settings-worker-delivery.md)                  | Deliver plugin `settings_schema` values to workers via `/tokens/_settings.json`                                             | Accepted                                               |
 
 ## Creating a New ADR
 

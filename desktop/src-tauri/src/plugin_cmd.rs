@@ -713,7 +713,12 @@ pub fn plugin_save_settings(
 
         config::save_user_config(&user_config)
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // Persisted like the auth_fields files, so a container start picks it up and a worker
+    // re-reading per request sees the change without a restart.
+    let sid = manifest.service_id.as_deref().unwrap_or(&slug);
+    plugin::write_settings_file(&project, sid, &settings).map_err(|e| e.to_string())
 }
 
 /// Rejects calls targeting a plugin whose verification status is not `Verified`.
