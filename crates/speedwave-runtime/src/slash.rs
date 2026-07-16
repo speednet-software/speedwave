@@ -4,7 +4,7 @@
 use crate::consts;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -17,9 +17,6 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a cached discovery result stays valid before re-running discovery.
 /// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
-
-/// Polling interval while waiting for the init line.
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Indicates whether the discovery result came from Claude Code itself
 /// (`Init`) or from the hardcoded fallback list (`Fallback`).
@@ -279,7 +276,24 @@ fn run_discovery(
     runtime: &crate::runtime::LockedRuntime,
     container: &str,
 ) -> anyhow::Result<RawDiscovery> {
-    let args = [
+    run_discovery_with_timeout(runtime, container, DISCOVERY_TIMEOUT)
+}
+
+/// Reader events: one parsed init, EOF with the line count seen, or an IO error.
+enum ReaderEvent {
+    Init(RawDiscovery),
+    Eof { saw_lines: bool },
+    Err(std::io::Error),
+}
+
+fn run_discovery_with_timeout(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+    timeout: Duration,
+) -> anyhow::Result<RawDiscovery> {
+    let instance_id = crate::session::new_instance_id();
+    let marker_argv = crate::session::instance_env_argv(&instance_id);
+    let claude_argv = [
         consts::CLAUDE_BINARY,
         "-p",
         "--verbose",
@@ -290,66 +304,114 @@ fn run_discovery(
         "--",
         "/",
     ];
+    let argv: Vec<&str> = marker_argv
+        .iter()
+        .map(String::as_str)
+        .chain(claude_argv.iter().copied())
+        .collect();
 
-    let mut cmd = runtime.container_exec_piped(container, &args)?;
+    let mut cmd = runtime.container_exec_piped(container, &argv)?;
+    let start = Instant::now();
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("claude -p: stdout not captured"))?;
 
-    let start = Instant::now();
-    let mut reader = BufReader::new(stdout);
-    let mut buf = String::new();
-    let mut result: Option<RawDiscovery> = None;
-    let mut got_line = false;
-
-    while start.elapsed() < DISCOVERY_TIMEOUT {
-        buf.clear();
-        match reader.read_line(&mut buf) {
-            Ok(0) => break, // EOF — process exited without init
-            Ok(_) => {
-                got_line = true;
-                if let Some(parsed) = parse_init_line(&buf) {
-                    result = Some(parsed);
-                    break;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let mut saw_lines = false;
+        for line in &mut lines {
+            match line {
+                Ok(l) => {
+                    saw_lines = true;
+                    if let Some(parsed) = parse_init_line(&l) {
+                        let _ = tx.send(ReaderEvent::Init(parsed));
+                        return;
+                    }
                 }
-            }
-            Err(err) => {
-                let kind = err.kind();
-                if kind == std::io::ErrorKind::WouldBlock
-                    || kind == std::io::ErrorKind::TimedOut
-                    || kind == std::io::ErrorKind::Interrupted
-                {
-                    std::thread::sleep(POLL_INTERVAL);
-                    continue;
+                Err(e) => {
+                    let _ = tx.send(ReaderEvent::Err(e));
+                    return;
                 }
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(anyhow::Error::new(err).context("claude -p: read_line failed"));
             }
         }
-    }
+        let _ = tx.send(ReaderEvent::Eof { saw_lines });
+    });
 
-    // Always kill the child; ignore kill errors (may already have exited).
-    let _ = child.kill();
-    let _ = child.wait();
-
-    match result {
-        Some(parsed) => Ok(parsed),
-        None => {
-            if got_line {
-                anyhow::bail!("claude -p: no system/init event in stdout before timeout");
+    match rx.recv_timeout(timeout) {
+        Ok(ReaderEvent::Init(parsed)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            Ok(parsed)
+        }
+        Ok(ReaderEvent::Eof { saw_lines }) => {
+            let status = child.wait();
+            let _ = reader.join();
+            if saw_lines {
+                anyhow::bail!("no system/init event in stdout before EOF");
             }
             anyhow::bail!(
-                "claude -p: no output received within {}s",
-                DISCOVERY_TIMEOUT.as_secs()
+                "exited without output (exit status {:?} after {}ms)",
+                status.map(|s| s.code()),
+                start.elapsed().as_millis()
             );
+        }
+        Ok(ReaderEvent::Err(e)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            Err(anyhow::Error::new(e).context("claude -p: read failed"))
+        }
+        Err(_) => {
+            reap_in_container_bounded(runtime, container, &instance_id);
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            anyhow::bail!("timed out after {}s with no init", timeout.as_secs())
+        }
+    }
+}
+
+/// Reap the in-container claude by marker (host kill alone does not propagate);
+/// the reap exec itself is bounded to 5s and then killed.
+fn reap_in_container_bounded(
+    runtime: &crate::runtime::LockedRuntime,
+    container: &str,
+    instance_id: &str,
+) {
+    let reap_argv = crate::session::kill_by_instance_command(instance_id);
+    let argv: Vec<&str> = reap_argv.iter().map(String::as_str).collect();
+    let Ok(mut cmd) = runtime.container_exec_piped(container, &argv) else {
+        log::warn!("discovery reap: exec build failed for '{container}'");
+        return;
+    };
+    let Ok(mut reap) = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        log::warn!("discovery reap: spawn failed for '{container}'");
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match reap.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = reap.kill();
+                let _ = reap.wait();
+                log::warn!("discovery reap: bounded kill after 5s for '{container}'");
+                return;
+            }
         }
     }
 }
@@ -922,23 +984,70 @@ mod tests {
     }
 
     #[test]
-    fn run_discovery_fails_when_no_init_line() {
-        let script = "just some text\nmore noise\n".to_string();
-        let (runtime, _) = MockRuntimeBuilder::new()
-            .with_exec_piped_script(&script)
-            .build();
+    fn run_discovery_reports_exited_without_output_with_status_and_elapsed() {
+        let (runtime, _) = MockRuntimeBuilder::new().with_exec_piped_script("").build();
+        let start = std::time::Instant::now();
         let err = run_discovery(&runtime, "test-container").expect_err("should fail");
         let msg = err.to_string();
-        assert!(msg.contains("no system/init") || msg.contains("no output"));
+        assert!(msg.starts_with("exited without output"), "got: {msg}");
+        assert!(msg.contains("exit status"), "got: {msg}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
-    fn run_discovery_fails_when_container_not_running() {
+    fn run_discovery_reports_no_init_when_lines_never_match() {
+        let (runtime, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script("noise\nmore noise\n")
+            .build();
+        let err = run_discovery(&runtime, "test-container").expect_err("should fail");
+        assert!(err.to_string().starts_with("no system/init"), "got: {err}");
+    }
+
+    #[test]
+    fn run_discovery_passes_spawn_errors_through() {
         let (runtime, _) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
             .build();
         let err = run_discovery(&runtime, "test-container").expect_err("should fail");
         assert!(err.to_string().contains("container not running"));
+    }
+
+    #[test]
+    fn run_discovery_stamps_instance_marker_in_argv() {
+        let (runtime, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_script("noise\n")
+            .build();
+        let _ = run_discovery(&runtime, "test-container");
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls[0].argv[0], "env");
+        assert!(calls[0].argv[1].starts_with("SPW_SESSION_INSTANCE_ID="));
+    }
+
+    #[test]
+    fn run_discovery_times_out_reaps_and_joins_under_deadline() {
+        let (runtime, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_hang(30)
+            .with_exec_piped_script("")
+            .build();
+        let start = std::time::Instant::now();
+        let err = run_discovery_with_timeout(
+            &runtime,
+            "test-container",
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("must time out");
+        assert!(err.to_string().starts_with("timed out"), "got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "reap/join must be bounded"
+        );
+        let calls = handles.exec_calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "spawn + reap expected, got {calls:?}");
+        let reap_argv = calls[1].argv.join(" ");
+        assert!(
+            reap_argv.contains("SPW_SESSION_INSTANCE_ID"),
+            "reap must target the marker: {reap_argv}"
+        );
     }
 
     #[test]
