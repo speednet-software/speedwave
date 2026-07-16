@@ -323,39 +323,52 @@ fn parse_token_span(span: &str) -> Option<(&str, &str)> {
     inner.split_once(":TOKEN_")
 }
 
+/// Resolves one token span to its plaintext; `None` on any parse or verification failure.
+fn resolve_span(key: &EngineKey, span: &str) -> Option<String> {
+    let (category, payload) = parse_token_span(span)?;
+    let ciphertext = decode_payload(payload).ok()?;
+    let plaintext_bytes = open(key, category, &ciphertext).ok()?;
+    String::from_utf8(plaintext_bytes).ok()
+}
+
 /// Replaces EVERY token span with its plaintext; the first failed tag verification aborts with Err.
 pub fn detokenize_text(key: &EngineKey, text: &str) -> Result<String, DetokenizeError> {
     let re = token_span_regex().map_err(|_| DetokenizeError::TokenPatternInvalid)?;
     let mut result = String::with_capacity(text.len());
     let mut last = 0;
     for (index, m) in re.find_iter(text).enumerate() {
-        let (category, payload) =
-            parse_token_span(m.as_str()).ok_or_else(|| DetokenizeError::VerificationFailed {
-                category: "unknown".to_string(),
+        let plaintext =
+            resolve_span(key, m.as_str()).ok_or_else(|| DetokenizeError::VerificationFailed {
+                category: parse_token_span(m.as_str())
+                    .map_or_else(|| "unknown".to_string(), |(c, _)| c.to_string()),
                 index,
             })?;
-        let ciphertext =
-            decode_payload(payload).map_err(|_| DetokenizeError::VerificationFailed {
-                category: category.to_string(),
-                index,
-            })?;
-        let plaintext_bytes =
-            open(key, category, &ciphertext).map_err(|_| DetokenizeError::VerificationFailed {
-                category: category.to_string(),
-                index,
-            })?;
-        let plaintext = String::from_utf8(plaintext_bytes).map_err(|_| {
-            DetokenizeError::VerificationFailed {
-                category: category.to_string(),
-                index,
-            }
-        })?;
         result.push_str(&text[last..m.start()]);
         result.push_str(&plaintext);
         last = m.end();
     }
     result.push_str(&text[last..]);
     Ok(result)
+}
+
+/// Per-span detokenization for presentation: resolvable spans are replaced, unresolvable
+/// spans stay verbatim. Never fails; tool-call paths must use the fail-closed variants instead.
+pub fn detokenize_text_lossy(key: &EngineKey, text: &str) -> String {
+    let Ok(re) = token_span_regex() else {
+        return text.to_string();
+    };
+    let mut result = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in re.find_iter(text) {
+        result.push_str(&text[last..m.start()]);
+        match resolve_span(key, m.as_str()) {
+            Some(plaintext) => result.push_str(&plaintext),
+            None => result.push_str(m.as_str()),
+        }
+        last = m.end();
+    }
+    result.push_str(&text[last..]);
+    result
 }
 
 fn detokenize_json_value(
@@ -728,5 +741,90 @@ mod tests {
         let result = detokenize_json(&key, &mut value);
         assert!(result.is_err(), "should reject on second token corruption");
         assert_eq!(value, original, "input must remain unchanged after error");
+    }
+
+    // ── detokenize_text_lossy: per-span presentation variant ──
+
+    #[test]
+    fn lossy_resolves_valid_spans_and_keeps_unresolvable_ones_verbatim() {
+        let key = test_key();
+        let valid_ct = siv_seal(
+            &key,
+            "EMAIL",
+            b"[EMAIL:TOKEN_S6Vqu7yWuqrhbwHUuU7GAsi0M6emGFXCiEHbo9lIVsjNvw]",
+        )
+        .expect("seal succeeds");
+        let valid_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&valid_ct));
+        let text = format!("real {valid_token} fake [EMAIL:TOKEN_XYZ] end");
+
+        let displayed = detokenize_text_lossy(&key, &text);
+        assert_eq!(displayed, "real [EMAIL:TOKEN_S6Vqu7yWuqrhbwHUuU7GAsi0M6emGFXCiEHbo9lIVsjNvw] fake [EMAIL:TOKEN_XYZ] end");
+    }
+
+    #[test]
+    fn lossy_keeps_flipped_bit_span_verbatim_and_resolves_its_valid_neighbor() {
+        let key = test_key();
+        let first_ct = siv_seal(
+            &key,
+            "EMAIL",
+            b"[EMAIL:TOKEN_kbmxDYUcxYCV0v9lHDfVDX9TG9ORSU9lHqsxWmye9BUq]",
+        )
+        .expect("seal succeeds");
+        let first_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&first_ct));
+        let second_ct = siv_seal(
+            &key,
+            "EMAIL",
+            b"[EMAIL:TOKEN_2q2xCFkxOI2vLuJ3S4NCA33olsxh1jieUqzYqAkzGpU8pg]",
+        )
+        .expect("seal succeeds");
+        let mut second_bytes = siv_encode_payload(&second_ct).into_bytes();
+        second_bytes[0] = if second_bytes[0] == b'A' { b'B' } else { b'A' };
+        let second_token = format!(
+            "[EMAIL:TOKEN_{}]",
+            String::from_utf8(second_bytes).expect("still valid utf8")
+        );
+        let text = format!("{first_token} and {second_token}");
+
+        let displayed = detokenize_text_lossy(&key, &text);
+        assert_eq!(
+            displayed,
+            format!(
+                "[EMAIL:TOKEN_kbmxDYUcxYCV0v9lHDfVDX9TG9ORSU9lHqsxWmye9BUq] and {second_token}"
+            )
+        );
+    }
+
+    #[test]
+    fn lossy_with_wrong_key_leaves_every_span_verbatim() {
+        let key = test_key();
+        let other_key = EngineKey::from_bytes([7u8; 32]);
+        let ct = siv_seal(
+            &key,
+            "EMAIL",
+            b"[EMAIL:TOKEN_Yl4h9nJRt3THY3zoNklqXVIcCq3zKA2rrPO4mCUW6uWm]",
+        )
+        .expect("seal succeeds");
+        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ct));
+
+        assert_eq!(detokenize_text_lossy(&other_key, &token), token);
+    }
+
+    #[test]
+    fn lossy_unknown_category_span_stays_verbatim() {
+        let key = test_key();
+        let ct = siv_seal(&key, "EMAIL", b"whatever").expect("seal succeeds");
+        let span = format!("[FOO:TOKEN_{}]", siv_encode_payload(&ct));
+
+        assert_eq!(detokenize_text_lossy(&key, &span), span);
+    }
+
+    #[test]
+    fn lossy_without_tokens_is_identity_and_empty_is_empty() {
+        let key = test_key();
+        assert_eq!(
+            detokenize_text_lossy(&key, "plain text, nothing to see"),
+            "plain text, nothing to see"
+        );
+        assert_eq!(detokenize_text_lossy(&key, ""), "");
     }
 }

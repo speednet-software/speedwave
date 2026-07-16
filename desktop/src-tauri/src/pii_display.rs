@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use speedwave_pii_engine::{detokenize_text, EngineKey};
+use speedwave_pii_engine::{detokenize_text_lossy, EngineKey};
 
 use crate::history::{ConversationSummary, ConversationTranscript, MessageBlock};
 
@@ -14,12 +14,13 @@ pub(crate) fn load_display_key(data_dir: &Path, project: &str) -> Option<EngineK
         .map(EngineKey::from_bytes)
 }
 
-/// Detokenizes one string for display. Unresolvable tokens and missing keys fall back to unchanged text.
+/// Detokenizes one string for display, per span: resolvable tokens are replaced,
+/// unresolvable ones stay verbatim (a model-garbled span must not hide its valid neighbors).
 pub(crate) fn detokenize_for_display(key: Option<&EngineKey>, text: &str) -> String {
     let Some(key) = key else {
         return text.to_string();
     };
-    detokenize_text(key, text).unwrap_or_else(|_| text.to_string())
+    detokenize_text_lossy(key, text)
 }
 
 /// Detokenizes a `ConversationTranscript` in place for display, on a copy parsed from disk.
@@ -129,6 +130,29 @@ mod tests {
         // Well-formed span shape but bogus ciphertext: must not decode, and must not error.
         let text = "see [EMAIL:TOKEN_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA] there";
         assert_eq!(detokenize_for_display(Some(&key), text), text);
+    }
+
+    #[test]
+    fn one_garbled_span_does_not_hide_a_valid_neighbor_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
+        let key = load_display_key(tmp.path(), "proj").expect("key must load");
+
+        let tokenized = scan_text(
+            &full_policy(),
+            &key,
+            "reach [EMAIL:TOKEN_thdCj2wWFBpZi2_8dGYJTD7URNshH26HUe_R39Sq4Q]",
+        )
+        .expect("scan succeeds")
+        .text;
+        // A model reply that garbles one span (e.g. a literal example token) alongside a real one.
+        let mixed = format!("{tokenized} but not [EMAIL:TOKEN_XYZ]");
+
+        let displayed = detokenize_for_display(Some(&key), &mixed);
+        assert_eq!(
+            displayed,
+            "reach [EMAIL:TOKEN_thdCj2wWFBpZi2_8dGYJTD7URNshH26HUe_R39Sq4Q] but not [EMAIL:TOKEN_XYZ]"
+        );
     }
 
     #[test]
