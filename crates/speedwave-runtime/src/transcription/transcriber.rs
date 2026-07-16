@@ -202,6 +202,34 @@ fn overlaps_speech(spans: &[(Duration, Duration)], start: Duration, end: Duratio
         .any(|(s, e)| start < *e + VAD_OVERLAP_TOLERANCE && *s < end + VAD_OVERLAP_TOLERANCE)
 }
 
+/// The VAD gate's verdict on a span of the decode window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VadDecision {
+    /// The span overlaps speech, or no gate is active (degraded) — keep it.
+    Keep,
+    /// VAD heard speech elsewhere but none under this span — drop it.
+    Drop,
+    /// VAD heard no speech anywhere in the window — skip the decode entirely.
+    SkipWindow,
+}
+
+/// Pure VAD gate: `spans` is the window's speech spans (`None` = the gate is
+/// unavailable this window and decoding degrades to the signal-only checks).
+fn vad_decision(spans: Option<&[(Duration, Duration)]>, span: (Duration, Duration)) -> VadDecision {
+    match spans {
+        None => VadDecision::Keep,
+        Some([]) => VadDecision::SkipWindow,
+        Some(spans) if overlaps_speech(spans, span.0, span.1) => VadDecision::Keep,
+        Some(_) => VadDecision::Drop,
+    }
+}
+
+/// One-shot latch for VAD-failure warnings: `true` (warn) only on the first
+/// failure; the latch stays tripped for the rest of the recording.
+fn vad_failure_should_warn(already_warned: &mut bool) -> bool {
+    !std::mem::replace(already_warned, true)
+}
+
 /// Whisper speech-to-text via whisper.cpp. Holds a loaded context for one
 /// model; create one per recording.
 pub struct WhisperCppTranscriber {
@@ -272,11 +300,9 @@ impl WhisperCppTranscriber {
         // VAD gate: no speech in the window = no decode. A VAD failure degrades
         // this window to the signal-only gates and retries next window (warn once).
         let speech_spans = match self.vad.as_mut().map(|v| v.speech_spans(pcm)) {
-            Some(Ok(spans)) if spans.is_empty() => return Ok(Vec::new()),
             Some(Ok(spans)) => Some(spans),
             Some(Err(e)) => {
-                if !self.vad_warned {
-                    self.vad_warned = true;
+                if vad_failure_should_warn(&mut self.vad_warned) {
                     log::warn!(
                         target: "transcription::transcriber",
                         "silero vad failed ({e}) — decoding without the gate; retrying on later windows"
@@ -286,6 +312,12 @@ impl WhisperCppTranscriber {
             }
             None => None,
         };
+        let window_end = Duration::from_secs_f64(pcm.len() as f64 / f64::from(SAMPLE_RATE_HZ));
+        if vad_decision(speech_spans.as_deref(), (Duration::ZERO, window_end))
+            == VadDecision::SkipWindow
+        {
+            return Ok(Vec::new());
+        }
         let mut state = self
             .ctx
             .create_state()
@@ -337,10 +369,8 @@ impl WhisperCppTranscriber {
             }
             // A segment over a span VAD heard no speech in is a hallucination,
             // whatever its text — drop it.
-            if let Some(spans) = &speech_spans {
-                if !overlaps_speech(spans, start, end) {
-                    continue;
-                }
+            if vad_decision(speech_spans.as_deref(), (start, end)) != VadDecision::Keep {
+                continue;
             }
             let text = format!("{seg}").trim().to_string();
             if text.is_empty() {
@@ -569,6 +599,70 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(2)
         ));
+    }
+
+    #[test]
+    fn vad_decision_covers_keep_drop_and_skip() {
+        let spans = vec![(Duration::from_secs(1), Duration::from_secs(3))];
+        // Overlapping speech → keep.
+        assert_eq!(
+            vad_decision(
+                Some(&spans),
+                (Duration::from_secs(2), Duration::from_secs(4))
+            ),
+            VadDecision::Keep
+        );
+        // Speech elsewhere, none under the span → drop.
+        assert_eq!(
+            vad_decision(
+                Some(&spans),
+                (Duration::from_secs(10), Duration::from_secs(12))
+            ),
+            VadDecision::Drop
+        );
+        // No speech anywhere in the window → skip the decode entirely.
+        assert_eq!(
+            vad_decision(Some(&[]), (Duration::ZERO, Duration::from_secs(12))),
+            VadDecision::SkipWindow
+        );
+        // Gate unavailable (VAD failed/absent) → degrade to keep.
+        assert_eq!(
+            vad_decision(None, (Duration::from_secs(10), Duration::from_secs(12))),
+            VadDecision::Keep
+        );
+    }
+
+    #[test]
+    fn vad_failure_warn_latch_fires_once_and_stays_tripped() {
+        let mut warned = false;
+        assert!(vad_failure_should_warn(&mut warned), "first failure warns");
+        assert!(warned, "the latch trips on the first failure");
+        assert!(
+            !vad_failure_should_warn(&mut warned),
+            "later failures stay quiet"
+        );
+        assert!(!vad_failure_should_warn(&mut warned));
+        assert!(warned);
+    }
+
+    #[test]
+    fn transcript_source_labels_match_live_transcript_component() {
+        // The Angular live view re-derives the You/Meeting channel labels in a
+        // ternary; pin its literals to `TranscriptSource::label()` (the SSOT).
+        let src = include_str!(
+            "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
+        );
+        for (variant, ts_tag) in [
+            (TranscriptSource::Mic, "mic"),
+            (TranscriptSource::System, "system"),
+        ] {
+            let expr = format!("seg.source === '{ts_tag}' ? '{}'", variant.label());
+            assert!(
+                src.contains(&expr),
+                "live-transcript.component.ts must label the {ts_tag} channel '{}' (expected fragment: {expr})",
+                variant.label()
+            );
+        }
     }
 
     #[test]

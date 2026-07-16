@@ -126,6 +126,20 @@ impl LimaRuntime {
             .run("limactl", &["shell", vm, "--", "sudo", "sh", "-c", &cmd])
             .map(|_| ())
     }
+
+    /// Self-heals stale engine state from a prior dirty shutdown (CNI chain
+    /// collisions, dead name-store reservations): clean + retry once per class.
+    fn up_with_heal<U>(&self, project: &str, up: U) -> anyhow::Result<()>
+    where
+        U: Fn() -> anyhow::Result<()>,
+    {
+        super::with_engine_state_heal(
+            project,
+            up,
+            |e| self.cleanup_stale_cni(e),
+            |e| self.cleanup_stale_name_store(e, project),
+        )
+    }
 }
 
 /// Recursively copies `src` into `dst`, creating directories as needed.
@@ -330,14 +344,7 @@ impl ContainerRuntime for LimaRuntime {
                 )
                 .map(|_| ())
         };
-        // Self-heal stale engine state from a prior dirty shutdown (CNI chain
-        // collisions, dead name-store reservations): clean + retry once per class.
-        super::with_engine_state_heal(
-            project,
-            up,
-            |e| self.cleanup_stale_cni(e),
-            |e| self.cleanup_stale_name_store(e, project),
-        )
+        self.up_with_heal(project, up)
     }
 
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
@@ -666,12 +673,7 @@ impl ContainerRuntime for LimaRuntime {
                 )
                 .map(|_| ())
         };
-        super::with_engine_state_heal(
-            project,
-            up,
-            |e| self.cleanup_stale_cni(e),
-            |e| self.cleanup_stale_name_store(e, project),
-        )
+        self.up_with_heal(project, up)
     }
 
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
@@ -701,12 +703,7 @@ impl ContainerRuntime for LimaRuntime {
                 )
                 .map(|_| ())
         };
-        super::with_engine_state_heal(
-            project,
-            up,
-            |e| self.cleanup_stale_cni(e),
-            |e| self.cleanup_stale_name_store(e, project),
-        )
+        self.up_with_heal(project, up)
     }
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {

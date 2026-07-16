@@ -522,8 +522,8 @@ fn relay_packages_script() -> String {
 /// warn-only) in the distro. Idempotent; runs as root via `bash -s` on stdin; bounded.
 #[cfg(target_os = "windows")]
 fn ensure_relay_packages() -> anyhow::Result<()> {
-    let mut child = crate::binary::system_command("wsl.exe")
-        .args([
+    let output = crate::binary::run_wsl_bounded(
+        &[
             "-d",
             consts::wsl_distro_name(),
             "-u",
@@ -531,23 +531,16 @@ fn ensure_relay_packages() -> anyhow::Result<()> {
             "--",
             "bash",
             "-s",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(relay_packages_script().as_bytes())?;
-    }
-    let output =
-        crate::binary::wait_with_output_timeout(child, std::time::Duration::from_secs(120))
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "ensuring relay packages (iptables/socat) in distro '{}': {e}",
-                    consts::wsl_distro_name()
-                )
-            })?;
+        ],
+        Some(&relay_packages_script()),
+        std::time::Duration::from_secs(120),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "ensuring relay packages (iptables/socat) in distro '{}': {e}",
+            consts::wsl_distro_name()
+        )
+    })?;
     if !output.status.success() {
         anyhow::bail!(
             "iptables provisioning failed (CNI networking cannot work without it): {}",
@@ -1485,20 +1478,10 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         source_commands = source_commands
     );
     // Write the install script via stdin to avoid wsl.exe arg length/escaping.
-    let mut child = crate::binary::system_command("wsl.exe")
-        .args(["-d", consts::wsl_distro_name(), "--", "bash", "-s"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    use std::io::Write;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(install_script.as_bytes())?;
-        // Drop stdin to close the pipe and let bash finish
-    }
     // Bounded host-side wait — a stalled in-distro download must not hang startup.
-    let output = match crate::binary::wait_with_output_timeout(
-        child,
+    let output = match crate::binary::run_wsl_bounded(
+        &["-d", consts::wsl_distro_name(), "--", "bash", "-s"],
+        Some(&install_script),
         std::time::Duration::from_secs(consts::NERDCTL_INSTALL_TIMEOUT_SECS),
     ) {
         Ok(output) => output,

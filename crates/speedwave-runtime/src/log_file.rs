@@ -184,6 +184,20 @@ mod tests {
     }
 
     #[test]
+    fn open_log_file_on_unreadable_path_yields_none_and_stays_quiet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("audit.log");
+        std::fs::write(&p, "x").unwrap();
+        crate::fs_perms::make_unreadable_for_test(&p);
+        let mut f = open_log_file(&p);
+        assert!(
+            f.is_none(),
+            "unreadable log must map to None (append-blind mode)"
+        );
+        write_log_line(&mut f, "TEST", "must not panic");
+    }
+
+    #[test]
     fn truncate_if_oversized_keeps_tail() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("big.log");

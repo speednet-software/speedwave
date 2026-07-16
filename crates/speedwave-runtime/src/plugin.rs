@@ -291,7 +291,7 @@ pub struct PluginManifest {
 }
 
 /// Host-bridge declaration in `plugin.json`. Desktop reads this at startup and spawns a
-/// `HostBridge` per these fields; `compose::apply_plugins` injects `{url_env}`/`{token_env}`.
+/// `HostBridge` per these fields; `compose::apply_plugins_from_verified` injects `{url_env}`/`{token_env}`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HostBridgeManifest {
     /// Env var name for the bridge URL injected into the container worker.
@@ -410,6 +410,12 @@ pub struct PluginManifestSummary {
 /// Returns `~/.speedwave/plugins/`
 pub fn plugins_base_dir() -> anyhow::Result<PathBuf> {
     Ok(consts::data_dir().join("plugins"))
+}
+
+/// The claude-resources dir a plugin's `/speedwave/plugins/<slug>` mount must come from —
+/// shared by the renderer (`compose/plugins.rs`) and `SecurityCheck::check_claude_workspace_mount`.
+pub fn plugin_claude_resources_dir(plugin_dir: &Path) -> PathBuf {
+    plugin_dir.join("claude-resources")
 }
 
 /// Returns the base directory for mutable per-plugin state — default `~/.speedwave/plugin-state/`.
@@ -2737,15 +2743,41 @@ fn yaml_quote_entry(entry: &str) -> String {
     }
 }
 
+/// ZIP-bomb caps enforced by [`extract_zip`]; defaults are the `consts` SSOT values.
+/// Production callers never override them; tests inject small values to hit the boundaries.
+struct ZipExtractionLimits {
+    max_entries: usize,
+    max_total_uncompressed: u64,
+    max_compression_ratio: u64,
+}
+
+impl Default for ZipExtractionLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: crate::consts::PLUGIN_ZIP_MAX_ENTRIES,
+            max_total_uncompressed: crate::consts::PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED,
+            max_compression_ratio: crate::consts::PLUGIN_ZIP_MAX_COMPRESSION_RATIO,
+        }
+    }
+}
+
 fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
+    extract_zip_with_limits(zip_path, dest, &ZipExtractionLimits::default())
+}
+
+fn extract_zip_with_limits(
+    zip_path: &Path,
+    dest: &Path,
+    limits: &ZipExtractionLimits,
+) -> anyhow::Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
-    if archive.len() > crate::consts::PLUGIN_ZIP_MAX_ENTRIES {
+    if archive.len() > limits.max_entries {
         anyhow::bail!(
             "Plugin archive has too many entries ({} > {})",
             archive.len(),
-            crate::consts::PLUGIN_ZIP_MAX_ENTRIES
+            limits.max_entries
         );
     }
 
@@ -2767,19 +2799,17 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> anyhow::Result<()> {
         }
         let uncompressed = entry.size();
         let compressed = entry.compressed_size();
-        if compressed > 0
-            && uncompressed / compressed > crate::consts::PLUGIN_ZIP_MAX_COMPRESSION_RATIO
-        {
+        if compressed > 0 && uncompressed / compressed > limits.max_compression_ratio {
             anyhow::bail!(
                 "Rejected ZIP entry '{}' with excessive compression ratio",
                 name
             );
         }
         total_uncompressed = total_uncompressed.saturating_add(uncompressed);
-        if total_uncompressed > crate::consts::PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED {
+        if total_uncompressed > limits.max_total_uncompressed {
             anyhow::bail!(
                 "Plugin archive exceeds the uncompressed size limit ({} bytes)",
-                crate::consts::PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED
+                limits.max_total_uncompressed
             );
         }
     }
@@ -6694,6 +6724,92 @@ mod tests {
         assert!(
             !extract_dir.join("bomb").exists(),
             "bomb must not be written before the ratio check rejects it"
+        );
+    }
+
+    /// Writes a ZIP of Stored (ratio-1) entries so only the cap under test can trip.
+    fn write_stored_zip(zip_path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let buf = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(buf);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, content) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        let buf = writer.finish().unwrap();
+        std::fs::write(zip_path, buf.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn test_extract_zip_entry_count_at_limit_passes_one_over_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("entries.zip");
+        write_stored_zip(&zip_path, &[("a.txt", b"a"), ("b.txt", b"b")]);
+
+        let ok_dir = tmp.path().join("ok");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        let at_limit = ZipExtractionLimits {
+            max_entries: 2,
+            ..Default::default()
+        };
+        extract_zip_with_limits(&zip_path, &ok_dir, &at_limit)
+            .expect("an archive with exactly max_entries entries must extract");
+        assert!(ok_dir.join("a.txt").exists() && ok_dir.join("b.txt").exists());
+
+        let err_dir = tmp.path().join("err");
+        std::fs::create_dir_all(&err_dir).unwrap();
+        let one_under = ZipExtractionLimits {
+            max_entries: 1,
+            ..Default::default()
+        };
+        let err = extract_zip_with_limits(&zip_path, &err_dir, &one_under)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Plugin archive has too many entries (2 > 1)");
+        assert!(
+            !err_dir.join("a.txt").exists(),
+            "nothing may be written once the entry cap rejects the archive"
+        );
+    }
+
+    #[test]
+    fn test_extract_zip_total_uncompressed_at_limit_passes_one_over_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("total.zip");
+        // Two stored entries of 10 bytes each: total uncompressed is exactly 20.
+        write_stored_zip(&zip_path, &[("a.bin", &[0u8; 10]), ("b.bin", &[0u8; 10])]);
+
+        let ok_dir = tmp.path().join("ok");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        let at_limit = ZipExtractionLimits {
+            max_total_uncompressed: 20,
+            ..Default::default()
+        };
+        extract_zip_with_limits(&zip_path, &ok_dir, &at_limit)
+            .expect("an archive totalling exactly max_total_uncompressed must extract");
+        assert!(ok_dir.join("a.bin").exists() && ok_dir.join("b.bin").exists());
+
+        let err_dir = tmp.path().join("err");
+        std::fs::create_dir_all(&err_dir).unwrap();
+        let one_under = ZipExtractionLimits {
+            max_total_uncompressed: 19,
+            ..Default::default()
+        };
+        let err = extract_zip_with_limits(&zip_path, &err_dir, &one_under)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "Plugin archive exceeds the uncompressed size limit (19 bytes)"
+        );
+        assert!(
+            !err_dir.join("a.bin").exists(),
+            "nothing may be written once the size cap rejects the archive"
         );
     }
 

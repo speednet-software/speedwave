@@ -10,15 +10,8 @@ use crate::consts;
 use crate::engine_path::to_engine_path;
 use crate::plugin;
 
-/// Applies installed+enabled plugins to compose YAML: generates MCP services, injects WORKER_*_URL,
-/// mounts resources, sets SPEEDWAVE_PLUGINS. Manifests are re-validated at render time (ADR-051).
-pub(crate) fn apply_plugins(yaml: &str, ctx: &ApplyPluginsCtx<'_>) -> anyhow::Result<String> {
-    let plugins = plugin::list_verified_plugins()?;
-    apply_plugins_from_verified(yaml, ctx, &plugins)
-}
-
-/// Per-call inputs shared by `apply_plugins` and `apply_plugins_from_verified`. Bundled together
-/// so each new plugin-injection knob lives in one struct instead of growing the function signature.
+/// Per-call inputs for `apply_plugins_from_verified`. Bundled together so each new
+/// plugin-injection knob lives in one struct instead of growing the function signature.
 pub(crate) struct ApplyPluginsCtx<'a> {
     pub project_name: &'a str,
     pub project_dir: &'a str,
@@ -28,8 +21,8 @@ pub(crate) struct ApplyPluginsCtx<'a> {
     pub bridges: &'a HostBridgesInfo,
 }
 
-/// Test-friendly variant of [`apply_plugins`] accepting pre-verified plugins
-/// instead of consulting disk. Production goes through `apply_plugins`.
+/// Applies pre-verified plugins to compose YAML: generates MCP services, injects WORKER_*_URL,
+/// mounts resources, sets SPEEDWAVE_PLUGINS; the caller lists+verifies once per render (ADR-051).
 pub(crate) fn apply_plugins_from_verified(
     yaml: &str,
     ctx: &ApplyPluginsCtx<'_>,
@@ -139,7 +132,7 @@ pub(crate) fn apply_plugins_from_verified(
         }
 
         // Validate claude-resources is a real dir, not a symlink (ADR-051 security model).
-        let plugin_resources = plugin_dir.join("claude-resources");
+        let plugin_resources = plugin::plugin_claude_resources_dir(plugin_dir);
         if plugin_resources.exists() {
             ensure_resources_dir_safe(plugin_dir, &plugin_resources)
                 .map_err(|e| anyhow::anyhow!("plugin '{slug}': claude-resources unsafe: {e}"))?;

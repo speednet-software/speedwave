@@ -114,14 +114,14 @@ pub(crate) fn apply_worker_auth_tokens_in(
     yaml: &str,
     project_name: &str,
     integrations: &ResolvedIntegrationsConfig,
+    installed_plugins: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let secrets_dir = init_secrets_dir_in(data_dir, project_name)?;
-    let plugins = plugin::list_installed_plugins().unwrap_or_default();
-    apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, &plugins)
+    apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, installed_plugins)
 }
 
-/// Testable version: accepts explicit secrets directory and plugin list. Reads or generates a
-/// Bearer auth token, writes it atomically at 0o600, injects the env var, mounts into the hub.
+/// Reads or generates one worker's Bearer auth token, writes it atomically at 0o600,
+/// injects the env var into the worker, and mounts the token file into the hub.
 fn ensure_worker_auth_token(
     doc: &mut serde_yaml_ng::Value,
     secrets_dir: &std::path::Path,
@@ -232,19 +232,15 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Service IDs enabled by `integrations`, as the hub's `ENABLED_SERVICES` expects:
-/// built-in MCP config keys (`slack`, ...), `os` when any OS sub-integration is on,
-/// and enabled plugin service IDs — filtered against `plugin_manifests` so a
-/// resource-only plugin's enable-toggle key (its slug, not a `service_id`) never
-/// surfaces as a hub service with no worker behind it. Excludes `claude` / `mcp-hub`.
-/// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`; `build::enabled_images`
-/// uses the same per-service predicate (`is_service_enabled`) on the `IMAGES` list.
+/// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`: enabled built-in MCP keys, `os` when
+/// any OS sub-integration is on, and plugin service IDs backed by an MCP manifest (never a slug).
 pub fn enabled_hub_service_ids(
     integrations: &ResolvedIntegrationsConfig,
     plugin_manifests: &[plugin::PluginManifest],
 ) -> Vec<String> {
     let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
         .iter()
+        // `build::enabled_images` applies this same per-service predicate to the `IMAGES` list.
         .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
         .map(|svc| svc.config_key.to_string())
         .collect();

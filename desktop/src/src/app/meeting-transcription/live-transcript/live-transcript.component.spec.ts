@@ -90,6 +90,22 @@ describe('LiveTranscriptComponent', () => {
     expect(chips[0].textContent).toContain('You');
   });
 
+  it('sorts a copy, never mutating the session segment array', () => {
+    const segs = [seg(2, 'later'), seg(0, 'earlier')];
+    fixture.componentRef.setInput('session', session({ live_segments: segs }));
+    fixture.detectChanges();
+    expect(component.lines().map((l) => l.text)).toEqual(['earlier', 'later']);
+    expect(segs.map((s) => s.text)).toEqual(['later', 'earlier']);
+  });
+
+  it('keeps append order for segments sharing a start time (stable sort)', () => {
+    const first = { ...seg(1, 'system first'), source: 'system' as const };
+    const second = { ...seg(1, 'mic second'), source: 'mic' as const };
+    fixture.componentRef.setInput('session', session({ live_segments: [first, second] }));
+    fixture.detectChanges();
+    expect(component.lines().map((l) => l.text)).toEqual(['system first', 'mic second']);
+  });
+
   it('renders untagged segments without a speaker chip', () => {
     fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'hej')] }));
     fixture.detectChanges();
