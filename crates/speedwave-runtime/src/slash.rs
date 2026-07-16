@@ -67,7 +67,7 @@ pub struct SlashCommand {
 pub struct SlashDiscovery {
     /// Visible entries, already filtered and enriched.
     pub commands: Vec<SlashCommand>,
-    /// Whether this discovery came from Claude Code or the fallback list.
+    /// Whether this discovery came from Claude Code or could not run.
     pub source: DiscoverySource,
 }
 

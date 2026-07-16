@@ -13,8 +13,8 @@ export function isBareSlash(text: string): boolean {
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
 export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
 
-/** Indicates whether the discovery came from Claude Code or the fallback. */
-export type DiscoverySource = 'Init' | 'Fallback';
+/** Indicates whether the discovery came from Claude Code or could not run. */
+export type DiscoverySource = 'Init' | 'Unavailable';
 
 /** One entry in the slash popover, mirrored from Rust `SlashCommand`. */
 export interface SlashCommand {

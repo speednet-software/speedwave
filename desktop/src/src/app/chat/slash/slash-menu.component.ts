@@ -156,9 +156,9 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
         <span><span class="kbd">↑↓</span> navigate</span>
         <span><span class="kbd">↵</span> select</span>
         <span><span class="kbd">tab</span> complete</span>
-        @if (service.source() === 'Fallback') {
+        @if (service.source() === 'Unavailable') {
           <span class="text-[var(--amber)]" data-testid="slash-menu-fallback"
-            >offline · built-in commands</span
+            >offline · commands unavailable</span
           >
         }
         <span class="ml-auto"><span class="kbd">esc</span> close</span>

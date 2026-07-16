@@ -210,9 +210,9 @@ describe('SlashMenuComponent', () => {
       expect(component.badgeText(cmd('c', 'Command'))).toBe('cmd');
     });
 
-    it('renders fallback footer when source is Fallback', () => {
+    it('renders fallback footer when source is Unavailable', () => {
       service.commands.set([cmd('help', 'Builtin')]);
-      service.source.set('Fallback');
+      service.source.set('Unavailable');
       fixture.detectChanges();
       const el = fixture.nativeElement as HTMLElement;
       expect(el.querySelector('[data-testid="slash-menu-fallback"]')).not.toBeNull();
