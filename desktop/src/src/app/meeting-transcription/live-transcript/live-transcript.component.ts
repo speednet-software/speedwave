@@ -37,17 +37,6 @@ function bySegmentStart(a: Segment, b: Segment): number {
   return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
 }
 
-/**
- * `true` when `segs` is already in chronological order.
- * @param segs - segments in storage order
- */
-function isChronological(segs: Segment[]): boolean {
-  for (let i = 1; i < segs.length; i++) {
-    if (bySegmentStart(segs[i - 1], segs[i]) > 0) return false;
-  }
-  return true;
-}
-
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
@@ -160,9 +149,8 @@ export class LiveTranscriptComponent {
    * can append a mic segment after a later system one (or vice versa).
    */
   readonly lines = computed<TranscriptLine[]>(() => {
-    const segs = this.segments();
-    // Segments are almost always already chronological — sort only on disorder.
-    const ordered = isChronological(segs) ? segs : [...segs].sort(bySegmentStart);
+    // Sort a copy: the stored order is append order, and sort() is stable.
+    const ordered = [...this.segments()].sort(bySegmentStart);
     return ordered.map((seg) => ({
       startLabel: fmtTs(seg.start.secs),
       speaker: seg.source === 'mic' ? 'You' : seg.source === 'system' ? 'Meeting' : null,

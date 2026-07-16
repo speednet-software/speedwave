@@ -13,7 +13,7 @@
  */
 
 import { switchToProject, activeProjectSlug, containersRunning } from '../helpers/projects';
-import { confirmRestartAndWait } from '../helpers/shell';
+import { confirmRestartAndWait, requestBackendRestart } from '../helpers/shell';
 import { openIntegrations, toggleIntegration, rowStatus } from '../helpers/llm';
 
 const LLM_PROJECT = 'e2e-test';
@@ -53,12 +53,8 @@ describe('Restart Deferral', function () {
 
   it('applies the deferred change on a palette-requested restart', async function () {
     this.timeout(300_000);
-    await (await $('[data-testid="nav-rail-palette"]')).click();
-    await $('[data-testid="command-palette"]').waitForExist({ timeout: 10_000 });
-
-    await (await $('[data-testid="palette-item-action-restart-containers"]')).click();
     // requestRestart() re-surfaces the modal; confirming applies the change.
-    await confirmRestartAndWait();
+    await requestBackendRestart();
 
     await openIntegrations();
     await browser.waitUntil(async () => (await rowStatus(SERVICE)) === 'running', {

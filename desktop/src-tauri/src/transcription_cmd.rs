@@ -145,22 +145,15 @@ pub async fn start_transcription(
     // covers the whole start window (delete refuses while an entry is live).
     let stop = StopSignal::new();
     register_driver(drivers.inner(), session_id, &stop)?;
-    let unregister = |drivers: &DriversHandle| {
-        if let Ok(mut g) = drivers.lock() {
-            if g.get(&session_id).is_some_and(|s| s.same_as(&stop)) {
-                g.remove(&session_id);
-            }
-        }
-    };
     if let Err(e) = store.create(session) {
-        unregister(drivers.inner());
+        unregister_driver(drivers.inner(), session_id, &stop);
         return Err(format!("store create: {e}"));
     }
 
     let stream = match capture.start(audio_source) {
         Ok(s) => s,
         Err(e) => {
-            unregister(drivers.inner());
+            unregister_driver(drivers.inner(), session_id, &stop);
             // Mark the session failed so the UI shows the error, not a hang.
             let _ = store.set_status(
                 session_id,
@@ -220,6 +213,17 @@ fn register_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) -> Resu
     }
 }
 
+/// Releases the registry slot for `id` only while it still holds `stop` (a stale cleanup must
+/// not clobber a successor); recovers a poisoned lock, as a skipped removal blocks resume/delete.
+fn unregister_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) {
+    let mut g = drivers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.get(&id).is_some_and(|s| s.same_as(stop)) {
+        g.remove(&id);
+    }
+}
+
 /// Runs a built driver on a blocking task; cleans up the stop-signal registry
 /// and wakes `await_finished()` waiters when it winds down.
 fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: DriversHandle) {
@@ -236,16 +240,29 @@ fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: Drive
                 short_id(session_id)
             );
         }
-        if let Ok(mut g) = drivers.lock() {
-            // A wedged predecessor must not clobber a resumed recording's entry.
-            if g.get(&session_id)
-                .is_some_and(|s| s.same_as(&stop_for_cleanup))
-            {
-                g.remove(&session_id);
-            }
-        }
+        unregister_driver(&drivers, session_id, &stop_for_cleanup);
         stop_for_cleanup.signal_finished();
     });
+}
+
+/// Sums prior parts' durations to place the new part on the session timeline; an
+/// unreadable part aborts the resume (treating it as zero would overlap the timelines).
+fn resume_time_base(parts: &[std::path::PathBuf]) -> Result<std::time::Duration, String> {
+    let mut total = std::time::Duration::ZERO;
+    for part in parts {
+        match speedwave_runtime::transcription::wav_duration(part) {
+            Some(d) => total += d,
+            None => {
+                log::warn!("unreadable recorded audio part {}", part.display());
+                return Err(format!(
+                    "cannot read the duration of the recorded part {}; fix or delete the \
+                     recording before resuming (a zero-length guess would overlap the timelines)",
+                    part.display()
+                ));
+            }
+        }
+    }
+    Ok(total)
 }
 
 #[tauri::command]
@@ -272,11 +289,7 @@ pub async fn resume_transcription(
     let (_live_key, transcriber) = load_live_transcriber(models.inner()).await?;
 
     // The new part records past the earlier ones on the session timeline.
-    let time_base: std::time::Duration = session
-        .all_audio_parts()
-        .iter()
-        .filter_map(|p| speedwave_runtime::transcription::wav_duration(p))
-        .sum();
+    let time_base = resume_time_base(&session.all_audio_parts())?;
     let part_no = session.all_audio_parts().len() + 1;
     let next_part = store.session_dir(id).join(format!("audio-{part_no}.wav"));
 
@@ -284,27 +297,28 @@ pub async fn resume_transcription(
     // covers the whole resume window (delete refuses while an entry is live).
     let stop = StopSignal::new();
     register_driver(drivers.inner(), id, &stop)?;
-    let unregister = |drivers: &DriversHandle| {
-        if let Ok(mut g) = drivers.lock() {
-            if g.get(&id).is_some_and(|s| s.same_as(&stop)) {
-                g.remove(&id);
-            }
-        }
-    };
     if let Err(e) = store.resume(id, next_part.clone()) {
-        unregister(drivers.inner());
+        unregister_driver(drivers.inner(), id, &stop);
         return Err(e.to_string());
     }
     let stream = match capture.start(audio_source) {
         Ok(s) => s,
         Err(e) => {
-            unregister(drivers.inner());
-            let _ = store.set_status(
-                id,
-                TranscriptStatus::Failed {
-                    reason: e.to_string(),
-                },
-            );
+            unregister_driver(drivers.inner(), id, &stop);
+            // Roll back to Done: resume requires Done, so leaving the mutated session
+            // behind would strand a finished transcript on a transient capture error.
+            if let Err(re) = store.rollback_resume(id, &next_part) {
+                log::error!(
+                    "failed to roll back resumed transcript {} after a capture-start error: {re}",
+                    short_id(id)
+                );
+                let _ = store.set_status(
+                    id,
+                    TranscriptStatus::Failed {
+                        reason: e.to_string(),
+                    },
+                );
+            }
             return Err(e.to_string());
         }
     };
@@ -366,11 +380,7 @@ pub async fn stop_transcription(
     // live model) and mark Done; on failure the live transcript stays.
     let store_arc = store.inner().clone();
     let models_arc = models.inner().clone();
-    // Every recorded part goes through the offline pass (resumed sessions have several).
-    let audio_paths = store
-        .get(id)
-        .map(|s| s.all_audio_parts())
-        .unwrap_or_else(|_| vec![store.session_dir(id).join("audio.wav")]);
+    let audio_paths = offline_pass_parts(&store, id)?;
     tokio::task::spawn_blocking(move || {
         // Pick the offline model: `large-v3` if present, else fall back to any
         // downloaded Whisper model (the live one is guaranteed present).
@@ -423,6 +433,21 @@ pub async fn stop_transcription(
         }
     });
     Ok(())
+}
+
+/// Resolves every recorded part for the offline pass (resumed sessions have several); a store
+/// failure aborts the finalize, because degrading to `audio.wav` alone would drop resumed parts.
+fn offline_pass_parts(
+    store: &TranscriptStore,
+    id: Uuid,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    store.get(id).map(|s| s.all_audio_parts()).map_err(|e| {
+        log::error!(
+            "cannot load transcript {} for the offline pass: {e}",
+            short_id(id)
+        );
+        format!("cannot load the recording for the offline pass: {e}")
+    })
 }
 
 /// Validates a requested `AudioSource` against the host's `CaptureCapabilities`.
@@ -527,7 +552,7 @@ fn attach_vad(transcriber: &mut WhisperCppTranscriber, models: &ModelStoreHandle
     }
     let m = models.clone();
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = m.ensure_vad_model(&mut |_| {}) {
+        if let Err(e) = m.ensure_vad_model() {
             log::warn!(target: "transcription::models", "background VAD model download failed: {e}");
         }
     });
@@ -795,7 +820,7 @@ pub async fn download_transcription_model(
         let _slot = slot;
         // The Silero VAD gate rides along with every model download (~1 MB;
         // ADR-056 Amendment 8). Non-fatal: recording degrades to signal gates.
-        if let Err(e) = models.ensure_vad_model(&mut |_| {}) {
+        if let Err(e) = models.ensure_vad_model() {
             log::warn!(target: "transcription::models", "VAD model download failed: {e}");
         }
         models
@@ -854,6 +879,163 @@ mod tests {
         // A different session registers independently.
         register_driver(&drivers, Uuid::new_v4(), &StopSignal::new()).unwrap();
         assert_eq!(drivers.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unregister_driver_removes_only_the_entry_it_registered() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let id = Uuid::new_v4();
+        let winner = StopSignal::new();
+        register_driver(&drivers, id, &winner).unwrap();
+        // A stale predecessor's cleanup must not clobber the winner's entry.
+        unregister_driver(&drivers, id, &StopSignal::new());
+        assert!(drivers.lock().unwrap().contains_key(&id));
+        // Unknown id is a no-op.
+        unregister_driver(&drivers, Uuid::new_v4(), &winner);
+        assert_eq!(drivers.lock().unwrap().len(), 1);
+        // The owning stop removes its own entry.
+        unregister_driver(&drivers, id, &winner);
+        assert!(drivers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unregister_driver_recovers_from_a_poisoned_lock() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let id = Uuid::new_v4();
+        let stop = StopSignal::new();
+        register_driver(&drivers, id, &stop).unwrap();
+        let poisoner = drivers.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = poisoner.lock().unwrap();
+            panic!("poison the drivers lock");
+        })
+        .join();
+        assert!(drivers.is_poisoned());
+        unregister_driver(&drivers, id, &stop);
+        let g = drivers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(g.is_empty(), "cleanup must survive a poisoned lock");
+    }
+
+    /// Minimal valid 16-bit mono PCM WAV of `secs` seconds at 16 kHz.
+    fn write_test_wav(path: &std::path::Path, secs: u32) {
+        let sample_rate: u32 = 16_000;
+        let data_len = sample_rate * 2 * secs;
+        let mut buf = Vec::with_capacity(44 + data_len as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_len).to_le_bytes());
+        buf.extend_from_slice(b"WAVEfmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+        buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+        buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.resize(44 + data_len as usize, 0);
+        std::fs::write(path, buf).unwrap();
+    }
+
+    #[test]
+    fn resume_time_base_sums_every_readable_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("audio.wav");
+        let b = dir.path().join("audio-2.wav");
+        write_test_wav(&a, 1);
+        write_test_wav(&b, 2);
+        let total = resume_time_base(&[a, b]).unwrap();
+        assert_eq!(total, std::time::Duration::from_secs(3));
+        // No prior parts → zero base.
+        assert_eq!(resume_time_base(&[]).unwrap(), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn resume_time_base_fails_naming_the_unreadable_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("audio.wav");
+        write_test_wav(&good, 1);
+        // Missing part file.
+        let missing = dir.path().join("audio-2.wav");
+        let err = resume_time_base(&[good.clone(), missing.clone()]).unwrap_err();
+        assert!(err.contains(&missing.display().to_string()), "got: {err}");
+        assert!(err.contains("resum"), "actionable wording expected: {err}");
+        // Corrupt part file.
+        let corrupt = dir.path().join("audio-3.wav");
+        std::fs::write(&corrupt, b"not a wav").unwrap();
+        let err = resume_time_base(&[good, corrupt.clone()]).unwrap_err();
+        assert!(err.contains(&corrupt.display().to_string()), "got: {err}");
+    }
+
+    #[test]
+    fn offline_pass_parts_returns_every_recorded_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let mut s = TranscriptSession::new(
+            Language::Pl,
+            AudioSourceInfo {
+                source: AudioSource::SystemWide,
+                label: "Test".to_string(),
+            },
+            PathBuf::from("/tmp/a.wav"),
+        );
+        s.audio_parts = vec![PathBuf::from("/tmp/audio-2.wav")];
+        let id = store.create(s).unwrap();
+        assert_eq!(
+            offline_pass_parts(&store, id).unwrap(),
+            vec![
+                PathBuf::from("/tmp/a.wav"),
+                PathBuf::from("/tmp/audio-2.wav")
+            ]
+        );
+    }
+
+    #[test]
+    fn offline_pass_parts_fails_loud_when_the_session_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        // Unknown session.
+        let err = offline_pass_parts(&store, Uuid::new_v4()).unwrap_err();
+        assert!(err.contains("offline pass"), "got: {err}");
+        // Corrupt session json must not degrade to a partial part list.
+        let bad = Uuid::new_v4();
+        std::fs::create_dir_all(store.session_dir(bad)).unwrap();
+        std::fs::write(store.session_dir(bad).join("transcript.json"), b"{ broken").unwrap();
+        let err = offline_pass_parts(&store, bad).unwrap_err();
+        assert!(err.contains("offline pass"), "got: {err}");
+    }
+
+    /// The resume error path the command runs on a failed capture start:
+    /// unregister + rollback must return the session to a resumable `Done`.
+    #[tokio::test]
+    async fn failed_capture_start_on_resume_rolls_the_session_back_to_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = mk_session_in(&store);
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+
+        let next_part = store.session_dir(id).join("audio-2.wav");
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let stop = StopSignal::new();
+        register_driver(&drivers, id, &stop).unwrap();
+        store.resume(id, next_part.clone()).unwrap();
+        // Capture failed → the command unregisters and rolls back.
+        unregister_driver(&drivers, id, &stop);
+        store.rollback_resume(id, &next_part).unwrap();
+
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert!(snap.audio_parts.is_empty(), "phantom part must be dropped");
+        assert!(drivers.lock().unwrap().is_empty());
+        // A later resume succeeds: the transient failure did not strand the session.
+        register_driver(&drivers, id, &StopSignal::new()).unwrap();
+        store.resume(id, next_part).unwrap();
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Recording
+        ));
     }
 
     #[test]

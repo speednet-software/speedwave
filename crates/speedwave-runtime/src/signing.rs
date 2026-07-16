@@ -251,9 +251,18 @@ fn collect_files_recursive(
         } else if path.file_name().map(|n| n != "SIGNATURE").unwrap_or(true) {
             out.push(path);
         } else if path.parent() != Some(root) {
+            // Posix-joined relative path so the message is identical on macOS and Windows.
+            let rel = path.strip_prefix(root).map_or_else(
+                |_| path.display().to_string(),
+                |r| {
+                    r.components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                },
+            );
             anyhow::bail!(
-                "plugin contains a nested SIGNATURE file which is not allowed: {}",
-                path.display()
+                "plugin contains a nested SIGNATURE file at '{rel}' (only the top-level SIGNATURE is allowed): remove it and re-sign the plugin, or reinstall it from portal.speednet.pl"
             );
         }
     }
@@ -527,6 +536,34 @@ mod tests {
         assert!(
             err.contains("nested SIGNATURE"),
             "a nested SIGNATURE file must be rejected, not silently excluded: {err}"
+        );
+        // The message must name the offending relative path (posix separators on every
+        // host) and the remediation: the install/audit UI surfaces it verbatim.
+        assert!(
+            err.contains("'claude-resources/skills/SIGNATURE'"),
+            "error must name the posix relative path of the nested file: {err}"
+        );
+        assert!(
+            err.contains("reinstall it from portal.speednet.pl"),
+            "error must carry the remediation: {err}"
+        );
+    }
+
+    /// Depth 1 (directly under a subdirectory) is already "nested": only the root-level
+    /// SIGNATURE is the detached signature, even when no root SIGNATURE exists.
+    #[test]
+    fn test_compute_digest_rejects_nested_signature_at_depth_one_without_root_sig() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("SIGNATURE"), "smuggled").unwrap();
+
+        let err = compute_plugin_digest(dir).unwrap_err().to_string();
+        assert!(
+            err.contains("nested SIGNATURE") && err.contains("'sub/SIGNATURE'"),
+            "a depth-1 SIGNATURE must be rejected with its relative path: {err}"
         );
     }
 

@@ -240,11 +240,8 @@ impl ModelStore {
     }
 
     /// Ensures the Silero VAD model is present locally, downloading + verifying
-    /// it if needed. Returns the local path.
-    pub fn ensure_vad_model(
-        &self,
-        progress: &mut dyn FnMut(DownloadProgress),
-    ) -> Result<PathBuf, ModelStoreError> {
+    /// it if needed (no progress reporting; the file is ~1 MiB). Returns the local path.
+    pub fn ensure_vad_model(&self) -> Result<PathBuf, ModelStoreError> {
         let dest = self.vad_path();
         if self.vad_is_present() {
             return Ok(dest);
@@ -263,7 +260,7 @@ impl ModelStore {
             "silero-vad",
             VAD_MODEL.sha256,
             cap,
-            progress,
+            &mut no_progress,
         )?;
         log::info!(target: "transcription::models", "the Silero VAD model downloaded and verified");
         Ok(dest)
@@ -365,7 +362,7 @@ fn download_verified(
     expected_sha256: &str,
     cap: u64,
     progress: &mut dyn FnMut(DownloadProgress),
-) -> Result<String, ModelStoreError> {
+) -> Result<(), ModelStoreError> {
     // The temp name is unique per attempt: the SHA256 is computed over the network
     // stream, so a second concurrent writer on a shared temp could install a
     // corrupt file whose hash check passed.
@@ -393,7 +390,7 @@ fn download_verified(
         let _ = std::fs::remove_file(&tmp);
         ModelStoreError::Io(e)
     })?;
-    Ok(hash)
+    Ok(())
 }
 
 /// The shared streaming-download-with-hash core. Writes to `path`, returns the
@@ -636,7 +633,7 @@ mod tests {
         let (_srv, url) = serve_bytes(&body);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("final.bin");
-        let hash = download_verified(
+        download_verified(
             &url,
             &dest,
             "t",
@@ -645,8 +642,12 @@ mod tests {
             &mut no_progress,
         )
         .unwrap();
-        assert_eq!(hash, sha256_hex(&body));
         assert!(dest.is_file(), "final file in place");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            body,
+            "installed bytes intact"
+        );
         assert!(no_part_files(dir.path()), "temp gone after rename");
     }
 
@@ -681,7 +682,7 @@ mod tests {
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         for r in results {
-            assert_eq!(r.unwrap(), sha256_hex(&body));
+            r.unwrap();
         }
         assert_eq!(std::fs::read(&dest).unwrap(), body, "installed file intact");
         assert!(no_part_files(dir.path()));
@@ -984,7 +985,7 @@ mod tests {
         write_sparse(VAD_MODEL.approx_bytes);
         assert!(store.vad_is_present(), "exact size is present");
         // Present → ensure returns the path without touching the network.
-        let p = store.ensure_vad_model(&mut no_progress).unwrap();
+        let p = store.ensure_vad_model().unwrap();
         assert_eq!(p, store.vad_path());
 
         write_sparse(VAD_MODEL.approx_bytes / 2);

@@ -11,7 +11,7 @@ use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError,
 };
-use super::mix::{MixBuffer, MixSource, CHUNK_SAMPLES};
+use super::mix::{MixBuffer, MixSource, PairedPcm, CHUNK_SAMPLES};
 
 /// Name of the bundled CLI (resolved via `binary::command`).
 const CLI_NAME: &str = "audio-capture-cli";
@@ -318,7 +318,7 @@ impl AudioStream for MixedCliStream {
         let want = CHUNK_SAMPLES;
         loop {
             let start_ns = self.mix.offset_ns();
-            if let Some((sys, mic)) = self.mix.pop_pair(1, want) {
+            if let Some(PairedPcm { system: sys, mic }) = self.mix.pop_pair(1, want) {
                 return Ok(Some(AudioChunk {
                     samples: sys,
                     mic: Some(mic),
@@ -329,7 +329,7 @@ impl AudioStream for MixedCliStream {
                 None => {
                     let start_ns = self.mix.offset_ns();
                     self.mix.finish();
-                    if let Some((sys, mic)) = self.mix.pop_pair(1, usize::MAX) {
+                    if let Some(PairedPcm { system: sys, mic }) = self.mix.pop_pair(1, usize::MAX) {
                         return Ok(Some(AudioChunk {
                             samples: sys,
                             mic: Some(mic),

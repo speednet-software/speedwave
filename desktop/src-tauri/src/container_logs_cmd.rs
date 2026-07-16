@@ -6,8 +6,8 @@ use crate::types::check_project;
 /// Read a log file, take the last `tail` lines, and sanitize secrets.
 /// Returns an empty string if the file does not exist.
 fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, String> {
-    // claude-home is container-writable: a no-follow atomic read stops a
-    // symlink-swap race from pulling an arbitrary host file into /logs + ZIP.
+    // claude-home is container-writable: the no-follow read (Unix O_NOFOLLOW,
+    // Windows reparse rejection) keeps symlink-swapped host files out of /logs.
     let content = match speedwave_runtime::fs_perms::read_regular_file_no_follow(path)? {
         Some(c) => c,
         None => return Ok(String::new()),

@@ -28,6 +28,53 @@ interface RetryConfig extends InternalAxiosRequestConfig {
 /** HTTP methods safe to replay: reads with no server-side effect. */
 const IDEMPOTENT_METHODS = new Set(['get', 'head']);
 
+/** Redirect statuses: reported as a host_url misconfiguration, never followed or retried. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Resolve the origin a redirect Location points at (path, query, and fragment stripped).
+ * @param location - Raw Location header value (absolute or relative).
+ * @param baseUrl - Configured Redmine base URL used to resolve a relative Location.
+ * @returns The target origin, or null when the Location is missing or unparseable.
+ */
+function redirectTargetOrigin(location: unknown, baseUrl: string): string | null {
+  if (typeof location !== 'string' || location === '') {
+    return null;
+  }
+  try {
+    const origin = new URL(location, baseUrl).origin;
+    return origin === 'null' ? null : origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert a 3xx response into a teaching Error: redirects are not followed (the API key
+ * would leak cross-origin), so host_url must point directly at the Redmine instance.
+ * @param error - The Axios error to inspect.
+ * @param baseUrl - The configured Redmine base URL.
+ * @returns The teaching Error, or null when the error is not a redirect response.
+ */
+function redirectConfigError(error: AxiosError, baseUrl: string): Error | null {
+  const status = error.response?.status;
+  if (status === undefined || !REDIRECT_STATUSES.has(status)) {
+    return null;
+  }
+  const headers = error.response?.headers as Record<string, unknown> | undefined;
+  const origin = redirectTargetOrigin(headers?.location ?? headers?.Location, baseUrl);
+  const target = origin ? ` to ${origin}` : ' without a usable Location header';
+  const fix = origin
+    ? `Update host_url to ${origin}.`
+    : 'Find the URL your Redmine instance is served at and update host_url.';
+  return new Error(
+    withSetupGuidance(
+      `Redmine at ${baseUrl} responded with HTTP ${status}, a redirect${target}. ` +
+        `Redirects are not followed to protect the API key from leaking to another origin. ${fix}`
+    )
+  );
+}
+
 /**
  * True when an Axios error is safe to retry: an idempotent method AND either a
  * network error (no response) or a transient status (429 or 5xx).
@@ -858,6 +905,11 @@ export class RedmineClient {
     this.client.interceptors.response.use(
       (response) => response,
       async (error: AxiosError) => {
+        // A redirect here means host_url is wrong: reject with the teaching fix, never retry.
+        const redirect = redirectConfigError(error, this.config.url);
+        if (redirect) {
+          return Promise.reject(redirect);
+        }
         const config = error.config as RetryConfig | undefined;
         if (!config || (config.__retryCount ?? 0) >= 3 || !isRetryable(error)) {
           return Promise.reject(error);

@@ -246,6 +246,24 @@ impl TranscriptDriver {
                     .map(Lane::new)
                     .collect();
             }
+            // The lane count (and the WAV's channel layout) is fixed by the first chunk;
+            // a mid-stream mic flip would corrupt the WAV or silently drop mic PCM.
+            if chunk.mic.is_some() != (self.lanes.len() == 2) {
+                return Err(DriverError::Capture(format!(
+                    "audio stream changed shape mid-recording: started with {} channel(s), got a chunk with {}",
+                    self.lanes.len(),
+                    if chunk.mic.is_some() { 2 } else { 1 },
+                )));
+            }
+            if let Some(mic) = &chunk.mic {
+                if mic.len() != chunk.samples.len() {
+                    return Err(DriverError::Capture(format!(
+                        "paired audio chunk is misaligned: {} system samples vs {} mic samples",
+                        chunk.samples.len(),
+                        mic.len(),
+                    )));
+                }
+            }
             let writer = match wav {
                 Some(w) => w,
                 None => wav.insert(WavWriter::create(wav_path, self.lanes.len() as u16)?),
@@ -503,31 +521,39 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         "no audio was captured — check that audio was playing and that microphone / \
          system-audio recording permission is granted";
 
-    // 1) Load every recorded part (one lane per WAV channel; stereo = system+mic).
+    // 1) Cheap header pass: fixes each part's timeline base and the progress weights
+    //    without loading any PCM — loading happens one part at a time below.
     // A part that never got audio has no file (the WAV is created lazily) — skipped;
     // failing the whole pass over one empty resume would discard the good parts.
-    struct PartLanes {
-        channels: Vec<Vec<f32>>,
+    struct PartPlan<'a> {
+        path: &'a Path,
         part_base: Duration,
+        /// Frames × channels — this part's share of the progress band.
+        samples: u64,
     }
-    let mut parts: Vec<PartLanes> = Vec::new();
+    let mut plans: Vec<PartPlan> = Vec::new();
     let mut part_base = Duration::ZERO;
     let mut skipped = 0usize;
     let mut first_read_error: Option<String> = None;
     for path in &audio_paths {
         // A lost part must not discard the good ones, but it must never vanish
         // silently either: warn + a RecordingPartMissing event below.
-        let reason = match super::audio::parse_wav_to_channels_f32(path) {
-            Ok((chs, rate)) if rate > 0 && chs.iter().any(|c| !c.is_empty()) => {
-                let secs = chs.iter().map(Vec::len).max().unwrap_or(0) as f64 / f64::from(rate);
-                parts.push(PartLanes {
-                    channels: chs,
-                    part_base,
-                });
-                part_base += Duration::from_secs_f64(secs);
-                continue;
+        let reason = match hound::WavReader::open(path) {
+            Ok(reader) => {
+                let spec = reader.spec();
+                let frames = u64::from(reader.duration());
+                if spec.sample_rate > 0 && frames > 0 {
+                    plans.push(PartPlan {
+                        path,
+                        part_base,
+                        samples: frames * u64::from(spec.channels.max(1)),
+                    });
+                    part_base +=
+                        Duration::from_secs_f64(frames as f64 / f64::from(spec.sample_rate));
+                    continue;
+                }
+                "carries no samples".to_string()
             }
-            Ok(_) => "carries no samples".to_string(),
             Err(e) => {
                 // ≤44 bytes = a header-only/empty capture, not a corrupt file.
                 let header_only = std::fs::metadata(path)
@@ -549,34 +575,54 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
             path.display()
         );
     }
-    if parts.is_empty() {
+    if plans.is_empty() {
         return Err(fail(
             &store,
             first_read_error.unwrap_or_else(|| NO_AUDIO.to_string()),
         ));
     }
-    if skipped > 0 {
+    let mut part_missing_warned = skipped > 0;
+    if part_missing_warned {
         let _ = store.capture_warning(
             id,
             crate::transcription::audio::CaptureWarning::RecordingPartMissing,
         );
     }
 
-    // 2) + 3) Transcribe each part's lanes in ~30 s windows with overlap, stitching +
+    // 2) + 3) Load, transcribe, and drop ONE part at a time (~30 s windows with overlap),
     //    emitting per-window progress (fills the 5%..60% band); merged by start time.
+    //    Peak memory stays one part's PCM, not the whole meeting's.
     let _ = store.finalize_progress(id, 0.05);
-    let total_samples: usize = parts
-        .iter()
-        .flat_map(|p| p.channels.iter().map(Vec::len))
-        .sum();
+    let total_samples: u64 = plans.iter().map(|p| p.samples).sum();
     let mut final_segs: Vec<Segment> = Vec::new();
-    let mut done_samples = 0usize;
-    for part in &parts {
-        let lanes: Vec<(Option<TranscriptSource>, &[f32])> = lane_sources(part.channels.len())
+    let mut done_samples: u64 = 0;
+    let mut loaded_any = false;
+    for plan in &plans {
+        let channels = match super::audio::parse_wav_to_channels_f32(plan.path) {
+            Ok((chs, _rate)) => chs,
+            Err(e) => {
+                // Header parsed but the samples didn't (unsupported encoding, truncation
+                // since the header pass) — skip the part like a header-pass skip.
+                log::warn!(
+                    "transcript {id} audio part {} is unreadable: {e} — skipping it in the offline pass",
+                    plan.path.display()
+                );
+                first_read_error.get_or_insert_with(|| format!("read audio: {e}"));
+                if !part_missing_warned {
+                    part_missing_warned = true;
+                    let _ = store.capture_warning(
+                        id,
+                        crate::transcription::audio::CaptureWarning::RecordingPartMissing,
+                    );
+                }
+                done_samples += plan.samples;
+                continue;
+            }
+        };
+        for (source, pcm) in lane_sources(channels.len())
             .into_iter()
-            .zip(part.channels.iter().map(Vec::as_slice))
-            .collect();
-        for (source, pcm) in lanes {
+            .zip(channels.iter().map(Vec::as_slice))
+        {
             let lane_share = pcm.len() as f32 / total_samples.max(1) as f32;
             let done_frac = done_samples as f32 / total_samples.max(1) as f32;
             let segs = match transcribe_chunked(
@@ -593,12 +639,19 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
                 Err(e) => return Err(fail(&store, format!("offline transcribe: {e}"))),
             };
             final_segs.extend(segs.into_iter().map(|mut s| {
-                s.start += part.part_base;
-                s.end += part.part_base;
+                s.start += plan.part_base;
+                s.end += plan.part_base;
                 s
             }));
-            done_samples += pcm.len();
+            done_samples += pcm.len() as u64;
         }
+        loaded_any = true;
+    }
+    if !loaded_any {
+        return Err(fail(
+            &store,
+            first_read_error.unwrap_or_else(|| NO_AUDIO.to_string()),
+        ));
     }
     final_segs.sort_by_key(|s| s.start);
     let _ = store.finalize_progress(id, 0.9);
@@ -924,6 +977,90 @@ mod tests {
         }
     }
 
+    /// A stream whose chunks come from a canned script — for shape-violation tests.
+    struct ScriptedChunkStream {
+        chunks: Vec<crate::transcription::audio::AudioChunk>,
+    }
+    impl AudioStream for ScriptedChunkStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if self.chunks.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(self.chunks.remove(0)))
+        }
+    }
+
+    fn chunk_at(
+        ms: u64,
+        samples: usize,
+        mic: Option<usize>,
+    ) -> crate::transcription::audio::AudioChunk {
+        crate::transcription::audio::AudioChunk {
+            samples: vec![0.1; samples],
+            mic: mic.map(|n| vec![0.1; n]),
+            offset: Duration::from_millis(ms),
+        }
+    }
+
+    fn run_driver_expecting_capture_error(
+        chunks: Vec<crate::transcription::audio::AudioChunk>,
+    ) -> (Arc<TranscriptStore>, Uuid, DriverError) {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream { chunks }),
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let err = driver.run(&out_wav).unwrap_err();
+        (store, id, err)
+    }
+
+    #[test]
+    fn a_mid_stream_mic_flip_aborts_with_a_capture_error() {
+        // Mono start, then a chunk suddenly carrying a mic lane.
+        let (store, id, err) = run_driver_expecting_capture_error(vec![
+            chunk_at(0, 1600, None),
+            chunk_at(100, 1600, Some(1600)),
+        ]);
+        assert!(matches!(err, DriverError::Capture(_)), "got {err:?}");
+        assert!(err.to_string().contains("mid-recording"), "got: {err}");
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
+
+        // The reverse flip: paired start, then a mic-less chunk.
+        let (_store, _id, err) = run_driver_expecting_capture_error(vec![
+            chunk_at(0, 1600, Some(1600)),
+            chunk_at(100, 1600, None),
+        ]);
+        assert!(matches!(err, DriverError::Capture(_)), "got {err:?}");
+        assert!(err.to_string().contains("mid-recording"), "got: {err}");
+    }
+
+    #[test]
+    fn a_misaligned_paired_chunk_aborts_with_a_capture_error() {
+        let (store, id, err) = run_driver_expecting_capture_error(vec![
+            chunk_at(0, 1600, Some(1600)),
+            chunk_at(100, 1600, Some(800)),
+        ]);
+        assert!(matches!(err, DriverError::Capture(_)), "got {err:?}");
+        assert!(err.to_string().contains("misaligned"), "got: {err}");
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
+    }
+
     #[test]
     fn stop_signal_same_as_distinguishes_instances_from_clones() {
         let a = StopSignal::new();
@@ -1089,6 +1226,99 @@ mod tests {
             .iter()
             .any(|s| s.source == Some(TranscriptSource::Mic)));
         assert!(finals.windows(2).all(|w| w[0].start <= w[1].start));
+    }
+
+    /// A WAV whose header parses (hound reads 24-bit) but whose samples the
+    /// decode pass rejects (`parse_wav_to_channels_f32` supports 16-bit/f32 only).
+    fn make_24bit_wav(dir: &Path, secs: f32) -> PathBuf {
+        let path = dir.join("part-24bit.wav");
+        let mut w = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 24,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..(secs * 16_000.0) as usize {
+            w.write_sample(1000i32).unwrap();
+        }
+        w.finalize().unwrap();
+        path
+    }
+
+    #[test]
+    fn run_finalize_skips_a_part_that_fails_to_decode_after_the_header_check() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+
+        let (_g1, good) = make_fixture_wav(4.0);
+        let undecodable = make_24bit_wav(store_dir.path(), 2.0);
+        let mut sub = store.subscribe(id).unwrap();
+        run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_paths: vec![good, undecodable],
+            transcriber: Box::new(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "f{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap();
+
+        // The good part survived; the undecodable one raised the missing-part warning.
+        let snap = store.get(id).unwrap();
+        assert!(matches!(snap.status, TranscriptStatus::Done));
+        assert_eq!(
+            snap.final_segments.unwrap().len(),
+            2,
+            "4 s / 2 s from part 1"
+        );
+        let mut saw_missing_warning = false;
+        while let Ok(ev) = sub.events.try_recv() {
+            if let crate::transcription::transcript_store::TranscriptEvent::CaptureWarning {
+                warning: crate::transcription::audio::CaptureWarning::RecordingPartMissing,
+                ..
+            } = ev
+            {
+                saw_missing_warning = true;
+            }
+        }
+        assert!(
+            saw_missing_warning,
+            "a load-skipped part must raise a warning"
+        );
+    }
+
+    #[test]
+    fn run_finalize_fails_when_every_part_fails_to_decode() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let _ = store.set_status(id, TranscriptStatus::Finalizing { progress: 0.0 });
+
+        let undecodable = make_24bit_wav(store_dir.path(), 2.0);
+        let err = run_finalize(FinalizeConfig {
+            id,
+            store: store.clone(),
+            audio_paths: vec![undecodable],
+            transcriber: Box::new(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("read audio:"),
+            "the real decode error must surface, got: {err}"
+        );
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
     }
 
     #[test]

@@ -74,6 +74,7 @@ export interface PluginStatusEntry {
   enabled: boolean;
   configured: boolean;
   auth_fields: PluginAuthField[];
+  /** Stored values keyed by `auth_fields[].key`, for prefilling the form; secret fields are never included. */
   current_values: Record<string, string>;
   /**
    * Keys of `auth_fields` that have a non-empty value stored on disk.

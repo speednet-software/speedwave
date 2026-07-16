@@ -1455,6 +1455,58 @@ describe('PluginDetailComponent', () => {
       expect(badges.length).toBe(1);
     });
 
+    it('passes current_values to the credentials form so a non-secret field is prefilled', async () => {
+      const withValue = JSON.parse(JSON.stringify(PLUGIN_WITH_AUTH));
+      withValue.plugins[0].auth_fields.push({
+        key: 'base_url',
+        label: 'Base URL',
+        field_type: 'text',
+        placeholder: 'https://api.example.com',
+        is_secret: false,
+        required: true,
+      });
+      withValue.plugins[0].configured_fields = ['base_url'];
+      withValue.plugins[0].current_values = { base_url: 'https://tenant.example.com' };
+      const mockTauri = new MockTauriService();
+      mockTauri.invokeHandler = (cmd: string) => {
+        switch (cmd) {
+          case 'list_projects':
+            return Promise.resolve({
+              projects: [{ name: 'test-project', dir: '/tmp/test' }],
+              active_project: 'test-project',
+            });
+          case 'get_plugins':
+            return Promise.resolve(withValue);
+          case 'plugin_load_settings':
+            return Promise.resolve({});
+          case 'get_integrations':
+            return Promise.resolve(JSON.parse(JSON.stringify(MOCK_INTEGRATIONS)));
+          default:
+            return Promise.resolve(undefined);
+        }
+      };
+      TestBed.configureTestingModule({
+        imports: [PluginDetailComponent],
+        providers: [
+          { provide: TauriService, useValue: mockTauri },
+          { provide: ActivatedRoute, useValue: createRouteStub('example-plugin') },
+          { provide: Router, useValue: mockRouter },
+        ],
+      });
+      const projectState = TestBed.inject(ProjectStateService);
+      projectState.activeProject.set('test-project');
+      const fixture = TestBed.createComponent(PluginDetailComponent);
+      const component = fixture.componentInstance;
+      await initAndDetect(component, fixture);
+      component.selectTab('settings');
+      fixture.detectChanges();
+
+      const input = fixture.nativeElement.querySelector(
+        '[data-testid="cred-input-base_url"]'
+      ) as HTMLInputElement;
+      expect(input.value).toBe('https://tenant.example.com');
+    });
+
     // ── M3: verification-status guard ───────────────────────────────────────
 
     it('hides the credentials section when the plugin is not verified', async () => {
