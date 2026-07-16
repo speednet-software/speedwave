@@ -78,8 +78,8 @@ async function localLlmReachable(): Promise<boolean> {
   }
 }
 
-/** Fatal preconditions, empty when the suite may run. An unreachable local LLM
- *  is not fatal — it marks specs 11/12 skippable so the other 16 keep reporting. */
+/** Fatal preconditions, empty when the suite may run. An unreachable local LLM is not
+ *  fatal — it marks spec 11 and the live-server tests of spec 12 skippable so the rest keep reporting. */
 export async function runPreflight(): Promise<PreflightFailure[]> {
   const [openrouter, localOk] = await Promise.all([checkOpenrouter(), localLlmReachable()]);
 
@@ -88,9 +88,9 @@ export async function runPreflight(): Promise<PreflightFailure[]> {
     const target = process.env.LOCAL_LLM_BASE_URL || '(LOCAL_LLM_BASE_URL unset)';
     console.warn(
       `\n⚠  E2E preflight: local LLM at ${target} is unreachable from this machine.\n` +
-        '   Specs 11 (local-provider-resume) and 12 (provider-errors) will SKIP — the local\n' +
-        '   provider is not covered by this run. Give this host a route to the server to\n' +
-        '   restore that coverage.\n'
+        '   Spec 11 (local-provider-resume) and the live-server tests of spec 12\n' +
+        '   (provider-errors) will SKIP — spec 12 still runs its offline-server test.\n' +
+        '   Give this host a route to the server to restore that coverage.\n'
     );
   }
 

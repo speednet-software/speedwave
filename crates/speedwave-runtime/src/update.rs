@@ -398,9 +398,12 @@ pub fn update_containers(
         &new_manifest,
     )
     .map_err(|e| {
+        // Full chain to the log first — the banner's "full output in Logs" pointer
+        // (stderr on the CLI path) must actually hold.
+        log::error!("image rebuild during update failed: {e:#}");
         anyhow::anyhow!(
             "Image rebuild failed: {}. Containers are still running with the previous version.",
-            build::condense_build_error(&format!("{e:#}"))
+            build::user_facing_engine_error(&e)
         )
     })?;
 

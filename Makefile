@@ -64,6 +64,7 @@ guard-not-prod-data-dir:
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
+        test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -571,6 +572,20 @@ test-e2e: build-cli
 test-e2e-plugin-tamper-release: build-cli-release
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
+
+# `env` prefix is load-bearing (word-split at use sites, not a shell assignment); the
+# bundled-limactl path mirrors scripts/e2e-vm.sh's MACOS_ENGINE_BATS_PREAMBLE and engine.ts::engineExec (manual alignment).
+ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave-dev -- sudo
+
+test-engine-contract:
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" bats --print-output-on-failure _tests/e2e/engine-contract.bats
+
+test-e2e-update-dirty: build-cli
+	@test -n "$(SPW_E2E_PROJECT)" || { echo "SPW_E2E_PROJECT is required (e.g. make test-e2e-update-dirty SPW_E2E_PROJECT=speedwave)"; exit 1; }
+	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" SPEEDWAVE_DATA_DIR=$(HOME)/.speedwave-dev \
+	SPW_E2E_PROJECT="$(SPW_E2E_PROJECT)" SPEEDWAVE_BIN=$(CURDIR)/target/debug/speedwave \
+	bats --print-output-on-failure _tests/e2e/update-dirty-state.bats
 
 test-entrypoint:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }

@@ -1,7 +1,9 @@
 # ADR-062: Playwright host-gateway access via static extra_hosts
 
-> **Status:** Accepted (updates [ADR-039](ADR-039-playwright-shared-browser-service.md))
+> **Status:** Accepted (updates [ADR-039](ADR-039-playwright-shared-browser-service.md); gateway reachability revised by [ADR-080](ADR-080-wsl2-mirrored-container-host-relay.md))
 > **Context:** The built-in `mcp-playwright` worker could not reach host-loopback services (a local dev server, a host-side MCP endpoint) because it lacked the `host.docker.internal` alias every other container already had.
+>
+> **Update (ADR-080):** the gateway-reachability consequence below holds only under **NAT** networking / macOS. Under **WSL2 mirrored** networking (the Windows default) only Speedwave-supervised listeners are relayed to containers; a host-bound dev server is not reachable via the gateway, because no relay is created for an unsupervised port.
 
 ## Decision
 
