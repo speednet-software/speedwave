@@ -102,8 +102,7 @@ pub fn discover_slash_commands(
 }
 
 /// Test seam for [`discover_slash_commands`] with an injectable timeout.
-/// Concurrent calls for the same project share one run via [`lead_discovery`];
-/// a failed run is never cached (returns `Unavailable` fresh every time).
+/// A failed run is never cached (returns `Unavailable` fresh every time).
 fn discover_slash_commands_with_timeout(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -171,11 +170,8 @@ impl Drop for LeaderGuard<'_> {
     }
 }
 
-/// Runs `run` at most once per `project` across concurrent callers: the
-/// first caller becomes the leader and executes `run`; concurrent callers
-/// for the same project block on the leader's result instead of re-running
-/// discovery. A leader panic still publishes `Err` to unblock followers
-/// (see [`LeaderGuard`]).
+/// Runs `run` at most once per `project` across concurrent callers; other
+/// callers block on the leader's result instead of re-running discovery.
 fn lead_discovery(
     project: &str,
     run: impl FnOnce() -> Result<RawDiscovery, String>,
@@ -367,9 +363,7 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
 }
 
 /// Runs `claude -p ... -- /` in `container` and returns the first parsed
-/// `system/init` event, killing the child once that line is captured.
-/// Test-only: production callers go through `run_discovery_with_timeout`
-/// directly (via `lead_discovery`) to inject a bounded timeout.
+/// `system/init` event. Test-only; production uses `run_discovery_with_timeout`.
 #[cfg(test)]
 fn run_discovery(
     runtime: &crate::runtime::LockedRuntime,
@@ -544,8 +538,7 @@ struct SlashFrontmatter {
 }
 
 /// Turns raw discovery into a filtered, enriched, sorted `SlashDiscovery`.
-/// Default-deny: a name with no plugin prefix, no agent match, no native-table
-/// hit, and no on-disk frontmatter hit anywhere is dropped.
+/// Default-deny: a name with no provenance anywhere (plugin/agent/native/on-disk) is dropped.
 fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> SlashDiscovery {
     let personal_dir = personal_claude_dir();
     let mut commands: Vec<SlashCommand> = Vec::new();
@@ -746,11 +739,8 @@ fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<(PathBuf, Frontm
     ));
 }
 
-/// Resolves `name` against the data-dir copy of `claude-resources`'s
-/// integration-scoped tree: `<data_dir>/claude-resources/<type>/integrations/<name>/`
-/// (mirrors the entrypoint symlink layout, `entrypoint.sh` + `consts.rs`'s
-/// `integrations_directories_match_known_service_keys`). `user-invocable: false`
-/// hides an integration skill exactly as it does for any other source.
+/// Resolves `name` under `<data_dir>/claude-resources/<type>/integrations/<name>/`,
+/// mirroring the entrypoint symlink layout.
 fn lookup_integration_frontmatter(
     name: &str,
     data_dir: &Path,
