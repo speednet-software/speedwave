@@ -654,7 +654,7 @@ mod tests {
             .finish(
                 "m",
                 0,
-                "anthropic_apikey",
+                "anthropic_api_key",
                 "anthropic",
                 RequestStatus::Failure,
             )
