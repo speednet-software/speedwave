@@ -29,6 +29,7 @@ describe('ModelSelectorComponent', () => {
       latest: true,
       premium: false,
       selectable: true,
+      has_1m: true,
     } as AnthropicModel,
     {
       id: 'claude-opus-4-1',
@@ -37,6 +38,7 @@ describe('ModelSelectorComponent', () => {
       latest: false,
       premium: true,
       selectable: false,
+      has_1m: false,
     } as AnthropicModel,
   ];
 
@@ -132,6 +134,47 @@ describe('ModelSelectorComponent', () => {
     ).toBeFalsy();
   });
 
+  it('offers the [1m] alias by has_1m, not context_tokens (claude-fable-5 exception)', async () => {
+    const catalogWithFable: AnthropicModel[] = [
+      {
+        id: 'claude-fable-5',
+        family: 'Fable 5',
+        context_tokens: 200_000,
+        latest: true,
+        premium: true,
+        selectable: true,
+        has_1m: true,
+      },
+      {
+        id: 'claude-haiku-4-5',
+        family: 'Haiku 4.5',
+        context_tokens: 200_000,
+        latest: true,
+        premium: false,
+        selectable: true,
+        has_1m: false,
+      },
+    ];
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'list_anthropic_models') return Promise.resolve(catalogWithFable);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    // fable-5 has a 200k bare context but has_1m=true: must still offer [1m].
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="model-selector-option-claude-fable-5[1m]"]'))
+    ).toBeTruthy();
+    // haiku is also 200k context but has_1m=false: no [1m] alias offered.
+    expect(
+      fixture.debugElement.query(
+        By.css('[data-testid="model-selector-option-claude-haiku-4-5[1m]"]')
+      )
+    ).toBeFalsy();
+  });
+
   it('shows error+retry on a fetch failure and recovers on retry', async () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
@@ -220,6 +263,104 @@ describe('ModelSelectorComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
     expect(fixture.debugElement.query(By.css('[data-testid="model-selector-error"]'))).toBeTruthy();
+  });
+
+  it('open_router and local branches produce identically-shaped options from the same discover result', async () => {
+    const discovered = { models: [{ id: 'model-a', context_tokens: 4096 }] };
+    const expectedOptions = [{ id: 'model-a', label: 'model-a', contextTokens: 4096 }];
+
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openrouter/model-a',
+      base_url: null,
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      if (cmd === 'discover_llm_models') return Promise.resolve(discovered);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or-shape');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(fixture.componentInstance['options']()).toEqual(expectedOptions);
+
+    const localSummary: ActiveProviderSummary = {
+      provider_id: 'my-ollama',
+      kind: 'local',
+      model: 'my-ollama/model-a',
+      base_url: 'http://host.docker.internal:11434',
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummary);
+      if (cmd === 'discover_llm_models') return Promise.resolve(discovered);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-local-shape');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    expect(fixture.componentInstance['options']()).toEqual(expectedOptions);
+  });
+
+  it('reuses cached discovery results on a second open, but re-probes on a provider/base_url change', async () => {
+    const localSummary: ActiveProviderSummary = {
+      provider_id: 'my-ollama',
+      kind: 'local',
+      model: 'my-ollama/llama3.3',
+      base_url: 'http://host.docker.internal:11434',
+    };
+    let discoverCalls = 0;
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(localSummary);
+      if (cmd === 'discover_llm_models') {
+        discoverCalls++;
+        return Promise.resolve({ models: [{ id: 'llama3.3', context_tokens: 8192 }] });
+      }
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-cache');
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    expect(discoverCalls).toBe(1);
+
+    // Close and reopen for the same provider/base_url: reuses the cached result.
+    fixture.componentInstance.open.set(false);
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    expect(discoverCalls).toBe(1);
+
+    // A different base_url (provider/summary change) must invalidate the cache.
+    const otherLocalSummary: ActiveProviderSummary = {
+      ...localSummary,
+      base_url: 'http://host.docker.internal:22222',
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(otherLocalSummary);
+      if (cmd === 'discover_llm_models') {
+        discoverCalls++;
+        return Promise.resolve({ models: [{ id: 'llama3.3', context_tokens: 8192 }] });
+      }
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-cache-2');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    expect(discoverCalls).toBe(2);
+
+    // Retry (force) bypasses the cache even for the same key.
+    await fixture.componentInstance.fetchOptions(true);
+    expect(discoverCalls).toBe(3);
   });
 
   it('emits exactly one modelSelected event carrying catalogId, wireId, providerId and kind', async () => {

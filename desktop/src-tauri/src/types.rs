@@ -50,6 +50,15 @@ pub(crate) struct LlmConfigResponse {
     pub(crate) default_base_url: Option<String>,
 }
 
+/// Wire shape for `list_anthropic_models`: flattens `AnthropicModelInfo` and adds
+/// the derived `has_1m` (the composer's SSOT for offering a `[1m]` option).
+#[derive(Serialize)]
+pub(crate) struct AnthropicModelWire {
+    #[serde(flatten)]
+    pub(crate) info: speedwave_runtime::defaults::AnthropicModelInfo,
+    pub(crate) has_1m: bool,
+}
+
 /// Auth-status discriminant derived from the `AuthStatusResponse` flags.
 /// Wire strings are snake_case: `no_provider` | `ready` | `auth_required`.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -15,6 +15,7 @@ const FIXTURE: AnthropicModel[] = [
     latest: true,
     premium: true,
     selectable: true,
+    has_1m: true,
   },
 ];
 

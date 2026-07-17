@@ -61,6 +61,14 @@ pub struct AnthropicModelInfo {
     pub selectable: bool,
 }
 
+impl AnthropicModelInfo {
+    /// True when a priced `[1m]` alias exists (`pricing_1m.is_some()`) — the
+    /// SSOT for whether the composer should offer the `[1m]` option.
+    pub fn has_1m(&self) -> bool {
+        self.pricing_1m.is_some()
+    }
+}
+
 // Published per-MTok rates: platform.claude.com/docs/en/pricing.
 const FABLE_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
@@ -730,6 +738,39 @@ mod tests {
                 "{}: pricing_1m presence must mirror context_tokens >= 1M (was {}), except the documented claude-fable-5 exception",
                 m.id,
                 m.context_tokens
+            );
+        }
+    }
+
+    #[test]
+    fn has_1m_mirrors_pricing_1m_presence() {
+        // claude-fable-5 is the documented exception: 200k context, still has_1m.
+        let fable = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .expect("claude-fable-5 must be in the catalog");
+        assert_eq!(fable.context_tokens, 200_000);
+        assert!(
+            fable.has_1m(),
+            "claude-fable-5 must report has_1m() == true"
+        );
+
+        let haiku = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-haiku-4-5")
+            .expect("claude-haiku-4-5 must be in the catalog");
+        assert_eq!(haiku.context_tokens, 200_000);
+        assert!(
+            !haiku.has_1m(),
+            "an unpriced 200k model must report has_1m() == false"
+        );
+
+        for m in ANTHROPIC_MODELS {
+            assert_eq!(
+                m.has_1m(),
+                m.pricing_1m.is_some(),
+                "{}: has_1m() must mirror pricing_1m.is_some()",
+                m.id
             );
         }
     }

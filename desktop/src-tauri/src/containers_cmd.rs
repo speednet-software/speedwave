@@ -6,7 +6,7 @@ use speedwave_runtime::config;
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{
-    check_project, LlmConfigResponse, LlmConfigUpdate, TelemetryConfigResponse,
+    check_project, AnthropicModelWire, LlmConfigResponse, LlmConfigUpdate, TelemetryConfigResponse,
     TelemetryConfigUpdate, TelemetryLocks,
 };
 
@@ -1019,10 +1019,16 @@ pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> 
 }
 
 /// SSOT Anthropic model list for Settings → LLM Provider; bumping a model
-/// edits one const in `defaults.rs` (struct serializes across IPC directly).
+/// edits one const in `defaults.rs`. Adds the derived `has_1m` field.
 #[tauri::command]
-pub fn list_anthropic_models() -> &'static [speedwave_runtime::defaults::AnthropicModelInfo] {
+pub fn list_anthropic_models() -> Vec<AnthropicModelWire> {
     speedwave_runtime::defaults::ANTHROPIC_MODELS
+        .iter()
+        .map(|info| AnthropicModelWire {
+            info: info.clone(),
+            has_1m: info.has_1m(),
+        })
+        .collect()
 }
 
 /// Builds the frontend telemetry response. Never copies the headers value (only
@@ -2092,6 +2098,39 @@ mod tests {
                 "'{pat}' must route through build::user_facing_engine_error before Err(String)"
             );
         }
+    }
+
+    /// `list_anthropic_models` must expose `has_1m` derived from
+    /// `pricing_1m.is_some()` — the composer's SSOT for the `[1m]` option,
+    /// including the documented claude-fable-5 exception (200k context, priced 1M alias).
+    #[test]
+    fn list_anthropic_models_carries_has_1m_from_pricing() {
+        let models = list_anthropic_models();
+        let fable = models
+            .iter()
+            .find(|m| m.info.id == "claude-fable-5")
+            .expect("claude-fable-5 must be in the catalog");
+        assert_eq!(fable.info.context_tokens, 200_000);
+        assert!(fable.has_1m, "claude-fable-5 must serialize has_1m=true");
+
+        let haiku = models
+            .iter()
+            .find(|m| m.info.id == "claude-haiku-4-5")
+            .expect("claude-haiku-4-5 must be in the catalog");
+        assert_eq!(haiku.info.context_tokens, 200_000);
+        assert!(
+            !haiku.has_1m,
+            "an unpriced 200k model must serialize has_1m=false"
+        );
+
+        let json = serde_json::to_value(&models).expect("catalog must serialize");
+        let fable_json = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == "claude-fable-5")
+            .expect("claude-fable-5 must be present in the JSON payload");
+        assert_eq!(fable_json["has_1m"], serde_json::json!(true));
     }
 
     fn make_config_with_active_project() -> SpeedwaveUserConfig {

@@ -73,7 +73,7 @@ export interface ModelSelection {
         } @else if (error()) {
           <div data-testid="model-selector-error">
             {{ error() }}
-            <button type="button" data-testid="model-selector-retry" (click)="fetchOptions()">
+            <button type="button" data-testid="model-selector-retry" (click)="fetchOptions(true)">
               Retry
             </button>
           </div>
@@ -141,6 +141,13 @@ export class ModelSelectorComponent {
   /** In-flight option fetch, awaited by tests to settle the fire-and-forget open. */
   private optionsFetch: Promise<void> = Promise.resolve();
 
+  /**
+   * Last-successful local/OpenRouter discovery result, keyed by `kind|base_url` so a
+   * provider or summary change invalidates it; re-opening the combobox for the same
+   * key reuses it instead of re-issuing a live `discover_llm_models` VM+host probe.
+   */
+  private discoverCache: { key: string; options: ModelOption[] } | null = null;
+
   protected readonly effortLevels = signal<string[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly pendingEffortPin = signal<string | null>(null);
@@ -205,8 +212,10 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Expands a 1M-capable selectable Anthropic entry into two options: the bare
-   * 200k-session id and the `[1m]` 1M-session id (Task 7 catalog contract).
+   * Expands a 1M-priced selectable Anthropic entry into two options: the bare
+   * id and the `[1m]` 1M-priced-alias id (Task 7 catalog contract). Gated on
+   * `has_1m` (backend `pricing_1m.is_some()`), NOT `context_tokens >= 1_000_000`
+   * — claude-fable-5 reports a 200k bare context yet still prices a `[1m]` alias.
    * @param list - Full Anthropic catalog from `list_anthropic_models`.
    * @returns The selectable options, `[1m]` variants included.
    */
@@ -215,7 +224,7 @@ export class ModelSelectorComponent {
     for (const m of list) {
       if (!m.selectable) continue;
       rows.push({ id: m.id, label: m.family, contextTokens: m.context_tokens });
-      if (m.context_tokens >= 1_000_000) {
+      if (m.has_1m) {
         rows.push({
           id: `${m.id}[1m]`,
           label: `${m.family} (1M)`,
@@ -226,8 +235,30 @@ export class ModelSelectorComponent {
     return rows;
   }
 
-  /** Fetches the option list for the active provider kind (badge combobox source). */
-  async fetchOptions(): Promise<void> {
+  /**
+   * Runs a `discover_llm_models` probe for one provider and maps the result into
+   * combobox options; the single source both the OpenRouter and local branches call.
+   * @param provider - Wire provider id (`'openrouter'` or `'local'`).
+   * @param baseUrl - Server base URL (`''` for OpenRouter, the summary's URL for local).
+   */
+  private async fetchDiscoverOptions(provider: string, baseUrl: string): Promise<ModelOption[]> {
+    const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
+      args: { provider, baseUrl, apiKey: undefined },
+    });
+    return (res?.models ?? []).map((m) => ({
+      id: m.id,
+      label: m.id,
+      contextTokens: m.context_tokens ?? null,
+    }));
+  }
+
+  /**
+   * Fetches the option list for the active provider kind (badge combobox source).
+   * Local/OpenRouter results are cached per `kind|base_url`; pass `force` to bypass
+   * the cache (retry-after-error, or a fresh open must still catch a server-side change).
+   * @param force - Skip the cache and re-issue the discovery probe.
+   */
+  async fetchOptions(force = false): Promise<void> {
     const summary = this.summary();
     if (!summary) return;
     this.loading.set(true);
@@ -236,31 +267,21 @@ export class ModelSelectorComponent {
       if (isAnthropicKind(summary.kind)) {
         const list = await this.anthropicModels.list();
         this.options.set(this.anthropicOptionsFrom(list));
-      } else if (summary.kind === 'open_router') {
-        const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
-          args: { provider: 'openrouter', baseUrl: '', apiKey: undefined },
-        });
-        this.options.set(
-          (res?.models ?? []).map((m) => ({
-            id: m.id,
-            label: m.id,
-            contextTokens: m.context_tokens ?? null,
-          }))
-        );
       } else {
-        if (!summary.base_url) {
+        const isOpenRouter = summary.kind === 'open_router';
+        if (!isOpenRouter && !summary.base_url) {
           throw new Error('local provider has no base_url configured');
         }
-        const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
-          args: { provider: 'local', baseUrl: summary.base_url, apiKey: undefined },
-        });
-        this.options.set(
-          (res?.models ?? []).map((m) => ({
-            id: m.id,
-            label: m.id,
-            contextTokens: m.context_tokens ?? null,
-          }))
-        );
+        const provider = isOpenRouter ? 'openrouter' : 'local';
+        const baseUrl = isOpenRouter ? '' : (summary.base_url as string);
+        const cacheKey = `${provider}|${baseUrl}`;
+        if (!force && this.discoverCache?.key === cacheKey) {
+          this.options.set(this.discoverCache.options);
+        } else {
+          const opts = await this.fetchDiscoverOptions(provider, baseUrl);
+          this.discoverCache = { key: cacheKey, options: opts };
+          this.options.set(opts);
+        }
       }
       if (this.options().length === 0) this.error.set('No models available.');
     } catch (e: unknown) {

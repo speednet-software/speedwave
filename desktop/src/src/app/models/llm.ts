@@ -19,6 +19,12 @@ export interface AnthropicModel {
   premium: boolean;
   /** Offered by the composer selector; `false` for legacy entries kept for pricing history. */
   selectable: boolean;
+  /**
+   * True when a priced `[1m]` alias exists (backend `pricing_1m.is_some()`). The
+   * SSOT for offering the `[1m]` combobox option — NOT `context_tokens >= 1_000_000`
+   * (claude-fable-5 reports a 200k bare context yet still has a priced `[1m]` alias).
+   */
+  has_1m: boolean;
 }
 
 /** Default fallback context window for a model the SSOT doesn't know. */

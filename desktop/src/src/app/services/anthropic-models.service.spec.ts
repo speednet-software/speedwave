@@ -14,6 +14,7 @@ const FIXTURE: AnthropicModel[] = [
     latest: true,
     premium: true,
     selectable: true,
+    has_1m: true,
   },
   {
     id: 'claude-sonnet-4-6',
@@ -22,6 +23,7 @@ const FIXTURE: AnthropicModel[] = [
     latest: true,
     premium: false,
     selectable: true,
+    has_1m: true,
   },
   {
     id: 'claude-haiku-4-5',
@@ -30,6 +32,7 @@ const FIXTURE: AnthropicModel[] = [
     latest: true,
     premium: false,
     selectable: true,
+    has_1m: false,
   },
   {
     id: 'claude-opus-4-7',
@@ -38,6 +41,7 @@ const FIXTURE: AnthropicModel[] = [
     latest: false,
     premium: true,
     selectable: false,
+    has_1m: true,
   },
 ];
 
