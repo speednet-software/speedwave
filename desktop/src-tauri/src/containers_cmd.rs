@@ -6,9 +6,9 @@ use speedwave_runtime::config;
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
 use crate::setup_wizard;
 use crate::types::{
-    check_project, CustomPolicyDto, CustomPolicyDtoInput, LlmConfigResponse, LlmConfigUpdate,
-    SecurityPolicyResponse, SecurityPolicyTemplateInfo, SecurityPolicyUpdate,
-    TelemetryConfigResponse, TelemetryConfigUpdate, TelemetryLocks,
+    check_project, CustomPolicyDto, LlmConfigResponse, LlmConfigUpdate, SecurityPolicyResponse,
+    SecurityPolicyTemplateInfo, SecurityPolicyUpdate, TelemetryConfigResponse,
+    TelemetryConfigUpdate, TelemetryLocks,
 };
 
 /// Max bytes for the local-LLM `api_key` token file; larger is almost
@@ -1907,7 +1907,7 @@ fn mirror_local_key_to_llm_namespace(
 )]
 mod tests {
     use super::*;
-    use crate::types::SecurityPolicyCustomPatternInput;
+    use crate::types::{CustomPolicyDtoInput, SecurityPolicyCustomPatternInput};
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
 
     /// Structural: every `start_containers` error string crossing IPC goes through
