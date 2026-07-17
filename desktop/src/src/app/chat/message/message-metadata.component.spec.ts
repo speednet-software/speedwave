@@ -2,6 +2,21 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MessageMetadataComponent } from './message-metadata.component';
 import type { ChatMessage } from '../../models/chat';
+import { AnthropicModelsService } from '../../services/anthropic-models.service';
+import { TauriService } from '../../services/tauri.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
+import type { AnthropicModel } from '../../models/llm';
+
+const FIXTURE: AnthropicModel[] = [
+  {
+    id: 'claude-opus-4-8',
+    family: 'Opus 4.8',
+    context_tokens: 1_000_000,
+    latest: true,
+    premium: true,
+    selectable: true,
+  },
+];
 
 function baseAssistant(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -331,5 +346,38 @@ describe('MessageMetadataComponent', () => {
     expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
       'opus-4.7[1m]'
     );
+  });
+
+  describe('with the catalog loaded', () => {
+    beforeEach(async () => {
+      const mockTauri = new MockTauriService();
+      mockTauri.invokeHandler = async (cmd: string) =>
+        cmd === 'list_anthropic_models' ? FIXTURE : undefined;
+
+      TestBed.resetTestingModule();
+      await TestBed.configureTestingModule({
+        imports: [MessageMetadataComponent],
+        providers: [{ provide: TauriService, useValue: mockTauri }],
+      }).compileComponents();
+
+      fixture = TestBed.createComponent(MessageMetadataComponent);
+      await TestBed.inject(AnthropicModelsService).list();
+    });
+
+    it('renders the catalog family label when the model is in the catalog', () => {
+      setEntry(baseAssistant({ meta: { model: 'claude-opus-4-8' } }));
+
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe('Opus 4.8');
+    });
+
+    it('falls back to the regex formatting for non-catalog ids', () => {
+      setEntry(baseAssistant({ meta: { model: 'local/unsloth/Qwen3.6-35B-A3B' } }));
+
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="meta-model"]')?.textContent?.trim()).toBe(
+        'local/unsloth/Qwen3.6-35B-A3B'
+      );
+    });
   });
 });

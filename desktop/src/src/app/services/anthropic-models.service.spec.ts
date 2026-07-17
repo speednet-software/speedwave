@@ -271,6 +271,24 @@ describe('AnthropicModelsService', () => {
     });
   });
 
+  describe('familyLabelFor()', () => {
+    it('returns null before the catalog has loaded', () => {
+      expect(service.familyLabelFor('claude-opus-4-8')).toBeNull();
+    });
+
+    it('returns the catalog family label for a known id', async () => {
+      await service.list();
+      expect(service.familyLabelFor('claude-opus-4-8')).toBe('Opus 4.8');
+    });
+
+    it('returns null for unknown or empty ids', async () => {
+      await service.list();
+      expect(service.familyLabelFor('openrouter/anthropic/claude-sonnet-5')).toBeNull();
+      expect(service.familyLabelFor(null)).toBeNull();
+      expect(service.familyLabelFor('')).toBeNull();
+    });
+  });
+
   describe('contextTokensOrDefault()', () => {
     it('falls back to DEFAULT_CONTEXT_TOKENS when the model is unknown', async () => {
       await service.list();

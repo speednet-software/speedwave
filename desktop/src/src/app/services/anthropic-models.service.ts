@@ -74,6 +74,18 @@ export class AnthropicModelsService {
   }
 
   /**
+   * Catalog family display label (e.g. "Opus 4.8") for a model id.
+   * @param modelId - CC-selectable id; `[1m]` suffix tolerated.
+   * @returns Label or `null` when the id is not in the catalog.
+   */
+  familyLabelFor(modelId: string | null | undefined): string | null {
+    if (!this.cache || !modelId) return null;
+    const bare = modelId.replace(/(\[1m\])+$/, '');
+    const hit = this.cache.find((m) => m.id === bare || m.id === modelId);
+    return hit?.family ?? null;
+  }
+
+  /**
    * The catalog entries offered by the composer selector — legacy (non-`selectable`)
    * entries stay in the full catalog for pricing history but are excluded here.
    */

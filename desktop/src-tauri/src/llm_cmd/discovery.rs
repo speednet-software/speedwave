@@ -746,17 +746,17 @@ pub(crate) async fn do_discover_llm_models(
     let validated = normalize_and_validate_discovery_url(base_url)?;
 
     // Non-anthropic providers route through `discover_local`; legacy names accepted on read.
-    let (raw_models, messages_endpoint_ok) = match provider {
-        "local" | "ollama" | "lmstudio" | "llamacpp" => {
+    let (raw_models, messages_endpoint_ok) =
+        if speedwave_runtime::config::is_local_provider(Some(provider)) {
             // List first, then probe with a real model id so a "model not found"
             // 404 isn't read as a missing endpoint (Ollama false-positive).
             let models = discover_local(&validated, transport).await?;
             let first_model = models.first().map(|m| m.id.as_str());
             let sanity = probe_messages_endpoint(&validated, first_model, transport).await;
             (models, sanity)
-        }
-        _ => return Err(ERR_UNSUPPORTED.to_string()),
-    };
+        } else {
+            return Err(ERR_UNSUPPORTED.to_string());
+        };
 
     let models: Vec<DiscoveredModel> = raw_models
         .into_iter()
@@ -1287,6 +1287,39 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, "unsupported");
+    }
+
+    #[tokio::test]
+    async fn discover_routes_every_local_provider_kind_via_ssot() {
+        // Every provider name the config SSOT classifies as local must be routed
+        // through `discover_local`, never `ERR_UNSUPPORTED` (drift guard for the
+        // match arm previously hand-typing "local"|"ollama"|"lmstudio"|"llamacpp").
+        let mut server = mockito::Server::new_async().await;
+        let _models_mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"test-model"}]}"#)
+            .create_async()
+            .await;
+        let _messages_mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(r#"{}"#)
+            .create_async()
+            .await;
+
+        let client = build_llm_probe_client().unwrap();
+        for provider in speedwave_runtime::config::LOCAL_PROVIDERS {
+            assert!(speedwave_runtime::config::is_local_provider(Some(provider)));
+            let result =
+                do_discover_llm_models(provider, &server.url(), &client, Duration::from_secs(2))
+                    .await;
+            assert!(
+                !matches!(result, Err(ref e) if e == ERR_UNSUPPORTED),
+                "provider '{provider}' accepted by is_local_provider must not return unsupported"
+            );
+        }
     }
 
     #[tokio::test]

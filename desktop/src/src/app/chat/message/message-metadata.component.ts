@@ -1,6 +1,7 @@
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
 import type { ChatMessage } from '../../models/chat';
 import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number';
+import { AnthropicModelsService } from '../../services/anthropic-models.service';
 
 /**
  * Mono metadata line below each assistant message (`opus-4.7 · edited · 1,243 tok · cache: 4,012 · $0.018`).
@@ -39,12 +40,16 @@ import { formatTokens as fmtTokens, formatUsd } from '../../shared/format-number
   `,
 })
 export class MessageMetadataComponent {
+  private readonly models = inject(AnthropicModelsService);
+
   readonly entry = input.required<ChatMessage>();
   readonly precedingEdited = input(false);
 
   readonly modelLabel = computed<string>(() => {
     const raw = this.entry().meta?.model;
     if (!raw) return '';
+    const fromCatalog = this.models.familyLabelFor(raw);
+    if (fromCatalog) return raw.endsWith('[1m]') ? `${fromCatalog} [1m]` : fromCatalog;
     const stripped = raw.replace(/^claude-/, '');
     // Collapse repeated `[1m]` suffixes.
     const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
