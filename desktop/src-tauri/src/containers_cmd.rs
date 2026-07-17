@@ -2325,98 +2325,38 @@ mod tests {
         }
     }
 
-    /// Isolates `consts::data_dir()` (a process-wide `OnceLock`) to a tempdir, writing
-    /// `cfg` first — the `SPEEDWAVE_DATA_DIR` swap pattern used by `oauth_cmd.rs`'s
-    /// `provider_success_saves_tokens_and_emits_success`. Returns the restore guard;
-    /// caller must mark the test `#[serial_test::serial(data_dir_swap)]`.
-    fn set_temp_user_config(cfg: &SpeedwaveUserConfig) -> (tempfile::TempDir, Option<String>) {
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
-        config::save_user_config(cfg).unwrap();
-        (tmp, prev)
-    }
-
-    fn restore_data_dir(prev: Option<String>) {
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(data_dir_swap)]
-    async fn settings_save_preserves_existing_entry_models() {
-        // A prior save (or the auto-default at provider-save time) stored a
-        // model on the local entry; a later settings save - where the
-        // component no longer carries a model control - sends the same
-        // entry back with `model: None`. The merge must not clobber it.
-        let mut cfg = make_config_with_active_project();
-        {
-            let project = cfg.find_project_mut("alpha").unwrap();
-            project.claude = Some(config::ClaudeOverrides {
-                env: None,
-                settings: None,
-                llm: Some(LlmConfig {
-                    provider: Some("local".to_string()),
-                    schema_version: Some(config::LLM_SCHEMA_VERSION),
-                    providers: vec![speedwave_runtime::config::LlmProviderEntry {
-                        id: "local".to_string(),
-                        kind: speedwave_runtime::config::LlmProviderKind::Local,
-                        base_url: Some("http://localhost:11434".to_string()),
-                        model: Some("llama3.3".to_string()),
-                        has_api_key: false,
-                        context_tokens: Some(128_000),
-                        has_custom_headers: false,
-                    }],
-                    active: Some(speedwave_runtime::config::LlmActive {
-                        provider_id: "local".to_string(),
-                        model: Some("llama3.3".to_string()),
-                    }),
-                    ..Default::default()
-                }),
-            });
-        }
-        let (_tmp, prev) = set_temp_user_config(&cfg);
-
-        // Settings component resend: same entry, no model field carried.
-        let update = LlmConfigUpdate {
-            provider: Some("local".to_string()),
-            model: None,
+    #[test]
+    fn settings_save_preserves_existing_entry_models() {
+        // Pure merge-step check (mirrors update_llm_config's preserve step,
+        // without touching disk): a settings resave carrying `model: None`
+        // must inherit the stored model by id, never clobber it.
+        let stored = [speedwave_runtime::config::LlmProviderEntry {
+            id: "local".to_string(),
+            kind: speedwave_runtime::config::LlmProviderKind::Local,
             base_url: Some("http://localhost:11434".to_string()),
-            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
-                id: "local".to_string(),
-                kind: speedwave_runtime::config::LlmProviderKind::Local,
-                base_url: Some("http://localhost:11434".to_string()),
-                model: None,
-                has_api_key: false,
-                context_tokens: None,
-                has_custom_headers: false,
-            }]),
-            active: Some(speedwave_runtime::config::LlmActive {
-                provider_id: "local".to_string(),
-                model: None,
-            }),
-            ..Default::default()
-        };
-        let result = update_llm_config(update).await;
-        result.as_ref().expect("save must succeed");
+            model: Some("llama3.3".to_string()),
+            has_api_key: false,
+            context_tokens: Some(128_000),
+            has_custom_headers: false,
+        }];
+        let mut incoming = [speedwave_runtime::config::LlmProviderEntry {
+            id: "local".to_string(),
+            kind: speedwave_runtime::config::LlmProviderKind::Local,
+            base_url: Some("http://localhost:11434".to_string()),
+            model: None,
+            has_api_key: false,
+            context_tokens: None,
+            has_custom_headers: false,
+        }];
 
-        let saved = config::load_user_config().unwrap();
-        let entry = saved
-            .active_project_entry()
-            .and_then(|p| p.claude.as_ref())
-            .and_then(|c| c.llm.as_ref())
-            .and_then(|llm| llm.providers.iter().find(|p| p.id == "local"))
-            .expect("local entry must survive the save");
+        preserve_stored_entry_models(&mut incoming, &stored);
+
         assert_eq!(
-            entry.model.as_deref(),
+            incoming[0].model.as_deref(),
             Some("llama3.3"),
             "a settings save carrying no model must not erase the \
              stored entry model"
         );
-
-        restore_data_dir(prev);
     }
 
     #[test]

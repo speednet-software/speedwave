@@ -1661,7 +1661,9 @@ pub fn load_user_config() -> anyhow::Result<SpeedwaveUserConfig> {
     load_user_config_from(&config_path)
 }
 
-pub(crate) fn load_user_config_from(path: &Path) -> anyhow::Result<SpeedwaveUserConfig> {
+/// `path`-parameterized variant of [`load_user_config`]; use in tests and any
+/// caller that must not depend on the process-wide `data_dir()` OnceLock.
+pub fn load_user_config_from(path: &Path) -> anyhow::Result<SpeedwaveUserConfig> {
     if !path.exists() {
         return Ok(SpeedwaveUserConfig::default());
     }
@@ -1676,7 +1678,9 @@ pub fn save_user_config(config: &SpeedwaveUserConfig) -> anyhow::Result<()> {
     save_user_config_to(config, &config_path)
 }
 
-pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> anyhow::Result<()> {
+/// `path`-parameterized variant of [`save_user_config`]; use in tests and any
+/// caller that must not depend on the process-wide `data_dir()` OnceLock.
+pub fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
