@@ -20,6 +20,7 @@ import {
 import { filter } from 'rxjs/operators';
 import type { ConversationSummary } from '../../models/chat';
 import { IconComponent } from '../../shared/icon.component';
+import { isControlShaped } from '../slash/slash.service';
 
 /**
  * Buckets a conversation into today/yesterday/older by relative day.
@@ -359,6 +360,7 @@ const PREVIEW_PLAN_PREFIX_RE = /^\[Plan mode\][^\n]*\n+/i;
  */
 function cleanConversationPreview(raw: string): string {
   if (!raw) return 'untitled';
+  if (isControlShaped(raw)) return 'untitled';
   const stripped = raw
     .replace(PREVIEW_TAG_RE, '')
     .replace(PREVIEW_OTHER_TAG_RE, ' ')

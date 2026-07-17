@@ -160,6 +160,30 @@ describe('ConversationsSidebarComponent', () => {
       const drawer = q('[data-testid="conversations-sidebar"]')!;
       expect(drawer.textContent).toContain('0 · —');
     });
+
+    it('falls back to "untitled" when the backend preview is a bare control-chip message', () => {
+      host.conversations = [
+        { session_id: 's4', preview: '/model claude-sonnet-5', timestamp: '2m', message_count: 3 },
+      ];
+      fixture.detectChanges();
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('untitled');
+      expect(drawer.textContent).not.toContain('/model claude-sonnet-5');
+    });
+
+    it('shows the real preview text when the first message is not a control chip', () => {
+      host.conversations = [
+        {
+          session_id: 's5',
+          preview: 'help me refactor this module',
+          timestamp: '2m',
+          message_count: 3,
+        },
+      ];
+      fixture.detectChanges();
+      const drawer = q('[data-testid="conversations-sidebar"]')!;
+      expect(drawer.textContent).toContain('help me refactor this module');
+    });
   });
 
   describe('active highlight', () => {
