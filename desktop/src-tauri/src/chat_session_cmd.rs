@@ -90,6 +90,7 @@ pub(crate) async fn start_chat(
 
 #[tauri::command]
 pub(crate) async fn send_message(
+    app_handle: tauri::AppHandle,
     blocks: Vec<chat::WireContentBlock>,
     display_text: String,
     state: tauri::State<'_, SharedChatSession>,
@@ -110,7 +111,9 @@ pub(crate) async fn send_message(
             "no active session (session is being started)".to_string()
         })?;
         log::info!("lock acquired, sending message");
-        session.send_message(&blocks).map_err(|e| e.to_string())
+        session
+            .send_message(&app_handle, &blocks)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

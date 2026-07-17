@@ -1405,6 +1405,11 @@ pub struct ChatSession {
     /// Set by `stop()` so the reader thread stays silent on a deliberate EOF
     /// instead of reporting a crash. Reset on each fresh spawn.
     stopping: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when the just-sent message was control-shaped and still expects
+    /// its paired synthetic assistant confirmation (model `"<synthetic>"`) to
+    /// arrive and be suppressed exactly once. Consumed by the reader thread,
+    /// which copies-and-resets it into the local `StreamParser`.
+    pending_synthetic_confirmation_suppression: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatSession {
@@ -1419,6 +1424,9 @@ impl ChatSession {
             session_log_path: None,
             instance_id: None,
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_synthetic_confirmation_suppression: Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
         }
     }
 
@@ -1800,8 +1808,25 @@ impl ChatSession {
     }
 
     /// Send a user message to Claude (write JSON to stdin) in stream-json input
-    /// format. Errors if the subprocess has exited (broken pipe).
-    pub fn send_message(&mut self, blocks: &[WireContentBlock]) -> anyhow::Result<()> {
+    /// format. Errors if the subprocess has exited (broken pipe). A
+    /// control-shaped message (`/model <id>`, `/effort <level>`) additionally
+    /// emits a `ControlChip` chunk and arms the reader thread's one-shot
+    /// suppression of the paired synthetic confirmation — the wire carries no
+    /// user-echo event to detect this from, so the send path (which already
+    /// knows the outgoing text) is the only place this can happen.
+    pub fn send_message(
+        &mut self,
+        app_handle: &tauri::AppHandle,
+        blocks: &[WireContentBlock],
+    ) -> anyhow::Result<()> {
+        self.send_message_with_emit(blocks, |chunk| emit_sanitized_chunk(app_handle, chunk))
+    }
+
+    fn send_message_with_emit(
+        &mut self,
+        blocks: &[WireContentBlock],
+        mut emit: impl FnMut(StreamChunk),
+    ) -> anyhow::Result<()> {
         // Drop a bare `/` or blank before stdin — never reaches Claude.
         if is_blank_or_slash_only(blocks) {
             anyhow::bail!("empty message");
@@ -1834,6 +1859,22 @@ impl ChatSession {
                 MAX_WIRE_BYTES
             );
         }
+
+        let joined: String = blocks
+            .iter()
+            .map(|WireContentBlock::Text { text }| text.as_str())
+            .collect();
+        if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(&joined)
+        {
+            self.pending_synthetic_confirmation_suppression
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            emit(StreamChunk::ControlChip {
+                command: command.to_string(),
+                argument: argument.to_string(),
+                uuid: None,
+            });
+        }
+
         log::info!(
             "sending user message: serialized={} bytes, blocks={}",
             serialized.len(),
@@ -1845,6 +1886,32 @@ impl ChatSession {
         writeln!(stdin, "{}", serialized)?;
         stdin.flush()?;
         Ok(())
+    }
+
+    /// Test-only stdin stand-in: wraps a real OS pipe write-end as a
+    /// `ChildStdin` and a trivial blocked child as `self.child`, so
+    /// `send_message_with_emit`'s liveness/stdin guards pass without a real
+    /// spawned Claude session. `buf` seeds a background drain thread that
+    /// reads everything written to the pipe (kept open for the pipe's life).
+    #[cfg(test)]
+    fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
+        let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
+        #[cfg(unix)]
+        let stdin: std::process::ChildStdin = {
+            let fd: std::os::fd::OwnedFd = writer.into();
+            fd.into()
+        };
+        #[cfg(windows)]
+        let stdin: std::process::ChildStdin = {
+            let handle: std::os::windows::io::OwnedHandle = writer.into();
+            handle.into()
+        };
+        std::thread::spawn(move || {
+            let mut drained = buf;
+            let _ = std::io::Read::read_to_end(&mut reader, &mut drained);
+        });
+        self.shared_stdin = Some(Arc::new(Mutex::new(stdin)));
+        self.child = Some(spawn_test_blocked_child());
     }
 
     /// Record one slot's answer; once every slot is filled, write a single
@@ -2134,6 +2201,31 @@ fn drain_queued_message(
     log::debug!("queue drained: {} bytes for session", drained_text.len());
 }
 
+/// Spawns a trivial child that blocks reading its own stdin until killed, so
+/// `ChatSession::set_test_stdin_sink` can populate `self.child` with a real,
+/// live `Child` (test-only — never a Claude session).
+#[cfg(test)]
+fn spawn_test_blocked_child() -> Child {
+    #[cfg(unix)]
+    let mut command = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg("read line");
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "pause"]);
+        c
+    };
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn test blocked child")
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -2277,7 +2369,7 @@ mod tests {
         // child the error is "empty message", proving it never reaches stdin.
         let mut s = ChatSession::new("test-project");
         let err = s
-            .send_message(&text_only("/"))
+            .send_message_with_emit(&text_only("/"), |_| {})
             .expect_err("bare slash must be rejected");
         assert!(
             err.to_string().contains("empty message"),
@@ -2290,12 +2382,70 @@ mod tests {
         // Real text passes the guard and hits the no-active-session error.
         let mut s = ChatSession::new("test-project");
         let err = s
-            .send_message(&text_only("hej"))
+            .send_message_with_emit(&text_only("hej"), |_| {})
             .expect_err("no active session expected");
         assert!(
             err.to_string().contains("no active session"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn send_message_matching_control_shape_emits_control_chip_before_stdin() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        let result =
+            session.send_message_with_emit(&text_only("/model claude-sonnet-5"), |chunk| {
+                emitted.push(chunk);
+            });
+        assert!(result.is_ok());
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0] {
+            StreamChunk::ControlChip {
+                command,
+                argument,
+                uuid,
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+                assert_eq!(
+                    uuid, &None,
+                    "no uuid available at send time - see Task 13 wire-fact note"
+                );
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+        assert!(session
+            .pending_synthetic_confirmation_suppression
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn send_message_plain_text_emits_no_control_chip() {
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("what is 2+2?"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(emitted.is_empty());
+        assert!(!session
+            .pending_synthetic_confirmation_suppression
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn send_message_bare_model_without_argument_emits_no_control_chip() {
+        // Bare "/model" (no argument) shows current model - CC's own reply, not
+        // a switch - and must go to stdin as plain text, not a chip.
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(emitted.is_empty());
     }
 
     #[test]
