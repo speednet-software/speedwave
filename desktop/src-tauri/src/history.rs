@@ -565,6 +565,9 @@ fn list_conversations_impl(
                 // conversational content — never the preview, never counted.
                 let is_control_chip_user = msg.role == "user"
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
+                // Tag-only match is safe: SYNTHETIC_MODEL is Claude Code's own wire
+                // value, emitted only as the confirmation reply to a control command
+                // (ADR-082) — never reused for other assistant turns.
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
                 if is_control_chip_user || is_synthetic_chip_reply {
@@ -1919,6 +1922,42 @@ mod tests {
     }
 
     #[test]
+    fn list_conversations_synthetic_model_exclusion_is_only_ever_adjacent_to_a_control_chip() {
+        // Pins the SYNTHETIC_MODEL tag-match invariant (see comment at the
+        // `is_synthetic_chip_reply` site): Claude Code only ever emits
+        // `model == "<synthetic>"` as the immediate confirmation reply to a
+        // `/model` or `/effort` control-chip user line (ADR-082), so a bare
+        // tag match is safe without an adjacency check. Two chip exchanges
+        // back-to-back — both immediately preceded by their own control
+        // line — are excluded; the surrounding real turns are counted.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real answer"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"/model claude-opus-4-7"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-opus-4-7"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+                r#"{"type":"user","uuid":"u3","message":{"role":"user","content":"/effort high"},"timestamp":"2025-01-01T00:00:04Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set effort to high"}]},"timestamp":"2025-01-01T00:00:05Z"}"#,
+                r#"{"type":"user","uuid":"u4","message":{"role":"user","content":"another real question"},"timestamp":"2025-01-01T00:00:06Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"another real answer"}]},"timestamp":"2025-01-01T00:00:07Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].message_count, 4,
+            "only the two chip exchanges are excluded; both real turns count"
+        );
+    }
+
+    #[test]
     fn list_conversations_chip_only_session_is_dropped_like_any_other_empty_session() {
         // A session containing ONLY a chip exchange never increments
         // message_count (the chip lines `continue` before the counter), so it
@@ -2722,6 +2761,37 @@ mod tests {
 
         let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
         assert_eq!(snap.model.as_deref(), Some("model-b"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_chronological_tracker_wins_over_usage_dominant_model_never_observed_chronologically(
+    ) {
+        // model-a inits and runs turns whose assistant lines carry no
+        // `message.model` (only usage); the closing `result` line's
+        // `modelUsage` reports model-b as usage-dominant, but model-b was
+        // never chronologically observed via init or assistant. The tracker
+        // (init-observed model-a) must still win over usage dominance.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"model-b":{"inputTokens":100,"outputTokens":900}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(
+            snap.model.as_deref(),
+            Some("model-a"),
+            "chronological tracker (init-observed model-a) must win over usage-dominant model-b, \
+             which was never chronologically observed"
+        );
     }
 
     #[test]
