@@ -125,6 +125,18 @@ impl PiiCategoryFlags {
         sensitive_field: true,
     };
 
+    /// Every category disabled — backs the beta-off no-op policy.
+    pub const ALL_OFF: Self = Self {
+        email: false,
+        phone_pl: false,
+        pesel: false,
+        nip: false,
+        iban: false,
+        card: false,
+        api_key: false,
+        sensitive_field: false,
+    };
+
     /// Reads the flag for one category.
     pub fn get(&self, category: PiiCategory) -> bool {
         match category {
@@ -400,6 +412,27 @@ fn safe_default_policy() -> ResolvedPiiPolicy {
         custom_patterns: Vec::new(),
         sensitive_keys: sensitive_keys.into_iter().collect(),
     }
+}
+
+/// The beta-off no-op policy: nothing tokenized or logged, no patterns, no
+/// sensitive keys — the proxy and hub engines compile it to zero rules.
+pub fn disabled_policy() -> ResolvedPiiPolicy {
+    ResolvedPiiPolicy {
+        version: 2,
+        source: ResolvedPiiPolicySource::default(),
+        categories: PiiCategoryFlags::ALL_OFF.into(),
+        custom_patterns: Vec::new(),
+        sensitive_keys: Vec::new(),
+    }
+}
+
+/// PII tokenization is beta-gated (ADR-058); MDM-forced policies apply
+/// regardless of the toggle — an org policy must never silently vanish.
+pub fn pii_feature_enabled(
+    beta_enabled: bool,
+    managed: Option<&crate::config::ManagedPiiPolicyConfig>,
+) -> bool {
+    beta_enabled || managed.is_some_and(|m| !m.forced_policies.is_empty())
 }
 
 static TEMPLATE_ID_RE: LazyLock<Result<Regex, regex::Error>> =
@@ -1056,6 +1089,11 @@ pub fn check_pii_policy_at_boot() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .and_then(|m| m.pii_policy);
 
+    // Beta-gated: an inactive feature must not block boot on a stale user config.
+    if !pii_feature_enabled(user_config.beta_enabled(), managed.as_ref()) {
+        return Ok(());
+    }
+
     if let Err(e) = resolve_pii_policy(policy, managed.as_ref()) {
         if pii_policy_error_implicates_mdm(policy, managed.as_ref()) {
             return Err(e);
@@ -1285,6 +1323,39 @@ sensitiveKeys: { add: [], remove: [] }
             }
         );
         assert!(resolved.custom_patterns.is_empty());
+    }
+
+    #[test]
+    fn disabled_policy_compiles_to_engine_noop() {
+        let policy = disabled_policy();
+        assert_eq!(policy.categories, PiiCategoryFlags::ALL_OFF.into());
+        assert!(policy.custom_patterns.is_empty());
+        assert!(policy.sensitive_keys.is_empty());
+        let compiled =
+            speedwave_pii_engine::compile_policy_v2(&serde_json::to_string(&policy).unwrap())
+                .expect("the beta-off policy must be a valid v2 document");
+        assert!(compiled.rules().is_empty(), "no value-pattern rules");
+        assert!(compiled.sensitive_keys().is_empty(), "no key-name rules");
+    }
+
+    #[test]
+    fn pii_feature_enabled_gates_on_beta_or_mdm_forced() {
+        use crate::config::ManagedPiiPolicyConfig;
+        let forced = ManagedPiiPolicyConfig {
+            forced_policies: vec!["gdpr-art32".to_string()],
+        };
+        let empty = ManagedPiiPolicyConfig::default();
+        assert!(pii_feature_enabled(true, None));
+        assert!(pii_feature_enabled(true, Some(&forced)));
+        assert!(
+            pii_feature_enabled(false, Some(&forced)),
+            "MDM-forced policies must apply with beta off"
+        );
+        assert!(!pii_feature_enabled(false, None));
+        assert!(
+            !pii_feature_enabled(false, Some(&empty)),
+            "a managed file forcing nothing must not enable the feature"
+        );
     }
 
     #[test]

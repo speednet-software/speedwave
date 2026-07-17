@@ -1631,13 +1631,19 @@ pub(crate) fn resolve_project_config_in_with_managed(
     let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
     // Stored as a Result (not degraded here): `render_compose` hard-fails via `?`
-    // on an invalid per-project policy.
-    let pii_policy = crate::pii_policy::resolve_pii_policy(
-        user_config
-            .find_project(project_name)
-            .and_then(|p| p.policy.as_ref()),
-        managed_pii_policy,
-    );
+    // on an invalid per-project policy. Beta-gated (ADR-058): with beta off and
+    // no MDM-forced policies the engines get the inert all-off policy.
+    let pii_policy =
+        if crate::pii_policy::pii_feature_enabled(user_config.beta_enabled(), managed_pii_policy) {
+            crate::pii_policy::resolve_pii_policy(
+                user_config
+                    .find_project(project_name)
+                    .and_then(|p| p.policy.as_ref()),
+                managed_pii_policy,
+            )
+        } else {
+            Ok(crate::pii_policy::disabled_policy())
+        };
 
     let claude = ResolvedClaudeConfig {
         env,
@@ -5573,7 +5579,9 @@ mod tests {
             }],
             active_project: None,
             selected_ide: None,
-            ui: None,
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
             telemetry: None,
         };
         let (claude, _) = resolve_project_config_in_with_managed(
@@ -5595,6 +5603,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn beta_off_resolves_inert_pii_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: Some(PiiPolicyUserConfig {
+                    policies: vec!["gdpr-art32".to_string()],
+                    ..Default::default()
+                }),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+        );
+        let resolved = claude.pii_policy.unwrap();
+        assert_eq!(
+            resolved,
+            crate::pii_policy::disabled_policy(),
+            "with beta off and no MDM-forced policies, even a configured user \
+             policy must resolve to the inert all-off document"
+        );
+    }
+
+    #[test]
+    fn beta_off_ignores_invalid_user_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: Some(PiiPolicyUserConfig {
+                    policies: vec!["no-such-policy".to_string()],
+                    ..Default::default()
+                }),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+        );
+        assert_eq!(
+            claude.pii_policy,
+            Ok(crate::pii_policy::disabled_policy()),
+            "an invalid policy id must not error while the feature is beta-gated off"
+        );
+    }
+
+    // Also the beta-off + MDM case: ui is None, so MDM-forced ids alone activate the feature.
     #[test]
     fn managed_forced_pii_policy_reaches_resolved_project_config() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5684,7 +5765,13 @@ mod tests {
         .unwrap();
         let without_policy_key = tempfile::tempdir().unwrap();
 
-        let user_config = SpeedwaveUserConfig::default();
+        // Beta on so the policy actually resolves (off would mask the repo key anyway).
+        let user_config = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
         let (claude_with, _) = resolve_project_config(with_policy_key.path(), &user_config, "p");
         let (claude_without, _) =
             resolve_project_config(without_policy_key.path(), &user_config, "p");
