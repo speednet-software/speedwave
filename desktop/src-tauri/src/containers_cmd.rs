@@ -1488,7 +1488,17 @@ async fn apply_model_auto_defaults(
 /// Applies an `LlmConfigUpdate` (Settings Save) to the active project.
 /// Crash-recovery contract documented in ADR-040 §"Rollback".
 #[tauri::command]
-pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
+pub async fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
+    update_llm_config_in(speedwave_runtime::consts::data_dir(), update).await
+}
+
+/// `data_dir`-parameterized variant of [`update_llm_config`]; use in tests and
+/// any caller that must not depend on the process-wide `data_dir()` OnceLock.
+async fn update_llm_config_in(
+    data_dir: &std::path::Path,
+    mut update: LlmConfigUpdate,
+) -> Result<(), String> {
+    let config_path = data_dir.join("config.json");
     // Canonicalize loopback hosts before validation so the persisted base_url
     // is the one the proxy container can reach.
     if config::is_local_provider(update.provider.as_deref()) {
@@ -1498,7 +1508,7 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
     }
     if let Some(ref mut providers) = update.providers {
         canonicalize_provider_base_urls(providers);
-        let loaded = config::load_user_config().ok();
+        let loaded = config::load_user_config_from(&config_path).ok();
         let stored_providers = loaded
             .as_ref()
             .and_then(|c| c.active_project_entry())
@@ -1588,8 +1598,8 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
         "custom_headers",
     )?;
 
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
+    config::with_config_lock_in(data_dir, || {
+        let mut user_config = config::load_user_config_from(&config_path)?;
         let active = user_config
             .active_project
             .clone()
@@ -1601,14 +1611,14 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
         let mut new_has_custom_headers =
             lookup_has_flag(&user_config, &active, |c| c.has_custom_headers);
 
-        apply_credential_action(&active, "api_key", &api_key_action)?;
+        apply_credential_action(data_dir, &active, "api_key", &api_key_action)?;
         match &api_key_action {
             CredentialAction::Keep => {}
             CredentialAction::Delete => new_has_api_key = false,
             CredentialAction::Write(_) => new_has_api_key = true,
         }
 
-        apply_credential_action(&active, "custom_headers", &custom_headers_action)?;
+        apply_credential_action(data_dir, &active, "custom_headers", &custom_headers_action)?;
         match &custom_headers_action {
             CredentialAction::Keep => {}
             CredentialAction::Delete => new_has_custom_headers = false,
@@ -1652,7 +1662,7 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
             config::sync_llm_legacy_fields(&mut merged);
         }
         apply_llm_config(&mut user_config, merged)?;
-        config::save_user_config(&user_config)?;
+        config::save_user_config_to(&user_config, &config_path)?;
         log::info!(
             "persisted LLM config to active_project={:?}",
             user_config.active_project
@@ -1917,6 +1927,7 @@ fn lookup_has_flag(
 }
 
 fn apply_credential_action(
+    data_dir: &std::path::Path,
     project: &str,
     file: &str,
     action: &CredentialAction,
@@ -1924,26 +1935,28 @@ fn apply_credential_action(
     match action {
         CredentialAction::Keep => Ok(()),
         CredentialAction::Delete => {
-            let path = speedwave_runtime::compose::tokens_path(project, "local-llm", file)?;
+            let path =
+                speedwave_runtime::compose::tokens_path_in(data_dir, project, "local-llm", file)?;
             // One syscall, no TOCTOU — `NotFound` is the expected idempotent case.
             match std::fs::remove_file(&path) {
                 Ok(()) => log::info!("removed LLM token file {}", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            mirror_local_key_to_llm_namespace(project, file, None)?;
+            mirror_local_key_to_llm_namespace(data_dir, project, file, None)?;
             Ok(())
         }
         CredentialAction::Write(value) => {
-            speedwave_runtime::compose::ensure_token_dir(project, "local-llm")?;
-            let path = speedwave_runtime::compose::tokens_path(project, "local-llm", file)?;
+            speedwave_runtime::compose::ensure_token_dir_in(data_dir, project, "local-llm")?;
+            let path =
+                speedwave_runtime::compose::tokens_path_in(data_dir, project, "local-llm", file)?;
             speedwave_runtime::fs_perms::write_restricted_file_atomic(&path, value)?;
             log::info!(
                 "wrote LLM token file {} ({} bytes)",
                 path.display(),
                 value.len()
             );
-            mirror_local_key_to_llm_namespace(project, file, Some(value))?;
+            mirror_local_key_to_llm_namespace(data_dir, project, file, Some(value))?;
             Ok(())
         }
     }
@@ -1952,6 +1965,7 @@ fn apply_credential_action(
 /// Mirrors the local card's `api_key` into the proxy-read `llm/` namespace
 /// (only `api_key`; non-fatal — failure keeps the proxy on the previous key).
 fn mirror_local_key_to_llm_namespace(
+    data_dir: &std::path::Path,
     project: &str,
     file: &str,
     value: Option<&str>,
@@ -1959,20 +1973,12 @@ fn mirror_local_key_to_llm_namespace(
     if file != "api_key" {
         return Ok(());
     }
-    let data_dir = speedwave_runtime::consts::data_dir();
     let result = match value {
-        Some(v) => speedwave_runtime::compose::write_llm_provider_key_in(
-            data_dir.as_path(),
-            project,
-            "local",
-            v,
-        )
-        .map(|_| ()),
-        None => speedwave_runtime::compose::remove_llm_provider_key_in(
-            data_dir.as_path(),
-            project,
-            "local",
-        ),
+        Some(v) => {
+            speedwave_runtime::compose::write_llm_provider_key_in(data_dir, project, "local", v)
+                .map(|_| ())
+        }
+        None => speedwave_runtime::compose::remove_llm_provider_key_in(data_dir, project, "local"),
     };
     if let Err(e) = result {
         log::warn!("failed to mirror local api_key to llm namespace: {e}");
@@ -2070,6 +2076,19 @@ mod tests {
             base_url: base_url.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    /// Isolated `config.json` seeded with an active project, for tests that
+    /// exercise `update_llm_config_in`'s real write path without ever
+    /// touching the process-wide `data_dir()` OnceLock.
+    fn seeded_config_tempdir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        config::save_user_config_to(
+            &make_config_with_active_project(),
+            &tmp.path().join("config.json"),
+        )
+        .expect("seed config");
+        tmp
     }
 
     // -- apply_llm_config tests --
@@ -2313,7 +2332,8 @@ mod tests {
     #[tokio::test]
     async fn update_llm_config_accepts_anthropic_without_model() {
         // Anthropic isn't local — the model-required guard must not fire.
-        let result = update_llm_config(llm_update("anthropic", None, None)).await;
+        let tmp = seeded_config_tempdir();
+        let result = update_llm_config_in(tmp.path(), llm_update("anthropic", None, None)).await;
         // May fail for project-config reasons; we only require the error is
         // NOT the model-required one.
         if let Err(err) = result {
@@ -3067,11 +3087,11 @@ mod tests {
     async fn update_llm_config_accepts_model_with_dash_in_middle() {
         // Common model names contain dashes (e.g. `llama-3.3`, `qwen-coder`).
         // The guard only rejects leading dashes.
-        let result = update_llm_config(llm_update(
-            "ollama",
-            Some("llama-3.3"),
-            Some("http://localhost:11434"),
-        ))
+        let tmp = seeded_config_tempdir();
+        let result = update_llm_config_in(
+            tmp.path(),
+            llm_update("ollama", Some("llama-3.3"), Some("http://localhost:11434")),
+        )
         .await;
         // The save itself may fail for project-config reasons in the test env,
         // but the model-name check must not be the reason.
@@ -3107,11 +3127,15 @@ mod tests {
     async fn update_llm_config_accepts_v1_suffix() {
         // Regression: a `…/v1` URL must be accepted (render strips the suffix
         // before validating); the error, if any, must NOT be the path rejection.
-        let result = update_llm_config(llm_update(
-            "ollama",
-            Some("llama3.3"),
-            Some("http://localhost:11434/v1"),
-        ))
+        let tmp = seeded_config_tempdir();
+        let result = update_llm_config_in(
+            tmp.path(),
+            llm_update(
+                "ollama",
+                Some("llama3.3"),
+                Some("http://localhost:11434/v1"),
+            ),
+        )
         .await;
         if let Err(err) = result {
             assert!(
@@ -3172,11 +3196,11 @@ mod tests {
     async fn update_llm_config_accepts_loopback_via_validation() {
         // `update_llm_config` may fail later (no active project) — we just need
         // the error (if any) NOT to be a URL rejection.
-        let result = update_llm_config(llm_update(
-            "ollama",
-            Some("llama3.3"),
-            Some("http://127.0.0.1:11434"),
-        ))
+        let tmp = seeded_config_tempdir();
+        let result = update_llm_config_in(
+            tmp.path(),
+            llm_update("ollama", Some("llama3.3"), Some("http://127.0.0.1:11434")),
+        )
         .await;
         if let Err(err) = result {
             assert!(
@@ -3190,11 +3214,15 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_accepts_rfc1918_via_validation() {
-        let result = update_llm_config(llm_update(
-            "ollama",
-            Some("llama3.3"),
-            Some("http://192.168.1.50:11434"),
-        ))
+        let tmp = seeded_config_tempdir();
+        let result = update_llm_config_in(
+            tmp.path(),
+            llm_update(
+                "ollama",
+                Some("llama3.3"),
+                Some("http://192.168.1.50:11434"),
+            ),
+        )
         .await;
         if let Err(err) = result {
             assert!(
@@ -3207,11 +3235,11 @@ mod tests {
     #[tokio::test]
     async fn update_llm_config_accepts_public_domain_via_validation() {
         // Per ADR-041: user-written URL == user's threat model (align with Redmine).
-        let result = update_llm_config(llm_update(
-            "ollama",
-            Some("x"),
-            Some("http://my-ollama.company.com"),
-        ))
+        let tmp = seeded_config_tempdir();
+        let result = update_llm_config_in(
+            tmp.path(),
+            llm_update("ollama", Some("x"), Some("http://my-ollama.company.com")),
+        )
         .await;
         if let Err(err) = result {
             assert!(
