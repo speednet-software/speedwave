@@ -18,6 +18,12 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
+/// How long a failed (`Unavailable`) discovery stays cached before retrying.
+/// Short relative to `CACHE_STALENESS` so a container that recovers is
+/// re-probed soon, but a bare `/` keystroke storm does not re-run the up to
+/// 60s probe on every press while the container stays down.
+const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
+
 /// Indicates whether the discovery result came from Claude Code itself
 /// (`Init`) or discovery could not run (`Unavailable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +108,8 @@ pub fn discover_slash_commands(
 }
 
 /// Test seam for [`discover_slash_commands`] with an injectable timeout.
-/// A failed run is never cached (returns `Unavailable` fresh every time).
+/// A failed run is cached too (`NEGATIVE_CACHE_TTL`), so a container that
+/// stays down does not re-run the full probe on every bare `/`.
 fn discover_slash_commands_with_timeout(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -125,10 +132,12 @@ fn discover_slash_commands_with_timeout(
         }
         Err(err) => {
             log::warn!("slash discovery failed for '{}': {err}", project.name);
-            Ok(SlashDiscovery {
+            let discovery = SlashDiscovery {
                 commands: vec![],
                 source: DiscoverySource::Unavailable,
-            })
+            };
+            cache_put(&project.name, discovery.clone());
+            Ok(discovery)
         }
     }
 }
@@ -271,6 +280,15 @@ fn cache() -> &'static Mutex<HashMap<String, CachedDiscovery>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// TTL for a cache entry: failed discoveries expire sooner so a recovered
+/// container is re-probed promptly.
+fn ttl_for(discovery: &SlashDiscovery) -> Duration {
+    match discovery.source {
+        DiscoverySource::Init => CACHE_STALENESS,
+        DiscoverySource::Unavailable => NEGATIVE_CACHE_TTL,
+    }
+}
+
 fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
     let mut map = match cache().lock() {
         Ok(map) => map,
@@ -280,11 +298,22 @@ fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
         }
     };
     let entry = map.get(project_name)?;
-    if entry.stored_at.elapsed() < CACHE_STALENESS {
+    if entry.stored_at.elapsed() < ttl_for(&entry.discovery) {
         Some(entry.discovery.clone())
     } else {
         map.remove(project_name);
         None
+    }
+}
+
+/// Test-only seam: rewinds a cache entry's `stored_at` by `age` so TTL
+/// expiry can be asserted deterministically instead of sleeping for real.
+#[cfg(test)]
+fn backdate_cache_entry(project_name: &str, age: Duration) {
+    if let Ok(mut map) = cache().lock() {
+        if let Some(entry) = map.get_mut(project_name) {
+            entry.stored_at -= age;
+        }
     }
 }
 
@@ -487,18 +516,45 @@ fn run_discovery_with_timeout(
             let _ = child.wait();
             // The reap kills by env marker, not by pipe fd: if the in-container
             // process still holds the write end, the reader never sees EOF and
-            // joining would hang again. Wait briefly, then detach instead of blocking.
+            // joining here would hang again. Wait briefly, then hand the reader
+            // off to a background joiner instead of blocking this call — the
+            // joiner reclaims the thread once the pipe eventually closes rather
+            // than leaving it permanently unjoined.
             if rx.recv_timeout(Duration::from_secs(2)).is_ok() {
                 let _ = reader.join();
             } else {
                 log::warn!(
-                    "discovery reap: reader thread detached for '{container}' \
+                    "discovery reap: reader thread handed to background joiner for '{container}' \
                      (in-container process may still hold the output pipe)"
                 );
+                spawn_background_joiner(reader, container.to_string());
             }
             anyhow::bail!("timed out after {}s with no init", timeout.as_secs())
         }
     }
+}
+
+/// Test-only counter of background joins that have completed, so tests can
+/// prove an abandoned reader thread actually terminates instead of parking
+/// forever (never joined by the caller, never observed by anything else).
+#[cfg(test)]
+fn background_joins_completed() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    &COUNT
+}
+
+/// Reclaims an abandoned reader thread once its blocking `read_line` finally
+/// returns (pipe closed by the in-container process exiting, or the guest
+/// process tree unwinding some other way), instead of leaving the
+/// `JoinHandle` dropped and unobserved. Runs on its own thread so it never
+/// blocks the discovery caller.
+fn spawn_background_joiner(reader: std::thread::JoinHandle<()>, container: String) {
+    std::thread::spawn(move || {
+        let _ = reader.join();
+        log::debug!("discovery reap: background-joined reader thread for '{container}'");
+        #[cfg(test)]
+        background_joins_completed().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 /// Reap the in-container claude by marker (host kill alone does not propagate);
@@ -1352,21 +1408,95 @@ mod tests {
     }
 
     #[test]
-    fn failed_discovery_returns_unavailable_and_is_never_cached() {
+    fn abandoned_reader_thread_is_background_joined_once_pipe_closes() {
+        // The orphan hang must outlast the 2s post-reap grace window (so the
+        // background-joiner path, not the in-line join, actually triggers)
+        // but still exit soon enough for this test to observe reclamation.
+        let before = background_joins_completed().load(std::sync::atomic::Ordering::SeqCst);
+        let (runtime, _handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_orphan_hang(4)
+            .with_exec_piped_script("")
+            .build();
+        let err = run_discovery_with_timeout(
+            &runtime,
+            "test-container",
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("must time out while the pipe survives the kill");
+        assert!(err.to_string().starts_with("timed out"), "got: {err}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let after = background_joins_completed().load(std::sync::atomic::Ordering::SeqCst);
+            if after > before {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background joiner never reclaimed the abandoned reader thread"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn failed_discovery_is_negative_cached_within_ttl() {
         invalidate_all_caches();
-        let project = ProjectHandle::new(unique_project_name("nocache"), std::env::temp_dir());
+        let project = ProjectHandle::new(unique_project_name("negcache"), std::env::temp_dir());
         let (failing, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
             .build();
         let first = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(first.source, DiscoverySource::Unavailable);
         assert!(first.commands.is_empty());
+
+        // A second call within the negative TTL must hit the cache, not re-probe.
+        let second = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(second.source, DiscoverySource::Unavailable);
+        assert_eq!(
+            handles.exec_calls.lock().unwrap().len(),
+            1,
+            "second call within the negative TTL must not re-spawn the probe"
+        );
+    }
+
+    #[test]
+    fn negative_cache_expires_after_ttl_and_reprobes() {
+        invalidate_all_caches();
+        let project = ProjectHandle::new(unique_project_name("negttl"), std::env::temp_dir());
+        let (failing, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        let first = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(first.source, DiscoverySource::Unavailable);
+
+        backdate_cache_entry(&project.name, NEGATIVE_CACHE_TTL);
         let second = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(second.source, DiscoverySource::Unavailable);
         assert_eq!(
             handles.exec_calls.lock().unwrap().len(),
             2,
-            "no failure caching"
+            "a call past the negative TTL must re-probe"
+        );
+    }
+
+    #[test]
+    fn invalidate_cache_clears_a_negative_entry() {
+        invalidate_all_caches();
+        let project =
+            ProjectHandle::new(unique_project_name("neginvalidate"), std::env::temp_dir());
+        let (failing, handles) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(handles.exec_calls.lock().unwrap().len(), 1);
+
+        invalidate_cache(&project.name);
+        discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(
+            handles.exec_calls.lock().unwrap().len(),
+            2,
+            "invalidate_cache must clear the negative entry and force a re-probe"
         );
     }
 
