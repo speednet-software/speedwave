@@ -13,6 +13,7 @@ import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
+import { isAnthropicKind } from '../../../models/llm';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 
 /** One row in the combobox, normalized across the three provider sources. */
@@ -188,7 +189,7 @@ export class ModelSelectorComponent {
     this.loading.set(true);
     this.error.set('');
     try {
-      if (summary.kind === 'anthropic_oauth' || summary.kind === 'anthropic_api_key') {
+      if (isAnthropicKind(summary.kind)) {
         const list = await this.anthropicModels.list();
         this.options.set(this.anthropicOptionsFrom(list));
       } else if (summary.kind === 'open_router') {

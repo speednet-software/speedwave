@@ -136,6 +136,14 @@ export interface ActiveProviderSummary {
 }
 
 /**
+ * True for either Anthropic-backed `LlmProviderKind` wire value.
+ * @param kind - Provider kind from `ActiveProviderSummary.kind`.
+ */
+export function isAnthropicKind(kind: LlmProviderKind): boolean {
+  return kind === 'anthropic_oauth' || kind === 'anthropic_api_key';
+}
+
+/**
  * One aggregate bucket of the usage dashboard. Mirror of the Rust
  * `speedwave_runtime::usage::UsageBucket` returned by `get_llm_usage`.
  */
