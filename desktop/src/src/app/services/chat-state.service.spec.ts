@@ -4548,6 +4548,45 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBe('claude-opus-4-8');
     });
 
+    it('an idle pre-first-turn anthropic pick respawns the session carrying the override', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const startCalls = invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat');
+      expect(startCalls.at(-1)?.[1]).toMatchObject({ modelOverride: 'claude-sonnet-5' });
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('a pick during the still-session-less first turn queues without respawning', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      service.isStreaming = true;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(service.pendingModelOverride()).toBe('claude-sonnet-5');
+    });
+
     it('does nothing further for a no-session non-anthropic selection beyond the write-through', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');

@@ -126,7 +126,7 @@ export class ChatStateService {
     return this._pendingQueue;
   }
 
-  /** Anthropic model chosen while no session was live (composer, Task 16); sent once after the next SystemInit. */
+  /** Anthropic model chosen while no session was live (composer, Task 16); consumed by the next spawn's `--model`, else wired once after the next SystemInit. */
   private readonly _pendingModelOverride = signal<string | null>(null);
   /** Effort picked mid-turn; wire `/effort` flushed when the turn ends. */
   private readonly _pendingEffortOverride = signal<string | null>(null);
@@ -203,6 +203,12 @@ export class ChatStateService {
       else await this.sendMessage(`/model ${sel.wireId}`);
     } else if (isAnthropic) {
       this.setPendingModelOverride(sel.wireId);
+      // Idle pre-first-turn spawn: respawn so the pick rides --model and governs
+      // the FIRST reply (a queued wire /model can only apply from the next turn).
+      if (!this.isStreaming && !this._resumeInProgress) {
+        this.resetForNewConversation();
+        await this.startChatSession();
+      }
     }
   }
 
