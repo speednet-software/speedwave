@@ -1396,6 +1396,9 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
         merged.providers = update.providers.clone().unwrap_or(stored.providers);
         merged.active = update.active.clone().or(stored.active);
         merged.proxy_enabled = update.proxy_enabled.or(stored.proxy_enabled);
+        // Anthropic entries never carry a stored model (spec 4.5): clear it
+        // on every save, regardless of what the caller sent.
+        merged.clear_active_anthropic_model();
         if !merged.providers.is_empty() {
             merged.schema_version = Some(config::LLM_SCHEMA_VERSION);
             // Keep the legacy flat fields coherent for the downgrade story.
@@ -2072,6 +2075,68 @@ mod tests {
                  model-required guard, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn update_llm_config_merge_clears_anthropic_model() {
+        // Pure merge-step check (mirrors update_llm_config's construction of
+        // `merged`, without touching disk): an anthropic-kind active entry
+        // must never carry a stored model after the merge.
+        let stored = config::LlmConfig {
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            providers: vec![config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("claude-opus-4-6".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("claude-opus-4-6".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let mut merged = config::LlmConfig {
+            providers: stored.providers.clone(),
+            active: stored.active.clone(),
+            schema_version: Some(config::LLM_SCHEMA_VERSION),
+            ..Default::default()
+        };
+        merged.clear_active_anthropic_model();
+        config::sync_llm_legacy_fields(&mut merged);
+
+        assert_eq!(
+            merged.active_provider().unwrap().model,
+            None,
+            "entry model must be cleared"
+        );
+        assert_eq!(
+            merged.active.as_ref().unwrap().model,
+            None,
+            "active pointer model must be cleared"
+        );
+        assert_eq!(merged.effective_active_model(), None);
+    }
+
+    #[test]
+    fn update_llm_config_source_calls_clear_active_anthropic_model() {
+        // Structural: the merge step in update_llm_config must call the
+        // clearing helper before persisting - a call-site drift check since
+        // the full save path touches real user config on disk in tests.
+        let source = include_str!("containers_cmd.rs");
+        let site = source
+            .find("apply_llm_config(&mut user_config, merged)?;")
+            .expect("update_llm_config merge call site must exist");
+        let start = source[..site].rfind("let mut merged").unwrap_or(0);
+        assert!(
+            source[start..site].contains("merged.clear_active_anthropic_model()"),
+            "update_llm_config must call clear_active_anthropic_model on \
+             `merged` before apply_llm_config"
+        );
     }
 
     #[test]
