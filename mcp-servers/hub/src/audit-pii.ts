@@ -10,7 +10,7 @@ import type { Detection } from '@speedwave/policy-engine';
 import { ts } from '@speedwave/mcp-shared';
 
 /** Sandbox boundary a detection crossed: bridge result, or the sandbox code's own return value. */
-export type AuditLayer = 'B-result' | 'sandbox-return';
+export type AuditLayer = 'tool-result' | 'sandbox-return';
 
 /** One audit row: category/action/count metadata only, never the scanned data itself. */
 export interface PiiAuditEvent {
