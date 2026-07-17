@@ -40,6 +40,11 @@ pub enum MessageBlock {
     /// Error content.
     #[serde(rename = "error")]
     Error { content: String },
+    /// A user control command (`/model <id>` or `/effort <level>`), rendered as a
+    /// self-describing chip; the paired synthetic assistant confirmation is folded
+    /// away by `fold_history_control_chips` (spec 4.4).
+    #[serde(rename = "control_chip")]
+    ControlChip { command: String, argument: String },
 }
 
 /// A single message extracted from a JSONL session.
@@ -451,6 +456,39 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
     format!("{end}...")
 }
 
+/// Applies the control-chip shape rule (spec 4.4) to a reconstructed message
+/// sequence, in place: a user message whose sole block is text matching
+/// `speedwave_runtime::slash::parse_control_command` becomes a `ControlChip`
+/// block, and the assistant message immediately following it is removed when it
+/// is the paired synthetic confirmation (`model == SYNTHETIC_MODEL`). Detection
+/// shares the live-path chunk rule's SSOT, so the two paths never disagree.
+fn fold_history_control_chips(messages: &mut Vec<ConversationMessage>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let chip = match messages[i].blocks.as_deref() {
+            Some([MessageBlock::Text { content }]) if messages[i].role == "user" => {
+                speedwave_runtime::slash::parse_control_command(content)
+                    .map(|(command, argument)| (command.to_string(), argument.to_string()))
+            }
+            _ => None,
+        };
+        let Some((command, argument)) = chip else {
+            i += 1;
+            continue;
+        };
+        messages[i].blocks = Some(vec![MessageBlock::ControlChip { command, argument }]);
+
+        let next_is_synthetic = messages.get(i + 1).is_some_and(|m| {
+            m.role == "assistant"
+                && m.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL)
+        });
+        if next_is_synthetic {
+            messages.remove(i + 1);
+        }
+        i += 1;
+    }
+}
+
 /// List all conversations for a project, sorted newest first.
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
     list_conversations_impl(consts::data_dir(), project)
@@ -523,6 +561,15 @@ fn list_conversations_impl(
             };
             scanned_lines += 1;
             if let Some(msg) = parse_jsonl_message(&line) {
+                // A control-chip user line and its paired synthetic reply carry no
+                // conversational content — never the preview, never counted.
+                let is_control_chip_user = msg.role == "user"
+                    && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
+                let is_synthetic_chip_reply = msg.role == "assistant"
+                    && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
+                if is_control_chip_user || is_synthetic_chip_reply {
+                    continue;
+                }
                 // Deduplicate: skip result whose content is a substring of the preceding assistant message.
                 if msg.role == "assistant" {
                     if let Some(ref prev) = last_assistant_content {
@@ -632,6 +679,8 @@ fn get_conversation_impl(
             messages.push(msg);
         }
     }
+
+    fold_history_control_chips(&mut messages);
 
     Ok(ConversationTranscript {
         session_id: session_id.to_string(),
@@ -860,6 +909,201 @@ mod tests {
     fn write_session(dir: &Path, session_id: &str, lines: &[&str]) {
         let path = dir.join(format!("{session_id}.jsonl"));
         fs::write(&path, lines.join("\n")).unwrap();
+    }
+
+    // ── fold_history_control_chips ─────────────────────────────────
+
+    fn user_msg(uuid: &str, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+            blocks: Some(vec![MessageBlock::Text {
+                content: content.to_string(),
+            }]),
+            timestamp: None,
+            uuid: Some(uuid.to_string()),
+            model: None,
+            usage: None,
+        }
+    }
+
+    fn assistant_msg(model: Option<&str>, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            blocks: Some(vec![MessageBlock::Text {
+                content: content.to_string(),
+            }]),
+            timestamp: None,
+            uuid: None,
+            model: model.map(str::to_string),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_converts_matching_user_text() {
+        let mut messages = vec![user_msg("u1", "/model claude-sonnet-5")];
+        fold_history_control_chips(&mut messages);
+        match &messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_removes_paired_synthetic_reply() {
+        let mut messages = vec![
+            user_msg("u1", "/model claude-sonnet-5"),
+            assistant_msg(
+                Some(crate::session_model::SYNTHETIC_MODEL),
+                "Set model to claude-sonnet-5",
+            ),
+            assistant_msg(Some("claude-sonnet-5"), "Hello!"),
+        ];
+        fold_history_control_chips(&mut messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "the synthetic confirmation must be folded away"
+        );
+        assert!(matches!(
+            messages[0].blocks.as_ref().unwrap()[0],
+            MessageBlock::ControlChip { .. }
+        ));
+        assert_eq!(messages[1].content, "Hello!");
+    }
+
+    #[test]
+    fn fold_history_control_chips_only_folds_synthetic_directly_after_a_chip() {
+        let mut messages = vec![
+            user_msg("u1", "hello"),
+            assistant_msg(
+                Some(crate::session_model::SYNTHETIC_MODEL),
+                "unrelated synthetic reply",
+            ),
+        ];
+        fold_history_control_chips(&mut messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "synthetic-fold only applies right after a chip"
+        );
+        match &messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::Text { content } => assert_eq!(content, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_leaves_help_command_unchipped() {
+        // `/help` has no argument — parse_control_command rejects it, so it stays plain text.
+        let mut messages = vec![user_msg("u1", "/help")];
+        fold_history_control_chips(&mut messages);
+        match &messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::Text { content } => assert_eq!(content, "/help"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_preserves_retry_anchor_uuid() {
+        let mut messages = vec![user_msg("u1", "/effort high")];
+        fold_history_control_chips(&mut messages);
+        assert_eq!(messages[0].uuid.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn fold_history_control_chips_ignores_multi_block_user_messages() {
+        // A chip rule only ever fires on a single-Text-block message (matches the
+        // live-path chunk rule's shape guard exactly — a mixed content array
+        // never chips there either).
+        let mut messages = vec![ConversationMessage {
+            role: "user".to_string(),
+            content: "/model claude-sonnet-5".to_string(),
+            blocks: Some(vec![
+                MessageBlock::Text {
+                    content: "/model claude-sonnet-5".to_string(),
+                },
+                MessageBlock::Text {
+                    content: "extra".to_string(),
+                },
+            ]),
+            timestamp: None,
+            uuid: Some("u1".to_string()),
+            model: None,
+            usage: None,
+        }];
+        fold_history_control_chips(&mut messages);
+        assert!(matches!(
+            messages[0].blocks.as_ref().unwrap()[0],
+            MessageBlock::Text { .. }
+        ));
+    }
+
+    // ── parity: history fold vs. the live-path (Task 13) chip classification ──
+
+    #[test]
+    fn fold_history_control_chips_classification_matches_parse_control_command_directly() {
+        // Same JSONL-derived (role, model, text) triples the live chat.rs path
+        // (Task 13's send-time check in `send_message_with_emit`) would see for
+        // the user-authored text it already has in hand before writing to stdin.
+        // Both call sites classify a chip via the identical
+        // `speedwave_runtime::slash::parse_control_command` SSOT, so this proves
+        // history reconstruction cannot silently diverge from the live rule.
+        let source = [
+            ("user", None, "/model claude-sonnet-5"),
+            (
+                "assistant",
+                Some(crate::session_model::SYNTHETIC_MODEL),
+                "Set model to claude-sonnet-5",
+            ),
+            ("user", None, "what is 2+2?"),
+            ("assistant", Some("claude-sonnet-5"), "4"),
+        ];
+
+        let mut history_side: Vec<ConversationMessage> = source
+            .iter()
+            .map(|(role, model, text)| {
+                if *role == "user" {
+                    user_msg("uuid", text)
+                } else {
+                    assistant_msg(*model, text)
+                }
+            })
+            .collect();
+        fold_history_control_chips(&mut history_side);
+
+        assert_eq!(
+            history_side.len(),
+            3,
+            "the paired synthetic confirmation must be folded away"
+        );
+
+        for (idx, (role, _model, text)) in source.iter().enumerate() {
+            if *role != "user" {
+                continue;
+            }
+            let live_path_is_chip = speedwave_runtime::slash::parse_control_command(text).is_some();
+            // The fold preserves `content` verbatim, so match on it: the chip's
+            // blocks change to ControlChip but its text stays the source line.
+            let history_side_msg = history_side
+                .iter()
+                .find(|m| m.role == "user" && m.content == *text);
+            let history_is_chip = history_side_msg.is_some_and(|m| {
+                matches!(
+                    m.blocks.as_deref(),
+                    Some([MessageBlock::ControlChip { .. }])
+                )
+            });
+            assert_eq!(
+                live_path_is_chip, history_is_chip,
+                "entry {idx} ('{text}'): live-path and history classification must agree"
+            );
+        }
     }
 
     // ── validate_session_id ────────────────────────────────────────
@@ -1554,6 +1798,68 @@ mod tests {
     }
 
     #[test]
+    fn get_conversation_renders_control_chip_and_folds_synthetic_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/model claude-sonnet-5"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"what is 2+2?"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"4"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(
+            transcript.messages.len(),
+            3,
+            "the synthetic reply must be folded away"
+        );
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+        assert_eq!(transcript.messages[1].content, "what is 2+2?");
+        assert_eq!(transcript.messages[2].content, "4");
+    }
+
+    #[test]
+    fn get_conversation_hand_typed_chip_gets_the_same_treatment() {
+        // A manually typed `/model x` (no composer involved) is executed by CC
+        // the same way, so it renders identically (spec 4.4: "truthful either way").
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/effort high"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "effort");
+                assert_eq!(argument, "high");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn list_conversations_skips_slash_command_markers() {
         // Slash-command invocations carry no `isMeta` flag but are still synthetic.
         let tmp = tempfile::tempdir().unwrap();
@@ -1575,6 +1881,63 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].preview, "real question");
         assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn list_conversations_preview_falls_back_past_a_leading_control_chip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/model claude-sonnet-5"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real answer"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].preview, "real question",
+            "the chip and its synthetic reply must never be chosen as the preview"
+        );
+        assert_eq!(
+            result[0].message_count, 2,
+            "the chip/synthetic-reply pair must not count toward message_count"
+        );
+    }
+
+    #[test]
+    fn list_conversations_chip_only_session_is_dropped_like_any_other_empty_session() {
+        // A session containing ONLY a chip exchange never increments
+        // message_count (the chip lines `continue` before the counter), so it
+        // hits the pre-existing `if message_count == 0 { continue; }` guard the
+        // same way a session with no parseable content at all would — a
+        // deliberate outcome: a chip-only session carries no real content.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/effort high"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set effort to high"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            result.len(),
+            0,
+            "a chip-only session has zero real messages and is dropped, matching any other empty session"
+        );
     }
 
     #[test]
@@ -2034,6 +2397,36 @@ mod tests {
     }
 
     #[test]
+    fn message_block_control_chip_serializes_with_type_tag() {
+        let block = MessageBlock::ControlChip {
+            command: "model".to_string(),
+            argument: "claude-sonnet-5".to_string(),
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "control_chip",
+                "command": "model",
+                "argument": "claude-sonnet-5",
+            })
+        );
+    }
+
+    #[test]
+    fn message_block_control_chip_roundtrips() {
+        let line = r#"{"type":"control_chip","command":"effort","argument":"high"}"#;
+        let decoded: MessageBlock = serde_json::from_str(line).unwrap();
+        match decoded {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "effort");
+                assert_eq!(argument, "high");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_result_message_skips_empty() {
         let line = r#"{"type":"result","is_error":false,"result":""}"#;
         assert!(parse_jsonl_message(line).is_none());
@@ -2407,6 +2800,34 @@ mod tests {
             Some("claude-opus-4-7"),
             "must pick the model with the highest outputTokens, not the alphabetically first key"
         );
+    }
+
+    #[test]
+    fn compute_resume_snapshot_ignores_chip_exchange_when_a_real_turn_follows() {
+        // A `/model` chip mid-session must not corrupt the resume snapshot: the
+        // synthetic reply carries no usage/modelUsage, so the real turn's system
+        // init and assistant usage still drive the snapshot.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/model claude-sonnet-5"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]}}"#,
+                r#"{"type":"system","subtype":"init","model":"claude-sonnet-5"}"#,
+                r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","usage":{"input_tokens":5,"output_tokens":9,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-5"));
+        let cu = snap.context_usage.expect("context_usage must be present");
+        assert_eq!(cu.input_tokens, 5);
+        assert_eq!(cu.output_tokens, 9);
     }
 
     // ── delete_conversation ────────────────────────────────────────
