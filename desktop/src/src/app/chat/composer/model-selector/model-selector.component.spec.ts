@@ -723,6 +723,34 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(badgeText()).toBe('claude-opus-4-8');
   });
 
+  it('drops a session-scoped pick when a new conversation starts, falling back to the hint', async () => {
+    // Field repro: pick mid-session, press "+" (session ends) - the badge must
+    // NOT keep the previous conversation's session-scoped pick.
+    modelHint = 'claude-opus-4-8';
+    fixture.componentRef.setInput('sessionModel', 'claude-opus-4-8');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    fixture.debugElement
+      .query(By.css('[data-testid="composer-model-badge"]'))
+      .nativeElement.click();
+    await fixture.whenStable();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    fixture.debugElement
+      .query(By.css('[data-testid="model-selector-option-claude-fable-5"]'))
+      .nativeElement.click();
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-fable-5');
+
+    fixture.componentRef.setInput('sessionModel', '');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-opus-4-8');
+  });
+
   it('shows the picked catalog id optimistically after a live anthropic selection', async () => {
     await fixture.whenStable();
     fixture.detectChanges();

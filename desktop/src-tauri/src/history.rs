@@ -758,8 +758,8 @@ pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Resul
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
 
-/// Model of the project's most recent transcript (chronological tracker over
-/// the newest `.jsonl`); the composer badge's pre-session hint.
+/// Session-START model of the newest transcript: what a NEW session will resolve.
+/// Mid-session wire `/model` switches are session-scoped, so later models are ignored.
 pub fn last_session_model(project: &str) -> Option<String> {
     last_session_model_impl(consts::data_dir(), project)
 }
@@ -776,8 +776,6 @@ fn last_session_model_impl(data_dir: &Path, project: &str) -> Option<String> {
                 .unwrap_or(std::time::UNIX_EPOCH)
         })?;
     let file = fs::File::open(newest.path()).ok()?;
-    let mut tracker = crate::session_model::SessionModelTracker::default();
-    let mut init_model: Option<String> = None;
     for line in BufReader::new(file)
         .lines()
         .take(10_000)
@@ -787,22 +785,19 @@ fn last_session_model_impl(data_dir: &Path, project: &str) -> Option<String> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        match parsed["type"].as_str().unwrap_or("") {
-            "system" if parsed["subtype"].as_str() == Some("init") => {
-                if let Some(model) = parsed["model"].as_str() {
-                    init_model = Some(model.to_string());
-                    tracker.observe_init(model);
-                }
-            }
-            "assistant" => {
-                if let Some(model) = parsed["message"]["model"].as_str() {
-                    tracker.observe_assistant(model);
-                }
+        let model = match parsed["type"].as_str().unwrap_or("") {
+            "system" if parsed["subtype"].as_str() == Some("init") => parsed["model"].as_str(),
+            "assistant" => parsed["message"]["model"].as_str(),
+            _ => None,
+        };
+        match model {
+            Some(m) if !m.is_empty() && m != crate::session_model::SYNTHETIC_MODEL => {
+                return Some(m.to_string());
             }
             _ => {}
         }
     }
-    tracker.resolve().map(str::to_string).or(init_model)
+    None
 }
 
 fn compute_resume_snapshot_impl(
@@ -3040,7 +3035,9 @@ mod tests {
     // ── last_session_model ─────────────────────────────────────────
 
     #[test]
-    fn last_session_model_resolves_the_chronologically_last_model() {
+    fn last_session_model_resolves_the_session_start_model_ignoring_a_later_switch() {
+        // A mid-session wire /model switch is session-scoped: the next session
+        // starts on the default again, so the hint must report the START model.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         write_session(
@@ -3053,18 +3050,23 @@ mod tests {
         );
         assert_eq!(
             last_session_model_impl(tmp.path(), "proj"),
-            Some("claude-fable-5".to_string())
+            Some("claude-opus-4-8".to_string())
         );
     }
 
     #[test]
-    fn last_session_model_falls_back_to_the_init_model() {
+    fn last_session_model_uses_the_first_assistant_model_when_no_init_is_persisted() {
+        // Real transcripts often omit the system/init line; the first main-chain
+        // assistant model is the session-start model then.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         write_session(
             &dir,
             "s1",
-            &[r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#],
+            &[
+                r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#,
+                r#"{"type":"assistant","message":{"model":"claude-sonnet-5"}}"#,
+            ],
         );
         assert_eq!(
             last_session_model_impl(tmp.path(), "proj"),

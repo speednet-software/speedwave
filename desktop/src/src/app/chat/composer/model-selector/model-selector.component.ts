@@ -236,9 +236,16 @@ export class ModelSelectorComponent {
     effect(() => {
       const live = this.sessionModel();
       const changed = live !== '' && live !== this.lastSessionModel;
+      const ended = live === '' && this.lastSessionModel !== '';
       this.lastSessionModel = live;
       const id = this.projectId();
       if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
+      // Session over (new conversation/reset): a wire pick was session-scoped, so
+      // drop the optimistic badge and re-read the next-session hint.
+      if (ended) {
+        this.lastPicked.set('');
+        if (id && !this.summary()?.model) void this.loadModelHint(id);
+      }
     });
   }
 
