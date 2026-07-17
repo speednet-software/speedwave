@@ -79,6 +79,7 @@ windows-sys = { version = "0.61", features = [
 e2e = ["dep:tauri-plugin-webdriver"]
 
 [dev-dependencies]
+fs2 = "0.4"
 mockito = "1"
 serial_test = "3"
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription", "test-support"] }

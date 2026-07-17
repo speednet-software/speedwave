@@ -1506,7 +1506,27 @@ async fn update_llm_config_in(
             update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
         }
     }
+    // Probe-derived auto-default model values, keyed by provider id. The
+    // probe is network-bound and must run outside the config lock, so it is
+    // computed here against a pre-lock snapshot and used ONLY as a fallback
+    // value inside the lock (below) — never spliced into the persisted
+    // config directly. The actual persist-time reconciliation re-runs
+    // `preserve_stored_entry_models` against the freshly reloaded on-disk
+    // state under the lock, so a concurrent save's model change cannot be
+    // reverted by a save that read a stale snapshot.
+    let mut auto_default_candidates: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Pre-flight-validation view: a clone with stored/auto-defaulted models
+    // filled in, so `validate_provider_entries`/`validate_active_selection`
+    // (which require a model on non-Anthropic entries) accept a plain resave
+    // that carries no model. This clone is validation-only; `update.providers`
+    // itself stays the caller's raw payload (URL-canonicalized) and is what
+    // the in-lock closure reconciles and persists.
+    let mut validation_providers = update.providers.clone();
     if let Some(ref mut providers) = update.providers {
+        canonicalize_provider_base_urls(providers);
+    }
+    if let Some(ref mut providers) = validation_providers {
         canonicalize_provider_base_urls(providers);
         let loaded = config::load_user_config_from(&config_path).ok();
         let stored_providers = loaded
@@ -1526,6 +1546,11 @@ async fn update_llm_config_in(
             active_project: active_project.as_deref(),
         };
         apply_model_auto_defaults(providers, &probe).await?;
+        for entry in providers.iter() {
+            if let Some(model) = entry.model.as_deref() {
+                auto_default_candidates.insert(entry.id.clone(), model.to_string());
+            }
+        }
     }
     log::info!(
         "updating LLM config: provider={:?} model={:?} context_tokens={:?} \
@@ -1537,14 +1562,14 @@ async fn update_llm_config_in(
         update.custom_headers.is_some(),
     );
     // v2 saves (Task 18) never carry a flat `model` for a provider whose model
-    // already lives in `providers[]` (preserved above); only fall back to the
-    // legacy flat-field check when no v2 entry resolves a model for it.
+    // already lives in `providers[]` (preserved above, in `validation_providers`);
+    // only fall back to the legacy flat-field check when no v2 entry resolves
+    // a model for it.
     let local_model_in_providers = update
         .provider
         .as_deref()
         .and_then(|provider_id| {
-            update
-                .providers
+            validation_providers
                 .as_ref()?
                 .iter()
                 .find(|p| p.id == provider_id)
@@ -1581,8 +1606,10 @@ async fn update_llm_config_in(
     }
 
     // v2 provider list (ADR-073): validate ids, base URLs and the active
-    // selection before anything is persisted.
-    if let Some(ref providers) = update.providers {
+    // selection before anything is persisted. Uses the stored/auto-defaulted
+    // view so a plain resave (no model in the payload) still validates; the
+    // in-lock closure below re-derives the actually-persisted models.
+    if let Some(ref providers) = validation_providers {
         validate_provider_entries(providers)?;
         if let Some(ref active) = update.active {
             validate_active_selection(providers, active)?;
@@ -1636,12 +1663,28 @@ async fn update_llm_config_in(
         };
         // v2 fields (ADR-073): the UI sends the full provider set; preserve
         // the stored one when absent so a legacy-shaped save cannot wipe it.
+        // Reconciled against the on-disk state read UNDER THIS LOCK (never the
+        // pre-lock snapshot above) so a concurrent save's model change cannot
+        // be silently reverted by a save that started before it landed.
         let stored = user_config
             .active_project_entry()
             .and_then(|p| p.claude.as_ref())
             .and_then(|c| c.llm.clone())
             .unwrap_or_default();
-        merged.providers = update.providers.clone().unwrap_or(stored.providers);
+        merged.providers = match update.providers {
+            Some(mut providers) => {
+                preserve_stored_entry_models(&mut providers, &stored.providers);
+                for entry in &mut providers {
+                    if entry.model.is_none() {
+                        if let Some(model) = auto_default_candidates.get(&entry.id) {
+                            entry.model = Some(model.clone());
+                        }
+                    }
+                }
+                providers
+            }
+            None => stored.providers.clone(),
+        };
         merged.active = update.active.clone().or(stored.active);
         merged.proxy_enabled = update.proxy_enabled.or(stored.proxy_enabled);
         // The active pointer must not desync from the entry after the merge:
@@ -2376,6 +2419,128 @@ mod tests {
             Some("llama3.3"),
             "a settings save carrying no model must not erase the \
              stored entry model"
+        );
+    }
+
+    /// Seeds a `config.json` whose active project already has a v2 `local`
+    /// provider entry with `model` set, for the concurrent-save race test.
+    fn seeded_config_tempdir_with_local_model(model: &str) -> tempfile::TempDir {
+        let mut cfg = make_config_with_active_project();
+        let project = cfg.find_project_mut("alpha").unwrap();
+        project.claude = Some(ClaudeOverrides {
+            env: None,
+            settings: None,
+            llm: Some(LlmConfig {
+                schema_version: Some(config::LLM_SCHEMA_VERSION),
+                providers: vec![speedwave_runtime::config::LlmProviderEntry {
+                    id: "local".to_string(),
+                    kind: speedwave_runtime::config::LlmProviderKind::Local,
+                    base_url: Some("http://localhost:11434".to_string()),
+                    model: Some(model.to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                }],
+                active: Some(speedwave_runtime::config::LlmActive {
+                    provider_id: "local".to_string(),
+                    model: Some(model.to_string()),
+                }),
+                ..Default::default()
+            }),
+        });
+        let tmp = tempfile::tempdir().expect("tempdir");
+        config::save_user_config_to(&cfg, &tmp.path().join("config.json")).expect("seed config");
+        tmp
+    }
+
+    // `with_config_lock_in` and the pre-lock config read are blocking OS
+    // calls; a multi-thread runtime is required so the spawned save and this
+    // test's own timing/lock-manipulation steps can run concurrently instead
+    // of deadlocking a single-threaded executor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_llm_config_in_reconciles_models_under_the_lock_not_a_pre_lock_snapshot() {
+        // Regression for the race: two concurrent Settings saves each read the
+        // stored provider list for model-preservation BEFORE acquiring the
+        // config lock. If that pre-lock snapshot is what gets persisted, the
+        // second save to actually reach the lock clobbers a model change the
+        // first save just landed, using data that predates it.
+        //
+        // Reproduced deterministically by holding `config.lock` externally
+        // while `update_llm_config_in`'s pre-lock read happens (seeing the
+        // OLD model), then rewriting the on-disk config to the NEW model
+        // (simulating the concurrent save's write) before releasing the lock.
+        // A correct implementation reconciles against the on-disk state read
+        // UNDER the lock and must persist the NEW model, never the OLD one.
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let data_dir = tmp.path().to_path_buf();
+        let config_path = data_dir.join("config.json");
+
+        let lock_path = data_dir.join("config.lock");
+        let lock_file = std::fs::File::create(&lock_path).expect("create lock file");
+        fs2::FileExt::lock_exclusive(&lock_file).expect("acquire external lock");
+
+        // A plain resave: the settings UI never sends a model, so the saved
+        // entry must inherit whatever is stored AT SAVE TIME.
+        let update = LlmConfigUpdate {
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some("http://localhost:11434".to_string()),
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+
+        let call_data_dir = data_dir.clone();
+        let handle =
+            tokio::spawn(async move { update_llm_config_in(&call_data_dir, update).await });
+
+        // Give the spawned call time to complete its pre-lock read (sees
+        // "llama-old") and then block on `lock_exclusive`.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Simulate the concurrent save that landed while the call above was
+        // blocked: the on-disk model is now "llama-new".
+        let mut cfg = config::load_user_config_from(&config_path).expect("reload seeded config");
+        {
+            let project = cfg.find_project_mut("alpha").unwrap();
+            let llm = project.claude.as_mut().unwrap().llm.as_mut().unwrap();
+            llm.providers[0].model = Some("llama-new".to_string());
+            llm.active.as_mut().unwrap().model = Some("llama-new".to_string());
+        }
+        config::save_user_config_to(&cfg, &config_path).expect("write concurrent update");
+
+        fs2::FileExt::unlock(&lock_file).expect("release external lock");
+        drop(lock_file);
+
+        handle
+            .await
+            .expect("task join")
+            .expect("update must succeed");
+
+        let final_cfg = config::load_user_config_from(&config_path).expect("reload final config");
+        let final_llm = final_cfg
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            final_llm.providers[0].model.as_deref(),
+            Some("llama-new"),
+            "the persisted model must come from the on-disk state read UNDER \
+             the config lock, not the pre-lock snapshot — a concurrent save's \
+             model change must never be silently reverted"
         );
     }
 
