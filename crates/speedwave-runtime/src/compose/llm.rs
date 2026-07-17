@@ -100,11 +100,7 @@ fn apply_llm_config_proxy(
                 );
             }
             // `<id>/<model>` matches the per-provider wildcard route in the proxy config.
-            let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
-                model.clone()
-            } else {
-                format!("{}/{}", entry.id, model)
-            };
+            let routed_model = crate::model_id::wire_model_id(entry.kind, &entry.id, &model);
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
                 super::PROXY_BASE_URL.to_string(),

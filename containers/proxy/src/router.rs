@@ -270,6 +270,30 @@ mod tests {
         );
     }
 
+    /// The prefix match has no allowlist of known provider kinds - any custom
+    /// slug the renderer emits (`compose/proxy.rs`'s `prefix: entry.id`) is
+    /// matched verbatim. Regression for the routing-bypass class of bug where
+    /// the renderer hardcoded `"openrouter"` regardless of the entry's own id.
+    #[test]
+    fn resolve_matches_an_arbitrary_custom_prefix_not_just_known_provider_kinds() {
+        let cfg = Config {
+            routes: vec![Route {
+                prefix: "my-or".to_string(),
+                base_url: "https://openrouter.ai/api".to_string(),
+                auth: Auth::Swap {
+                    env: "SPW_KEY_MY_OR".to_string(),
+                    scheme: Scheme::Bearer,
+                },
+                provider_kind: "openrouter".to_string(),
+                provider_id: "my-or".to_string(),
+            }],
+            usage_path: PathBuf::from("/usage/usage.jsonl"),
+            ..Default::default()
+        };
+        let r = resolve(&cfg, "my-or/anthropic/claude-sonnet-5").unwrap();
+        assert!(matches!(&r.auth, Auth::Swap { env, .. } if env == "SPW_KEY_MY_OR"));
+    }
+
     #[test]
     fn config_deserializes_from_proxy_json_format() {
         let json = r#"{

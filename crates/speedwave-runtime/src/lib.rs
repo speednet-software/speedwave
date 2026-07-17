@@ -23,6 +23,7 @@ pub mod log_sanitizer;
 pub mod log_ts;
 pub mod managed_config;
 pub mod mcp_os_process;
+pub mod model_id;
 pub mod native_slash;
 pub mod oauth_persist;
 pub mod oauth_process;

@@ -128,7 +128,7 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
             LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {}
             LlmProviderKind::OpenRouter => {
                 routes.push(RenderRoute {
-                    prefix: "openrouter".into(),
+                    prefix: entry.id.clone(),
                     base_url: "https://openrouter.ai/api".into(),
                     auth: RouteAuth::Swap {
                         swap_env: spw_key_env_name(&entry.id),
@@ -422,6 +422,31 @@ mod tests {
         let llm = full_provider_mix();
         let expected = r#"{"routes":[{"prefix":"anthropic","base_url":"https://api.anthropic.com","auth":"passthrough","provider_kind":"anthropic_oauth","provider_id":"anthropic"},{"prefix":"local","base_url":"http://host.docker.internal:9000","auth":"none","provider_kind":"local","provider_id":"local"},{"prefix":"openrouter","base_url":"https://openrouter.ai/api","auth":{"swap_env":"SPW_KEY_OPENROUTER","scheme":"bearer"},"provider_kind":"openrouter","provider_id":"openrouter"}]}"#;
         assert_eq!(render_proxy_config(&llm), expected);
+    }
+
+    /// Regression: an OpenRouter-kind entry whose id is NOT the literal
+    /// `"openrouter"` must still render a route whose `prefix` equals its own
+    /// `entry.id` (never a hardcoded per-kind literal) - otherwise
+    /// `wire_model_id`'s `<entry_id>/<catalog_id>` wire model matches no
+    /// route in `router.rs::resolve` (first-`/`-segment match) and 404s.
+    #[test]
+    fn openrouter_route_prefix_follows_a_custom_entry_id_not_a_hardcoded_literal() {
+        let llm = LlmConfig {
+            providers: vec![LlmProviderEntry {
+                has_api_key: true,
+                ..entry("my-or", LlmProviderKind::OpenRouter)
+            }],
+            ..Default::default()
+        };
+        let json = render_proxy_config(&llm);
+        assert!(
+            json.contains(r#""prefix":"my-or""#),
+            "route prefix must be the entry's own id, not a hardcoded 'openrouter': {json}"
+        );
+        assert!(
+            !json.contains(r#""prefix":"openrouter""#),
+            "must not fall back to the hardcoded literal: {json}"
+        );
     }
 
     /// The anthropic passthrough route's kind reflects the active provider:
