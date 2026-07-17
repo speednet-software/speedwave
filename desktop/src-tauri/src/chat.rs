@@ -392,6 +392,9 @@ pub struct StreamParser {
     /// Unhandled top-level stream-json `type` values, each logged once per
     /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
     seen_unknown_types: std::collections::HashSet<String>,
+    /// True once the non-anthropic soft-impose `/model` message has been
+    /// injected for this session - never re-sent, even on a later SystemInit.
+    soft_impose_done: bool,
 }
 
 /// Cap on distinct unknown types tracked for once-per-type logging.
@@ -410,6 +413,7 @@ impl StreamParser {
             previous_session_cost: None,
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
+            soft_impose_done: false,
         }
     }
 
@@ -1251,6 +1255,45 @@ fn soft_impose_message(
     Some(format!("/model {expected}"))
 }
 
+/// Active provider's routing identity, captured once at spawn (before the
+/// reader thread starts) so soft-impose never re-reads config mid-session.
+struct SoftImposeConfig {
+    kind: speedwave_runtime::config::LlmProviderKind,
+    entry_id: String,
+    entry_model: Option<String>,
+}
+
+/// Injects the soft-impose `/model` command via `write` when `init_line`'s
+/// observed model mismatches `cfg`, at most once per `parser` (session).
+/// `write` receives the exact same JSON-wrapped stdin line `send_message`
+/// serializes (`build_user_message`) - never a bare text command, since the
+/// wire protocol requires every stdin line to be a stream-json envelope.
+fn maybe_soft_impose(
+    parser: &mut StreamParser,
+    cfg: &SoftImposeConfig,
+    init_line: &serde_json::Value,
+    mut write: impl FnMut(&str),
+) {
+    if parser.soft_impose_done {
+        return;
+    }
+    let Some(observed) = init_line["model"].as_str().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(cmd) = soft_impose_message(
+        cfg.kind,
+        &cfg.entry_id,
+        cfg.entry_model.as_deref(),
+        observed,
+    ) else {
+        return;
+    };
+    parser.soft_impose_done = true;
+    let wire_line = build_user_message(&text_only(&cmd)).to_string();
+    write(&wire_line);
+    log::debug!("soft-imposing model at spawn: {cmd}");
+}
+
 /// Auto-approve response for non-AskUserQuestion tools.
 pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
     serde_json::json!({
@@ -1509,6 +1552,27 @@ impl ChatSession {
             resume_session_id,
             resume_at_uuid,
         )?;
+
+        // Active provider's routing identity for soft-impose, captured once
+        // here (before the reader thread starts) - never re-read mid-session.
+        let soft_impose_cfg = {
+            let project_dir =
+                std::path::PathBuf::from(&user_config.require_project(&self.project_name)?.dir);
+            let resolved =
+                config::resolve_claude_config(&project_dir, &user_config, &self.project_name);
+            match resolved.llm.active_provider() {
+                Some(entry) => SoftImposeConfig {
+                    kind: entry.kind,
+                    entry_id: entry.id.clone(),
+                    entry_model: entry.model.clone(),
+                },
+                None => SoftImposeConfig {
+                    kind: config::LlmProviderKind::AnthropicOauth,
+                    entry_id: config::ANTHROPIC_PROVIDER_ID.to_string(),
+                    entry_model: None,
+                },
+            }
+        };
 
         let mut cmd = rt.container_exec_piped(
             &container,
@@ -1780,6 +1844,27 @@ impl ChatSession {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
+                // Soft-impose a non-anthropic model mismatch right after the
+                // first SystemInit; a plain stdin write, never a chunk.
+                if chunks
+                    .iter()
+                    .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
+                {
+                    maybe_soft_impose(&mut parser, &soft_impose_cfg, &parsed, |line| {
+                        match stdin_for_reader.lock() {
+                            Ok(mut stdin) => {
+                                if let Err(e) = writeln!(stdin, "{}", line) {
+                                    log::error!("soft-impose stdin write failed: {e}");
+                                } else if let Err(e) = stdin.flush() {
+                                    log::error!("soft-impose stdin flush failed: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("stdin mutex poisoned: {e}; dropping soft-impose")
+                            }
+                        }
+                    });
+                }
                 if is_terminal || msg_type == "system" {
                     got_result = true;
                     // Clear per-turn state (interrupts emit Result with no message_stop).
@@ -3029,6 +3114,94 @@ mod tests {
             "anthropic/claude-sonnet-5",
         );
         assert_eq!(msg, None);
+    }
+
+    // ── soft-impose injection at session spawn ───────────────────────
+
+    #[test]
+    fn soft_impose_fires_once_on_mismatch_and_writes_wrapped_stdin_line() {
+        let mut parser = StreamParser::new();
+        let mut captured: Vec<String> = Vec::new();
+        let cfg = SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::Local,
+            entry_id: "local".to_string(),
+            entry_model: Some("llama-3.1-70b".to_string()),
+        };
+        let init_line = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1",
+            "model": "wrong-observed-model",
+        });
+        let (chunk, _log) = parser.parse_system_message(&init_line);
+        assert!(matches!(chunk, Some(StreamChunk::SystemInit { .. })));
+
+        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
+            captured.push(line.to_string());
+        });
+        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
+            captured.push(line.to_string());
+        });
+
+        assert_eq!(captured.len(), 1, "must fire exactly once across two calls");
+        // The stdin line must be the same JSON envelope send_message serializes -
+        // build_user_message(&[WireContentBlock::Text{..}]) - never a bare string.
+        let expected = build_user_message(&text_only("/model local/llama-3.1-70b")).to_string();
+        assert_eq!(captured[0], expected);
+        let decoded: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        assert_eq!(decoded["type"], "user");
+        assert_eq!(
+            decoded["message"]["content"][0]["text"],
+            "/model local/llama-3.1-70b"
+        );
+    }
+
+    #[test]
+    fn soft_impose_does_not_fire_when_models_match() {
+        let mut parser = StreamParser::new();
+        let mut captured: Vec<String> = Vec::new();
+        let cfg = SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::Local,
+            entry_id: "local".to_string(),
+            entry_model: Some("llama-3.1-70b".to_string()),
+        };
+        let init_line = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1",
+            "model": "local/llama-3.1-70b",
+        });
+        parser.parse_system_message(&init_line);
+
+        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
+            captured.push(line.to_string());
+        });
+
+        assert!(captured.is_empty());
+    }
+
+    #[test]
+    fn soft_impose_never_fires_for_anthropic() {
+        let mut parser = StreamParser::new();
+        let mut captured: Vec<String> = Vec::new();
+        let cfg = SoftImposeConfig {
+            kind: speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
+            entry_id: "anthropic".to_string(),
+            entry_model: Some("claude-sonnet-5".to_string()),
+        };
+        let init_line = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1",
+            "model": "totally-different",
+        });
+        parser.parse_system_message(&init_line);
+
+        maybe_soft_impose(&mut parser, &cfg, &init_line, |line| {
+            captured.push(line.to_string());
+        });
+
+        assert!(captured.is_empty());
     }
 
     // ── StreamParser: text delta ─────────────────────────────────────
