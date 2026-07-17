@@ -909,11 +909,9 @@ mod tests {
 
     #[test]
     fn cache_1m_variant_uses_1m_pricing() {
-        // sonnet-4-6's [1m] alias is priced via pricing_1m, not silently
-        // falling back to base — both carry the standard $15/MTok output
-        // rate (1M context is included at standard rates), so this pins the
-        // routing, not a rate difference (see `one_m_suffix_without_pricing_1m_falls_back_to_base`
-        // for the no-pricing_1m fallback case).
+        // sonnet-4-6 1M output (22.5/MTok) differs from base (15.0/MTok) — its
+        // legacy long-context premium. This assertion was briefly "corrected"
+        // away and had to be restored; it is exactly the regression it guards.
         let e = compute_cost_with(
             &record(
                 "anthropic_apikey",
@@ -926,7 +924,29 @@ mod tests {
             &|_| None,
         );
         assert!(
-            (e.cost_usd.unwrap() - 15.0).abs() < 1e-9,
+            (e.cost_usd.unwrap() - 22.5).abs() < 1e-9,
+            "got {:?}",
+            e.cost_usd
+        );
+    }
+
+    #[test]
+    fn sonnet_5_1m_variant_resolves_to_base_pricing() {
+        // Current-gen models (unlike legacy sonnet-4-6) share pricing_1m with
+        // base — 1M context included at standard rates.
+        let e = compute_cost_with(
+            &record(
+                "anthropic_apikey",
+                "claude-sonnet-5[1m]",
+                0,
+                1_000_000,
+                0,
+                0,
+            ),
+            &|_| None,
+        );
+        assert!(
+            (e.cost_usd.unwrap() - 10.0).abs() < 1e-9,
             "got {:?}",
             e.cost_usd
         );

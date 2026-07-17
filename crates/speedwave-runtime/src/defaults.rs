@@ -87,6 +87,13 @@ const SONNET_4_6_PRICING: ModelPricing = ModelPricing {
     cache_write: 3.75,
     output: 15.0,
 };
+// Legacy long-context premium (deployed usage rows depend on this exact rate).
+const SONNET_4_6_PRICING_1M: ModelPricing = ModelPricing {
+    input: 6.0,
+    cached_input: 0.6,
+    cache_write: 7.5,
+    output: 22.5,
+};
 const HAIKU_PRICING: ModelPricing = ModelPricing {
     input: 1.0,
     cached_input: 0.1,
@@ -164,7 +171,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         latest: false,
         premium: false,
         pricing: SONNET_4_6_PRICING,
-        pricing_1m: Some(SONNET_4_6_PRICING),
+        pricing_1m: Some(SONNET_4_6_PRICING_1M),
         selectable: false,
     },
 ];
@@ -522,7 +529,20 @@ mod tests {
             .unwrap();
         assert_eq!(s46.pricing.input, 3.0);
         assert_eq!(s46.pricing.output, 15.0);
-        assert_eq!(s46.pricing_1m, Some(s46.pricing));
+    }
+
+    #[test]
+    fn sonnet_4_6_1m_variant_keeps_its_legacy_long_context_premium() {
+        // Deployed usage rows for sonnet-4-6[1m] were priced at this rate;
+        // unlike current-gen models, its pricing_1m must NOT collapse to base.
+        let s46 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .unwrap();
+        assert_ne!(s46.pricing_1m, Some(s46.pricing));
+        let p = s46.pricing_1m.unwrap();
+        assert_eq!(p.input, 6.0);
+        assert_eq!(p.output, 22.5);
     }
 
     #[test]
