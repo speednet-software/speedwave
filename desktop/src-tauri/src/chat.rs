@@ -395,6 +395,10 @@ pub struct StreamParser {
     /// Unhandled top-level stream-json `type` values, each logged once per
     /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
     seen_unknown_types: std::collections::HashSet<String>,
+    /// One-shot: suppresses the next assistant chunk whose `message.model ==
+    /// "<synthetic>"` (the `/model`/`/effort` confirmation), armed by a
+    /// chipped send. Cleared by a fresh `system/init` or any assistant line.
+    pending_synthetic_confirmation_suppression: bool,
 }
 
 /// Cap on distinct unknown types tracked for once-per-type logging.
@@ -413,6 +417,7 @@ impl StreamParser {
             previous_session_cost: None,
             model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
+            pending_synthetic_confirmation_suppression: false,
         }
     }
 
@@ -456,6 +461,9 @@ impl StreamParser {
                 self.capture_assistant_uuid(parsed);
                 self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
+                // One-shot: any assistant line consumes the flag (raw assistant
+                // lines never emit chunks anyway, synthetic or not).
+                self.pending_synthetic_confirmation_suppression = false;
                 (Vec::new(), None)
             }
             "system" => option_to_vec(self.parse_system_message(parsed)),
@@ -536,6 +544,20 @@ impl StreamParser {
         self.previous_session_cost = None;
         self.model_tracker = crate::session_model::SessionModelTracker::default();
         self.seen_unknown_types.clear();
+        self.pending_synthetic_confirmation_suppression = false;
+    }
+
+    /// Arms the one-shot synthetic-confirmation suppression (production path,
+    /// called by the reader thread when `ChatSession`'s send-time flag is set).
+    pub(crate) fn arm_synthetic_confirmation_suppression(&mut self) {
+        self.pending_synthetic_confirmation_suppression = true;
+    }
+
+    /// Test seam for `arm_synthetic_confirmation_suppression` — parsing tests
+    /// have no access to `ChatSession`'s send-time `Arc<AtomicBool>`.
+    #[cfg(test)]
+    pub(crate) fn arm_pending_synthetic_confirmation_suppression(&mut self) {
+        self.pending_synthetic_confirmation_suppression = true;
     }
 
     /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
@@ -1070,6 +1092,10 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
+        // A fresh system boundary must never carry a stale suppression into
+        // the next turn (e.g. an interrupted chip send with no reply yet).
+        self.pending_synthetic_confirmation_suppression = false;
+
         // ── Extract model + session id from system init message ──
         // Check BEFORE the message.is_empty() early return (init may lack `message`).
         if parsed["subtype"].as_str() == Some("init") {
@@ -1575,6 +1601,8 @@ impl ChatSession {
         let stdin_for_reader = shared_stdin;
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
+        let pending_synthetic_confirmation_suppression_for_reader =
+            self.pending_synthetic_confirmation_suppression.clone();
 
         // On resume: seed cumulative session state from the transcript so the
         // first turn reports a real delta. Non-fatal — log and use a zero baseline.
@@ -1743,6 +1771,11 @@ impl ChatSession {
                 }
 
                 // 2. Normal stream events
+                if pending_synthetic_confirmation_suppression_for_reader
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    parser.arm_synthetic_confirmation_suppression();
+                }
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
                     speedwave_runtime::log_file::write_log_line(
@@ -3382,6 +3415,76 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn synthetic_confirmation_following_a_chip_is_suppressed_once() {
+        let mut parser = StreamParser::new();
+        parser.arm_pending_synthetic_confirmation_suppression();
+
+        let synthetic_line = r#"{"type":"assistant","message":{"id":"u_synth_1","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]}}"#;
+        let synthetic_chunks = parse_line_all_str(&mut parser, synthetic_line);
+        assert!(
+            synthetic_chunks.is_empty(),
+            "the paired synthetic confirmation must produce no chunk, got {synthetic_chunks:?}"
+        );
+        assert!(
+            !parser.pending_synthetic_confirmation_suppression,
+            "the flag must be consumed by the matching synthetic line"
+        );
+
+        // A second, later synthetic-model assistant line (unrelated to any chip,
+        // flag already consumed) must NOT stay suppressed - the flag is one-shot.
+        let unrelated_synthetic = r#"{"type":"assistant","message":{"id":"u_synth_2","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"unrelated"}]}}"#;
+        let unrelated_chunks = parse_line_all_str(&mut parser, unrelated_synthetic);
+        assert!(
+            unrelated_chunks.is_empty(),
+            "raw assistant lines never emit chunks directly regardless of suppression state - this is the pre-existing behavior, not evidence of suppression"
+        );
+    }
+
+    #[test]
+    fn suppression_clears_on_system_init_to_avoid_leaking_across_turns() {
+        let mut parser = StreamParser::new();
+        parser.arm_pending_synthetic_confirmation_suppression();
+
+        let init_line = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1",
+            "model": "claude-sonnet-5",
+        });
+        parser.parse_system_message(&init_line);
+
+        assert!(
+            !parser.pending_synthetic_confirmation_suppression,
+            "a fresh system/init must clear a stale suppression flag, never let it leak into the next turn"
+        );
+    }
+
+    #[test]
+    fn suppression_clears_on_non_synthetic_assistant_line_without_suppressing_it() {
+        let mut parser = StreamParser::new();
+        parser.arm_pending_synthetic_confirmation_suppression();
+
+        let real_line = r#"{"type":"assistant","message":{"id":"u_real","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real reply"}]}}"#;
+        parse_line_all_str(&mut parser, real_line);
+
+        assert!(
+            !parser.pending_synthetic_confirmation_suppression,
+            "the flag must not leak past the next assistant line even when it wasn't the synthetic confirmation"
+        );
+    }
+
+    #[test]
+    fn synthetic_assistant_message_with_no_armed_suppression_is_unaffected() {
+        let mut parser = StreamParser::new();
+        let line = r#"{"type":"assistant","message":{"id":"u_synth_3","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"some other synthetic text"}]}}"#;
+        let chunks = parse_line_all_str(&mut parser, line);
+        assert!(
+            chunks.is_empty(),
+            "raw assistant lines never emit chunks directly regardless of suppression state"
+        );
     }
 
     #[test]
