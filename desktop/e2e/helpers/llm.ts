@@ -101,9 +101,17 @@ export async function configureLocalProvider(baseUrl: string, apiKey: string): P
 /** Picks `catalogId` in the composer model selector — the single model control
  *  (ADR-082); non-anthropic picks write through to the project config. */
 export async function pickComposerModel(catalogId: string): Promise<void> {
-  await (await $('[data-testid="composer-model-badge"]')).click();
+  // A just-flushed control turn briefly streams, and the badge click is a
+  // deliberate no-op then (openCombobox streaming guard) — retry until open.
   const search = await $('[data-testid="model-selector-search"]');
-  await search.waitForExist({ timeout: 10_000 });
+  await browser.waitUntil(
+    async () => {
+      if (await search.isExisting()) return true;
+      await (await $('[data-testid="composer-model-badge"]')).click();
+      return await search.isExisting();
+    },
+    { timeout: 30_000, interval: 1_000, timeoutMsg: 'model selector never opened' }
+  );
   await search.setValue(catalogId);
   const option = await $(`[data-testid="model-selector-option-${catalogId}"]`);
   await option.waitForExist({
