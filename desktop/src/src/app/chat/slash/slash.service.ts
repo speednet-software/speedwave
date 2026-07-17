@@ -51,6 +51,8 @@ export interface SlashCommand {
 export interface SlashDiscovery {
   readonly commands: readonly SlashCommand[];
   readonly source: DiscoverySource;
+  /** Why discovery failed, when `source === 'Unavailable'`. Absent on success. */
+  readonly reason?: string | null;
 }
 
 /**
@@ -72,30 +74,42 @@ export class SlashService {
   readonly error = signal<string | null>(null);
   /** True when the last discovery reported `source: 'Unavailable'`. */
   readonly unavailable = computed(() => this.source() === 'Unavailable');
+  /** Reason the last discovery was unavailable, if the backend supplied one. */
+  readonly unavailableReason = signal<string | null>(null);
 
   /** Convenience computed: is the popover "empty and loading"? */
   readonly isLoadingEmpty = computed(() => this.discovering() && this.commands().length === 0);
 
   /** Promise of the in-flight `refresh()` call, if any (TS-side single-flight guard). */
   private inFlight: Promise<void> | null = null;
+  /** Project id the in-flight `refresh()` call is fetching for. */
+  private inFlightProjectId: string | null = null;
 
   /**
    * Fetches the slash-command list and updates the signals; never throws.
-   * A concurrent call while one is already in flight is a no-op that awaits the same result.
+   * A concurrent call for the SAME project while one is already in flight
+   * is a no-op that awaits the same result. A call for a DIFFERENT project
+   * starts its own fetch — the stale one's result is dropped on resolve
+   * (mirrors model-selector's `summaryProjectId` pattern).
    * @param projectId - Project name used by Tauri to find the container.
    */
   async refresh(projectId: string): Promise<void> {
     if (!projectId) {
       this.commands.set([]);
       this.source.set(null);
+      this.unavailableReason.set(null);
       this.error.set(null);
       return;
     }
-    if (this.inFlight) {
+    if (this.inFlight && this.inFlightProjectId === projectId) {
       return this.inFlight;
     }
+    this.inFlightProjectId = projectId;
     this.inFlight = this.doRefresh(projectId).finally(() => {
-      this.inFlight = null;
+      if (this.inFlightProjectId === projectId) {
+        this.inFlight = null;
+        this.inFlightProjectId = null;
+      }
     });
     return this.inFlight;
   }
@@ -107,13 +121,19 @@ export class SlashService {
       const result = await this.tauri.invoke<SlashDiscovery>('list_slash_commands', {
         projectId,
       });
+      if (this.inFlightProjectId !== projectId) return;
       this.commands.set(result.commands);
       this.source.set(result.source);
+      this.unavailableReason.set(result.reason ?? null);
     } catch (err) {
+      if (this.inFlightProjectId !== projectId) return;
       this.source.set(null);
+      this.unavailableReason.set(null);
       this.error.set(String(err));
     } finally {
-      this.discovering.set(false);
+      if (this.inFlightProjectId === projectId) {
+        this.discovering.set(false);
+      }
     }
   }
 

@@ -11,6 +11,7 @@ class FakeSlashService {
   source = signal<DiscoverySource | null>(null);
   error = signal<string | null>(null);
   unavailable = signal(false);
+  unavailableReason = signal<string | null>(null);
   isLoadingEmpty = () => this.discovering() && this.commands().length === 0;
   refresh = vi.fn();
   invalidate = vi.fn();
@@ -275,6 +276,26 @@ describe('SlashMenuComponent', () => {
       const el = fixture.nativeElement as HTMLElement;
       expect(el.querySelectorAll('[data-testid="slash-menu-item"]').length).toBe(1);
       expect(el.querySelector('[data-testid="slash-popover-unavailable"]')).toBeNull();
+    });
+
+    it('renders the failure reason as a muted second line when the service supplies one', () => {
+      service.unavailable.set(true);
+      service.commands.set([]);
+      service.unavailableReason.set('timed out after 60s with no init');
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      const reasonEl = el.querySelector('[data-testid="slash-popover-unavailable-reason"]');
+      expect(reasonEl).not.toBeNull();
+      expect(reasonEl?.textContent?.trim()).toBe('timed out after 60s with no init');
+    });
+
+    it('omits the reason line when the service has no reason', () => {
+      service.unavailable.set(true);
+      service.commands.set([]);
+      service.unavailableReason.set(null);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+      expect(el.querySelector('[data-testid="slash-popover-unavailable-reason"]')).toBeNull();
     });
   });
 });

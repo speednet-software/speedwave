@@ -75,6 +75,9 @@ pub struct SlashDiscovery {
     pub commands: Vec<SlashCommand>,
     /// Whether this discovery came from Claude Code or could not run.
     pub source: DiscoverySource,
+    /// Why discovery failed, when `source == Unavailable`. `None` on success.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reason: Option<String>,
 }
 
 /// Minimal project view for the discovery function.
@@ -135,6 +138,7 @@ fn discover_slash_commands_with_timeout(
             let discovery = SlashDiscovery {
                 commands: vec![],
                 source: DiscoverySource::Unavailable,
+                reason: Some(err),
             };
             cache_put(&project.name, discovery.clone());
             Ok(discovery)
@@ -515,12 +519,8 @@ fn run_discovery_with_timeout(
             reap_in_container_bounded(runtime, container, &instance_id);
             let _ = child.kill();
             let _ = child.wait();
-            // The reap kills by env marker, not by pipe fd: if the in-container
-            // process still holds the write end, the reader never sees EOF and
-            // joining here would hang again. Wait briefly, then hand the reader
-            // off to a background joiner instead of blocking this call — the
-            // joiner reclaims the thread once the pipe eventually closes rather
-            // than leaving it permanently unjoined.
+            // Reap kills by env marker, not pipe fd, so a held write end means no EOF here;
+            // wait briefly, then hand the reader to a background joiner instead of blocking.
             if rx.recv_timeout(Duration::from_secs(2)).is_ok() {
                 let _ = reader.join();
             } else {
@@ -656,7 +656,7 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
             continue;
         }
 
-        let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents, native);
+        let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
         let (frontmatter, origin) = lookup_frontmatter(
             clean_name,
             plugin.as_deref(),
@@ -722,6 +722,7 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
     SlashDiscovery {
         commands,
         source: DiscoverySource::Init,
+        reason: None,
     }
 }
 
@@ -736,24 +737,15 @@ fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Classifies a command by plugin prefix, `agents` presence, and the native
-/// allowlist. `native` is the caller's already-computed
-/// `native_slash::native_command` lookup (avoids re-scanning the table).
+/// Classifies a command by plugin prefix and `agents` presence (native-allowlist
+/// hits are handled earlier in `enrich_and_filter` and never reach here).
 /// Default `Command` is the safest fallback (UI renders `cmd`).
-fn classify_kind(
-    name: &str,
-    plugin: Option<&str>,
-    agents: &[String],
-    native: Option<&'static crate::native_slash::NativeSlashCommand>,
-) -> SlashKind {
+fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKind {
     if plugin.is_some() {
         return SlashKind::Plugin;
     }
     if agents.iter().any(|a| a == name) {
         return SlashKind::Agent;
-    }
-    if let Some(native) = native {
-        return native.badge;
     }
     // Default; refined to Skill by enrich_and_filter when the file is under skills/.
     SlashKind::Command
@@ -1579,10 +1571,21 @@ mod tests {
         let first = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(first.source, DiscoverySource::Unavailable);
         assert!(first.commands.is_empty());
+        assert!(
+            first
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("container not running"),
+            "Err branch must populate reason: {:?}",
+            first.reason
+        );
 
-        // A second call within the negative TTL must hit the cache, not re-probe.
+        // A second call within the negative TTL must hit the cache, not re-probe,
+        // and the cached negative entry must keep its reason.
         let second = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(second.source, DiscoverySource::Unavailable);
+        assert_eq!(second.reason, first.reason);
         assert_eq!(
             handles.exec_calls.lock().unwrap().len(),
             1,
@@ -1650,6 +1653,10 @@ mod tests {
         let first = discover_slash_commands(&runtime, &project).unwrap();
         assert_eq!(first.source, DiscoverySource::Init);
         assert!(first.commands.iter().any(|c| c.name == "my-skill"));
+        assert_eq!(
+            first.reason, None,
+            "a successful discovery must carry no reason"
+        );
 
         // A failing runtime must still return the cached Init result.
         let (failing, _) = MockRuntimeBuilder::new()
@@ -1680,25 +1687,14 @@ mod tests {
     }
 
     #[test]
-    fn classify_kind_prefers_plugin_then_agent_then_native_then_command() {
+    fn classify_kind_prefers_plugin_then_agent_then_command() {
         let agents = vec!["my-agent".to_string()];
-        let help_native = crate::native_slash::native_command("help");
         assert_eq!(
-            classify_kind("anything", Some("p"), &agents, help_native),
+            classify_kind("anything", Some("p"), &agents),
             SlashKind::Plugin
         );
-        assert_eq!(
-            classify_kind("my-agent", None, &agents, None),
-            SlashKind::Agent
-        );
-        assert_eq!(
-            classify_kind("help", None, &agents, help_native),
-            SlashKind::Builtin
-        );
-        assert_eq!(
-            classify_kind("other", None, &agents, None),
-            SlashKind::Command
-        );
+        assert_eq!(classify_kind("my-agent", None, &agents), SlashKind::Agent);
+        assert_eq!(classify_kind("other", None, &agents), SlashKind::Command);
     }
 
     #[test]

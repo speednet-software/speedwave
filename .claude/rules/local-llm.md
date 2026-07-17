@@ -31,7 +31,7 @@ Every session routes through the per-project Rust forwarder `proxy` (port 4000, 
 
 ## Env-var injection (compose/llm.rs)
 
-- **`ANTHROPIC_MODEL` is primary**, `ANTHROPIC_CUSTOM_MODEL_OPTION` supplementary. For non-Anthropic kinds the model is `<provider_id>/<model>` and must match the route prefix in the rendered proxy.json.
+- **Anthropic kinds set `ANTHROPIC_MODEL` only, and only when a non-empty, non-foreign model is active** (else the account default applies) — `ANTHROPIC_CUSTOM_MODEL_OPTION` is never injected for them. Non-Anthropic kinds route on `<provider_id>/<model>`, always set via `ANTHROPIC_MODEL`/`ANTHROPIC_CUSTOM_MODEL_OPTION`, and must match the route prefix in the rendered proxy.json.
 - **Non-Anthropic kinds remap built-in aliases:** `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` all point at the routed `<provider_id>/<model>` so `/model opus|sonnet|haiku|fable` hits the wildcard route instead of 404ing on a bare `claude-*`. `ANTHROPIC_DEFAULT_HAIKU_MODEL` (subagent/background traffic) replaces the deprecated `ANTHROPIC_SMALL_FAST_MODEL`.
 - **Anthropic kinds pin `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` only — FABLE is deliberately omitted** (it resolves natively; test `anthropic_default_models_env_omits_fable_alias`), each alias to its latest catalog model, with the `[1m]` suffix only where the model supports a 1M context. `[1m]` is real Claude Code model-id syntax — it must stay quoted in compose YAML (Go/nerdctl chokes on `[`); never strip it.
 - **Provenance:** the routing model comes from the active provider entry (`LlmConfig::effective_active_model`), never a foreign `active.model`. A `provider/model`-shaped id under an Anthropic entry falls back to the account default.

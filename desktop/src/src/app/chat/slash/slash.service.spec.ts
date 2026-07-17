@@ -189,6 +189,35 @@ describe('SlashService', () => {
     expect(service.unavailable()).toBe(true);
     expect(service.commands()).toEqual([]);
     expect(service.error()).toBeNull();
+    expect(service.unavailableReason()).toBeNull();
+  });
+
+  it('refresh() surfaces the backend reason when source is Unavailable', async () => {
+    const discovery: SlashDiscovery = {
+      commands: [],
+      source: 'Unavailable',
+      reason: 'timed out after 60s with no init',
+    };
+    tauri.invokeMock.mockResolvedValue(discovery);
+
+    await service.refresh('acme');
+
+    expect(service.unavailable()).toBe(true);
+    expect(service.unavailableReason()).toBe('timed out after 60s with no init');
+  });
+
+  it('refresh() clears a stale reason once a subsequent Init result arrives', async () => {
+    tauri.invokeMock.mockResolvedValueOnce({
+      commands: [],
+      source: 'Unavailable',
+      reason: 'exited without output (exit status 1 after 12ms)',
+    } as SlashDiscovery);
+    await service.refresh('acme');
+    expect(service.unavailableReason()).toBe('exited without output (exit status 1 after 12ms)');
+
+    tauri.invokeMock.mockResolvedValueOnce({ commands: [], source: 'Init' } as SlashDiscovery);
+    await service.refresh('acme');
+    expect(service.unavailableReason()).toBeNull();
   });
 
   it('refresh() clears unavailable on a subsequent Init result', async () => {
@@ -281,6 +310,67 @@ describe('SlashService', () => {
     expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
     expect(service.commands().length).toBe(1);
     expect(service.discovering()).toBe(false);
+  });
+
+  it('refresh() for a different project while one is in flight starts its own fetch', async () => {
+    const forA = deferred<SlashDiscovery>();
+    tauri.invokeMock.mockReturnValueOnce(forA.promise);
+
+    const callA = service.refresh('project-a');
+    expect(service.discovering()).toBe(true);
+
+    const forB = deferred<SlashDiscovery>();
+    tauri.invokeMock.mockReturnValueOnce(forB.promise);
+    const callB = service.refresh('project-b');
+
+    // Both calls actually hit the backend — no coalescing across projects.
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(2);
+    expect(tauri.invokeMock).toHaveBeenNthCalledWith(1, 'list_slash_commands', {
+      projectId: 'project-a',
+    });
+    expect(tauri.invokeMock).toHaveBeenNthCalledWith(2, 'list_slash_commands', {
+      projectId: 'project-b',
+    });
+
+    forB.resolve({
+      commands: [
+        { name: 'b-cmd', description: null, argument_hint: null, kind: 'Command', plugin: null },
+      ],
+      source: 'Init',
+    });
+    await callB;
+    expect(service.commands().map((c) => c.name)).toEqual(['b-cmd']);
+    expect(service.discovering()).toBe(false);
+
+    // A's late result must not clobber B's already-applied signals.
+    forA.resolve({
+      commands: [
+        { name: 'a-cmd', description: null, argument_hint: null, kind: 'Command', plugin: null },
+      ],
+      source: 'Init',
+    });
+    await callA;
+    expect(service.commands().map((c) => c.name)).toEqual(['b-cmd']);
+    expect(service.discovering()).toBe(false);
+  });
+
+  it('refresh() same-project coalescing still holds while a different-project fetch is unaffected', async () => {
+    const forA = deferred<SlashDiscovery>();
+    tauri.invokeMock.mockReturnValueOnce(forA.promise);
+
+    const callA1 = service.refresh('project-a');
+    const callA2 = service.refresh('project-a');
+
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
+
+    forA.resolve({
+      commands: [
+        { name: 'a-cmd', description: null, argument_hint: null, kind: 'Command', plugin: null },
+      ],
+      source: 'Init',
+    });
+    await Promise.all([callA1, callA2]);
+    expect(service.commands().map((c) => c.name)).toEqual(['a-cmd']);
   });
 
   it('refresh() runs again once the previous in-flight call has resolved', async () => {

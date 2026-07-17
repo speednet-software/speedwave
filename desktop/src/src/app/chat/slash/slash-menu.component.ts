@@ -76,6 +76,11 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
             class="mono flex flex-col items-start gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
           >
             <span>slash commands unavailable</span>
+            @if (service.unavailableReason()) {
+              <span data-testid="slash-popover-unavailable-reason" class="text-[10px] opacity-70">{{
+                service.unavailableReason()
+              }}</span>
+            }
             <button
               type="button"
               data-testid="slash-popover-retry"
