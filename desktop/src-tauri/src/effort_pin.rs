@@ -166,4 +166,15 @@ mod tests {
         let err = set_effort_pin(tmp.path(), "proj", level).unwrap_err();
         assert!(err.contains("not an object"));
     }
+
+    #[test]
+    fn set_effort_pin_rejects_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", "not json");
+        let level = PERSISTABLE_EFFORT_LEVELS[0];
+        let err = set_effort_pin(tmp.path(), "proj", level).unwrap_err();
+        assert!(err.contains("malformed settings.json"));
+        let path = settings_path(tmp.path(), "proj");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+    }
 }
