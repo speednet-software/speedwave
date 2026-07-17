@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
+import { By } from '@angular/platform-browser';
 import { ComposerComponent } from './composer.component';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SlashService } from '../slash/slash.service';
@@ -500,6 +501,42 @@ describe('ComposerComponent', () => {
       expect(emitted[1]).toContain('Plan mode');
       expect(emitted[0]).toContain('first');
       expect(emitted[1]).toContain('second');
+    });
+  });
+
+  describe('model selector', () => {
+    it('renders app-model-selector instead of the old read-only model span', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector).toBeTruthy();
+    });
+
+    it('forwards streaming() to the model selector', () => {
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.streaming()).toBe(true);
+    });
+
+    it('re-emits the model selector modelSelected event unchanged for the parent to handle', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      const emissions: unknown[] = [];
+      fixture.componentInstance.modelSelected.subscribe((sel) => emissions.push(sel));
+
+      selector.triggerEventHandler('modelSelected', {
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(emissions).toEqual([
+        {
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+        },
+      ]);
     });
   });
 });

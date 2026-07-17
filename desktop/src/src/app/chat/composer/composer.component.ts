@@ -26,6 +26,10 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
 import { FileDropDirective } from './file-drop.directive';
 import {
+  ModelSelectorComponent,
+  type ModelSelection,
+} from './model-selector/model-selector.component';
+import {
   ImagePreprocessorService,
   ERROR_UNSUPPORTED_TYPE,
   type ModelClass,
@@ -63,6 +67,7 @@ const PLAN_MODE_PREFIX =
     TooltipDirective,
     AttachmentStripComponent,
     FileDropDirective,
+    ModelSelectorComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'relative block min-w-0' },
@@ -168,16 +173,12 @@ const PLAN_MODE_PREFIX =
         >
           /<span class="hidden sm:inline"> skill</span>
         </button>
-        @if (model()) {
-          <span class="mx-1 hidden text-[var(--line-strong)] md:inline">·</span>
-          <span
-            class="hidden text-[var(--teal)] md:inline"
-            data-testid="composer-model"
-            appTooltip="Active LLM model"
-            placement="top"
-            >{{ model() }}</span
-          >
-        }
+        <span class="mx-1 hidden text-[var(--line-strong)] md:inline">·</span>
+        <app-model-selector
+          [projectId]="projectId()"
+          [streaming]="streaming()"
+          (modelSelected)="modelSelected.emit($event)"
+        />
         @if (contextLabel()) {
           <span
             class="hidden text-[var(--ink-mute)] lg:inline"
@@ -257,8 +258,11 @@ export class ComposerComponent implements AfterViewInit {
   /** Placeholder shown in the textarea when it is empty. */
   readonly placeholder = input('message speedwave...');
 
-  /** Active model id (e.g. "opus-4.7") — shown in teal in the toolbar when set. */
+  /** Active model id (e.g. "opus-4.7") — feeds the paste model-class heuristic. */
   readonly model = input('');
+
+  /** Active project id, forwarded to the model selector for its IPC calls. */
+  readonly projectId = input('');
 
   /** Context window hint (e.g. "128k") — shown next to the model on lg+. */
   readonly contextLabel = input('');
@@ -281,6 +285,9 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Emits when the user clicks the inline Stop button while streaming. */
   readonly stopRequested = output<void>();
+
+  /** Re-emits the model selector's single event unchanged; handled by chat.component.ts. */
+  readonly modelSelected = output<ModelSelection>();
 
   /** Emits when the slash popover transitions open/closed (for parent UI coordination). */
   readonly slashOpenChange = output<boolean>();
