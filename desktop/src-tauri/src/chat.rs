@@ -1954,6 +1954,20 @@ impl ChatSession {
             );
         }
 
+        log::info!(
+            "sending user message: serialized={} bytes, blocks={}",
+            serialized.len(),
+            blocks.len()
+        );
+        let mut stdin = shared
+            .lock()
+            .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
+        writeln!(stdin, "{}", serialized)?;
+        stdin.flush()?;
+        drop(stdin);
+
+        // Emitted only after the write succeeds, so a dead stdin never leaves
+        // a phantom chip with no message reaching Claude.
         let joined: String = blocks
             .iter()
             .map(|WireContentBlock::Text { text }| text.as_str())
@@ -1966,17 +1980,6 @@ impl ChatSession {
                 uuid: None,
             });
         }
-
-        log::info!(
-            "sending user message: serialized={} bytes, blocks={}",
-            serialized.len(),
-            blocks.len()
-        );
-        let mut stdin = shared
-            .lock()
-            .map_err(|e| anyhow::anyhow!("stdin lock poisoned: {e}"))?;
-        writeln!(stdin, "{}", serialized)?;
-        stdin.flush()?;
         Ok(())
     }
 
@@ -1985,6 +1988,14 @@ impl ChatSession {
     #[cfg(test)]
     fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
+        self.child = Some(spawn_test_blocked_child());
+    }
+
+    /// Test-only stdin stand-in whose write end has no live reader, so any
+    /// write to it fails with a broken-pipe error (test-only).
+    #[cfg(test)]
+    fn set_test_stdin_broken_pipe(&mut self) {
+        self.shared_stdin = Some(Arc::new(Mutex::new(test_broken_pipe_stdin())));
         self.child = Some(spawn_test_blocked_child());
     }
 
@@ -2314,6 +2325,25 @@ fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
     stdin
 }
 
+/// A pipe write-end wrapped as `ChildStdin` whose read end is dropped
+/// immediately, so every write to it fails (broken pipe) (test-only).
+#[cfg(test)]
+fn test_broken_pipe_stdin() -> std::process::ChildStdin {
+    let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
+    drop(reader);
+    #[cfg(unix)]
+    let stdin: std::process::ChildStdin = {
+        let fd: std::os::fd::OwnedFd = writer.into();
+        fd.into()
+    };
+    #[cfg(windows)]
+    let stdin: std::process::ChildStdin = {
+        let handle: std::os::windows::io::OwnedHandle = writer.into();
+        handle.into()
+    };
+    stdin
+}
+
 /// A trivial child blocked reading its own stdin, giving `set_test_stdin_sink`
 /// a real, live `Child` (test-only — never a Claude session).
 #[cfg(test)]
@@ -2503,7 +2533,7 @@ mod tests {
     }
 
     #[test]
-    fn send_message_matching_control_shape_emits_control_chip_before_stdin() {
+    fn send_message_matching_control_shape_emits_control_chip_after_stdin_write() {
         let mut session = ChatSession::new("proj");
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
@@ -2528,6 +2558,24 @@ mod tests {
             }
             other => panic!("expected ControlChip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn send_message_stdin_write_failure_propagates_error_and_emits_no_control_chip() {
+        // A dead stdin (broken pipe) must not leave a phantom "command sent"
+        // chip for a message that never reached Claude.
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_broken_pipe();
+        let result =
+            session.send_message_with_emit(&text_only("/model claude-sonnet-5"), |chunk| {
+                emitted.push(chunk);
+            });
+        assert!(result.is_err(), "expected stdin write failure to propagate");
+        assert!(
+            emitted.is_empty(),
+            "expected no ControlChip on write failure, got {emitted:?}"
+        );
     }
 
     #[test]
