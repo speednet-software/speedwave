@@ -2874,6 +2874,7 @@ mod tests {
             "must delegate to the data_dir-parameterized variant"
         );
         assert!(
+            // SSOT-allow: asserting on the literal token in source, not a call.
             body.contains("speedwave_runtime::consts::data_dir()"),
             "must pass the process-wide data_dir SSOT"
         );
