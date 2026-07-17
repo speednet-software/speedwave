@@ -400,6 +400,31 @@ fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
     }
 }
 
+/// One-time upgrade self-heal: anthropic-kind entries stop carrying a stored
+/// model (the license default rules the session; the composer switches it).
+pub(crate) fn clear_anthropic_models(llm: &mut LlmConfig) -> bool {
+    let mut changed = false;
+    for entry in &mut llm.providers {
+        if entry.kind.is_anthropic() && entry.model.take().is_some() {
+            changed = true;
+        }
+    }
+    if let Some(active) = &mut llm.active {
+        let active_is_anthropic = llm
+            .providers
+            .iter()
+            .any(|p| p.id == active.provider_id && p.kind.is_anthropic());
+        if active_is_anthropic && active.model.take().is_some() {
+            changed = true;
+        }
+    }
+    let v1_is_anthropic = llm.provider.as_deref() == Some(ANTHROPIC_PROVIDER_ID);
+    if v1_is_anthropic && llm.model.take().is_some() {
+        changed = true;
+    }
+    changed
+}
+
 /// Downgrade story (one release): derive the legacy flat fields from the
 /// active v2 entry so an older Speedwave reading this config keeps working.
 pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
@@ -1710,6 +1735,7 @@ pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
             if has_llm {
                 if let Some(llm) = project.claude.as_mut().and_then(|c| c.llm.as_mut()) {
                     changed |= migrate_llm(llm, evidence);
+                    changed |= clear_anthropic_models(llm);
                 }
             } else if evidence != AnthropicEvidence::None {
                 // v0.13.3 default population: no llm block but working Anthropic
@@ -3774,6 +3800,98 @@ mod tests {
         assert_eq!(first, serde_json::to_string(&llm).unwrap());
     }
 
+    #[test]
+    fn clear_anthropic_models_clears_v2_entry_and_active_pointer() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "anthropic".into(),
+                kind: LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("claude-haiku-4-5".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("claude-haiku-4-5".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(clear_anthropic_models(&mut llm));
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    #[test]
+    fn clear_anthropic_models_clears_legacy_v1_flat_model_for_anthropic_provider() {
+        let mut llm = LlmConfig {
+            provider: Some("anthropic".into()),
+            model: Some("claude-haiku-4-5".into()),
+            ..Default::default()
+        };
+        assert!(clear_anthropic_models(&mut llm));
+        assert_eq!(llm.model, None);
+    }
+
+    #[test]
+    fn clear_anthropic_models_leaves_local_and_openrouter_untouched() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![
+                LlmProviderEntry {
+                    id: "openrouter".into(),
+                    kind: LlmProviderKind::OpenRouter,
+                    base_url: None,
+                    model: Some("anthropic/claude-sonnet-5".into()),
+                    has_api_key: true,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+                LlmProviderEntry {
+                    id: "local".into(),
+                    kind: LlmProviderKind::Local,
+                    base_url: Some("http://localhost:11434".into()),
+                    model: Some("unsloth/Qwen3.6-35B-A3B".into()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                },
+            ],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("anthropic/claude-sonnet-5".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(!clear_anthropic_models(&mut llm));
+        assert!(llm.providers.iter().all(|p| p.model.is_some()));
+    }
+
+    #[test]
+    fn clear_anthropic_models_is_idempotent() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "anthropic".into(),
+                kind: LlmProviderKind::AnthropicApiKey,
+                base_url: None,
+                model: Some("claude-sonnet-5".into()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("claude-sonnet-5".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(clear_anthropic_models(&mut llm));
+        assert!(!clear_anthropic_models(&mut llm));
+    }
+
     /// Heal-and-save: a corrupted config on disk is rewritten with the foreign
     /// model cleared, and a second heal is a no-op.
     #[test]
@@ -3829,6 +3947,63 @@ mod tests {
         let after_first = std::fs::read_to_string(&config_path).unwrap();
         heal_llm_config_in(dir.path()).unwrap();
         assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
+    }
+
+    /// Upgrade compatibility: an existing anthropic entry with a stored model
+    /// loads back with the model cleared, and the on-disk file is rewritten.
+    #[test]
+    fn test_heal_llm_config_on_disk_clears_anthropic_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "speedwave".into(),
+                dir: "/x".into(),
+                claude: Some(ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: Some(LlmConfig {
+                        schema_version: Some(LLM_SCHEMA_VERSION),
+                        providers: vec![LlmProviderEntry {
+                            id: "anthropic".into(),
+                            kind: LlmProviderKind::AnthropicOauth,
+                            base_url: None,
+                            model: Some("claude-haiku-4-5".into()),
+                            has_api_key: false,
+                            context_tokens: None,
+                            has_custom_headers: false,
+                        }],
+                        active: Some(LlmActive {
+                            provider_id: "anthropic".into(),
+                            model: Some("claude-haiku-4-5".into()),
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+                integrations: None,
+                plugin_settings: None,
+            }],
+            ..Default::default()
+        };
+        save_user_config_to(&config, &config_path).unwrap();
+
+        heal_llm_config_in(dir.path()).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !on_disk.contains("claude-haiku-4-5"),
+            "healed file on disk must not carry the cleared model"
+        );
+        let healed = load_user_config_from(&config_path).unwrap();
+        let llm = healed.projects[0]
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(llm.providers[0].model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
     }
 
     /// Upgrade rescue: unset provider + on-disk OAuth credentials must fabricate an
