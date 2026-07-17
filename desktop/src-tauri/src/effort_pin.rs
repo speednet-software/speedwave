@@ -1,6 +1,6 @@
 //! Launch-effort pin IO for a project's claude-home `settings.json`
-//! (`effortLevel` key). Next-session semantics only (ADR-082):
-//! Claude Code itself refuses a live `/effort` change under an existing pin.
+//! (`effortLevel` key). The pin feeds the spawn's `--effort`, which releases
+//! CC's premium launch hold so the wire `/effort` applies live (ADR-082 am.).
 
 use std::path::Path;
 

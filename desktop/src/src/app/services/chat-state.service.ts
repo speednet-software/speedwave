@@ -128,6 +128,8 @@ export class ChatStateService {
 
   /** Anthropic model chosen while no session was live (composer, Task 16); sent once after the next SystemInit. */
   private readonly _pendingModelOverride = signal<string | null>(null);
+  /** Effort picked mid-turn; wire `/effort` flushed when the turn ends. */
+  private readonly _pendingEffortOverride = signal<string | null>(null);
   /** Read-only: the composer's queued model switch, or null when none/already sent. */
   readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
 
@@ -141,12 +143,31 @@ export class ChatStateService {
 
   /** Sends the queued override as a normal `/model` message and clears it (fires at most once per queued value). */
   private flushPendingModelOverride(): void {
-    const pending = this._pendingModelOverride();
     // Never consume into sendMessage's silent isStreaming drop: keep the queue
     // and retry on the next flush point (SystemInit / turn end) instead.
-    if (!pending || this.isStreaming) return;
-    this._pendingModelOverride.set(null);
-    void this.sendMessage(`/model ${pending}`);
+    if (this.isStreaming) return;
+    const model = this._pendingModelOverride();
+    if (model) {
+      this._pendingModelOverride.set(null);
+      void this.sendMessage(`/model ${model}`);
+      return;
+    }
+    const effort = this._pendingEffortOverride();
+    if (effort) {
+      this._pendingEffortOverride.set(null);
+      void this.sendMessage(`/effort ${effort}`);
+    }
+  }
+
+  /**
+   * Applies an effort pick to the CURRENT session via a wire `/effort` (the pin
+   * is already persisted and the spawn's `--effort` released CC's launch hold).
+   * @param level - One of the persistable effort levels.
+   */
+  async applyEffortSelection(level: string): Promise<void> {
+    if (!this.hasLiveSession()) return;
+    if (this.isStreaming) this._pendingEffortOverride.set(level);
+    else await this.sendMessage(`/effort ${level}`);
   }
 
   /** Surface for a failed write-through from the composer model selector. */
@@ -1183,6 +1204,7 @@ export class ChatStateService {
         // A queued override targets the project it was picked in; it must survive
         // a same-project fresh session but never leak across a project switch.
         this._pendingModelOverride.set(null);
+        this._pendingEffortOverride.set(null);
         this.notifyChange();
       } else if (this.projectState.status() === 'ready') {
         // Project just settled — re-pull the persisted context tokens so
@@ -1242,6 +1264,7 @@ export class ChatStateService {
     // Resuming an existing conversation is a context change: a pick queued for the
     // fresh session being composed must not fire into this old transcript instead.
     this._pendingModelOverride.set(null);
+    this._pendingEffortOverride.set(null);
 
     this.resetForNewConversation();
     this.beginTranscriptLoad();

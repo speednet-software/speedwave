@@ -131,7 +131,7 @@ export interface ModelSelection {
         <div data-testid="effort-control" class="hidden items-center gap-1 md:flex">
           <span
             class="mono text-[10px] text-[var(--ink-mute)]"
-            appTooltip="Reasoning effort pin - applies from the next session (Claude Code reads it at session start)"
+            appTooltip="Reasoning effort - applies to the current session and persists for new ones"
             placement="top"
             >{{ currentEffortPin() ?? 'auto' }}</span
           >
@@ -139,10 +139,9 @@ export interface ModelSelection {
             <button
               type="button"
               [attr.data-testid]="'effort-option-' + level"
-              [disabled]="streaming()"
-              class="mono rounded border px-1.5 py-0.5 text-[10px] disabled:cursor-not-allowed disabled:opacity-50"
+              class="mono rounded border px-1.5 py-0.5 text-[10px]"
               [class]="
-                effectiveEffort() === level
+                currentEffortPin() === level
                   ? 'border-[var(--teal)] text-[var(--teal)]'
                   : 'border-[var(--line)] text-[var(--ink-mute)] hover:text-[var(--ink)]'
               "
@@ -150,11 +149,6 @@ export interface ModelSelection {
             >
               {{ level }}
             </button>
-          }
-          @if (pendingEffortPin(); as pending) {
-            <span data-testid="effort-pending" class="mono ml-1 text-[10px] text-[var(--amber)]"
-              >{{ pending }} - next session</span
-            >
           }
         </div>
       }
@@ -177,8 +171,11 @@ export class ModelSelectorComponent {
   /** Live session model (SystemInit); the anthropic badge fallback, since config carries no model. */
   readonly sessionModel = input('');
 
-  /** The one event this component emits; routed to `ChatStateService.applyModelSelection`. */
+  /** Routed to `ChatStateService.applyModelSelection`. */
   readonly modelSelected = output<ModelSelection>();
+
+  /** Effort pick, routed to `ChatStateService.applyEffortSelection` (live wire `/effort`). */
+  readonly effortSelected = output<string>();
 
   readonly open = signal(false);
   readonly query = signal('');
@@ -201,11 +198,6 @@ export class ModelSelectorComponent {
 
   protected readonly effortLevels = signal<string[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
-  protected readonly pendingEffortPin = signal<string | null>(null);
-  /** Level highlighted in the segmented control: the freshly-picked pin, else the stored one. */
-  protected readonly effectiveEffort = computed(
-    () => this.pendingEffortPin() ?? this.currentEffortPin()
-  );
 
   /** Optimistic badge value after a live anthropic pick (no config write to re-read it from). */
   private readonly lastPicked = signal('');
@@ -456,7 +448,6 @@ export class ModelSelectorComponent {
       if (this.projectId() !== projectId) return;
       this.effortLevels.set(levels);
       this.currentEffortPin.set(pin);
-      this.pendingEffortPin.set(null);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: effort pin load failed: ${msg}`);
@@ -464,16 +455,16 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Writes the next-session effort pin and refreshes the pending-vs-current display.
+   * Persists the pin (spawn passes it via `--effort`) and emits the level so the
+   * chat layer applies it to the CURRENT session with a wire `/effort`.
    * @param level - One of `PERSISTABLE_EFFORT_LEVELS`, from an `effort-option-*` click.
    */
   protected async selectEffortLevel(level: string): Promise<void> {
-    if (this.streaming()) return;
     const projectId = this.projectId();
     try {
       await this.tauri.invoke('set_effort_pin', { projectId, level });
-      const pin = await this.tauri.invoke<string | null>('get_effort_pin', { projectId });
-      this.pendingEffortPin.set(pin !== this.currentEffortPin() ? pin : null);
+      this.currentEffortPin.set(level);
+      this.effortSelected.emit(level);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: set_effort_pin failed: ${msg}`);

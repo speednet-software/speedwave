@@ -73,6 +73,7 @@
             (queueCancelled)="onQueueCancelled()"
             (stopRequested)="onStopClicked()"
             (modelSelected)="chat.applyModelSelection($event)"
+            (effortSelected)="chat.applyEffortSelection($event)"
           />
           <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />
         </div>

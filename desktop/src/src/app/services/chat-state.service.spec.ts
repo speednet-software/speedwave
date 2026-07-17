@@ -1384,6 +1384,58 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
+    it('applyEffortSelection with a live idle session sends the wire /effort immediately', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      await service.applyEffortSelection('low');
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort low')
+      );
+      expect(effortSend).toBeDefined();
+    });
+
+    it('applyEffortSelection mid-stream queues and flushes the wire /effort after the turn', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+      service.isStreaming = true;
+
+      await service.applyEffortSelection('xhigh');
+      let effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort ')
+      );
+      expect(effortSend).toBeUndefined();
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      await Promise.resolve();
+      effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort xhigh')
+      );
+      expect(effortSend).toBeDefined();
+    });
+
+    it('applyEffortSelection without a live session sends nothing (the spawn --effort covers it)', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      await service.applyEffortSelection('low');
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort ')
+      );
+      expect(effortSend).toBeUndefined();
+    });
+
     it('a queued override is NOT consumed by a SystemInit arriving mid-stream; it fires after the turn ends', async () => {
       // Field repro: session restart mid-send fires SystemInit while isStreaming
       // is true; the old code consumed the queue into sendMessage's silent drop.

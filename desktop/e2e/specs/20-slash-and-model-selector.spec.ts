@@ -246,30 +246,49 @@ describe('Slash Popover + Model/Effort Selector', function () {
     }
     if (!targetLevel) throw new Error('no alternative effort level found');
     console.log(`[20-slash-and-model-selector] switching to effort level: ${targetLevel}`);
+    // A live session must exist so the pick applies via a wire /effort.
+    await sendMessageAndWait('Say hi in one word.');
     await (await $(`[data-testid="effort-option-${targetLevel}"]`)).click();
 
-    // Pending state communicates next-session semantics ("<level> - next
-    // session"); the pin must not have applied to the still-open session. The
-    // pending value is exposed only as text content on a nested effort-pending
-    // span inside effort-control (Task 17's contract), so assert the pending
-    // copy appears rather than a dedicated attribute.
-    await $('[data-testid="effort-pending"]').waitForExist({
-      timeout: 10_000,
-      timeoutMsg: 'effort-pending never rendered after picking a new level',
-    });
-    expect(await (await $('[data-testid="effort-pending"]')).getText()).toContain(targetLevel);
-
-    await startNewConversation();
-    await sendMessageAndWait('Say hi in one word.');
+    // Live semantics (ADR-082 amendment): the pick is current at once - the pin
+    // span reflects it immediately and no pending badge exists.
     await browser.waitUntil(
       async () => {
-        if (await $('[data-testid="effort-pending"]').isExisting()) return false;
-        const text = await (await $('[data-testid="effort-control"]')).getText();
-        return text.includes(targetLevel!);
+        const text = (await (await $('[data-testid="effort-control"]')).getText()).trim();
+        return text.startsWith(targetLevel!);
+      },
+      {
+        timeout: 10_000,
+        timeoutMsg: `effort-control never showed ${targetLevel} as current after the pick`,
+      }
+    );
+    expect(await $('[data-testid="effort-pending"]').isExisting()).toBe(false);
+
+    // The wire /effort renders as a control chip in the conversation.
+    await browser.waitUntil(
+      async () => {
+        const chips = await $$('[data-testid="control-chip"][data-command="effort"]').getElements();
+        for (const chip of chips) {
+          if ((await chip.getText()).includes(targetLevel!)) return true;
+        }
+        return false;
       },
       {
         timeout: 30_000,
-        timeoutMsg: `new session never picked up the pending effort pin (${targetLevel})`,
+        timeoutMsg: `no effort control chip appeared for ${targetLevel}`,
+      }
+    );
+
+    // A NEW session starts on the persisted pin (spawn --effort <pin>).
+    await startNewConversation();
+    await browser.waitUntil(
+      async () => {
+        const text = (await (await $('[data-testid="effort-control"]')).getText()).trim();
+        return text.startsWith(targetLevel!);
+      },
+      {
+        timeout: 30_000,
+        timeoutMsg: `new session never started on the persisted effort pin (${targetLevel})`,
       }
     );
   });

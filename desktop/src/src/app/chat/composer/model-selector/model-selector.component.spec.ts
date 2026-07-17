@@ -422,12 +422,13 @@ describe('ModelSelectorComponent', () => {
     expect(el.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
   });
 
-  it('shows a pending value distinct from the current pin after set_effort_pin', async () => {
+  it('a pick persists the pin, updates the highlight immediately, and emits effortSelected', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
+    const emitted: string[] = [];
+    fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'set_effort_pin') return Promise.resolve(undefined);
-      if (cmd === 'get_effort_pin') return Promise.resolve('low');
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
     const lowOption = fixture.nativeElement.querySelector(
@@ -436,40 +437,40 @@ describe('ModelSelectorComponent', () => {
     lowOption.click();
     await fixture.whenStable();
     fixture.detectChanges();
-    const pending = fixture.nativeElement.querySelector('[data-testid="effort-pending"]');
-    expect(pending?.textContent).toContain('next session');
+    expect(emitted).toEqual(['low']);
+    const setCall = tauriInvoke.mock.calls.find(([cmd]) => cmd === 'set_effort_pin');
+    expect(setCall?.[1]).toMatchObject({ level: 'low' });
+    // Live semantics: the picked level is current at once; no pending badge exists.
+    expect(fixture.nativeElement.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
+    const el = fixture.nativeElement.querySelector(
+      '[data-testid="effort-option-low"]'
+    ) as HTMLElement;
+    expect(el.className).toContain('--teal');
   });
 
-  it('disables the effort control while a turn is streaming', async () => {
+  it('a pick during a streaming turn still emits (the chat layer queues the wire send)', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     fixture.componentRef.setInput('streaming', true);
     fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
-    const el = fixture.nativeElement as HTMLElement;
-    const option = el.querySelector('[data-testid="effort-option-low"]') as HTMLButtonElement;
-    expect(option.disabled).toBe(true);
-  });
-
-  it('re-fetches the effort pin when a new session starts, clearing the pending badge', async () => {
-    await fixture.whenStable();
-    fixture.detectChanges();
+    const emitted: string[] = [];
+    fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'set_effort_pin') return Promise.resolve(undefined);
-      if (cmd === 'get_effort_pin') return Promise.resolve('low');
-      if (cmd === 'list_effort_levels') return Promise.resolve(['low', 'medium', 'high', 'xhigh']);
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
-    fixture.nativeElement.querySelector('[data-testid="effort-option-low"]').click();
+    const option = fixture.nativeElement.querySelector(
+      '[data-testid="effort-option-low"]'
+    ) as HTMLButtonElement;
+    expect(option.disabled).toBe(false);
+    option.click();
+    await fixture.whenStable();
+    expect(emitted).toEqual(['low']);
+  });
+
+  it('re-fetches the effort pin when a new session starts', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
-    expect(
-      fixture.nativeElement.querySelector('[data-testid="effort-pending"]')?.textContent
-    ).toContain('low');
-
-    // A new session starts: sessionModel transitions from '' to a live model.
-    // The applied pin now reads back as the picked level.
     const getEffortPinCalls = () =>
       tauriInvoke.mock.calls.filter(([cmd]) => cmd === 'get_effort_pin').length;
     const callsBefore = getEffortPinCalls();
@@ -477,13 +478,8 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
 
     expect(getEffortPinCalls()).toBeGreaterThan(callsBefore);
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
-    expect(el.textContent).toContain('low');
   });
 
   it('does not reload the effort pin on a no-op sessionModel update (same value re-set)', async () => {

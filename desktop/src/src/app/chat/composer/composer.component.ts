@@ -180,6 +180,7 @@ const PLAN_MODE_PREFIX =
           [modelError]="modelError()"
           [sessionModel]="model()"
           (modelSelected)="modelSelected.emit($event)"
+          (effortSelected)="effortSelected.emit($event)"
         />
         @if (contextLabel()) {
           <span
@@ -293,6 +294,9 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Re-emits the model selector's single event unchanged; handled by chat.component.ts. */
   readonly modelSelected = output<ModelSelection>();
+
+  /** Re-emits the effort pick unchanged; handled by chat.component.ts. */
+  readonly effortSelected = output<string>();
 
   /** Emits when the slash popover transitions open/closed (for parent UI coordination). */
   readonly slashOpenChange = output<boolean>();

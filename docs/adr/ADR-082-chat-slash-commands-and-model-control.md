@@ -186,7 +186,7 @@ resume, the injected message renders as a normal chip like any other -
 the transcript cannot distinguish it from a user-typed one, so it is not
 special-cased there.
 
-### 5. Effort control has next-session semantics, driven by an observed wire refusal
+### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
 launch-effort pin already exists in the project's Claude Code
@@ -201,32 +201,34 @@ effort from. This matches Claude Code's own documentation: a non-interactive
 4.7 and reports `Not applied`[^1], and more generally `low`/`medium`/`high`/
 `xhigh` persist across sessions only when set in an _interactive_ session[^1].
 
-Given this constraint, the composer effort control never sends `/effort`.
-It instead writes the launch pin directly
-(`desktop/src-tauri/src/effort_pin.rs::set_effort_pin`): Desktop updates
-`effortLevel` in `claude-home/<project>/.claude/settings.json` via the
-`fs_perms` durable write helper, and only while no session turn is currently
-streaming (this timing minimizes - it cannot eliminate - a clobber race
-against Claude Code's own writes to the same file). Persistable levels are
-exactly `low`, `medium`, `high`, `xhigh` (`effort_pin::PERSISTABLE_EFFORT_LEVELS`)
+**Amendment (same change, deeper empirics): the hold is releasable at spawn,
+so the control is live after all.** Further in-container probes against the
+pinned Claude Code build showed the refusal is NOT tied to the settings-file
+pin: with `effortLevel` absent entirely, a non-interactive `/effort` was
+refused with the identical "launch-effort pin holds effort at high" message
+(high = the premium model default). The releasing lever is the `--effort
+<level>` launch flag ("Effort level for the current session", `claude
+--help`): a session spawned with an explicit `--effort` accepts wire
+`/effort` changes live ("Set effort level to <level> (this session only)"),
+and Claude Code records per-model release flags (`unpinOpus48LaunchEffort`
+etc.) in `~/.claude.json`, after which even flag-less sessions accept live
+changes.
 
-- Claude Code's own settings-file contract accepts only these four, since
-  `max` and `ultracode` are documented as session-only and not accepted in the
-  `effortLevel` settings key[^1]. The control communicates plainly that the
-  change applies from the next session ("od nowej sesji" in the Polish UI
-  copy) and shows both the current-session pin and a pending value when they
-  differ. The effort badge is read once, at session spawn, from
-  `settings.json` - there is no other source. A hand-typed `/effort <level>`
-  in chat remains pass-through; Claude Code's own refusal (or acceptance, on
-  a fresh session with no pin) renders as the reply, unmodified - the product
-  never invents its own denial message. The control is rendered only for
-  Anthropic provider kinds; its levels come from the allowlist entry's
-  metadata. Level-vs-model capability mismatches are Claude Code's own
-  concern: if a next-session spawn rejects the pinned level for the resolved
-  model, Claude Code's own message surfaces, exactly as it would for a
-  manually edited `settings.json` (Claude Code documents that an unsupported
-  level is silently clamped to the highest supported level at or below it,
-  per-model[^1]).
+The shipped design therefore: every chat spawn passes `--effort <pin>`
+(`chat.rs::launch_effort_level`: the persisted pin, else `high`), which both
+sets the launch effort and releases the hold; the composer effort control
+persists the pin (`effort_pin::set_effort_pin`, next sessions) AND applies
+the level to the CURRENT session with a wire `/effort` routed through the
+control-command path (`ChatStateService.applyEffortSelection`) - queued when
+a turn is streaming, flushed at turn end, rendering the standard control
+chip. Persistable levels remain exactly `low`, `medium`, `high`, `xhigh`
+(`effort_pin::PERSISTABLE_EFFORT_LEVELS`) - Claude Code's settings-file
+contract accepts only these four, since `max` and `ultracode` are documented
+as session-only[^1]. A hand-typed `/effort <level>` in chat remains
+pass-through; Claude Code's own reply renders unmodified. The control is
+rendered only for Anthropic provider kinds. Level-vs-model capability
+mismatches are Claude Code's own concern (an unsupported level is silently
+clamped per-model[^1]).
 
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 

@@ -1372,6 +1372,14 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Launch effort for a spawn: the project's persisted pin, else `high`
+/// (the premium-model default); an unknown stored value falls back too.
+fn launch_effort_level(project_name: &str) -> String {
+    crate::effort_pin::get_effort_pin(speedwave_runtime::consts::data_dir(), project_name)
+        .filter(|l| crate::effort_pin::PERSISTABLE_EFFORT_LEVELS.contains(&l.as_str()))
+        .unwrap_or_else(|| "high".to_string())
+}
+
 /// Build Claude Code's stream-json argv: `env SPW_SESSION_INSTANCE_ID=<id>` for
 /// reap, plus `--resume`/`--resume-session-at` from the resume args (ADR-046).
 pub fn build_claude_args(
@@ -1515,12 +1523,13 @@ impl ChatSession {
 
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
-        let args = build_claude_args(
-            instance_id,
-            resume_session_id,
-            resume_at_uuid,
-            &resolved.flags,
-        );
+        let mut flags = resolved.flags.clone();
+        // Explicit --effort releases CC's premium launch-effort hold, making the
+        // wire `/effort` live for the session (empirical; ADR-082 amendment).
+        flags.push("--effort".to_string());
+        flags.push(launch_effort_level(project_name));
+
+        let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 
         Ok((args, container))
@@ -5367,6 +5376,9 @@ mod tests {
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
+        // Explicit launch effort releases the premium hold so wire /effort is live.
+        let pos = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[pos + 1], "high");
     }
 
     #[test]
