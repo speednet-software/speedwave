@@ -15,6 +15,8 @@ mod containers_cmd;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
+mod effort_pin;
+mod effort_pin_cmd;
 mod firewall;
 mod git_cmd;
 mod health;
@@ -1290,6 +1292,9 @@ fn main() {
             containers_cmd::set_provider_model,
             containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
+            effort_pin_cmd::get_effort_pin,
+            effort_pin_cmd::set_effort_pin,
+            effort_pin_cmd::list_effort_levels,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,
