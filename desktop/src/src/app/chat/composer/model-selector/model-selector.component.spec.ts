@@ -51,6 +51,8 @@ describe('ModelSelectorComponent', () => {
     tauriInvoke = vi.fn(async (cmd: string) => {
       if (cmd === 'get_active_provider_summary') return summary;
       if (cmd === 'list_anthropic_models') return anthropicCatalog;
+      if (cmd === 'get_effort_pin') return 'high';
+      if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
       throw new Error(`unexpected invoke: ${cmd}`);
     });
     await TestBed.configureTestingModule({
@@ -244,5 +246,68 @@ describe('ModelSelectorComponent', () => {
         kind: 'anthropic_oauth',
       },
     ]);
+  });
+
+  it('renders the effort control only for anthropic provider kinds', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-control"]'))).toBeTruthy();
+  });
+
+  it('hides the effort control for non-anthropic provider kinds', async () => {
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary')
+        return Promise.resolve({
+          provider_id: 'openrouter',
+          kind: 'open_router',
+          model: 'some-model',
+          base_url: null,
+        });
+      if (cmd === 'list_anthropic_models') return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-non-anthropic');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-control"]'))).toBeFalsy();
+  });
+
+  it('shows the current session pin read from get_effort_pin and no pending badge when unset', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.textContent).toContain('high');
+    expect(el.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
+  });
+
+  it('shows a pending value distinct from the current pin after set_effort_pin', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'set_effort_pin') return Promise.resolve(undefined);
+      if (cmd === 'get_effort_pin') return Promise.resolve('low');
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    const lowOption = fixture.nativeElement.querySelector(
+      '[data-testid="effort-option-low"]'
+    ) as HTMLElement;
+    lowOption.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const pending = fixture.nativeElement.querySelector('[data-testid="effort-pending"]');
+    expect(pending?.textContent).toContain('next session');
+  });
+
+  it('disables the effort control while a turn is streaming', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    fixture.componentRef.setInput('streaming', true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    const option = el.querySelector('[data-testid="effort-option-low"]') as HTMLButtonElement;
+    expect(option.disabled).toBe(true);
   });
 });

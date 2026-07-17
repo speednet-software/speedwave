@@ -88,6 +88,24 @@ export interface ModelSelection {
         }
       </div>
     }
+    @if (showEffortControl()) {
+      <div data-testid="effort-control">
+        <span>{{ currentEffortPin() ?? 'auto' }}</span>
+        @for (level of effortLevels(); track level) {
+          <button
+            type="button"
+            [attr.data-testid]="'effort-option-' + level"
+            [disabled]="streaming()"
+            (click)="selectEffortLevel(level)"
+          >
+            {{ level }}
+          </button>
+        }
+        @if (pendingEffortPin(); as pending) {
+          <span data-testid="effort-pending">{{ pending }} - next session</span>
+        }
+      </div>
+    }
   `,
 })
 export class ModelSelectorComponent {
@@ -113,11 +131,25 @@ export class ModelSelectorComponent {
   /** In-flight option fetch, awaited by tests to settle the fire-and-forget open. */
   private optionsFetch: Promise<void> = Promise.resolve();
 
+  protected readonly effortLevels = signal<string[]>([]);
+  protected readonly currentEffortPin = signal<string | null>(null);
+  protected readonly pendingEffortPin = signal<string | null>(null);
+
+  /** Anthropic-only: `effortLevel` is a Claude Code settings.json concept, not a provider one. */
+  protected readonly showEffortControl = computed(() => {
+    const summary = this.summary();
+    return summary !== null && isAnthropicKind(summary.kind);
+  });
+
   /** Reloads the active-provider summary whenever the project id changes. */
   constructor() {
     effect(() => {
       const id = this.projectId();
       if (id) void this.loadSummary(id);
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (this.showEffortControl() && id) void this.loadEffortState(id);
     });
   }
 
@@ -257,6 +289,42 @@ export class ModelSelectorComponent {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: get_active_provider_summary failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Loads the persistable-level list and the current launch-effort pin for the project.
+   * @param projectId - Active project id to read the pin for.
+   */
+  private async loadEffortState(projectId: string): Promise<void> {
+    try {
+      const [levels, pin] = await Promise.all([
+        this.tauri.invoke<string[]>('list_effort_levels'),
+        this.tauri.invoke<string | null>('get_effort_pin', { projectId }),
+      ]);
+      this.effortLevels.set(levels);
+      this.currentEffortPin.set(pin);
+      this.pendingEffortPin.set(null);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`model-selector: effort pin load failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Writes the next-session effort pin and refreshes the pending-vs-current display.
+   * @param level - One of `PERSISTABLE_EFFORT_LEVELS`, from an `effort-option-*` click.
+   */
+  protected async selectEffortLevel(level: string): Promise<void> {
+    if (this.streaming()) return;
+    const projectId = this.projectId();
+    try {
+      await this.tauri.invoke('set_effort_pin', { projectId, level });
+      const pin = await this.tauri.invoke<string | null>('get_effort_pin', { projectId });
+      this.pendingEffortPin.set(pin !== this.currentEffortPin() ? pin : null);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`model-selector: set_effort_pin failed: ${msg}`);
     }
   }
 }
