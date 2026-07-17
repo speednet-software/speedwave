@@ -237,6 +237,22 @@ pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }
 
+/// Matches the bare control-command shape `^/(model|effort)\s+\S+$` on trimmed `text`.
+/// Returns `(command, argument)`; the SSOT every control-chip rendering rule
+/// (live chunk emission in chat.rs, history reconstruction in history.rs) calls.
+pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim();
+    let (command, argument) = trimmed
+        .strip_prefix("/model ")
+        .map(|arg| ("model", arg))
+        .or_else(|| trimmed.strip_prefix("/effort ").map(|arg| ("effort", arg)))?;
+    let argument = argument.trim_start();
+    if argument.is_empty() || argument.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((command, argument))
+}
+
 /// Logs a poisoned-mutex condition at `warn!`; the cache update is skipped.
 fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
     log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
@@ -878,6 +894,73 @@ mod tests {
             "doc comment must name the real mirror (slash.service.ts::isBareSlash), \
              not composer canSubmit (canSubmit only consumes it): {doc_window:?}"
         );
+    }
+
+    #[test]
+    fn parse_control_command_matches_model_with_argument() {
+        assert_eq!(
+            parse_control_command("/model claude-sonnet-5"),
+            Some(("model", "claude-sonnet-5"))
+        );
+    }
+
+    #[test]
+    fn parse_control_command_matches_effort_with_argument() {
+        assert_eq!(
+            parse_control_command("/effort high"),
+            Some(("effort", "high"))
+        );
+    }
+
+    #[test]
+    fn parse_control_command_trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_control_command("  /model opus-4-8  "),
+            Some(("model", "opus-4-8"))
+        );
+    }
+
+    #[test]
+    fn parse_control_command_accepts_unicode_argument() {
+        assert_eq!(
+            parse_control_command("/model modèle-🌊"),
+            Some(("model", "modèle-🌊"))
+        );
+    }
+
+    #[test]
+    fn parse_control_command_rejects_extra_spaces_mid_argument() {
+        assert_eq!(parse_control_command("/model claude sonnet"), None);
+    }
+
+    #[test]
+    fn parse_control_command_rejects_multi_word_argument_generally() {
+        assert_eq!(parse_control_command("/effort very high please"), None);
+    }
+
+    #[test]
+    fn parse_control_command_rejects_unknown_command_name() {
+        assert_eq!(parse_control_command("/modelx claude-sonnet-5"), None);
+        assert_eq!(parse_control_command("/effortx high"), None);
+    }
+
+    #[test]
+    fn parse_control_command_rejects_missing_argument() {
+        assert_eq!(parse_control_command("/model"), None);
+        assert_eq!(parse_control_command("/model "), None);
+    }
+
+    #[test]
+    fn parse_control_command_rejects_plain_text_and_other_commands() {
+        assert_eq!(parse_control_command("hello there"), None);
+        assert_eq!(parse_control_command("/clear"), None);
+        assert_eq!(parse_control_command("/help"), None);
+    }
+
+    #[test]
+    fn parse_control_command_rejects_empty_and_bare_slash() {
+        assert_eq!(parse_control_command(""), None);
+        assert_eq!(parse_control_command("/"), None);
     }
 
     fn sample_init_json() -> String {
