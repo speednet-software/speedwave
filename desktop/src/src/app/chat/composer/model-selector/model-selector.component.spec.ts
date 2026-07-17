@@ -452,6 +452,92 @@ describe('ModelSelectorComponent', () => {
     expect(option.disabled).toBe(true);
   });
 
+  it('re-fetches the effort pin when a new session starts, clearing the pending badge', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'set_effort_pin') return Promise.resolve(undefined);
+      if (cmd === 'get_effort_pin') return Promise.resolve('low');
+      if (cmd === 'list_effort_levels') return Promise.resolve(['low', 'medium', 'high', 'xhigh']);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.nativeElement.querySelector('[data-testid="effort-option-low"]').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="effort-pending"]')?.textContent
+    ).toContain('low');
+
+    // A new session starts: sessionModel transitions from '' to a live model.
+    // The applied pin now reads back as the picked level.
+    const getEffortPinCalls = () =>
+      tauriInvoke.mock.calls.filter(([cmd]) => cmd === 'get_effort_pin').length;
+    const callsBefore = getEffortPinCalls();
+    fixture.componentRef.setInput('sessionModel', 'claude-sonnet-5');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(getEffortPinCalls()).toBeGreaterThan(callsBefore);
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
+    expect(el.textContent).toContain('low');
+  });
+
+  it('does not reload the effort pin on a no-op sessionModel update (same value re-set)', async () => {
+    fixture.componentRef.setInput('sessionModel', 'claude-sonnet-5');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const getEffortPinCalls = () =>
+      tauriInvoke.mock.calls.filter(([cmd]) => cmd === 'get_effort_pin').length;
+    const callsBefore = getEffortPinCalls();
+
+    fixture.componentRef.setInput('sessionModel', 'claude-sonnet-5');
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    expect(getEffortPinCalls()).toBe(callsBefore);
+  });
+
+  it('drops a stale effort-state resolution when the project switched while it was in flight', async () => {
+    let resolvePinA!: (v: string | null) => void;
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'list_effort_levels') return Promise.resolve(['low', 'medium', 'high', 'xhigh']);
+      if (cmd === 'get_effort_pin')
+        return new Promise((r) => {
+          resolvePinA = r;
+        });
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    // Start a load for project A (in flight, not yet resolved).
+    fixture.componentRef.setInput('projectId', 'proj-effort-a');
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    // Switch to project B before A resolves; B gets its own pin going forward.
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'list_effort_levels') return Promise.resolve(['low', 'medium', 'high', 'xhigh']);
+      if (cmd === 'get_effort_pin') return Promise.resolve('medium');
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-effort-b');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // A's stale load resolves last; it must be dropped, not overwrite B's pin.
+    resolvePinA('xhigh');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance['currentEffortPin']()).toBe('medium');
+  });
+
   it('drops a stale summary resolution when the project switched while it was in flight', async () => {
     let resolveA!: (v: ActiveProviderSummary) => void;
     const summaryB: ActiveProviderSummary = {

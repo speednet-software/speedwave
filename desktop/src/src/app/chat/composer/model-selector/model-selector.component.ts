@@ -219,6 +219,9 @@ export class ModelSelectorComponent {
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
+  /** Last `sessionModel` seen by the reload effect; detects a genuine session-start transition. */
+  private lastSessionModel = '';
+
   /** Reloads the active-provider summary whenever the project id changes. */
   constructor() {
     effect(() => {
@@ -228,6 +231,14 @@ export class ModelSelectorComponent {
     effect(() => {
       const id = this.projectId();
       if (this.showEffortControl() && id) void this.loadEffortState(id);
+    });
+    // A new session applies any pending effort pin; re-read it so the badge clears.
+    effect(() => {
+      const live = this.sessionModel();
+      const changed = live !== '' && live !== this.lastSessionModel;
+      this.lastSessionModel = live;
+      const id = this.projectId();
+      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
     });
   }
 
@@ -426,6 +437,7 @@ export class ModelSelectorComponent {
 
   /**
    * Loads the persistable-level list and the current launch-effort pin for the project.
+   * Drops the result if the project changed while the fetch was in flight.
    * @param projectId - Active project id to read the pin for.
    */
   private async loadEffortState(projectId: string): Promise<void> {
@@ -434,6 +446,7 @@ export class ModelSelectorComponent {
         this.tauri.invoke<string[]>('list_effort_levels'),
         this.tauri.invoke<string | null>('get_effort_pin', { projectId }),
       ]);
+      if (this.projectId() !== projectId) return;
       this.effortLevels.set(levels);
       this.currentEffortPin.set(pin);
       this.pendingEffortPin.set(null);
