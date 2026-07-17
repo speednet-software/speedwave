@@ -1732,23 +1732,39 @@ EOF
     [ "${#lines[@]}" -eq 1 ]
 }
 
+@test "skips the network add when the official marketplace is already registered on disk" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_recording_all_plugin_calls
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo '{"claude-plugins-official":{"source":{"source":"github"}}}' \
+        > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/plugin-calls.log"
+    [ "${lines[0]}" = "install superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+}
+
+@test "a registry listing only other marketplaces does not skip the official add" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_recording_all_plugin_calls
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo '{"some-other-mp":{}}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/plugin-calls.log"
+    [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
+    [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
+}
+
 @test "skips marketplace bootstrap when every bundled plugin is already installed" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
-    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]'
-    exit 0
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ]; then
-    echo "marketplace \$3" >> "$TEST_HOME/plugin-calls.log"; exit 0
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "install \$3" >> "$TEST_HOME/plugin-calls.log"; exit 0
-fi
-echo "${PINNED_VERSION} (Claude Code)"
-EOF
-    chmod +x "$STUBS_DIR/claude"
+    _stub_claude_recording_all_plugin_calls
+    sed -i.bak 's|\[\]|[{"id":"superpowers@claude-plugins-official","enabled":true}]|' "$STUBS_DIR/claude"
     export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
@@ -1757,18 +1773,8 @@ EOF
 }
 
 @test "a failed marketplace bootstrap is non-fatal, logged, and installs still run" {
-    cat > "$STUBS_DIR/claude" << EOF
-#!/bin/bash
-if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then echo '[]'; exit 0; fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ] && [ "\$3" = "add" ]; then
-    echo "network unreachable" >&2; exit 1
-fi
-if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
-    echo "install \$3" >> "$TEST_HOME/plugin-calls.log"; exit 0
-fi
-echo "${PINNED_VERSION} (Claude Code)"
-EOF
-    chmod +x "$STUBS_DIR/claude"
+    _stub_claude_recording_all_plugin_calls
+    sed -i.bak 's|echo "marketplace-add .*|echo "network unreachable" >\&2; exit 1|' "$STUBS_DIR/claude"
     export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true

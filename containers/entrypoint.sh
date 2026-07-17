@@ -307,7 +307,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
-        _mp_bootstrapped=""
+        _mp_add_attempted=""
         # The CLI can print NOTHING with exit 0 on a cold start; blank means unknown,
         # never "everything installed" (jq 1.6's -e exits 0 on empty input).
         _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
@@ -331,9 +331,12 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             fi
             # CC registers the official marketplace only on interactive TTY startup —
             # headless/CLI runs never do, so a fresh HOME must add it before installing.
-            if [ "${_mp}" = "claude-plugins-official" ] && [ -z "${_mp_bootstrapped}" ]; then
-                _mp_bootstrapped=1
-                if ! _err="$(timeout 150 claude plugin marketplace add anthropics/claude-plugins-official 2>&1 >/dev/null)"; then
+            if [ "${_mp}" = "claude-plugins-official" ] && [ -z "${_mp_add_attempted}" ] \
+                && ! jq -e --arg mp "${_mp}" 'has($mp)' "${HOME}/.claude/plugins/known_marketplaces.json" >/dev/null 2>&1; then
+                # One network attempt per start (deliberate latency bound) — once the
+                # registration is durable, the jq check above skips the subprocess.
+                _mp_add_attempted=1
+                if ! _err="$(timeout 150 claude plugin marketplace add "anthropics/${_mp}" 2>&1 >/dev/null)"; then
                     echo "WARNING: failed to add plugin marketplace ${_mp}: ${_err} (continuing)" >&2
                     _diag WARN CONFIG "marketplace add ${_mp}: ${_err}"
                 fi
@@ -352,7 +355,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             rm -f "${_new_marker}"
         fi
     fi
-    unset _mp _plugin _installed _err _all_recorded _new_marker _match _mp_bootstrapped
+    unset _mp _plugin _installed _err _all_recorded _new_marker _match _mp_add_attempted
 fi
 unset _bundled_marker
 
