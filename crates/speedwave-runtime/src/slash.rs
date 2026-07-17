@@ -237,9 +237,8 @@ pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }
 
-/// Matches the bare control-command shape `^/(model|effort)\s+\S+$` on trimmed `text`.
-/// Returns `(command, argument)`; the SSOT every control-chip rendering rule
-/// (live chunk emission in chat.rs, history reconstruction in history.rs) calls.
+/// Matches `^/(model|effort)\s+\S+$` on trimmed `text`, returning `(command, argument)`.
+/// SSOT for control-chip shape, called by both live emission and history reconstruction.
 pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim();
     let (command, argument) = trimmed

@@ -93,11 +93,8 @@ pub enum StreamChunk {
     /// Commits a UUID onto the most recent user entry (ADR-046) on the first
     /// text-bearing user message (not a tool_result wrapper).
     UserMessageCommit { uuid: String },
-    /// A user control command (`/model <id>` or `/effort <level>`), recognized
-    /// by shape at send time and rendered as a self-describing chip instead of
-    /// a plain user bubble. `uuid` is `None` at emission — the wire carries no
-    /// user-echo event for a tool-free session; a later user-type event with a
-    /// matching `message.id` may still commit a uuid via `UserMessageCommit`.
+    /// A `/model <id>` or `/effort <level>` command, rendered as a chip
+    /// instead of a plain user bubble. `uuid` is `None` at emission (no wire echo).
     ControlChip {
         command: String,
         argument: String,
@@ -395,9 +392,8 @@ pub struct StreamParser {
     /// Unhandled top-level stream-json `type` values, each logged once per
     /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
     seen_unknown_types: std::collections::HashSet<String>,
-    /// One-shot: suppresses the next assistant chunk whose `message.model ==
-    /// "<synthetic>"` (the `/model`/`/effort` confirmation), armed by a
-    /// chipped send. Cleared by a fresh `system/init` or any assistant line.
+    /// One-shot: armed by a chipped send, cleared by the next assistant or
+    /// `system/init` line — never leaks past one turn.
     pending_synthetic_confirmation_suppression: bool,
 }
 
@@ -1431,10 +1427,8 @@ pub struct ChatSession {
     /// Set by `stop()` so the reader thread stays silent on a deliberate EOF
     /// instead of reporting a crash. Reset on each fresh spawn.
     stopping: Arc<std::sync::atomic::AtomicBool>,
-    /// Set when the just-sent message was control-shaped and still expects
-    /// its paired synthetic assistant confirmation (model `"<synthetic>"`) to
-    /// arrive and be suppressed exactly once. Consumed by the reader thread,
-    /// which copies-and-resets it into the local `StreamParser`.
+    /// Set on a chipped send; the reader thread consumes it into the local
+    /// `StreamParser`'s one-shot suppression flag.
     pending_synthetic_confirmation_suppression: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1840,13 +1834,8 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Send a user message to Claude (write JSON to stdin) in stream-json input
-    /// format. Errors if the subprocess has exited (broken pipe). A
-    /// control-shaped message (`/model <id>`, `/effort <level>`) additionally
-    /// emits a `ControlChip` chunk and arms the reader thread's one-shot
-    /// suppression of the paired synthetic confirmation — the wire carries no
-    /// user-echo event to detect this from, so the send path (which already
-    /// knows the outgoing text) is the only place this can happen.
+    /// Send a user message to Claude (write JSON to stdin). Errors if the
+    /// subprocess has exited. A control-shaped message emits a `ControlChip` too.
     pub fn send_message(
         &mut self,
         app_handle: &tauri::AppHandle,
@@ -1921,11 +1910,8 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Test-only stdin stand-in: wraps a real OS pipe write-end as a
-    /// `ChildStdin` and a trivial blocked child as `self.child`, so
-    /// `send_message_with_emit`'s liveness/stdin guards pass without a real
-    /// spawned Claude session. `buf` seeds a background drain thread that
-    /// reads everything written to the pipe (kept open for the pipe's life).
+    /// Test-only stdin stand-in: a real pipe wrapped as `ChildStdin` plus a
+    /// blocked child, so the send guards pass without a real Claude session.
     #[cfg(test)]
     fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
         let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
@@ -2234,9 +2220,8 @@ fn drain_queued_message(
     log::debug!("queue drained: {} bytes for session", drained_text.len());
 }
 
-/// Spawns a trivial child that blocks reading its own stdin until killed, so
-/// `ChatSession::set_test_stdin_sink` can populate `self.child` with a real,
-/// live `Child` (test-only — never a Claude session).
+/// A trivial child blocked reading its own stdin, giving `set_test_stdin_sink`
+/// a real, live `Child` (test-only — never a Claude session).
 #[cfg(test)]
 fn spawn_test_blocked_child() -> Child {
     #[cfg(unix)]
