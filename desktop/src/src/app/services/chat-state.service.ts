@@ -140,9 +140,11 @@ export class ChatStateService {
   }
 
   /** Sends the queued override as a normal `/model` message and clears it (fires at most once per queued value). */
-  private sendPendingOverrideAfterInit(): void {
+  private flushPendingModelOverride(): void {
     const pending = this._pendingModelOverride();
-    if (!pending) return;
+    // Never consume into sendMessage's silent isStreaming drop: keep the queue
+    // and retry on the next flush point (SystemInit / turn end) instead.
+    if (!pending || this.isStreaming) return;
     this._pendingModelOverride.set(null);
     void this.sendMessage(`/model ${pending}`);
   }
@@ -175,7 +177,9 @@ export class ChatStateService {
       }
     }
     if (this.hasLiveSession()) {
-      await this.sendMessage(`/model ${sel.wireId}`);
+      // Mid-turn sendMessage silently drops on isStreaming; queue for turn end.
+      if (this.isStreaming) this.setPendingModelOverride(sel.wireId);
+      else await this.sendMessage(`/model ${sel.wireId}`);
     } else if (isAnthropic) {
       this.setPendingModelOverride(sel.wireId);
     }
@@ -795,7 +799,7 @@ export class ChatStateService {
           this.seedSessionId(chunk.data.session_id);
           void this.flushDeferredQueue(chunk.data.session_id);
         }
-        this.sendPendingOverrideAfterInit();
+        this.flushPendingModelOverride();
         break;
 
       case 'ControlChip': {
@@ -893,6 +897,8 @@ export class ChatStateService {
           this._lastKnownSessionId = chunk.data.session_id;
           void this.flushDeferredQueue(chunk.data.session_id);
         }
+        // A pick made mid-turn was queued; the turn just ended, so send it now.
+        this.flushPendingModelOverride();
         if (contextUsage) {
           this._lastContextTokens = contextTokensFrom(contextUsage);
         }

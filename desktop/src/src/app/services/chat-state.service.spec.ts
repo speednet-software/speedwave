@@ -1384,6 +1384,60 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
+    it('a queued override is NOT consumed by a SystemInit arriving mid-stream; it fires after the turn ends', async () => {
+      // Field repro: session restart mid-send fires SystemInit while isStreaming
+      // is true; the old code consumed the queue into sendMessage's silent drop.
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.setPendingModelOverride('claude-haiku-4-5');
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-restart' },
+      });
+      await Promise.resolve();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+      let modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeUndefined();
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-restart' },
+      } as never);
+      await Promise.resolve();
+      modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeDefined();
+      expect(JSON.stringify(modelSend?.[1])).toContain('/model claude-haiku-4-5');
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('applyModelSelection during a streaming turn queues the switch instead of silently dropping it', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      const modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeUndefined();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+    });
+
     it('a queued override survives resetForNewConversation and fires on the fresh SystemInit', async () => {
       // The queue exists precisely to outlive a same-project fresh-session start
       // (pick with no live session -> type a message -> startFreshSession).
