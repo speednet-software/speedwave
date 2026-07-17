@@ -1230,6 +1230,27 @@ pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     })
 }
 
+/// Computes the `/model <wire_id>` command to soft-impose at session start,
+/// or `None` when the observed model already matches (or the provider is
+/// Anthropic, which never soft-imposes - session-only switches there).
+fn soft_impose_message(
+    kind: speedwave_runtime::config::LlmProviderKind,
+    entry_id: &str,
+    entry_model: Option<&str>,
+    observed_model: &str,
+) -> Option<String> {
+    if kind.is_anthropic() {
+        return None;
+    }
+    let model = entry_model?;
+    let expected = speedwave_runtime::model_id::wire_model_id(kind, entry_id, model);
+    let observed = speedwave_runtime::model_id::normalize_observed(observed_model, entry_id);
+    if observed == speedwave_runtime::model_id::normalize_observed(&expected, entry_id) {
+        return None;
+    }
+    Some(format!("/model {expected}"))
+}
+
 /// Auto-approve response for non-AskUserQuestion tools.
 pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
     serde_json::json!({
@@ -2962,6 +2983,52 @@ mod tests {
     fn max_wire_bytes_is_1_mib() {
         // ADR-065: the cap is sized for text + paste-path refs only.
         assert_eq!(MAX_WIRE_BYTES, 1024 * 1024);
+    }
+
+    // ── soft-impose mismatch detection ───────────────────────────────
+
+    #[test]
+    fn soft_impose_message_returns_command_on_mismatch() {
+        let msg = soft_impose_message(
+            speedwave_runtime::config::LlmProviderKind::Local,
+            "local",
+            Some("llama-3.1-70b"),
+            "wrong-observed-model",
+        );
+        assert_eq!(msg.as_deref(), Some("/model local/llama-3.1-70b"));
+    }
+
+    #[test]
+    fn soft_impose_message_returns_none_on_match() {
+        let msg = soft_impose_message(
+            speedwave_runtime::config::LlmProviderKind::Local,
+            "local",
+            Some("llama-3.1-70b"),
+            "local/llama-3.1-70b",
+        );
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn soft_impose_message_returns_none_for_anthropic_kind() {
+        let msg = soft_impose_message(
+            speedwave_runtime::config::LlmProviderKind::AnthropicOauth,
+            "anthropic",
+            Some("claude-sonnet-5"),
+            "some-other-observed",
+        );
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn soft_impose_message_returns_none_when_entry_model_absent() {
+        let msg = soft_impose_message(
+            speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            "openrouter",
+            None,
+            "anthropic/claude-sonnet-5",
+        );
+        assert_eq!(msg, None);
     }
 
     // ── StreamParser: text delta ─────────────────────────────────────
