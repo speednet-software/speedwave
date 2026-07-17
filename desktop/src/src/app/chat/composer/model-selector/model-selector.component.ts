@@ -210,6 +210,9 @@ export class ModelSelectorComponent {
   /** Optimistic badge value after a live anthropic pick (no config write to re-read it from). */
   private readonly lastPicked = signal('');
 
+  /** CC-parity pre-session hint: settings.json model pin, else the newest transcript's model. */
+  private readonly modelHint = signal('');
+
   /** Anthropic-only: `effortLevel` is a Claude Code settings.json concept, not a provider one. */
   protected readonly showEffortControl = computed(() => {
     const summary = this.summary();
@@ -230,7 +233,8 @@ export class ModelSelectorComponent {
 
   /**
    * Badge text, never empty: config model (normalized) -> optimistic live pick ->
-   * observed session model -> 'default' (anthropic license-default pre-session).
+   * observed session model -> CC's own pin / last-transcript model -> 'default'
+   * (only a virgin project, where CC itself resolves the unknowable license default).
    */
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
@@ -239,6 +243,8 @@ export class ModelSelectorComponent {
     if (picked) return picked;
     const live = this.sessionModel();
     if (live) return s ? normalizeObserved(live, s.provider_id) : live;
+    const hint = this.modelHint();
+    if (hint) return s ? normalizeObserved(hint, s.provider_id) : hint;
     return 'default';
   });
 
@@ -392,9 +398,29 @@ export class ModelSelectorComponent {
       this.summary.set(summary);
       this.summaryProjectId = projectId;
       this.lastPicked.set('');
+      if (!summary.model) {
+        void this.loadModelHint(projectId);
+      } else {
+        this.modelHint.set('');
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: get_active_provider_summary failed: ${msg}`);
+    }
+  }
+
+  /**
+   * Loads the pre-session model hint; drops the result if the project changed mid-flight.
+   * @param projectId - Project id the hint is fetched for.
+   */
+  private async loadModelHint(projectId: string): Promise<void> {
+    try {
+      const hint = await this.tauri.invoke<string | null>('get_model_hint', { projectId });
+      if (this.projectId() !== projectId) return;
+      this.modelHint.set(hint ?? '');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`model-selector: get_model_hint failed: ${msg}`);
     }
   }
 

@@ -758,6 +758,53 @@ pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Resul
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
 
+/// Model of the project's most recent transcript (chronological tracker over
+/// the newest `.jsonl`); the composer badge's pre-session hint.
+pub fn last_session_model(project: &str) -> Option<String> {
+    last_session_model_impl(consts::data_dir(), project)
+}
+
+fn last_session_model_impl(data_dir: &Path, project: &str) -> Option<String> {
+    let dir = sessions_dir_impl(data_dir, project);
+    let newest = fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .max_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })?;
+    let file = fs::File::open(newest.path()).ok()?;
+    let mut tracker = crate::session_model::SessionModelTracker::default();
+    let mut init_model: Option<String> = None;
+    for line in BufReader::new(file)
+        .lines()
+        .take(10_000)
+        .map_while(Result::ok)
+    {
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match parsed["type"].as_str().unwrap_or("") {
+            "system" if parsed["subtype"].as_str() == Some("init") => {
+                if let Some(model) = parsed["model"].as_str() {
+                    init_model = Some(model.to_string());
+                    tracker.observe_init(model);
+                }
+            }
+            "assistant" => {
+                if let Some(model) = parsed["message"]["model"].as_str() {
+                    tracker.observe_assistant(model);
+                }
+            }
+            _ => {}
+        }
+    }
+    tracker.resolve().map(str::to_string).or(init_model)
+}
+
 fn compute_resume_snapshot_impl(
     data_dir: &Path,
     project: &str,
@@ -2987,6 +3034,68 @@ mod tests {
         assert!(
             ts.contains("type: 'chip'"),
             "TS normalizeHistoryBlocks must map control_chip to the chip view-model (type: 'chip')"
+        );
+    }
+
+    // ── last_session_model ─────────────────────────────────────────
+
+    #[test]
+    fn last_session_model_resolves_the_chronologically_last_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "s1",
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#,
+                r#"{"type":"assistant","message":{"model":"claude-fable-5"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj"),
+            Some("claude-fable-5".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_falls_back_to_the_init_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "s1",
+            &[r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#],
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj"),
+            Some("claude-opus-4-8".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_none_for_missing_dir_or_empty_transcripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(last_session_model_impl(tmp.path(), "proj"), None);
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(&dir, "s1", &[r#"{"type":"result"}"#]);
+        assert_eq!(last_session_model_impl(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn last_session_model_skips_the_synthetic_control_reply_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "s1",
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+                r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj"),
+            Some("claude-fable-5".to_string())
         );
     }
 }

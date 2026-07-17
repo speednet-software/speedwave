@@ -574,11 +574,15 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     } as AnthropicModel,
   ];
 
+  let modelHint: string | null = null;
+
   beforeEach(async () => {
+    modelHint = null;
     tauriInvoke = vi.fn(async (cmd: string) => {
       if (cmd === 'get_active_provider_summary') return configlessSummary;
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
+      if (cmd === 'get_model_hint') return modelHint;
       if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
       throw new Error(`unexpected invoke: ${cmd}`);
     });
@@ -606,10 +610,31 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(badgeText()).toBe('claude-fable-5');
   });
 
-  it('shows "default" before any session when the config carries no model', async () => {
+  it('shows "default" only when neither a session, a pin, nor history knows the model', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     expect(badgeText()).toBe('default');
+  });
+
+  it('shows the CC settings-pin/last-transcript hint before any session', async () => {
+    modelHint = 'claude-fable-5[1m]';
+    fixture.componentRef.setInput('projectId', 'proj-2');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    // The hint fetch is fired from inside loadSummary; flush its microtask chain.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-fable-5[1m]');
+  });
+
+  it('prefers the live session model over the pre-session hint', async () => {
+    modelHint = 'claude-fable-5[1m]';
+    fixture.componentRef.setInput('projectId', 'proj-2');
+    fixture.componentRef.setInput('sessionModel', 'claude-opus-4-8');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-opus-4-8');
   });
 
   it('shows the picked catalog id optimistically after a live anthropic selection', async () => {

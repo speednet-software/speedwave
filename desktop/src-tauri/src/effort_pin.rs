@@ -15,12 +15,22 @@ pub const PERSISTABLE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh
 /// Missing file or missing/non-string key both tolerate to `None`; a malformed
 /// (non-JSON-object) file also tolerates to `None` rather than erroring the caller.
 pub fn get_effort_pin(data_dir: &Path, project: &str) -> Option<String> {
+    read_settings_string_key(data_dir, project, "effortLevel")
+}
+
+/// Reads Claude Code's own saved default model (`model` key, written by an
+/// interactive `/model` save) from the project's claude-home `settings.json`.
+pub fn get_model_pin(data_dir: &Path, project: &str) -> Option<String> {
+    read_settings_string_key(data_dir, project, "model")
+}
+
+fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option<String> {
     let path = settings_path(data_dir, project);
     let contents = fs_perms::read_regular_file_no_follow(&path)
         .ok()
         .flatten()?;
     let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    value.get("effortLevel")?.as_str().map(str::to_string)
+    value.get(key)?.as_str().map(str::to_string)
 }
 
 /// Writes `effortLevel` into the project's claude-home `settings.json`,
@@ -120,6 +130,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(tmp.path(), "proj", r#"{"effortLevel":5}"#);
         assert_eq!(get_effort_pin(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn get_model_pin_reads_the_model_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-fable-5[1m]"}"#);
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj"),
+            Some("claude-fable-5[1m]".to_string())
+        );
+    }
+
+    #[test]
+    fn get_model_pin_tolerates_missing_file_and_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+        write_settings(tmp.path(), "proj", r#"{"effortLevel":"high"}"#);
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
     }
 
     #[test]
