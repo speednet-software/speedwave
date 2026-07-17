@@ -1163,14 +1163,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     () => this.computeFormSnapshot() !== this.loadedFormSnapshot()
   );
 
-  /** Save is allowed only when the active non-anthropic provider has a model AND the user has actually changed something since load/last save. */
+  /** Save is allowed only when the active non-anthropic provider is routable AND the user has actually changed something since load/last save. */
   protected readonly canSave = computed<boolean>(() => {
     if (!this.isDirty()) return false;
     const target = this.effectiveTarget();
     // Anthropic needs no model but DOES need credentials (oauth or api key).
     if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
-    if (extra) return !!extra.model.trim();
+    // A keyed remote row saves without a model — the backend auto-defaults it
+    // at save time (ADR-082 §8), so the key is the real requirement.
+    if (extra) return !!extra.model.trim() || extra.hasKey || !!extra.keyInput.trim();
     return this.localModelSatisfied();
   });
 
@@ -1277,8 +1279,15 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       return;
     }
     const activeExtra = this.extraProviders().find((p) => p.id === this.effectiveTarget());
-    if (activeExtra && !activeExtra.model.trim()) {
-      this.errorOccurred.emit(`Provider '${activeExtra.id}' requires a model name`);
+    // A model-less remote row is fine (backend auto-defaults, ADR-082 §8) but a
+    // keyless one can never route — reject with the actionable requirement.
+    if (
+      activeExtra &&
+      !activeExtra.model.trim() &&
+      !activeExtra.hasKey &&
+      !activeExtra.keyInput.trim()
+    ) {
+      this.errorOccurred.emit(`Provider '${activeExtra.id}' requires an API key`);
       return;
     }
     this.saving.set(true);

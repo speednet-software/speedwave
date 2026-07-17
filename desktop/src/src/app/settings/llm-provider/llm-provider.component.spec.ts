@@ -2368,7 +2368,7 @@ describe('LlmProviderComponent', () => {
     expect(or['context_tokens']).toBe(262144);
   });
 
-  it('save rejects an active remote provider without a model', async () => {
+  it('save rejects an active remote provider with neither model nor key', async () => {
     let invoked = false;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') invoked = true;
@@ -2382,7 +2382,31 @@ describe('LlmProviderComponent', () => {
     await component.saveConfig();
 
     expect(invoked).toBe(false);
-    expect(emitted).toContain('requires a model name');
+    expect(emitted).toContain('requires an API key');
+  });
+
+  it('save accepts a keyed remote provider without a model (backend auto-defaults, ADR-082 §8)', async () => {
+    let captured: Record<string, unknown> | null = null;
+    mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
+      return undefined;
+    };
+    let emitted = '';
+    component.errorOccurred.subscribe((msg: string) => (emitted = msg));
+
+    const row = component.extraProviders()[0];
+    component.toggleExtraExpanded(row);
+    component.selectExtraProvider(row);
+    component.onExtraKeyInput(row, 'sk-or-fresh-key');
+    fixture.detectChanges();
+    expect(component['canSave']()).toBe(true);
+    await component.saveConfig();
+
+    expect(emitted).toBe('');
+    expect(captured).not.toBeNull();
+    const providers = captured!['providers'] as Array<Record<string, unknown>>;
+    const or = providers.find((p) => p['id'] === 'openrouter')!;
+    expect(or['model'] ?? null).toBeNull();
   });
 
   it('loadConfig never adopts a foreign model under the anthropic card (F1)', async () => {
