@@ -4,6 +4,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use anyhow::Context;
 use tempfile::NamedTempFile;
 
 /// Prefix every `NamedTempFile::with_prefix_in` call in this module uses; a
@@ -498,6 +499,34 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
     file.read_to_string(&mut buf)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     Ok(Some(buf))
+}
+
+/// Runs `f` holding an exclusive `fs2` advisory lock on `lock_path`, serializing
+/// concurrent read-modify-write of a sibling file. Creates `lock_path` (owner-only,
+/// `0o600` on Unix) and its parent dir if missing. SSOT lock primitive — callers
+/// needing a per-file (not per-datadir) lock point this at a sibling `.lock`.
+pub fn with_file_lock_in<F, T>(lock_path: &Path, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    use fs2::FileExt;
+
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let lock_file = std::fs::File::create(lock_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        lock_file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("Failed to acquire lock at '{}'", lock_path.display()))?;
+    let result = f();
+    lock_file.unlock()?;
+    result
 }
 
 #[cfg(test)]

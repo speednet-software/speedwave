@@ -1695,21 +1695,7 @@ pub fn with_config_lock_in<F, T>(data_dir: &std::path::Path, f: F) -> anyhow::Re
 where
     F: FnOnce() -> anyhow::Result<T>,
 {
-    use fs2::FileExt;
-
-    let lock_path = data_dir.join("config.lock");
-
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let lock_file = std::fs::File::create(&lock_path)?;
-    lock_file
-        .lock_exclusive()
-        .with_context(|| format!("Failed to acquire config lock at '{}'", lock_path.display()))?;
-    let result = f();
-    lock_file.unlock()?;
-    result
+    crate::fs_perms::with_file_lock_in(&data_dir.join("config.lock"), f)
 }
 
 /// Runs `f` holding an exclusive lock on `~/.speedwave/config.lock`.
