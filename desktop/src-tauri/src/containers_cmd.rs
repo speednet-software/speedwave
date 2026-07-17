@@ -1280,6 +1280,70 @@ fn apply_llm_config(
     Ok(())
 }
 
+/// Narrow write-through for the composer's model selector (ADR-073 §4.3.2):
+/// mutates exactly one provider entry's `model`, never the full LLM config.
+/// Rejects Anthropic entries (session-only via wire `/model`, never persisted).
+fn apply_set_provider_model(
+    user_config: &mut config::SpeedwaveUserConfig,
+    project_id: &str,
+    provider_id: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("model must not be empty"));
+    }
+    let project = user_config
+        .find_project_mut(project_id)
+        .ok_or_else(|| anyhow::anyhow!("Project '{project_id}' not found in config"))?;
+    let llm = project
+        .claude
+        .as_mut()
+        .and_then(|c| c.llm.as_mut())
+        .ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' not in config"))?;
+    let entry = llm
+        .providers
+        .iter_mut()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' not in config"))?;
+    if entry.kind.is_anthropic() {
+        return Err(anyhow::anyhow!(
+            "'{provider_id}' is Anthropic - model changes are session-only via /model, not saved"
+        ));
+    }
+    entry.model = Some(trimmed.to_string());
+    if llm
+        .active
+        .as_ref()
+        .is_some_and(|a| a.provider_id == provider_id)
+    {
+        if let Some(active) = llm.active.as_mut() {
+            active.model = Some(trimmed.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Sets exactly one provider's model in place (composer write-through,
+/// ADR-073 §4.3.2) under the standard config lock - never the full-form
+/// `update_llm_config`. Rapid successive calls serialize through the lock;
+/// the later call's write is what persists.
+#[tauri::command]
+pub fn set_provider_model(
+    project_id: String,
+    provider_id: String,
+    model: String,
+) -> Result<(), String> {
+    log::info!("setting provider model project_id={project_id} provider_id={provider_id}");
+    config::with_config_lock(|| {
+        let mut user_config = config::load_user_config()?;
+        apply_set_provider_model(&mut user_config, &project_id, &provider_id, &model)?;
+        config::save_user_config(&user_config)?;
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
 /// Auto-defaults a `Local` provider's model via the discovery probe (mockable
 /// in tests); the production impl reuses `discover_llm_models_with_fallback`.
 #[async_trait::async_trait]
@@ -2267,6 +2331,200 @@ mod tests {
             context_tokens: None,
             has_custom_headers: false,
         }
+    }
+
+    // ── set_provider_model (narrow write-through, ADR-073 §4.3.2) ──────
+
+    fn cfg_with_providers(
+        active_provider_id: &str,
+        active_model: Option<&str>,
+        providers: Vec<speedwave_runtime::config::LlmProviderEntry>,
+    ) -> SpeedwaveUserConfig {
+        let mut cfg = make_config_with_active_project();
+        let project = cfg.find_project_mut("alpha").unwrap();
+        project.claude = Some(ClaudeOverrides {
+            env: None,
+            settings: None,
+            llm: Some(LlmConfig {
+                schema_version: Some(speedwave_runtime::config::LLM_SCHEMA_VERSION),
+                providers,
+                active: Some(speedwave_runtime::config::LlmActive {
+                    provider_id: active_provider_id.to_string(),
+                    model: active_model.map(str::to_string),
+                }),
+                ..Default::default()
+            }),
+        });
+        cfg
+    }
+
+    #[test]
+    fn apply_set_provider_model_happy_path_sets_entry_and_syncs_active() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "openrouter",
+            Some("anthropic/claude-sonnet-4-6"),
+            vec![v2_entry("openrouter", K::OpenRouter, None)],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "openrouter", "anthropic/claude-opus-4-8")
+            .unwrap();
+        let llm = cfg
+            .find_project_mut("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        let entry = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
+        assert_eq!(entry.model.as_deref(), Some("anthropic/claude-opus-4-8"));
+        assert_eq!(
+            llm.active.as_ref().unwrap().model.as_deref(),
+            Some("anthropic/claude-opus-4-8"),
+            "active pointer must follow the entry it points at"
+        );
+    }
+
+    #[test]
+    fn apply_set_provider_model_unknown_provider_id_errors() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "openrouter",
+            None,
+            vec![v2_entry("openrouter", K::OpenRouter, None)],
+        );
+        let err = apply_set_provider_model(&mut cfg, "alpha", "ghost", "some-model").unwrap_err();
+        assert!(err.to_string().contains("ghost"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_set_provider_model_rejects_anthropic_provider() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "anthropic",
+            None,
+            vec![v2_entry("anthropic", K::AnthropicOauth, None)],
+        );
+        let err = apply_set_provider_model(&mut cfg, "alpha", "anthropic", "claude-opus-4-8")
+            .unwrap_err();
+        assert!(err.to_string().contains("session-only"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_set_provider_model_rejects_empty_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "local",
+            None,
+            vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
+        );
+        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   ").unwrap_err();
+        assert!(err.to_string().contains("model"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_set_provider_model_rejects_anthropic_provider_regardless_of_model_shape() {
+        // Verifies anthropic-kind rejection: the entry.kind.is_anthropic() early
+        // return rejects ANY model value for an anthropic-kind entry, including a
+        // foreign-provider-shaped id - there is no separate foreign-model-shape
+        // guard on this path (that check lives only in validate_active_selection).
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "anthropic",
+            None,
+            vec![v2_entry("anthropic", K::AnthropicOauth, None)],
+        );
+        let err =
+            apply_set_provider_model(&mut cfg, "alpha", "anthropic", "openrouter/x").unwrap_err();
+        assert!(err.to_string().contains("session-only"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_set_provider_model_does_not_sync_active_when_pointer_targets_other_provider() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "anthropic",
+            None,
+            vec![
+                v2_entry("anthropic", K::AnthropicOauth, None),
+                v2_entry("local", K::Local, Some("http://127.0.0.1:11434")),
+            ],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "llama3.3").unwrap();
+        let llm = cfg
+            .find_project_mut("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            llm.active.as_ref().unwrap().provider_id,
+            "anthropic",
+            "active still points at anthropic, unaffected by the local entry write"
+        );
+        assert_eq!(
+            llm.providers
+                .iter()
+                .find(|p| p.id == "local")
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("llama3.3")
+        );
+    }
+
+    #[test]
+    fn apply_set_provider_model_sequential_calls_last_write_wins() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "local",
+            Some("llama3.3"),
+            vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
+        );
+        apply_set_provider_model(&mut cfg, "alpha", "local", "mixtral").unwrap();
+        apply_set_provider_model(&mut cfg, "alpha", "local", "llama4").unwrap();
+        let llm = cfg
+            .find_project_mut("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            llm.providers.iter().find(|p| p.id == "local").unwrap().model.as_deref(),
+            Some("llama4"),
+            "the later call must win, serialized the same way two rapid IPC calls serialize through with_config_lock"
+        );
+        assert_eq!(
+            llm.active.as_ref().unwrap().model.as_deref(),
+            Some("llama4")
+        );
+    }
+
+    #[test]
+    fn set_provider_model_command_uses_lock_and_saves() {
+        // Structural: the Tauri wrapper must go through the same lock/save
+        // path as every other config writer (set_llm_provider_key pattern).
+        let src = include_str!("containers_cmd.rs");
+        let start = src
+            .find("pub fn set_provider_model(")
+            .expect("set_provider_model command must exist");
+        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
+        assert!(
+            body.contains("with_config_lock"),
+            "must use the config lock"
+        );
+        assert!(body.contains("save_user_config"), "must persist");
+        assert!(
+            body.contains("apply_set_provider_model"),
+            "must delegate to the pure helper"
+        );
     }
 
     #[test]

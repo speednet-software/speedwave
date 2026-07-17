@@ -97,4 +97,20 @@ export class AnthropicModelsService {
     this.cache = null;
     this.inflight = null;
   }
+
+  /**
+   * Narrow write-through for the composer's model selector: mutates exactly
+   * one provider's model under the config lock (`set_provider_model`), never
+   * the full-form settings save. Rejected server-side for Anthropic entries.
+   * @param projectId - Project this write applies to.
+   * @param providerId - `LlmProviderEntry.id` to update.
+   * @param model - New model id (wire-shaped per the id triad).
+   */
+  async setProviderModel(projectId: string, providerId: string, model: string): Promise<void> {
+    await this.tauri.invoke<void>('set_provider_model', {
+      projectId,
+      providerId,
+      model,
+    });
+  }
 }

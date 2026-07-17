@@ -295,4 +295,32 @@ describe('AnthropicModelsService', () => {
       expect(invokeCount).toBe(2);
     });
   });
+
+  describe('setProviderModel()', () => {
+    it('invokes set_provider_model with the given project, provider and model', async () => {
+      let received: unknown;
+      mockTauri.invokeHandler = async (cmd: string, args?: unknown) => {
+        if (cmd === 'set_provider_model') {
+          received = args;
+          return undefined;
+        }
+        return undefined;
+      };
+      await service.setProviderModel('alpha', 'openrouter', 'anthropic/claude-opus-4-8');
+      expect(received).toEqual({
+        projectId: 'alpha',
+        providerId: 'openrouter',
+        model: 'anthropic/claude-opus-4-8',
+      });
+    });
+
+    it('propagates a backend rejection to the caller', async () => {
+      mockTauri.invokeHandler = async () => {
+        throw new Error("'anthropic' is Anthropic - model changes are session-only");
+      };
+      await expect(
+        service.setProviderModel('alpha', 'anthropic', 'claude-opus-4-8')
+      ).rejects.toThrow('session-only');
+    });
+  });
 });
