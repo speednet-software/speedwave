@@ -1817,6 +1817,42 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('chip block persistence round-trip', () => {
+    it('messageBlocksToState round-trips a control-chip block instead of dropping it', () => {
+      const block = { type: 'chip' as const, command: 'model', argument: 'claude-sonnet-5' };
+      const state = messageBlocksToState([block]);
+      expect(state).toEqual([{ kind: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
+      const recovered = stateBlocksToMessageBlocks(state);
+      expect(recovered).toEqual([block]);
+    });
+
+    it('a ControlChip message projected through the full state tree keeps its chip block', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'effort', argument: 'high' }],
+            timestamp: 1,
+            uuid: 'msg_chip_1',
+            uuid_status: 'Committed',
+          },
+        ],
+      });
+      // _setState does not rebuild the tree — drive a chunk to trigger notifyChange().
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: '' } });
+
+      const projectedEntry = service.state().entries[0];
+      expect(projectedEntry.blocks).toEqual([
+        { kind: 'chip', command: 'effort', argument: 'high' },
+      ]);
+
+      const projectedMessage = service.messagesFromState()[0];
+      expect(projectedMessage.blocks).toEqual([
+        { type: 'chip', command: 'effort', argument: 'high' },
+      ]);
+    });
+  });
+
   describe('stateBlocksToMessageBlocks unknown-kind handling (ADR-042 drift guard)', () => {
     it('renders a placeholder error block instead of silently dropping an unknown kind', () => {
       // Simulate a new Rust MessageBlock variant the TS union does not yet know.
@@ -2685,6 +2721,91 @@ describe('ChatStateService', () => {
       // The user entry immediately before the last assistant is a chip; the picker
       // stops at it rather than proposing a command as a retry target.
       expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('retryEnabled signal (state-tree path) stays false when a chip sits directly before the last assistant', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+      // _setState does not rebuild the tree — drive a chunk to trigger notifyChange()
+      // so `retryEnabled` (which reads the projected state tree, not legacy fields)
+      // observes the chip. Before the fix, the chip block was dropped to `[]` by
+      // `messageBlocksToState`, so this guard could never see it via this signal.
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'ok', utilization: null, resets_at: null },
+      });
+
+      expect(service.retryEnabled()).toBe(false);
+    });
+
+    it('retryEnabled signal (state-tree path) stays true when the anchor is a real question, chip trailing', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'real question' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'effort', argument: 'high' }],
+            timestamp: 3,
+            uuid: 'msg_user_2',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'ok', utilization: null, resets_at: null },
+      });
+
+      expect(service.retryEnabled()).toBe(true);
     });
   });
 

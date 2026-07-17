@@ -84,7 +84,9 @@ export type MessageBlockState =
       answers: ReadonlyArray<string | null>;
     }
   | { kind: 'error'; content: string }
-  | { kind: 'image'; media_type: string; alt: string | null };
+  | { kind: 'image'; media_type: string; alt: string | null }
+  /** Rendered control-message chip (`/model`/`/effort`); no Rust counterpart — TS-only, like `chat.ts::MessageBlock`'s `chip` variant. */
+  | { kind: 'chip'; command: string; argument: string };
 
 /** One entry in the conversation — user or assistant. */
 export interface ConversationEntryState {

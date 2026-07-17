@@ -1507,8 +1507,8 @@ function findRetryAnchorIn(
     role: 'user' | 'assistant';
     uuid?: string | null;
     uuid_status?: string;
-    // `type` is the live-path `MessageBlock` tag; `kind` lets the state-tree
-    // caller (`MessageBlockState`, which never carries a chip) satisfy the shape.
+    // `type` is the live-path `MessageBlock` tag; `kind` is the state-tree
+    // `MessageBlockState` tag — both carry a chip block, so both are checked.
     blocks?: readonly { type?: string; kind?: string }[];
   }[],
   committedTag: string
@@ -1530,7 +1530,8 @@ function findRetryAnchorIn(
     if (m.uuid_status !== undefined && m.uuid_status !== committedTag) return null;
     // A rendered `/model`/`/effort` chip keeps its transcript uuid but must never
     // be a retry target — replaying it would resend a command, not a question (spec 4.4).
-    if (m.blocks?.[0]?.type === 'chip') return null;
+    const firstBlock = m.blocks?.[0];
+    if (firstBlock?.type === 'chip' || firstBlock?.kind === 'chip') return null;
     return { userUuid: m.uuid, lastAssistantIdx, userIdx: i };
   }
   return null;
@@ -1775,6 +1776,9 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
       case 'image':
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
+      case 'chip':
+        out.push({ type: 'chip', command: b.command, argument: b.argument });
+        break;
       default: {
         // Unknown Rust MessageBlock variant with no TS arm (ADR-042 drift).
         const unknownKind = (b as { kind: string }).kind;
@@ -1842,6 +1846,9 @@ export function messageBlocksToState(blocks: readonly MessageBlock[]): MessageBl
         break;
       case 'permission_prompt':
         // In-flight UI affordance; never persisted to the state-tree.
+        break;
+      case 'chip':
+        out.push({ kind: 'chip', command: b.command, argument: b.argument });
         break;
     }
   }
