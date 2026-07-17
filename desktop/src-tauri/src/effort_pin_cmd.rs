@@ -37,14 +37,15 @@ pub(crate) fn list_effort_levels() -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// CC-parity model hint for the composer badge: the settings.json `model` pin
-/// (interactive `/model` save), else the newest transcript's resolved model.
+/// Anthropic-badge hint: settings `model` pin, else the newest transcript's start
+/// model; only `claude-*` shapes - a foreign provider's transcript must not poison it.
 #[tauri::command]
 pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
     Ok(
         crate::effort_pin::get_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
-            .or_else(|| crate::history::last_session_model(&project_name)),
+            .or_else(|| crate::history::last_session_model(&project_name))
+            .filter(|m| m.starts_with("claude-")),
     )
 }
 
@@ -79,6 +80,17 @@ mod tests {
     fn get_model_hint_rejects_invalid_project() {
         let res = get_model_hint(String::new());
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn model_hint_claude_filter_covers_every_catalog_id() {
+        for m in speedwave_runtime::defaults::ANTHROPIC_MODELS {
+            assert!(
+                m.id.starts_with("claude-"),
+                "get_model_hint's claude- filter would drop catalog id {}",
+                m.id
+            );
+        }
     }
 
     #[test]

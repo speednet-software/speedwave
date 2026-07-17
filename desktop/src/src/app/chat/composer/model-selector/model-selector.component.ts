@@ -44,6 +44,7 @@ export interface ModelSelection {
   selector: 'app-model-selector',
   imports: [FormsModule, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { '(document:keydown.escape)': 'onEscape()' },
   template: `
     <div class="relative inline-flex items-center gap-2">
       <button
@@ -62,6 +63,14 @@ export interface ModelSelection {
         }}</span>
       }
       @if (open()) {
+        <button
+          type="button"
+          data-testid="model-selector-backdrop"
+          aria-label="Close model list"
+          tabindex="-1"
+          class="fixed inset-0 z-30 cursor-default"
+          (click)="open.set(false)"
+        ></button>
         <div
           class="absolute bottom-full left-0 z-40 mb-2 w-80 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
           role="dialog"
@@ -282,6 +291,11 @@ export class ModelSelectorComponent {
   /** Resolves once the current option fetch settles (test synchronization). */
   whenOptionsSettled(): Promise<void> {
     return this.optionsFetch;
+  }
+
+  /** Escape closes the combobox, matching the app's popover conventions. */
+  protected onEscape(): void {
+    if (this.open()) this.open.set(false);
   }
 
   /**

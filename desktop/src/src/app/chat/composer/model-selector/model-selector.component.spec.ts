@@ -468,6 +468,33 @@ describe('ModelSelectorComponent', () => {
     expect(emitted).toEqual(['low']);
   });
 
+  it('closes the combobox on a backdrop click and on Escape', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const badge = () =>
+      fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]')).nativeElement;
+    const search = () =>
+      fixture.nativeElement.querySelector('[data-testid="model-selector-search"]');
+
+    badge().click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(search()).toBeTruthy();
+    (
+      fixture.nativeElement.querySelector('[data-testid="model-selector-backdrop"]') as HTMLElement
+    ).click();
+    fixture.detectChanges();
+    expect(search()).toBeFalsy();
+
+    badge().click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(search()).toBeTruthy();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    fixture.detectChanges();
+    expect(search()).toBeFalsy();
+  });
+
   it('re-fetches the effort pin when a new session starts', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
