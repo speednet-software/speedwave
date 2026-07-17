@@ -16,6 +16,7 @@ static START_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn start_session_inner(
     project: &str,
     resume_session_id: Option<&str>,
+    model_override: Option<&str>,
     session_arc: SharedChatSession,
     oauth_arc: SharedOauth,
     app_handle: tauri::AppHandle,
@@ -64,7 +65,7 @@ fn start_session_inner(
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     let result = session
-        .start(app_handle, resume_session_id)
+        .start(app_handle, resume_session_id, model_override)
         .map_err(|e| e.to_string());
     log::info!("session.start result={result:?}");
     result
@@ -73,6 +74,7 @@ fn start_session_inner(
 #[tauri::command]
 pub(crate) async fn start_chat(
     project: String,
+    model_override: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SharedChatSession>,
     oauth: tauri::State<'_, SharedOauth>,
@@ -82,7 +84,14 @@ pub(crate) async fn start_chat(
     let session_arc = state.inner().clone();
     let oauth_arc = oauth.inner().clone();
     tokio::task::spawn_blocking(move || {
-        start_session_inner(&project, None, session_arc, oauth_arc, app_handle)
+        start_session_inner(
+            &project,
+            None,
+            model_override.as_deref(),
+            session_arc,
+            oauth_arc,
+            app_handle,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -176,6 +185,7 @@ pub(crate) async fn resume_conversation(
         start_session_inner(
             &project,
             Some(&session_id),
+            None,
             session_arc,
             oauth_arc,
             app_handle,

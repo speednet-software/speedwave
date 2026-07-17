@@ -69,6 +69,19 @@ impl AnthropicModelInfo {
     }
 }
 
+/// True when `id` is a composer-selectable Anthropic id: a selectable catalog id,
+/// or its `[1m]` alias where `has_1m()`. Validation SSOT for `--model` overrides.
+pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
+    let base = id.strip_suffix("[1m]");
+    ANTHROPIC_MODELS.iter().any(|m| {
+        m.selectable
+            && match base {
+                Some(b) => m.id == b && m.has_1m(),
+                None => m.id == id,
+            }
+    })
+}
+
 // Published per-MTok rates: platform.claude.com/docs/en/pricing.
 const FABLE_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
@@ -770,6 +783,35 @@ mod tests {
                 m.has_1m(),
                 m.pricing_1m.is_some(),
                 "{}: has_1m() must mirror pricing_1m.is_some()",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn is_selectable_anthropic_model_id_accepts_every_selector_shape() {
+        for m in ANTHROPIC_MODELS.iter().filter(|m| m.selectable) {
+            assert!(is_selectable_anthropic_model_id(m.id), "{} must pass", m.id);
+            assert_eq!(
+                is_selectable_anthropic_model_id(&format!("{}[1m]", m.id)),
+                m.has_1m(),
+                "{}[1m] must pass exactly when has_1m()",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn is_selectable_anthropic_model_id_rejects_foreign_and_legacy_shapes() {
+        assert!(!is_selectable_anthropic_model_id(""));
+        assert!(!is_selectable_anthropic_model_id("gpt-4o-mini"));
+        assert!(!is_selectable_anthropic_model_id("unsloth/Qwen3.6-35B-A3B"));
+        assert!(!is_selectable_anthropic_model_id("claude-fable-5[2m]"));
+        assert!(!is_selectable_anthropic_model_id("[1m]"));
+        for m in ANTHROPIC_MODELS.iter().filter(|m| !m.selectable) {
+            assert!(
+                !is_selectable_anthropic_model_id(m.id),
+                "legacy {} must be rejected",
                 m.id
             );
         }

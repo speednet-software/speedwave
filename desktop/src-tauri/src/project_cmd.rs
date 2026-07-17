@@ -203,7 +203,9 @@ pub(crate) fn rebind_chat(
         .map_err(|e| format!("Lock poisoned: {e}"))?;
     session.stop().map_err(|e| e.to_string())?;
     *session = ChatSession::new(project);
-    session.start(app.clone(), None).map_err(|e| e.to_string())
+    session
+        .start(app.clone(), None, None)
+        .map_err(|e| e.to_string())
 }
 
 /// Parses a CloudStorage TCC error `"CloudStorage TCC required: {stable_id}|{dir}"`

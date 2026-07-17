@@ -2,7 +2,7 @@ use crate::history;
 use speedwave_runtime::stream::{
     AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
 };
-use speedwave_runtime::{config, consts, runtime};
+use speedwave_runtime::{config, consts, defaults, runtime};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Stdio};
@@ -1505,18 +1505,26 @@ impl ChatSession {
 
     /// Build the argv + container name for a spawn; `resume_session_id` adds
     /// `--resume`, `resume_at_uuid` adds `--resume-session-at` (ADR-046).
+    /// `model_override` adds `--model` so a pre-session pick governs the FIRST
+    /// turn (a wire `/model` can only apply from the next turn; ADR-082 amendment).
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
         instance_id: &str,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
+        model_override: Option<&str>,
     ) -> anyhow::Result<(Vec<String>, String)> {
         if let Some(id) = resume_session_id {
             history::validate_session_id(id)?;
         }
         if let Some(uuid) = resume_at_uuid {
             validate_retry_uuid(uuid)?;
+        }
+        if let Some(model) = model_override {
+            if !defaults::is_selectable_anthropic_model_id(model) {
+                anyhow::bail!("model override is not a selectable Anthropic model id: {model}");
+            }
         }
 
         let project_dir = std::path::PathBuf::from(&user_config.require_project(project_name)?.dir);
@@ -1528,6 +1536,10 @@ impl ChatSession {
         // wire `/effort` live for the session (empirical; ADR-082 amendment).
         flags.push("--effort".to_string());
         flags.push(launch_effort_level(project_name));
+        if let Some(model) = model_override {
+            flags.push("--model".to_string());
+            flags.push(model.to_string());
+        }
 
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
@@ -1541,8 +1553,9 @@ impl ChatSession {
         &mut self,
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
+        model_override: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.start_with_retry(app_handle, resume_session_id, None)
+        self.start_with_retry(app_handle, resume_session_id, None, model_override)
     }
 
     /// Start (or resume+retry) a session. `resume_at_uuid` rewinds to that
@@ -1552,6 +1565,7 @@ impl ChatSession {
         app_handle: AppHandle,
         resume_session_id: Option<&str>,
         resume_at_uuid: Option<&str>,
+        model_override: Option<&str>,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
         let user_config = config::load_user_config()?;
@@ -1566,6 +1580,7 @@ impl ChatSession {
             &instance_id,
             resume_session_id,
             resume_at_uuid,
+            model_override,
         )?;
 
         // Active provider's routing identity for soft-impose, captured once
@@ -5297,7 +5312,8 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result = ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None);
+        let result =
+            ChatSession::prepare_args("nonexistent", &user_config, "inst", None, None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -5327,6 +5343,7 @@ mod tests {
             "inst",
             Some("../../../etc/passwd"),
             None,
+            None,
         );
         assert!(result.is_err());
     }
@@ -5352,6 +5369,7 @@ mod tests {
             "inst",
             Some("550e8400-e29b-41d4-a716-446655440000"),
             Some("$(rm -rf /)"),
+            None,
         );
         assert!(result.is_err(), "shell-injection uuid must be rejected");
     }
@@ -5371,7 +5389,7 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None);
+        let result = ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None);
         assert!(result.is_ok());
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
@@ -5397,8 +5415,14 @@ mod tests {
             telemetry: None,
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
+        let result = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "my-inst",
+            Some(session_id),
+            None,
+            None,
+        );
         assert!(result.is_ok());
         let (args, _container) = result.unwrap();
         // The instance marker is stamped ahead of the claude binary.
@@ -5428,12 +5452,77 @@ mod tests {
         };
         let session_id = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_me";
-        let result =
-            ChatSession::prepare_args("proj", &user_config, "inst", Some(session_id), Some(uuid));
+        let result = ChatSession::prepare_args(
+            "proj",
+            &user_config,
+            "inst",
+            Some(session_id),
+            Some(uuid),
+            None,
+        );
         assert!(result.is_ok());
         let (args, _) = result.unwrap();
         assert!(args.contains(&"--resume-session-at".to_string()));
         assert!(args.contains(&uuid.to_string()));
+    }
+
+    fn model_override_user_config() -> config::SpeedwaveUserConfig {
+        config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        }
+    }
+
+    #[test]
+    fn prepare_args_appends_a_validated_model_override() {
+        let user_config = model_override_user_config();
+        let model = speedwave_runtime::defaults::ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.selectable)
+            .expect("catalog has a selectable model")
+            .id;
+        let (args, _) =
+            ChatSession::prepare_args("proj", &user_config, "inst", None, None, Some(model))
+                .unwrap();
+        let pos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[pos + 1], model);
+    }
+
+    #[test]
+    fn prepare_args_omits_model_flag_without_an_override() {
+        let user_config = model_override_user_config();
+        let (args, _) =
+            ChatSession::prepare_args("proj", &user_config, "inst", None, None, None).unwrap();
+        assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn prepare_args_rejects_a_non_catalog_model_override() {
+        let user_config = model_override_user_config();
+        for bad in [
+            "gpt-4o-mini",
+            "unsloth/Qwen3.6-35B-A3B",
+            "",
+            "claude-fable-5[2m]",
+        ] {
+            let err =
+                ChatSession::prepare_args("proj", &user_config, "inst", None, None, Some(bad))
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                err.contains("not a selectable Anthropic model id"),
+                "{bad:?} must be rejected, got: {err}"
+            );
+        }
     }
 
     // ── validate_retry_uuid ──────────────────────────────────────────

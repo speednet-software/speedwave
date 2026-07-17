@@ -138,7 +138,22 @@ already points at the new model for the next session. Rapid repeated
 selections serialize through the same command under the config lock; last
 write wins.
 
-### 4. Control messages render as chips by shape, not by a suppression sidecar
+**Amendment (field-tested first-turn gap): a pre-session Anthropic pick
+rides the spawn as `--model`, not a queued wire `/model`.** A wire `/model`
+queued before the session exists can only flush once Claude Code is already
+processing the first user prompt, so the FIRST reply always ran on the
+spawn default while the badge showed the pick (observed live: badge
+`claude-fable-5`, first reply `claude-opus-4-8`). Mirroring the `--effort`
+launch flag (decision 5 amendment), `start_chat` now accepts an optional
+model override consumed from the composer's queued pick
+(`ChatStateService.startChatSession`), validated against the catalog
+(`defaults::is_selectable_anthropic_model_id`, `[1m]` aliases only where
+`has_1m()`) and appended as `--model` in `ChatSession::prepare_args`. The
+pick is consumed synchronously at spawn, so the SystemInit flush cannot
+double-send a wire `/model`; no control chip renders, correctly - the
+session STARTED on that model, nothing switched. Wire `/model` remains the
+mechanism for live mid-session switches and their queue survives session
+start unchanged for picks made while a session is already spawning.
 
 Claude Code's transcript JSONL records a `/model` (or `/effort`) send as an
 ordinary user message; it carries no Speedwave-assigned UUID on the way out
