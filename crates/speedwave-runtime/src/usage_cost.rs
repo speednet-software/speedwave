@@ -909,7 +909,11 @@ mod tests {
 
     #[test]
     fn cache_1m_variant_uses_1m_pricing() {
-        // sonnet 1M output (22.5/MTok) differs from base (15.0/MTok).
+        // sonnet-4-6's [1m] alias is priced via pricing_1m, not silently
+        // falling back to base — both carry the standard $15/MTok output
+        // rate (1M context is included at standard rates), so this pins the
+        // routing, not a rate difference (see `one_m_suffix_without_pricing_1m_falls_back_to_base`
+        // for the no-pricing_1m fallback case).
         let e = compute_cost_with(
             &record(
                 "anthropic_apikey",
@@ -922,7 +926,7 @@ mod tests {
             &|_| None,
         );
         assert!(
-            (e.cost_usd.unwrap() - 22.5).abs() < 1e-9,
+            (e.cost_usd.unwrap() - 15.0).abs() < 1e-9,
             "got {:?}",
             e.cost_usd
         );

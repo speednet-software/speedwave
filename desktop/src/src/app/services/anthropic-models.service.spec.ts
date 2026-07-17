@@ -13,6 +13,7 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
+    selectable: true,
   },
   {
     id: 'claude-sonnet-4-6',
@@ -20,6 +21,7 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: true,
     premium: false,
+    selectable: true,
   },
   {
     id: 'claude-haiku-4-5',
@@ -27,6 +29,7 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 200_000,
     latest: true,
     premium: false,
+    selectable: true,
   },
   {
     id: 'claude-opus-4-7',
@@ -34,6 +37,7 @@ const FIXTURE: AnthropicModel[] = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
+    selectable: false,
   },
 ];
 
@@ -213,6 +217,19 @@ describe('AnthropicModelsService', () => {
       service.resetForTesting();
       await service.list();
       expect(service.latestEverydayModelId()).toBe('claude-sonnet-4-6');
+    });
+  });
+
+  describe('selectableModels()', () => {
+    it('returns an empty list before the catalog has loaded', () => {
+      expect(service.selectableModels()).toEqual([]);
+    });
+
+    it('excludes legacy (non-selectable) entries once loaded', async () => {
+      await service.list();
+      const ids = service.selectableModels().map((m) => m.id);
+      expect(ids).toEqual(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5']);
+      expect(ids).not.toContain('claude-opus-4-7');
     });
   });
 

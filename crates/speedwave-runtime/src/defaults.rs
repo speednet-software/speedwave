@@ -53,8 +53,12 @@ pub struct AnthropicModelInfo {
     /// Price of the base model id (e.g. `claude-sonnet-5`).
     pub pricing: ModelPricing,
     /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-5[1m]`),
-    /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
+    /// present when context_tokens >= 1_000_000, OR (documented exception)
+    /// claude-fable-5, whose bare id reports a 200k session window despite
+    /// shipping a priced [1m] alias.
     pub pricing_1m: Option<ModelPricing>,
+    /// Offered by the composer selector; legacy entries stay for pricing history.
+    pub selectable: bool,
 }
 
 // Published per-MTok rates: platform.claude.com/docs/en/pricing.
@@ -70,17 +74,18 @@ const OPUS_PRICING: ModelPricing = ModelPricing {
     cache_write: 6.25,
     output: 25.0,
 };
-const SONNET_PRICING: ModelPricing = ModelPricing {
+// Introductory rate, valid through 2026-08-31 per platform.claude.com/docs/en/about-claude/pricing.
+const SONNET_5_PRICING: ModelPricing = ModelPricing {
+    input: 2.0,
+    cached_input: 0.2,
+    cache_write: 2.5,
+    output: 10.0,
+};
+const SONNET_4_6_PRICING: ModelPricing = ModelPricing {
     input: 3.0,
     cached_input: 0.3,
     cache_write: 3.75,
     output: 15.0,
-};
-const SONNET_PRICING_1M: ModelPricing = ModelPricing {
-    input: 6.0,
-    cached_input: 0.6,
-    cache_write: 7.5,
-    output: 22.5,
 };
 const HAIKU_PRICING: ModelPricing = ModelPricing {
     input: 1.0,
@@ -95,11 +100,12 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
     AnthropicModelInfo {
         id: "claude-fable-5",
         family: "Fable 5",
-        context_tokens: 1_000_000,
+        context_tokens: 200_000,
         latest: true,
         premium: true,
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
+        selectable: true,
     },
     AnthropicModelInfo {
         id: "claude-opus-4-8",
@@ -109,6 +115,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: true,
     },
     AnthropicModelInfo {
         id: "claude-sonnet-5",
@@ -116,8 +123,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: true,
         premium: false,
-        pricing: SONNET_PRICING,
-        pricing_1m: Some(SONNET_PRICING_1M),
+        pricing: SONNET_5_PRICING,
+        pricing_1m: Some(SONNET_5_PRICING),
+        selectable: true,
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
@@ -127,6 +135,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
+        selectable: true,
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
@@ -136,6 +145,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: false,
     },
     AnthropicModelInfo {
         id: "claude-opus-4-6",
@@ -145,6 +155,7 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: false,
     },
     AnthropicModelInfo {
         id: "claude-sonnet-4-6",
@@ -152,8 +163,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: false,
         premium: false,
-        pricing: SONNET_PRICING,
-        pricing_1m: Some(SONNET_PRICING_1M),
+        pricing: SONNET_4_6_PRICING,
+        pricing_1m: Some(SONNET_4_6_PRICING),
+        selectable: false,
     },
 ];
 
@@ -482,9 +494,74 @@ mod tests {
             .find(|m| m.id == "claude-fable-5")
             .expect("claude-fable-5 must be in the catalog");
         assert!(fable.latest, "Fable 5 must be in the Latest group");
-        assert_eq!(fable.context_tokens, 1_000_000);
+        assert_eq!(fable.context_tokens, 200_000);
         assert_eq!(fable.pricing.input, 10.0);
         assert_eq!(fable.pricing.output, 50.0);
+    }
+
+    #[test]
+    fn sonnet_5_1m_variant_shares_base_pricing() {
+        let sonnet = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-5")
+            .unwrap();
+        assert_eq!(sonnet.pricing_1m, Some(sonnet.pricing));
+    }
+
+    #[test]
+    fn sonnet_5_carries_intro_pricing_and_4_6_keeps_standard() {
+        let s5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-5")
+            .unwrap();
+        assert_eq!(s5.pricing.input, 2.0);
+        assert_eq!(s5.pricing.output, 10.0);
+        let s46 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .unwrap();
+        assert_eq!(s46.pricing.input, 3.0);
+        assert_eq!(s46.pricing.output, 15.0);
+        assert_eq!(s46.pricing_1m, Some(s46.pricing));
+    }
+
+    #[test]
+    fn legacy_entries_are_not_selectable() {
+        for id in ["claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-6"] {
+            let m = ANTHROPIC_MODELS.iter().find(|m| m.id == id).unwrap();
+            assert!(!m.selectable, "{id} must not be selectable");
+        }
+    }
+
+    #[test]
+    fn current_entries_are_selectable() {
+        for id in [
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+        ] {
+            let m = ANTHROPIC_MODELS.iter().find(|m| m.id == id).unwrap();
+            assert!(m.selectable, "{id} must be selectable");
+        }
+    }
+
+    #[test]
+    fn fable_5_bare_id_reports_its_actual_session_window() {
+        // Empirically verified (design spec 1.4/4.6): the bare `claude-fable-5` id
+        // resolves to a 200k session window; only the `[1m]` alias gets 1M. The
+        // family still carries a priced `[1m]` variant via `pricing_1m`, so
+        // `pricing_1m` presence is no longer inferred from `context_tokens >= 1M`
+        // for this one entry - it is an explicit exception, asserted here.
+        let fable = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .unwrap();
+        assert_eq!(fable.context_tokens, 200_000);
+        assert!(
+            fable.pricing_1m.is_some(),
+            "claude-fable-5 must still price its [1m] alias"
+        );
     }
 
     #[test]
@@ -625,13 +702,17 @@ mod tests {
 
     #[test]
     fn one_m_pricing_present_iff_million_token_context() {
-        // `pricing_1m` must be present iff the model has a 1M-token context.
+        // `pricing_1m` must be present iff the model has a 1M-token context,
+        // except `claude-fable-5`: its bare id's session window is 200k (the
+        // empirically-verified default) while its family still exposes a
+        // priced `[1m]` alias.
         for m in ANTHROPIC_MODELS {
             let is_million = m.context_tokens >= 1_000_000;
+            let expected = is_million || m.id == "claude-fable-5";
             assert_eq!(
                 m.pricing_1m.is_some(),
-                is_million,
-                "{}: pricing_1m presence must mirror context_tokens >= 1M (was {})",
+                expected,
+                "{}: pricing_1m presence must mirror context_tokens >= 1M (was {}), except the documented claude-fable-5 exception",
                 m.id,
                 m.context_tokens
             );

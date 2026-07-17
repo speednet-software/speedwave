@@ -74,6 +74,14 @@ export class AnthropicModelsService {
   }
 
   /**
+   * The catalog entries offered by the composer selector — legacy (non-`selectable`)
+   * entries stay in the full catalog for pricing history but are excluded here.
+   */
+  selectableModels(): AnthropicModel[] {
+    return (this.cache ?? []).filter((m) => m.selectable);
+  }
+
+  /**
    * The Settings placeholder hint: the latest non-`premium` entry, falling back
    * to the first `latest` then the first entry. `null` while loading or empty.
    */

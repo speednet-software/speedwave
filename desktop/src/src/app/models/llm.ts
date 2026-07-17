@@ -7,12 +7,18 @@ export interface AnthropicModel {
   id: string;
   /** Display label for dropdowns and labels (e.g. `"Opus 4.7"`). */
   family: string;
-  /** Context window in tokens. `1_000_000` for 1M-context families. */
+  /**
+   * Context window in tokens. `1_000_000` for 1M-context families, except
+   * `claude-fable-5`: its bare id reports a 200k session window despite
+   * shipping a priced `[1m]` alias.
+   */
   context_tokens: number;
   /** Whether this entry belongs to the "Latest" optgroup; `false` for legacy snapshots. */
   latest: boolean;
   /** Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint. */
   premium: boolean;
+  /** Offered by the composer selector; `false` for legacy entries kept for pricing history. */
+  selectable: boolean;
 }
 
 /** Default fallback context window for a model the SSOT doesn't know. */

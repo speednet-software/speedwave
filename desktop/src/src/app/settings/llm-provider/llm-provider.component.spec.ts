@@ -35,9 +35,10 @@ const TEST_ANTHROPIC_MODELS = [
   {
     id: 'claude-fable-5',
     family: 'Fable 5',
-    context_tokens: 1_000_000,
+    context_tokens: 200_000,
     latest: true,
     premium: true,
+    selectable: true,
   },
   {
     id: 'claude-opus-4-8',
@@ -45,6 +46,7 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: true,
     premium: true,
+    selectable: true,
   },
   {
     id: 'claude-sonnet-4-6',
@@ -52,6 +54,7 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: true,
     premium: false,
+    selectable: true,
   },
   {
     id: 'claude-haiku-4-5',
@@ -59,6 +62,7 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 200_000,
     latest: true,
     premium: false,
+    selectable: true,
   },
   {
     id: 'claude-opus-4-7',
@@ -66,6 +70,7 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
+    selectable: false,
   },
   {
     id: 'claude-opus-4-6',
@@ -73,6 +78,7 @@ const TEST_ANTHROPIC_MODELS = [
     context_tokens: 1_000_000,
     latest: false,
     premium: true,
+    selectable: false,
   },
 ];
 
