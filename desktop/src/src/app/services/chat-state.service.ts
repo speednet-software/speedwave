@@ -259,9 +259,6 @@ export class ChatStateService {
   clearSessionTracking(): void {
     this._lastKnownSessionId = null;
     this._optimisticSessionId = null;
-    // A queued override targets the session it was set for; it must not
-    // survive into an unrelated later session/project.
-    this._pendingModelOverride.set(null);
   }
 
   private tauri = inject(TauriService);
@@ -1177,6 +1174,9 @@ export class ChatStateService {
         this._currentProvider = null;
         // A genuine project switch starts fresh — never resume the prior project.
         this.clearSessionTracking();
+        // A queued override targets the project it was picked in; it must survive
+        // a same-project fresh session but never leak across a project switch.
+        this._pendingModelOverride.set(null);
         this.notifyChange();
       } else if (this.projectState.status() === 'ready') {
         // Project just settled — re-pull the persisted context tokens so

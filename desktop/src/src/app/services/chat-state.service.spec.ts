@@ -1384,23 +1384,27 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    it('resetForNewConversation clears a queued override so a later SystemInit sends no /model', async () => {
+    it('a queued override survives resetForNewConversation and fires on the fresh SystemInit', async () => {
+      // The queue exists precisely to outlive a same-project fresh-session start
+      // (pick with no live session -> type a message -> startFreshSession).
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      service.setPendingModelOverride('claude-opus-4-8[1m]');
+      service.setPendingModelOverride('claude-haiku-4-5');
 
       service.resetForNewConversation();
-      expect(service.pendingModelOverride()).toBeNull();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
 
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
-        data: { model: 'claude-sonnet-5', session_id: 'sess-new' },
+        data: { model: 'claude-opus-4-8', session_id: 'sess-new' },
       });
       await Promise.resolve();
 
       const modelSendCall = invokeSpy.mock.calls.find(
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
       );
-      expect(modelSendCall).toBeUndefined();
+      expect(modelSendCall).toBeDefined();
+      expect(JSON.stringify(modelSendCall?.[1])).toContain('/model claude-haiku-4-5');
+      expect(service.pendingModelOverride()).toBeNull();
     });
 
     it('a project switch clears a queued override so a later SystemInit sends no /model', async () => {
