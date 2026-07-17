@@ -1747,6 +1747,20 @@ EOF
     [ "${#lines[@]}" -eq 1 ]
 }
 
+@test "a null tombstone entry for the official marketplace does not skip the add" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_recording_all_plugin_calls
+    mkdir -p "$TEST_HOME/.claude/plugins"
+    echo '{"claude-plugins-official":null}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/plugin-calls.log"
+    [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
+    [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
+}
+
 @test "a registry listing only other marketplaces does not skip the official add" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     _stub_claude_recording_all_plugin_calls

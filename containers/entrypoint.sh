@@ -332,7 +332,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             # CC registers the official marketplace only on interactive TTY startup —
             # headless/CLI runs never do, so a fresh HOME must add it before installing.
             if [ "${_mp}" = "claude-plugins-official" ] && [ -z "${_mp_add_attempted}" ] \
-                && ! jq -e --arg mp "${_mp}" 'has($mp)' "${HOME}/.claude/plugins/known_marketplaces.json" >/dev/null 2>&1; then
+                && ! jq -e --arg mp "${_mp}" '.[$mp] | type == "object"' "${HOME}/.claude/plugins/known_marketplaces.json" >/dev/null 2>&1; then
                 # One network attempt per start (deliberate latency bound) — once the
                 # registration is durable, the jq check above skips the subprocess.
                 _mp_add_attempted=1
