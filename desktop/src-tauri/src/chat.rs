@@ -933,16 +933,20 @@ impl StreamParser {
         });
 
         // Chronological last-observed model wins; usage-dominance is the final fallback.
+        let tracker_had_model = self.model_tracker.resolve().is_some();
         let model = self
             .model_tracker
             .resolve()
             .map(str::to_string)
             .or_else(|| usage_dominant_model.clone());
 
-        // Fed AFTER resolving (so this turn's dominance can't overwrite a value
-        // already observed this turn) — keeps a later plain-usage-only turn correct.
-        if let Some(m) = usage_dominant_model.as_deref() {
-            self.model_tracker.observe_assistant(m);
+        // Last-resort seed only: never re-feed the tracker when it already held a
+        // chronological value, or a later plain-usage-only turn would revert it
+        // back to the cumulative-dominant model.
+        if !tracker_had_model {
+            if let Some(m) = usage_dominant_model.as_deref() {
+                self.model_tracker.observe_assistant(m);
+            }
         }
 
         // contextWindow from the resolved model's modelUsage entry; falls back to
@@ -3616,6 +3620,74 @@ mod tests {
             }
             other => panic!("expected Result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_result_does_not_revert_tracker_on_later_plain_usage_turn() {
+        // Regression: a result event must never re-seed the chronological
+        // tracker from cumulative usage-dominance. Session observes model-a
+        // then model-b (chronologically later, fewer cumulative tokens); a
+        // result whose modelUsage still lists model-a as dominant-by-usage
+        // must not revert the tracker for the NEXT event.
+        let mut parser = StreamParser::new();
+        let assistant_a =
+            r#"{"type":"assistant","message":{"id":"msg_a","model":"model-a","usage":{}}}"#;
+        parse_line_all_str(&mut parser, assistant_a);
+        let assistant_b =
+            r#"{"type":"assistant","message":{"id":"msg_b","model":"model-b","usage":{}}}"#;
+        parse_line_all_str(&mut parser, assistant_b);
+
+        let result_line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"model-a":{"inputTokens":1000,"outputTokens":5000,"contextWindow":200000},"model-b":{"inputTokens":10,"outputTokens":5,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, result_line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("model-b"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+
+        assert_eq!(
+            parser.model_tracker.resolve(),
+            Some("model-b"),
+            "the result event must not re-seed the tracker back to the \
+             cumulative-dominant model-a"
+        );
+
+        // A later interrupt-style result with no assistant events in between
+        // must still resolve model-b, not the reverted model-a.
+        let interrupt_line = r#"{"type":"result","session_id":"abc","is_error":false,"result":""}"#;
+        let interrupt_chunk = parse_line_str(&mut parser, interrupt_line).unwrap();
+        match interrupt_chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("model-b"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_plain_usage_only_turn_still_resolves_model_for_context_window() {
+        // Last-resort seed: when the tracker has observed nothing yet, a
+        // usage-only result must still resolve a model (for contextWindow
+        // lookup), seeding the tracker since there is no chronological value
+        // to protect.
+        let mut parser = StreamParser::new();
+        assert!(parser.model_tracker.resolve().is_none());
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.05,"result":"","modelUsage":{"model-only":{"inputTokens":10,"outputTokens":10,"contextWindow":123456}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("model-only"));
+                assert_eq!(context_window_size, Some(123_456));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+        assert_eq!(parser.model_tracker.resolve(), Some("model-only"));
     }
 
     #[test]
