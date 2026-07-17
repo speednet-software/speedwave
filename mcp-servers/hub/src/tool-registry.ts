@@ -524,7 +524,7 @@ export type PrepareParamsFn = <T>(params: T) => T;
 
 /**
  * Function type for wrapping bridge calls with error handling.
- * @param toolName - camelCase tool method name, for B-result PII audit attribution.
+ * @param toolName - camelCase tool method name, for tool-result PII audit attribution.
  */
 export type WrapBridgeCallFn = <T>(
   bridgeCall: () => Promise<T>,
