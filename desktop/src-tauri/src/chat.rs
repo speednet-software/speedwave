@@ -1253,6 +1253,8 @@ fn soft_impose_message(
     let model = entry_model?;
     let expected = speedwave_runtime::model_id::wire_model_id(kind, entry_id, model);
     let observed = speedwave_runtime::model_id::normalize_observed(observed_model, entry_id);
+    // `expected` is re-normalized too: `wire_model_id` leaves an already
+    // `entry_id/`-prefixed catalog id unchanged, so it isn't always freshly prefixed.
     if observed == speedwave_runtime::model_id::normalize_observed(&expected, entry_id) {
         return None;
     }
@@ -1968,17 +1970,18 @@ impl ChatSession {
 
         // Emitted only after the write succeeds, so a dead stdin never leaves
         // a phantom chip with no message reaching Claude.
-        let joined: String = blocks
-            .iter()
-            .map(|WireContentBlock::Text { text }| text.as_str())
-            .collect();
-        if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(&joined)
-        {
-            emit(StreamChunk::ControlChip {
-                command: command.to_string(),
-                argument: argument.to_string(),
-                uuid: None,
-            });
+        // A control command is inherently one typed line - only a single-block
+        // message is eligible, so a future multi-block caller can never have
+        // its concatenated text spuriously match `/model`/`/effort`.
+        if let [WireContentBlock::Text { text }] = blocks {
+            if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text)
+            {
+                emit(StreamChunk::ControlChip {
+                    command: command.to_string(),
+                    argument: argument.to_string(),
+                    uuid: None,
+                });
+            }
         }
         Ok(())
     }
@@ -2603,6 +2606,52 @@ mod tests {
     }
 
     #[test]
+    fn send_message_multi_block_never_matches_control_shape_even_when_joined_text_would() {
+        // A control command is inherently one typed line: a hypothetical
+        // multi-block message whose concatenated text reads "/model x" must
+        // NOT emit a ControlChip - only a genuine single-block message can.
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        let blocks = vec![
+            WireContentBlock::Text {
+                text: "/model ".to_string(),
+            },
+            WireContentBlock::Text {
+                text: "x".to_string(),
+            },
+        ];
+        session
+            .send_message_with_emit(&blocks, |chunk| emitted.push(chunk))
+            .unwrap();
+        assert!(
+            emitted.is_empty(),
+            "multi-block message must never emit a ControlChip, got {emitted:?}"
+        );
+    }
+
+    #[test]
+    fn send_message_single_block_control_command_still_matches() {
+        // Same text, single block: the genuine control path still fires.
+        let mut session = ChatSession::new("proj");
+        let mut emitted: Vec<StreamChunk> = Vec::new();
+        session.set_test_stdin_sink(Vec::new());
+        session
+            .send_message_with_emit(&text_only("/model x"), |chunk| emitted.push(chunk))
+            .unwrap();
+        assert_eq!(emitted.len(), 1);
+        match &emitted[0] {
+            StreamChunk::ControlChip {
+                command, argument, ..
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "x");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn drained_control_shaped_text_emits_control_chip_then_queue_drained_and_writes_stdin_once() {
         let stdin = Arc::new(Mutex::new(test_pipe_stdin(Vec::new())));
         let mut emitted: Vec<StreamChunk> = Vec::new();
@@ -3166,6 +3215,40 @@ mod tests {
             "anthropic/claude-sonnet-5",
         );
         assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn soft_impose_message_matches_when_catalog_id_already_prefixed() {
+        // Regression pin for the `expected` re-normalization: when the catalog
+        // id already carries `<entry_id>/`, `wire_model_id` leaves it unchanged
+        // (no double-prefix), so `expected` needs its own normalize_observed
+        // pass to compare equal to the already-prefixed observed model.
+        let msg = soft_impose_message(
+            speedwave_runtime::config::LlmProviderKind::Local,
+            "llama",
+            Some("llama/whatever"),
+            "llama/whatever",
+        );
+        assert_eq!(
+            msg, None,
+            "an already-prefixed catalog id must still be recognized as matching"
+        );
+    }
+
+    #[test]
+    fn soft_impose_message_still_fires_for_openrouter_and_local_kinds_on_mismatch() {
+        // Non-anthropic kinds behave identically under the simplified-looking
+        // comparison: soft-impose still fires on mismatch and suppresses on match.
+        for kind in [
+            speedwave_runtime::config::LlmProviderKind::OpenRouter,
+            speedwave_runtime::config::LlmProviderKind::Local,
+        ] {
+            let mismatch = soft_impose_message(kind, "entry", Some("model-a"), "model-b");
+            assert!(mismatch.is_some(), "{kind:?} must fire on mismatch");
+
+            let matching = soft_impose_message(kind, "entry", Some("model-a"), "entry/model-a");
+            assert_eq!(matching, None, "{kind:?} must suppress on match");
+        }
     }
 
     // ── soft-impose injection at session spawn ───────────────────────
