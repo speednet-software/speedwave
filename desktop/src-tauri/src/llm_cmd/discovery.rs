@@ -795,6 +795,56 @@ pub struct DiscoverLlmModelsArgs {
     pub custom_headers: Option<Option<String>>,
 }
 
+/// Discovers models with the production VM-then-host fallback (VM probe
+/// reaches VPN-only endpoints; falls back to the host transport on failure).
+/// `active_project` resolves a stored credential when `api_key`/`custom_headers`
+/// are `None` (no transient UI override).
+pub(crate) async fn discover_llm_models_with_fallback(
+    provider: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    custom_headers: Option<&str>,
+    active_project: Option<&str>,
+) -> Result<DiscoverResult, String> {
+    let bearer = api_key.and_then(strip_bearer_prefix).or_else(|| {
+        active_project
+            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, "api_key"))
+    });
+    let headers = custom_headers.map(str::to_string).or_else(|| {
+        active_project
+            .and_then(|p| speedwave_runtime::compose::read_local_llm_token_opt(p, "custom_headers"))
+    });
+    let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
+    // Try VM probe first (reaches VPN servers); fall back to host probe silently.
+    let runtime = speedwave_runtime::runtime::detect_runtime();
+    let vm_available = runtime.is_available();
+    let result = if vm_available {
+        let vm_transport = VmProbe::new(bearer.clone(), headers.clone(), timeout);
+        let vm_res = do_discover_llm_models(provider, base_url, &vm_transport).await;
+        if vm_res.is_ok() {
+            vm_res
+        } else {
+            log::info!("VM probe failed for LLM model discovery, retrying via host transport");
+            let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
+            let host_transport = HostProbe::new(client, timeout);
+            do_discover_llm_models(provider, base_url, &host_transport).await
+        }
+    } else {
+        let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
+        let host_transport = HostProbe::new(client, timeout);
+        do_discover_llm_models(provider, base_url, &host_transport).await
+    };
+    match &result {
+        Ok(r) => log::info!(
+            "LLM model discovery succeeded: {} model(s), messages_endpoint_ok={:?}",
+            r.models.len(),
+            r.messages_endpoint_ok
+        ),
+        Err(e) => log::warn!("LLM model discovery failed: {e}"),
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<DiscoverResult, String> {
     log::info!(
@@ -813,35 +863,14 @@ pub async fn discover_llm_models(args: DiscoverLlmModelsArgs) -> Result<Discover
         active.as_deref(),
         "custom_headers",
     );
-    let timeout = Duration::from_secs(DISCOVERY_TIMEOUT_SECS);
-    // Try VM probe first (reaches VPN servers); fall back to host probe silently.
-    let runtime = speedwave_runtime::runtime::detect_runtime();
-    let vm_available = runtime.is_available();
-    let result = if vm_available {
-        let vm_transport = VmProbe::new(bearer.clone(), headers.clone(), timeout);
-        let vm_res = do_discover_llm_models(&args.provider, &args.base_url, &vm_transport).await;
-        if vm_res.is_ok() {
-            vm_res
-        } else {
-            log::info!("VM probe failed for LLM model discovery, retrying via host transport");
-            let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
-            let host_transport = HostProbe::new(client, timeout);
-            do_discover_llm_models(&args.provider, &args.base_url, &host_transport).await
-        }
-    } else {
-        let client = build_llm_probe_client_with_auth(bearer.as_deref(), headers.as_deref())?;
-        let host_transport = HostProbe::new(client, timeout);
-        do_discover_llm_models(&args.provider, &args.base_url, &host_transport).await
-    };
-    match &result {
-        Ok(r) => log::info!(
-            "LLM model discovery succeeded: {} model(s), messages_endpoint_ok={:?}",
-            r.models.len(),
-            r.messages_endpoint_ok
-        ),
-        Err(e) => log::warn!("LLM model discovery failed: {e}"),
-    }
-    result
+    discover_llm_models_with_fallback(
+        &args.provider,
+        &args.base_url,
+        bearer.as_deref(),
+        headers.as_deref(),
+        None, // credentials already resolved above; no double stored-token lookup
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1732,6 +1761,25 @@ mod tests {
         models_mock.assert_async().await;
         messages_mock.assert_async().await;
         no_show_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn discover_llm_models_with_fallback_returns_first_local_model_via_host_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"llama-3.3-70b"},{"id":"llama-3.1-8b"}]}"#)
+            .create_async()
+            .await;
+        let result = discover_llm_models_with_fallback("ollama", &server.url(), None, None, None)
+            .await
+            .expect("discovery must succeed against the mocked server");
+        assert_eq!(
+            result.models.first().map(|m| m.id.as_str()),
+            Some("llama-3.3-70b")
+        );
     }
 
     #[tokio::test]

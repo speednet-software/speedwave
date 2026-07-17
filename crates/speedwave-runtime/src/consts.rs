@@ -403,6 +403,10 @@ impl McpAuthFieldDescriptor {
     }
 }
 
+/// Verified OpenRouter-shaped default model id (decision: spec section 4.6),
+/// applied when an OpenRouter entry is saved with no model chosen.
+pub const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5";
+
 /// SharePoint Device Code Flow scopes; `Sites.Manage.All` covers the narrower
 /// Sites scopes and is required by Graph `createList` (delegated).
 pub const SHAREPOINT_OAUTH_SCOPES: &str = "https://graph.microsoft.com/Sites.Manage.All \
@@ -2970,5 +2974,12 @@ mod tests {
             "update-dirty-state.bats PREFIX derivation must mirror consts::compose_prefix() \
              (data-dir basename, leading dot stripped); rename it there too"
         );
+    }
+
+    #[test]
+    fn openrouter_default_model_is_the_verified_or_shaped_sonnet_5_id() {
+        // OpenRouter catalog shape (`<vendor>/<model>`), not the bare Anthropic
+        // catalog id `claude-sonnet-5` - see defaults.rs::ANTHROPIC_MODELS.
+        assert_eq!(OPENROUTER_DEFAULT_MODEL, "anthropic/claude-sonnet-5");
     }
 }
