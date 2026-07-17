@@ -1494,7 +1494,8 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
 }
 
 /**
- * Locates the retry anchor: the (assistant, user) pair replayable via `retry_last_turn` (ADR-046).
+ * Locates the retry anchor (ADR-046): the user entry before the last committed assistant.
+ * A control-chip user entry is skipped — it keeps its uuid but is not replayable (spec 4.4).
  * @param entries - Conversation entries in order, oldest first.
  * @param committedTag - The literal value that means "uuid is durable".
  */
@@ -1503,6 +1504,9 @@ function findRetryAnchorIn(
     role: 'user' | 'assistant';
     uuid?: string | null;
     uuid_status?: string;
+    // `type` is the live-path `MessageBlock` tag; `kind` lets the state-tree
+    // caller (`MessageBlockState`, which never carries a chip) satisfy the shape.
+    blocks?: readonly { type?: string; kind?: string }[];
   }[],
   committedTag: string
 ): { userUuid: string; lastAssistantIdx: number; userIdx: number } | null {
@@ -1521,6 +1525,9 @@ function findRetryAnchorIn(
     if (m.role !== 'user') continue;
     if (!m.uuid) return null;
     if (m.uuid_status !== undefined && m.uuid_status !== committedTag) return null;
+    // A rendered `/model`/`/effort` chip keeps its transcript uuid but must never
+    // be a retry target — replaying it would resend a command, not a question (spec 4.4).
+    if (m.blocks?.[0]?.type === 'chip') return null;
     return { userUuid: m.uuid, lastAssistantIdx, userIdx: i };
   }
   return null;
@@ -1881,6 +1888,17 @@ interface HistoryToolResultBlock {
 }
 
 /**
+ * Raw control-chip block from Rust `history.rs::MessageBlock::ControlChip` (serde
+ * tag `control_chip`); normalized into the live-path `{ type: 'chip' }` view-model
+ * so a resumed chip renders identically to a live one (spec 4.4).
+ */
+interface HistoryControlChipBlock {
+  type: 'control_chip';
+  command: string;
+  argument: string;
+}
+
+/**
  * Maps a backend `ConversationTranscript` into the live-chat `ChatMessage[]` shape.
  * @param transcript - Backend conversation transcript to convert.
  */
@@ -1889,7 +1907,12 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
     const role: 'user' | 'assistant' = msg.role === 'user' ? 'user' : 'assistant';
     const rawBlocks =
       msg.blocks && msg.blocks.length > 0
-        ? (msg.blocks as unknown as (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[])
+        ? (msg.blocks as unknown as (
+            | MessageBlock
+            | HistoryToolUseBlock
+            | HistoryToolResultBlock
+            | HistoryControlChipBlock
+          )[])
         : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
     const blocks = normalizeHistoryBlocks(rawBlocks);
     const timestamp = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now();
@@ -1914,7 +1937,7 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
  * @param blocks - Raw blocks from the backend history payload.
  */
 function normalizeHistoryBlocks(
-  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock)[]
+  blocks: (MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock | HistoryControlChipBlock)[]
 ): MessageBlock[] {
   const result: MessageBlock[] = [];
 
@@ -1942,6 +1965,9 @@ function normalizeHistoryBlocks(
           ? { ...base, status: 'error' as const, result_is_error: true as const }
           : { ...base, status: 'done' as const, result_is_error: false as const };
       }
+    } else if (block.type === 'control_chip') {
+      const hist = block as HistoryControlChipBlock;
+      result.push({ type: 'chip', command: hist.command, argument: hist.argument });
     } else {
       result.push(block as MessageBlock);
     }

@@ -2530,6 +2530,116 @@ describe('ChatStateService', () => {
       );
       errSpy.mockRestore();
     });
+
+    it('canRetryLastAssistant returns false when the anchor candidate is a control-chip message', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'a' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('canRetryLastAssistant keeps the real anchor when a chip trails the last assistant', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'real question' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'effort', argument: 'high' }],
+            timestamp: 3,
+            uuid: 'msg_user_2',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+
+      // The trailing chip sits after the last assistant, so the anchor picker
+      // never reaches it; the real question before that assistant stays the anchor.
+      expect(service.canRetryLastAssistant()).toBe(true);
+    });
+
+    it('canRetryLastAssistant returns false when a chip sits directly before the last assistant', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+
+      // The user entry immediately before the last assistant is a chip; the picker
+      // stops at it rather than proposing a command as a retry target.
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
   });
 
   describe('per-turn meta on assistant entries', () => {
@@ -3910,6 +4020,15 @@ describe('ChatStateService', () => {
       };
       const [msg] = toChatMessages(transcriptWith([nested]));
       expect(msg.blocks).toEqual([nested]);
+    });
+
+    it('normalizes a history control_chip block into the live-path chip view-model', () => {
+      // Rust serializes the chip as `type: control_chip`; the frontend renders it
+      // via the `type: chip` variant so a resumed chip matches the live path exactly.
+      const [msg] = toChatMessages(
+        transcriptWith([{ type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' }])
+      );
+      expect(msg.blocks).toEqual([{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
     });
   });
 
