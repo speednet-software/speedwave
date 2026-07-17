@@ -13,3 +13,16 @@ export function wireModelId(kind: LlmProviderKind, entryId: string, catalogId: s
   const prefix = `${entryId}/`;
   return catalogId.startsWith(prefix) ? catalogId : `${prefix}${catalogId}`;
 }
+
+/**
+ * Mirrors Rust `model_id::normalize_observed`: strips one leading `<entryId>/`
+ * from an observed wire id for display; a non-matching prefix (including a
+ * different first segment) passes through unchanged.
+ * @param observed - Observed/stored model id (bare or `<entryId>/<catalogId>`).
+ * @param entryId - Provider entry id whose prefix is stripped, if present.
+ * @returns The catalog id for display, prefix removed only on an exact match.
+ */
+export function normalizeObserved(observed: string, entryId: string): string {
+  const prefix = `${entryId}/`;
+  return observed.startsWith(prefix) ? observed.slice(prefix.length) : observed;
+}

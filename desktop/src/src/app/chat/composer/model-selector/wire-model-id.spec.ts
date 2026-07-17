@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { wireModelId } from './wire-model-id';
+import { normalizeObserved, wireModelId } from './wire-model-id';
 
 describe('wireModelId', () => {
   it('returns the catalog id unchanged for an anthropic entry', () => {
@@ -32,5 +32,28 @@ describe('wireModelId', () => {
     expect(wireModelId('open_router', 'openrouter', 'openrouter/anthropic/claude-sonnet-5')).toBe(
       'openrouter/anthropic/claude-sonnet-5'
     );
+  });
+});
+
+describe('normalizeObserved', () => {
+  it('strips only an exact leading `<entryId>/` prefix', () => {
+    expect(normalizeObserved('openrouter/anthropic/claude-sonnet-5', 'openrouter')).toBe(
+      'anthropic/claude-sonnet-5'
+    );
+    expect(normalizeObserved('my-ollama/llama3.3', 'my-ollama')).toBe('llama3.3');
+  });
+
+  it('passes an anthropic id (no slash) through unchanged', () => {
+    expect(normalizeObserved('claude-sonnet-5', 'anthropic')).toBe('claude-sonnet-5');
+    expect(normalizeObserved('claude-sonnet-5[1m]', 'anthropic')).toBe('claude-sonnet-5[1m]');
+  });
+
+  it('does not mis-strip a first segment that is not the entry id', () => {
+    // Regression: naive first-`/` slicing would wrongly drop `unsloth/` here.
+    expect(normalizeObserved('unsloth/Qwen2.5-Coder-32B', 'my-ollama')).toBe(
+      'unsloth/Qwen2.5-Coder-32B'
+    );
+    // Pathological near-miss: prefix must match exactly, `localhost/` is not `local/`.
+    expect(normalizeObserved('localhost/x', 'local')).toBe('localhost/x');
   });
 });

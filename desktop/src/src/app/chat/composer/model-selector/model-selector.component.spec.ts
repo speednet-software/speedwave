@@ -71,6 +71,28 @@ describe('ModelSelectorComponent', () => {
     expect(badge.nativeElement.textContent).not.toContain('anthropic/claude-sonnet-5');
   });
 
+  it('strips only the exact entry-id prefix on the badge, never a coincidental first segment', async () => {
+    const orSummary: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openrouter/anthropic/claude-sonnet-5',
+      base_url: null,
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(orSummary);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-or');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
+    // Exact "openrouter/" prefix stripped; the inner "anthropic/…" first
+    // segment must survive (a naive first-`/` slice would drop it).
+    expect(badge.nativeElement.textContent).toContain('anthropic/claude-sonnet-5');
+    expect(badge.nativeElement.textContent).not.toContain('openrouter/');
+  });
+
   it('shows a loader while the catalog is fetching, then only selectable options plus their [1m] variants', async () => {
     let resolveList!: (v: AnthropicModel[]) => void;
     tauriInvoke.mockImplementation((cmd: string) => {

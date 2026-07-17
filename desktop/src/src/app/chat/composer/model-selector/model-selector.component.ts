@@ -13,7 +13,7 @@ import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
-import { wireModelId } from './wire-model-id';
+import { normalizeObserved, wireModelId } from './wire-model-id';
 
 /** One row in the combobox, normalized across the three provider sources. */
 interface ModelOption {
@@ -120,15 +120,11 @@ export class ModelSelectorComponent {
     });
   }
 
-  /** Model shown on the badge, normalized (no `<entry_id>/` wire prefix). */
+  /** Model shown on the badge, normalized via the SSOT mirror (strips only an exact `<entry_id>/`). */
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
     if (!s?.model) return '';
-    const idx = s.model.indexOf('/');
-    // Anthropic ids never carry a slash; a proxy-routed id is "<entry_id>/<catalog_id>".
-    return idx === -1 || s.kind === 'anthropic_oauth' || s.kind === 'anthropic_api_key'
-      ? s.model
-      : s.model.slice(idx + 1);
+    return normalizeObserved(s.model, s.provider_id);
   });
 
   readonly filteredOptions = computed<ModelOption[]>(() => {

@@ -147,4 +147,38 @@ mod tests {
             "TS spec must exercise the same already-prefixed regression the Rust side guards"
         );
     }
+
+    #[test]
+    fn normalize_observed_matches_ts() {
+        // Cross-read guard: the TS mirror `normalizeObserved` must strip only an
+        // exact leading `<entryId>/` prefix, matching Rust normalize_observed.
+        let ts = include_str!(
+            "../../../desktop/src/src/app/chat/composer/model-selector/wire-model-id.ts"
+        );
+        assert!(
+            ts.contains("export function normalizeObserved"),
+            "TS must export normalizeObserved"
+        );
+        assert!(
+            ts.contains("observed.startsWith(prefix)"),
+            "TS normalizeObserved must strip only an exact leading prefix, matching Rust normalize_observed"
+        );
+
+        // Behavioral parity on the mis-strip regression: a first segment that is
+        // NOT the entry id must survive.
+        let rust_non_matching =
+            crate::model_id::normalize_observed("unsloth/Qwen2.5-Coder-32B", "my-ollama");
+        assert_eq!(
+            rust_non_matching, "unsloth/Qwen2.5-Coder-32B",
+            "Rust normalize_observed must not strip a first segment that is not the entry id"
+        );
+
+        let ts_spec = include_str!(
+            "../../../desktop/src/src/app/chat/composer/model-selector/wire-model-id.spec.ts"
+        );
+        assert!(
+            ts_spec.contains("does not mis-strip a first segment that is not the entry id"),
+            "TS spec must exercise the same mis-strip regression the Rust side guards"
+        );
+    }
 }
