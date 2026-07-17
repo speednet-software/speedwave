@@ -138,4 +138,17 @@ describe('UserMessageComponent', () => {
     expect(imgIdx).toBeGreaterThanOrEqual(0);
     expect(textIdx).toBeGreaterThan(imgIdx);
   });
+
+  // ── Control chip blocks (spec 4.4) ───────────────────────────────────
+
+  it('renders a chip block with the control-chip testid', () => {
+    fixture.componentRef.setInput('blocks', [
+      { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+    ]);
+    fixture.detectChanges();
+
+    const chip = fixture.nativeElement.querySelector('[data-testid="control-chip"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent?.trim()).toBe('model -> claude-sonnet-5');
+  });
 });

@@ -6,6 +6,7 @@ import { ToolBlockComponent } from '../blocks/tool-block.component';
 import { ErrorBlockComponent } from '../blocks/error-block.component';
 import { AskUserBlockComponent } from '../blocks/ask-user-block.component';
 import { PermissionPromptComponent } from '../blocks/permission-prompt.component';
+import { ControlChipComponent } from '../blocks/control-chip.component';
 import { UserMessageComponent } from './user-message.component';
 import { MessageActionsComponent } from './message-actions.component';
 import { MessageMetadataComponent } from './message-metadata.component';
@@ -20,6 +21,7 @@ import { MessageMetadataComponent } from './message-metadata.component';
     ErrorBlockComponent,
     AskUserBlockComponent,
     PermissionPromptComponent,
+    ControlChipComponent,
     UserMessageComponent,
     MessageActionsComponent,
     MessageMetadataComponent,
@@ -63,6 +65,9 @@ import { MessageMetadataComponent } from './message-metadata.component';
                   [description]="block.description ?? ''"
                   (decided)="onPermissionDecided($index, $event)"
                 />
+              }
+              @case ('chip') {
+                <app-control-chip [command]="block.command" [argument]="block.argument" />
               }
             }
           }

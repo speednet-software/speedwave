@@ -39,6 +39,20 @@ describe('ChatMessageComponent', () => {
     expect(el.querySelector('[data-testid="error-block"]')).not.toBeNull();
   });
 
+  it('renders chip block with the control-chip testid', () => {
+    const blocks: MessageBlock[] = [
+      { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+    ];
+    fixture.componentRef.setInput('blocks', blocks);
+    fixture.componentRef.setInput('role', 'user');
+    fixture.detectChanges();
+
+    const el = fixture.nativeElement as HTMLElement;
+    const chip = el.querySelector('[data-testid="control-chip"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent?.trim()).toBe('model -> claude-sonnet-5');
+  });
+
   it('renders thinking block collapsed', () => {
     const blocks: MessageBlock[] = [{ type: 'thinking', content: 'hmm', collapsed: true }];
     fixture.componentRef.setInput('blocks', blocks);
