@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   SlashService,
   isBareSlash,
@@ -23,22 +23,33 @@ interface ControlShapeCase {
  * cases, so a divergence (e.g. TS matching a tab that Rust rejects) fails on
  * whichever side regresses.
  */
+const FIXTURE_REL = join(
+  'crates',
+  'speedwave-runtime',
+  'src',
+  'fixtures',
+  'control_command_shape.json'
+);
+
+// __dirname depth varies under the coverage transform; walk up to the repo root.
+function locateFixture(): string {
+  let dir = __dirname;
+  for (let i = 0; i < 12; i++) {
+    const candidate = join(dir, FIXTURE_REL);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = resolve(dir, '..');
+    if (parent === dir) {
+      break;
+    }
+    dir = parent;
+  }
+  throw new Error(`control_command_shape.json not found walking up from ${__dirname}`);
+}
+
 function loadControlShapeFixture(): ControlShapeCase[] {
-  const path = join(
-    __dirname,
-    '..',
-    '..',
-    '..',
-    '..',
-    '..',
-    '..',
-    'crates',
-    'speedwave-runtime',
-    'src',
-    'fixtures',
-    'control_command_shape.json'
-  );
-  return JSON.parse(readFileSync(path, 'utf-8')) as ControlShapeCase[];
+  return JSON.parse(readFileSync(locateFixture(), 'utf-8')) as ControlShapeCase[];
 }
 
 describe('isControlShaped', () => {
