@@ -78,6 +78,20 @@ mod tests {
         assert_eq!(normalize_observed(&wire, entry_id), catalog_id);
     }
 
+    /// Regression: the already-prefixed guard checks a `/`-terminated prefix,
+    /// not a bare `starts_with(entry_id)` — a catalog id that merely shares a
+    /// character run with `entry_id` (no `/` boundary) must still be prefixed.
+    #[test]
+    fn catalog_id_sharing_a_prefix_without_slash_boundary_is_still_prefixed() {
+        let entry_id = "my-ollama";
+        let catalog_id = "my-ollama-fast/qwen";
+        let wire = wire_model_id(LlmProviderKind::Local, entry_id, catalog_id);
+        assert_eq!(
+            wire, "my-ollama/my-ollama-fast/qwen",
+            "a catalog id sharing entry_id's characters without a '/' boundary must be genuinely prefixed"
+        );
+    }
+
     #[test]
     fn already_prefixed_catalog_id_is_not_double_prefixed() {
         let entry_id = "openrouter";
