@@ -1,13 +1,55 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   SlashService,
   isBareSlash,
   isBlankOrSlashOnly,
+  isControlShaped,
   type SlashDiscovery,
 } from './slash.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+
+interface ControlShapeCase {
+  readonly input: string;
+  readonly is_control: boolean;
+}
+
+/**
+ * Shared Rust↔TS fixture table (`crates/speedwave-runtime/src/fixtures/control_command_shape.json`):
+ * both Rust `parse_control_command` and this spec assert against the same
+ * cases, so a divergence (e.g. TS matching a tab that Rust rejects) fails on
+ * whichever side regresses.
+ */
+function loadControlShapeFixture(): ControlShapeCase[] {
+  const path = join(
+    __dirname,
+    '..',
+    '..',
+    '..',
+    '..',
+    '..',
+    '..',
+    'crates',
+    'speedwave-runtime',
+    'src',
+    'fixtures',
+    'control_command_shape.json'
+  );
+  return JSON.parse(readFileSync(path, 'utf-8')) as ControlShapeCase[];
+}
+
+describe('isControlShaped', () => {
+  it('agrees with the Rust parse_control_command fixture table', () => {
+    const cases = loadControlShapeFixture();
+    expect(cases.length).toBeGreaterThan(0);
+    for (const { input, is_control } of cases) {
+      expect(isControlShaped(input), `isControlShaped(${JSON.stringify(input)})`).toBe(is_control);
+    }
+  });
+});
 
 describe('isBareSlash', () => {
   it('matches a lone slash, with or without surrounding whitespace', () => {

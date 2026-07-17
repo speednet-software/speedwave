@@ -279,7 +279,7 @@ function classifyDiscoveryFailure(msg: string): {
 
             <div class="mt-3">
               <p class="mono text-[11px] text-[var(--ink-mute)]">
-                Model wybierasz w oknie czatu - użyj selektora modelu w composerze.
+                Choose the model in the chat window — use the model selector in the composer.
               </p>
             </div>
           </div>
@@ -411,8 +411,8 @@ function classifyDiscoveryFailure(msg: string): {
                 class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
                 data-testid="settings-llm-local-model-hint"
               >
-                Model dla nowych sesji dobierany automatycznie z pierwszego wyniku discover; wybór
-                modelu w bieżącej sesji - w oknie czatu.
+                The model for new sessions is picked automatically from the first discovery result;
+                change the model for the current session in the chat window.
               </p>
             }
 
@@ -524,8 +524,8 @@ function classifyDiscoveryFailure(msg: string): {
                   class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
                   [attr.data-testid]="'settings-llm-extra-model-hint-' + entry.id"
                 >
-                  Model wybierasz w oknie czatu; nowa konfiguracja startuje z domyślnym modelem
-                  OpenRouter.
+                  Choose the model in the chat window; a new configuration starts with the default
+                  OpenRouter model.
                 </p>
               }
             </div>

@@ -19,11 +19,13 @@ export function isBlankOrSlashOnly(text: string): boolean {
   return text.trim().length === 0 || isBareSlash(text);
 }
 
-const CONTROL_COMMAND_RE = /^\/(model|effort)\s+(\S+)$/;
+const CONTROL_COMMAND_RE = /^\/(model|effort) +(\S+)$/;
 
 /**
  * True when `text` is a `/model <id>` or `/effort <level>` control command.
- * Mirrors Rust SSOT `speedwave_runtime::slash::parse_control_command`.
+ * Mirrors Rust SSOT `speedwave_runtime::slash::parse_control_command`, which
+ * requires a literal space separator (`strip_prefix("/model ")`), not `\s+` —
+ * a tab or other whitespace right after the command name does not match.
  * @param text - Raw composer text to test.
  */
 export function isControlShaped(text: string): boolean {
