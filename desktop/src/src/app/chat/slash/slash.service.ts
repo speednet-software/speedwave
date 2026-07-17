@@ -19,6 +19,17 @@ export function isBlankOrSlashOnly(text: string): boolean {
   return text.trim().length === 0 || isBareSlash(text);
 }
 
+const CONTROL_COMMAND_RE = /^\/(model|effort)\s+(\S+)$/;
+
+/**
+ * True when `text` is a `/model <id>` or `/effort <level>` control command.
+ * Mirrors Rust SSOT `speedwave_runtime::slash::parse_control_command`.
+ * @param text - Raw composer text to test.
+ */
+export function isControlShaped(text: string): boolean {
+  return CONTROL_COMMAND_RE.test(text.trim());
+}
+
 /** Classification of a slash-menu entry, used by the UI to render the badge. */
 export type SlashKind = 'Builtin' | 'Skill' | 'Command' | 'Plugin' | 'Agent';
 

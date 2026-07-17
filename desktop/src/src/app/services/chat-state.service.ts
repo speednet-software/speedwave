@@ -6,7 +6,7 @@ import { TauriService } from './tauri.service';
 import { ProjectStateService } from './project-state.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
-import { isBlankOrSlashOnly } from '../chat/slash/slash.service';
+import { isBlankOrSlashOnly, isControlShaped } from '../chat/slash/slash.service';
 import {
   DEFAULT_CONTEXT_TOKENS,
   isLocalProvider,
@@ -392,14 +392,19 @@ export class ChatStateService {
       // State-tree carries metadata only (ADR-065); bytes live on disk.
       displayBlocks.push({ type: 'image', media_type: att.mediaType, alt: att.filename });
     }
-    this._messages = [
-      ...this._messages,
-      {
-        role: 'user',
-        blocks: displayBlocks,
-        timestamp: Date.now(),
-      },
-    ];
+    // A control-shaped send (`/model x`, `/effort y`) arrives via a `ControlChip`
+    // stream event instead — skip the optimistic bubble to avoid double-rendering.
+    const isControlSend = chatInput.attachments.length === 0 && isControlShaped(surfaceText);
+    if (!isControlSend) {
+      this._messages = [
+        ...this._messages,
+        {
+          role: 'user',
+          blocks: displayBlocks,
+          timestamp: Date.now(),
+        },
+      ];
+    }
     this.isStreaming = true;
     this._turnId += 1;
     this._currentBlocks = [];
@@ -722,6 +727,20 @@ export class ChatStateService {
         }
         break;
 
+      case 'ControlChip': {
+        const { command, argument, uuid } = chunk.data;
+        this._messages = [
+          ...this._messages,
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command, argument }],
+            timestamp: Date.now(),
+            ...(uuid ? { uuid, uuid_status: 'Committed' as const } : {}),
+          },
+        ];
+        break;
+      }
+
       case 'RateLimit':
         if (chunk.data.utilization !== null) {
           this._rateLimit = {
@@ -849,14 +868,18 @@ export class ChatStateService {
         // ADR-045: backend sent the queued payload to stdin; mirror to local state.
         this._pendingQueue = null;
         this._queueAwaitingSession = false;
-        this._messages = [
-          ...this._messages,
-          {
-            role: 'user',
-            blocks: [{ type: 'text', content: chunk.data.text }],
-            timestamp: Date.now(),
-          },
-        ];
+        // A control-shaped drained text already arrived as a ControlChip (emitted
+        // just before QueueDrained) — the chip IS the message, skip the plain bubble.
+        if (!isControlShaped(chunk.data.text)) {
+          this._messages = [
+            ...this._messages,
+            {
+              role: 'user',
+              blocks: [{ type: 'text', content: chunk.data.text }],
+              timestamp: Date.now(),
+            },
+          ];
+        }
         this.isStreaming = true;
         this._turnId += 1;
         this._currentBlocks = [];

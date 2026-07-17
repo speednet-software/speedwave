@@ -36,6 +36,11 @@ export type StreamChunk =
   | { chunk_type: 'Error'; data: { content: string } }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
+      /** A `/model <id>` or `/effort <level>` control message, rendered as a self-describing chip (spec 4.4). */
+      chunk_type: 'ControlChip';
+      data: { command: string; argument: string; uuid?: string };
+    }
+  | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };
     }
@@ -145,6 +150,8 @@ export type MessageBlock =
       description?: string;
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
+  /** Rendered control-message chip for a `/model`/`/effort` command (spec 4.4). */
+  | { type: 'chip'; command: string; argument: string }
   /** Image placeholder; bytes live on disk (ADR-065). */
   | { type: 'image'; media_type: string; alt?: string };
 

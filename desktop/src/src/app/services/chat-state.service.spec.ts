@@ -455,6 +455,68 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('ControlChip chunk handling', () => {
+    it('appends a chip message when a control-shaped send is emitted', () => {
+      const beforeLen = service.messages.length;
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-sonnet-5' },
+      });
+
+      expect(service.messages.length).toBe(beforeLen + 1);
+      const last = service.messages[service.messages.length - 1];
+      expect(last.role).toBe('user');
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+      ]);
+    });
+
+    it('appends a chip message carrying a uuid when the chunk provides one', () => {
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'effort', argument: 'high', uuid: 'u_effort_1' },
+      });
+
+      const last = service.messages[service.messages.length - 1];
+      expect(last.uuid).toBe('u_effort_1');
+      expect(last.uuid_status).toBe('Committed');
+      expect(last.blocks).toEqual([{ type: 'chip', command: 'effort', argument: 'high' }]);
+    });
+
+    it('appends a chip with no uuid when the chunk carries none (the normal live-send case)', () => {
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-opus-4-8' },
+      });
+      const last = service.messages[service.messages.length - 1];
+      expect(last.uuid).toBeUndefined();
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-opus-4-8' },
+      ]);
+    });
+
+    it('ControlChip then QueueDrained for the same control text yields exactly one chip, no plain bubble', () => {
+      const beforeLen = service.messages.length;
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-sonnet-5' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'QueueDrained',
+        data: { session_id: 's-1', text: '/model claude-sonnet-5' },
+      });
+
+      expect(service.messages.length).toBe(beforeLen + 1);
+      const last = service.messages[service.messages.length - 1];
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+      ]);
+      expect(service.messages.some((m) => m.blocks.some((b) => b.type === 'text'))).toBe(false);
+    });
+  });
+
   describe('handleStreamChunk', () => {
     it('accumulates text chunks into currentBlocks', () => {
       const chunk1: StreamChunk = { chunk_type: 'Text', data: { content: 'Hello ' } };
