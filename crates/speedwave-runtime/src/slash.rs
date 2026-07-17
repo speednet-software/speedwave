@@ -246,8 +246,9 @@ pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }
 
-/// Matches `^/(model|effort)\s+\S+$` on trimmed `text`, returning `(command, argument)`.
-/// SSOT for control-chip shape, called by both live emission and history reconstruction.
+/// Matches `^/(model|effort) +\S+$` on trimmed `text` (a literal space separator,
+/// not `\s+` — a tab does not match), returning `(command, argument)`. SSOT for
+/// control-chip shape, called by both live emission and history reconstruction.
 pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim();
     let (command, argument) = trimmed
@@ -619,15 +620,31 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
         let (clean_name, plugin) = split_plugin_prefix(&name);
         let is_agent = raw.agents.iter().any(|a| a == clean_name);
 
-        // Native allowlist hit (and not shadowed by a plugin/agent name): badge,
-        // description and the show-filter come straight from the allowlist entry.
+        // Native allowlist hit (and not shadowed by a plugin/agent name): badge
+        // and show-filter come from the allowlist, but an on-disk skill/command
+        // of the same bare name is consulted first so a user's own frontmatter
+        // (description, user-invocable: false) is never silently dropped.
         if plugin.is_none() && !is_agent {
             if let Some(native) = crate::native_slash::native_command(clean_name) {
+                let (on_disk, _origin) = lookup_frontmatter(
+                    clean_name,
+                    None,
+                    project_dir,
+                    personal_dir.as_deref(),
+                    &raw.plugins,
+                );
+                if matches!(on_disk.user_invocable, Some(false)) {
+                    continue;
+                }
                 if native.show {
+                    let description = on_disk
+                        .description
+                        .map(|d| d.trim().to_string())
+                        .or_else(|| Some(native.description.to_string()));
                     commands.push(SlashCommand {
                         name: name.clone(),
-                        description: Some(native.description.to_string()),
-                        argument_hint: None,
+                        description,
+                        argument_hint: on_disk.argument_hint,
                         kind: native.badge,
                         plugin: None,
                     });
@@ -1022,15 +1039,17 @@ mod tests {
     fn parse_control_command_matches_ts_is_control_shaped() {
         // Cross-language SSOT guard (cf. is_bare_slash_matches_ts_mirror):
         // TS `isControlShaped` in slash.service.ts must stay byte-identical in shape.
+        // A literal space (not `\s+`) is load-bearing: `strip_prefix("/model ")`
+        // does not match a tab, so the TS regex must not either.
         let src = include_str!("../../../desktop/src/src/app/chat/slash/slash.service.ts");
         let re = regex::Regex::new(
-            r"const CONTROL_COMMAND_RE = /\^\\/\(model\|effort\)\\s\+\(\\S\+\)\$/;",
+            r"const CONTROL_COMMAND_RE = /\^\\/\(model\|effort\) \+\(\\S\+\)\$/;",
         )
         .unwrap();
         assert!(
             re.is_match(src),
-            "slash.service.ts::CONTROL_COMMAND_RE must stay `/^\\/(model|effort)\\s+(\\S+)$/` \
-             to match Rust parse_control_command's `^/(model|effort)\\s+\\S+$` shape"
+            "slash.service.ts::CONTROL_COMMAND_RE must stay `/^\\/(model|effort) +(\\S+)$/` \
+             (literal space) to match Rust parse_control_command's `^/(model|effort) +\\S+$` shape"
         );
         let body_re = regex::Regex::new(
             r"export function isControlShaped\(text: string\): boolean \{\s*return CONTROL_COMMAND_RE\.test\(text\.trim\(\)\);\s*\}",
@@ -1040,6 +1059,32 @@ mod tests {
             body_re.is_match(src),
             "slash.service.ts::isControlShaped must test CONTROL_COMMAND_RE against text.trim()"
         );
+    }
+
+    /// Fixture-table SSOT guard: both Rust `parse_control_command` and TS
+    /// `isControlShaped` (`slash.service.spec.ts`) read this same file, so a
+    /// behavioral divergence (e.g. TS matching a tab that Rust rejects) fails
+    /// loudly on whichever side regresses, not just on a regex-string diff.
+    #[derive(Deserialize)]
+    struct ControlShapeCase {
+        input: String,
+        is_control: bool,
+    }
+
+    #[test]
+    fn parse_control_command_matches_shared_fixture_table() {
+        let raw = include_str!("fixtures/control_command_shape.json");
+        let cases: Vec<ControlShapeCase> =
+            serde_json::from_str(raw).expect("fixture must be valid JSON");
+        assert!(!cases.is_empty(), "fixture table must not be empty");
+        for case in cases {
+            let got = parse_control_command(&case.input).is_some();
+            assert_eq!(
+                got, case.is_control,
+                "parse_control_command({:?}) = {got}, fixture expects is_control={}",
+                case.input, case.is_control
+            );
+        }
     }
 
     fn sample_init_json() -> String {
@@ -1266,6 +1311,81 @@ mod tests {
         let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands[0].description.as_deref(), Some("from project"));
+    }
+
+    #[test]
+    fn enrich_native_hit_prefers_on_disk_description_over_allowlist() {
+        // A project skill named like a native command ("model") must not be
+        // silently shadowed: its own description should surface, not the
+        // hardcoded allowlist description.
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/model");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: my custom model picker\n---\n",
+        )
+        .unwrap();
+
+        let raw = RawDiscovery {
+            slash_commands: vec!["model".into()],
+            ..RawDiscovery::default()
+        };
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert_eq!(d.commands.len(), 1);
+        assert_eq!(d.commands[0].name, "model");
+        assert_eq!(d.commands[0].kind, SlashKind::Builtin);
+        assert_eq!(
+            d.commands[0].description.as_deref(),
+            Some("my custom model picker"),
+            "on-disk frontmatter must win over the native allowlist description"
+        );
+    }
+
+    #[test]
+    fn enrich_native_hit_falls_back_to_allowlist_description_without_on_disk_hit() {
+        // No on-disk skill/command named "model" exists: the allowlist
+        // description must still be used (regression guard for the 5b/5c fix).
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = RawDiscovery {
+            slash_commands: vec!["model".into()],
+            ..RawDiscovery::default()
+        };
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert_eq!(d.commands.len(), 1);
+        assert_eq!(
+            d.commands[0].description.as_deref(),
+            Some("Show or switch the model for this session")
+        );
+    }
+
+    #[test]
+    fn enrich_native_hit_hidden_by_on_disk_user_invocable_false() {
+        // A project skill named like a native command with user-invocable:
+        // false intends to hide it; the native allowlist's show=true must
+        // not override that.
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".claude/skills/model");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: hidden model picker\nuser-invocable: false\n---\n",
+        )
+        .unwrap();
+
+        let raw = RawDiscovery {
+            slash_commands: vec!["model".into()],
+            ..RawDiscovery::default()
+        };
+        let data_tmp = tempfile::tempdir().unwrap();
+        let d = enrich_and_filter(raw, tmp.path(), data_tmp.path());
+        assert!(
+            d.commands.is_empty(),
+            "expected 'model' to be hidden by on-disk user-invocable: false, got {:?}",
+            d.commands
+        );
     }
 
     #[test]
