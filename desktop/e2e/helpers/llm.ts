@@ -43,8 +43,15 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   await selectBtn.waitForExist({ timeout: 10_000 });
   await selectBtn.click();
 
+  // Clicking an already-active row TOGGLES its panel — if the key input did not
+  // appear, the click collapsed a still-expanded row; click again to re-expand.
   const keyInput = await $('[data-testid="settings-llm-extra-key-openrouter"]');
-  await keyInput.waitForExist({ timeout: 5_000 });
+  try {
+    await keyInput.waitForExist({ timeout: 3_000 });
+  } catch {
+    await selectBtn.click();
+    await keyInput.waitForExist({ timeout: 5_000 });
+  }
   await keyInput.setValue(apiKey);
 
   // Discovery is a live key check: a bad OPENROUTER_API_KEY fails HERE with a
