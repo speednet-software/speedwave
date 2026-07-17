@@ -9,7 +9,7 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
     <span
       data-testid="control-chip"
       [attr.data-command]="command()"
-      class="mono inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] px-2.5 py-0.5 text-[11.5px] text-[var(--ink-mute)]"
+      class="mono inline-flex items-center gap-1.5 rounded-full border border-[var(--line-strong)] px-2.5 py-0.5 text-[11.5px] text-[var(--ink-mute)]"
     >
       {{ command() }} -> {{ argument() }}
     </span>
