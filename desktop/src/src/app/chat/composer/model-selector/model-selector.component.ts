@@ -134,6 +134,8 @@ export class ModelSelectorComponent {
   readonly loading = signal(false);
   readonly error = signal('');
   protected readonly summary = signal<ActiveProviderSummary | null>(null);
+  /** Project id the current `summary` was fetched for; drives staleness checks. */
+  private summaryProjectId: string | null = null;
   private readonly options = signal<ModelOption[]>([]);
 
   /** In-flight option fetch, awaited by tests to settle the fire-and-forget open. */
@@ -177,13 +179,15 @@ export class ModelSelectorComponent {
 
   /**
    * Opens the combobox and starts the option fetch. Awaits the summary if it is
-   * still loading, then kicks off `fetchOptions` without awaiting it, so the
-   * combobox can render its loading state while the catalog request is in flight.
+   * missing or stale for the current project, then kicks off `fetchOptions`
+   * without awaiting it, so the combobox can render its loading state while the
+   * catalog request is in flight.
    */
   async openCombobox(): Promise<void> {
     if (this.streaming()) return;
     this.open.set(true);
-    if (!this.summary()) await this.loadSummary(this.projectId());
+    const id = this.projectId();
+    if (this.summaryProjectId !== id) await this.loadSummary(id);
     this.optionsFetch = this.fetchOptions();
   }
 
@@ -285,6 +289,10 @@ export class ModelSelectorComponent {
     this.open.set(false);
   }
 
+  /**
+   * Drops the result if the project changed while the fetch was in flight.
+   * @param projectId - Project id to fetch the active-provider summary for.
+   */
   private async loadSummary(projectId: string): Promise<void> {
     try {
       const summary = await this.tauri.invoke<ActiveProviderSummary>(
@@ -293,7 +301,9 @@ export class ModelSelectorComponent {
           project: projectId,
         }
       );
+      if (this.projectId() !== projectId) return;
       this.summary.set(summary);
+      this.summaryProjectId = projectId;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: get_active_provider_summary failed: ${msg}`);

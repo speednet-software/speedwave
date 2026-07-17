@@ -311,6 +311,84 @@ describe('ModelSelectorComponent', () => {
     expect(option.disabled).toBe(true);
   });
 
+  it('drops a stale summary resolution when the project switched while it was in flight', async () => {
+    let resolveA!: (v: ActiveProviderSummary) => void;
+    const summaryB: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openrouter/some-model',
+      base_url: null,
+    };
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary')
+        return new Promise((r) => {
+          resolveA = r;
+        });
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    // Start a load for project A (in flight, not yet resolved).
+    fixture.componentRef.setInput('projectId', 'proj-a');
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    // Switch to project B before A resolves; B gets its own summary going forward.
+    tauriInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summaryB);
+      if (cmd === 'list_anthropic_models') return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-b');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // A's stale load resolves last; it must be dropped, not overwrite B's summary.
+    resolveA({
+      provider_id: 'anthropic',
+      kind: 'anthropic_oauth',
+      model: 'claude-sonnet-5',
+      base_url: null,
+    });
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance['summary']()).toEqual(summaryB);
+  });
+
+  it('reloads a stale non-null summary from a previous project before fetching options', async () => {
+    const summaryB: ActiveProviderSummary = {
+      provider_id: 'openrouter',
+      kind: 'open_router',
+      model: 'openrouter/some-model',
+      base_url: null,
+    };
+    // Project A resolves first, leaving a non-null summary in place.
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(fixture.componentInstance['summary']()).toEqual(summary);
+
+    // Switch to project B, but do not let the constructor effect's own load
+    // race the assertion below: it resolves to summaryB too, so either caller
+    // observes the same correct result.
+    tauriInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_active_provider_summary') return Promise.resolve(summaryB);
+      if (cmd === 'discover_llm_models') return Promise.resolve({ models: [] });
+      return Promise.reject(new Error(`unexpected: ${cmd} ${JSON.stringify(args)}`));
+    });
+    fixture.componentRef.setInput('projectId', 'proj-b');
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    await fixture.componentInstance.openCombobox();
+    await fixture.componentInstance.whenOptionsSettled();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance['summary']()).toEqual(summaryB);
+    const call = tauriInvoke.mock.calls.find(([cmd]) => cmd === 'discover_llm_models');
+    expect(call).toBeTruthy();
+  });
+
   it('surfaces a model-selection write-through error next to the badge, then clears it', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
