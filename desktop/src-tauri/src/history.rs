@@ -813,12 +813,12 @@ fn compute_resume_snapshot_impl(
                 }
             }
             "assistant" => {
-                if let Some(model) = parsed["message"]["model"].as_str() {
-                    tracker.observe_assistant(model);
-                }
-                // Last main-chain call's usage = context occupancy; sidechain
-                // (subagent) lines have their own context and are skipped.
+                // Sidechain (subagent) lines have their own model and context
+                // and are skipped — they commonly run a cheaper model.
                 if !crate::chat::is_sidechain_event(&parsed) {
+                    if let Some(model) = parsed["message"]["model"].as_str() {
+                        tracker.observe_assistant(model);
+                    }
                     if let Some(u) = crate::chat::turn_usage_from_jsonl(&parsed["message"]["usage"])
                     {
                         if u != crate::chat::TurnUsage::default() {
@@ -2362,6 +2362,27 @@ mod tests {
 
         let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
         assert_eq!(snap.model.as_deref(), Some("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_sidechain_assistant_model_does_not_override_main_chain() {
+        // A subagent (sidechain) turn commonly runs a cheaper model (e.g.
+        // haiku); it must not overwrite the main-chain session model.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5-20251001"}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("model-a"));
     }
 
     #[test]

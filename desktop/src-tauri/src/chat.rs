@@ -482,8 +482,12 @@ impl StreamParser {
     }
 
     /// Feed `message.model` into the session model tracker (chronological
-    /// last-observed wins). Missing/empty models are silently ignored.
+    /// last-observed wins). Sidechain (subagent) calls are excluded — they
+    /// commonly run a different, cheaper model than the main chain.
     fn capture_assistant_model(&mut self, parsed: &serde_json::Value) {
+        if is_sidechain_event(parsed) {
+            return;
+        }
         if let Some(model) = parsed["message"]["model"].as_str() {
             self.model_tracker.observe_assistant(model);
         }
@@ -3188,6 +3192,32 @@ mod tests {
         match chunk {
             StreamChunk::Result { model, .. } => {
                 assert_eq!(model.as_deref(), Some("model-observed"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_sidechain_assistant_model_does_not_override_main_chain() {
+        // A subagent (sidechain) turn commonly runs a cheaper model (e.g.
+        // haiku); it must not overwrite the main-chain session model or
+        // its context window.
+        let mut parser = StreamParser::new();
+        let init_a = r#"{"type":"system","subtype":"init","model":"model-a"}"#;
+        parse_line_str(&mut parser, init_a);
+        let sidechain = r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_sub","model":"claude-haiku-4-5-20251001","usage":{}}}"#;
+        parse_line_all_str(&mut parser, sidechain);
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"","modelUsage":{"model-a":{"inputTokens":10,"outputTokens":10,"contextWindow":200000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("model-a"));
+                assert_eq!(context_window_size, Some(200_000));
             }
             other => panic!("expected Result, got {other:?}"),
         }
