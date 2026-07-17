@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/policy-engine",
-  "version": "0.15.0",
+  "version": "0.17.0",
   "description": "Thin TS wrapper over the WASM PII tokenization engine, for the Speedwave MCP hub",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
