@@ -2886,4 +2886,31 @@ mod tests {
         assert!(!dir.join(format!("{id_a}.jsonl")).exists());
         assert!(dir.join(format!("{id_b}.jsonl")).exists());
     }
+
+    #[test]
+    fn control_chip_tag_matches_ts() {
+        // Cross-read guard: MessageBlock::ControlChip serializes with the serde
+        // tag "control_chip", which chat-state.service.ts::normalizeHistoryBlocks
+        // maps to the `{ type: 'chip' }` view-model. A rename on either side
+        // must fail here.
+        let json = serde_json::to_string(&MessageBlock::ControlChip {
+            command: "model".to_string(),
+            argument: "claude-sonnet-5".to_string(),
+        })
+        .unwrap();
+        assert!(
+            json.contains(r#""type":"control_chip""#),
+            "Rust MessageBlock::ControlChip must serialize with tag control_chip, got: {json}"
+        );
+
+        let ts = include_str!("../../src/src/app/services/chat-state.service.ts");
+        assert!(
+            ts.contains("'control_chip'"),
+            "TS normalizeHistoryBlocks must match the 'control_chip' history tag"
+        );
+        assert!(
+            ts.contains("type: 'chip'"),
+            "TS normalizeHistoryBlocks must map control_chip to the chip view-model (type: 'chip')"
+        );
+    }
 }

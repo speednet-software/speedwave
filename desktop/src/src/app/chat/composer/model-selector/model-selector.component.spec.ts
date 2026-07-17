@@ -310,4 +310,22 @@ describe('ModelSelectorComponent', () => {
     const option = el.querySelector('[data-testid="effort-option-low"]') as HTMLButtonElement;
     expect(option.disabled).toBe(true);
   });
+
+  it('surfaces a model-selection write-through error next to the badge, then clears it', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    // No error input yet: nothing is shown.
+    expect(fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'))).toBeFalsy();
+
+    fixture.componentRef.setInput('modelError', 'locked config');
+    fixture.detectChanges();
+    const err = fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'));
+    expect(err).toBeTruthy();
+    expect(err.nativeElement.textContent).toContain('locked config');
+
+    // A successful selection clears the error upstream; the input goes empty.
+    fixture.componentRef.setInput('modelError', '');
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'))).toBeFalsy();
+  });
 });

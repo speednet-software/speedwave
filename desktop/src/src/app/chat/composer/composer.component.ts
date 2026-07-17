@@ -177,6 +177,7 @@ const PLAN_MODE_PREFIX =
         <app-model-selector
           [projectId]="projectId()"
           [streaming]="streaming()"
+          [modelError]="modelError()"
           (modelSelected)="modelSelected.emit($event)"
         />
         @if (contextLabel()) {
@@ -263,6 +264,9 @@ export class ComposerComponent implements AfterViewInit {
 
   /** Active project id, forwarded to the model selector for its IPC calls. */
   readonly projectId = input('');
+
+  /** Model-selection write-through error, forwarded to the selector badge. */
+  readonly modelError = input('');
 
   /** Context window hint (e.g. "128k") — shown next to the model on lg+. */
   readonly contextLabel = input('');

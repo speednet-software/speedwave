@@ -54,6 +54,11 @@ export interface ModelSelection {
     >
       {{ displayModel() }}
     </button>
+    @if (modelError()) {
+      <span data-testid="model-selection-error" role="alert" class="ml-2 text-red-300">{{
+        modelError()
+      }}</span>
+    }
     @if (open()) {
       <div class="model-selector-popover" role="dialog">
         <input
@@ -117,6 +122,9 @@ export class ModelSelectorComponent {
   readonly projectId = input.required<string>();
   /** True while a turn is streaming; disables the badge (ADR-045-style lock). */
   readonly streaming = input(false);
+
+  /** Write-through error from `ChatStateService.applyModelSelection`; '' when none. */
+  readonly modelError = input('');
 
   /** The one event this component emits; routed to `ChatStateService.applyModelSelection`. */
   readonly modelSelected = output<ModelSelection>();
