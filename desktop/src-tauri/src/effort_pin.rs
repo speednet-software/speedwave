@@ -1,5 +1,5 @@
 //! Launch-effort pin IO for a project's claude-home `settings.json`
-//! (`effortLevel` key). Next-session semantics only (ADR-089 forthcoming):
+//! (`effortLevel` key). Next-session semantics only (ADR-082):
 //! Claude Code itself refuses a live `/effort` change under an existing pin.
 
 use std::path::Path;
