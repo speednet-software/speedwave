@@ -1280,10 +1280,85 @@ fn apply_llm_config(
     Ok(())
 }
 
+/// Auto-defaults a `Local` provider's model via the discovery probe (mockable
+/// in tests); the production impl reuses `discover_llm_models_with_fallback`.
+#[async_trait::async_trait]
+pub(crate) trait ModelAutoDefaultProbe: Send + Sync {
+    async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String>;
+}
+
+/// Production probe: no transient credential (save path carries none) - falls
+/// back to the stored per-project token file, matching discovery-time behavior.
+struct LiveModelAutoDefaultProbe<'a> {
+    active_project: Option<&'a str>,
+}
+
+#[async_trait::async_trait]
+impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
+    async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String> {
+        let result = crate::llm_cmd::discovery::discover_llm_models_with_fallback(
+            entry_id,
+            base_url,
+            None,
+            None,
+            self.active_project,
+        )
+        .await?;
+        result
+            .models
+            .into_iter()
+            .next()
+            .map(|m| m.id)
+            .ok_or_else(|| "empty".to_string())
+    }
+}
+
+/// Applies decision 7 (spec `2026-07-16-chat-slash-commands-design.md` §4.5):
+/// an OpenRouter entry saved with no model gets the verified default; a Local
+/// entry saved with no model gets the first probed model. Runs BEFORE
+/// `validate_provider_entries`/`validate_active_selection` so the
+/// model-required invariant never trips for a fresh save. Explicit models
+/// are never touched.
+async fn apply_model_auto_defaults(
+    providers: &mut [speedwave_runtime::config::LlmProviderEntry],
+    probe: &dyn ModelAutoDefaultProbe,
+) -> Result<(), String> {
+    use speedwave_runtime::config::LlmProviderKind;
+    for entry in providers.iter_mut() {
+        let has_model = entry
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|m| !m.is_empty());
+        if has_model {
+            continue;
+        }
+        match entry.kind {
+            LlmProviderKind::OpenRouter => {
+                entry.model = Some(speedwave_runtime::consts::OPENROUTER_DEFAULT_MODEL.to_string());
+            }
+            LlmProviderKind::Local => {
+                let base_url = entry.base_url.clone().unwrap_or_default();
+                match probe.first_local_model(&entry.id, &base_url).await {
+                    Ok(model) => entry.model = Some(model),
+                    Err(e) => {
+                        return Err(format!(
+                            "{} - could not auto-select a model: {e}",
+                            model_required_error(&entry.id)
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Applies an `LlmConfigUpdate` (Settings Save) to the active project.
 /// Crash-recovery contract documented in ADR-040 §"Rollback".
 #[tauri::command]
-pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
+pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
     // Canonicalize loopback hosts before validation so the persisted base_url
     // is the one the proxy container can reach.
     if config::is_local_provider(update.provider.as_deref()) {
@@ -1293,6 +1368,13 @@ pub fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String> {
     }
     if let Some(ref mut providers) = update.providers {
         canonicalize_provider_base_urls(providers);
+        let active_project = config::load_user_config()
+            .ok()
+            .and_then(|c| c.active_project);
+        let probe = LiveModelAutoDefaultProbe {
+            active_project: active_project.as_deref(),
+        };
+        apply_model_auto_defaults(providers, &probe).await?;
     }
     log::info!(
         "updating LLM config: provider={:?} model={:?} context_tokens={:?} \
@@ -2031,8 +2113,8 @@ mod tests {
         assert_eq!(beta_llm.model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
-    #[test]
-    fn update_llm_config_rejects_local_provider_without_model() {
+    #[tokio::test]
+    async fn update_llm_config_rejects_local_provider_without_model() {
         // Local providers need a model; reject at save time. Iterate the SSOT
         // const so a future local backend is covered automatically.
         assert!(
@@ -2048,7 +2130,8 @@ mod tests {
                     provider,
                     model.as_deref(),
                     Some("http://localhost:11434"),
-                ));
+                ))
+                .await;
                 let err = result.expect_err(&format!(
                     "provider={provider}, model={model:?} must be rejected \
                      but save succeeded"
@@ -2062,10 +2145,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_llm_config_accepts_anthropic_without_model() {
+    #[tokio::test]
+    async fn update_llm_config_accepts_anthropic_without_model() {
         // Anthropic isn't local — the model-required guard must not fire.
-        let result = update_llm_config(llm_update("anthropic", None, None));
+        let result = update_llm_config(llm_update("anthropic", None, None)).await;
         // May fail for project-config reasons; we only require the error is
         // NOT the model-required one.
         if let Err(err) = result {
@@ -2139,15 +2222,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_llm_config_rejects_model_with_flag_prefix() {
+    #[tokio::test]
+    async fn update_llm_config_rejects_model_with_flag_prefix() {
         // Regression: a `--`-prefixed model name could be parsed as another
         // CLI flag in the Claude Code invocation.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("--dangerously-skip-permissions"),
             Some("http://localhost:11434"),
-        ));
+        ))
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -2156,13 +2240,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_llm_config_rejects_model_with_single_dash_prefix() {
+    #[tokio::test]
+    async fn update_llm_config_rejects_model_with_single_dash_prefix() {
         let result = update_llm_config(llm_update(
             "ollama",
             Some("-h"),
             Some("http://localhost:11434"),
-        ));
+        ))
+        .await;
         assert!(result.is_err());
     }
 
@@ -2288,8 +2373,103 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn update_llm_config_rejects_dangling_active_provider() {
+    // ── auto-default model at provider save (Task 11) ────────────────────
+
+    /// Test double for the local-model probe: returns a fixed result or error
+    /// without any network/VM access.
+    struct FakeProbe(Result<Vec<&'static str>, &'static str>);
+
+    #[async_trait::async_trait]
+    impl ModelAutoDefaultProbe for FakeProbe {
+        async fn first_local_model(
+            &self,
+            _entry_id: &str,
+            _base_url: &str,
+        ) -> Result<String, String> {
+            match &self.0 {
+                Ok(models) => models
+                    .first()
+                    .map(|m| m.to_string())
+                    .ok_or_else(|| "empty".to_string()),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn or_entry_without_model_gets_default() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut providers = vec![v2_entry("openrouter", K::OpenRouter, None)];
+        let probe = FakeProbe(Ok(vec!["unused"]));
+        apply_model_auto_defaults(&mut providers, &probe)
+            .await
+            .unwrap();
+        assert_eq!(
+            providers[0].model.as_deref(),
+            Some(speedwave_runtime::consts::OPENROUTER_DEFAULT_MODEL)
+        );
+    }
+
+    #[tokio::test]
+    async fn local_entry_without_model_uses_first_probe_result() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut providers = vec![v2_entry(
+            "local",
+            K::Local,
+            Some("http://host.docker.internal:11434"),
+        )];
+        let probe = FakeProbe(Ok(vec!["llama-3.3-70b", "llama-3.1-8b"]));
+        apply_model_auto_defaults(&mut providers, &probe)
+            .await
+            .unwrap();
+        assert_eq!(providers[0].model.as_deref(), Some("llama-3.3-70b"));
+    }
+
+    #[tokio::test]
+    async fn local_probe_failure_surfaces_model_required_error() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut providers = vec![v2_entry(
+            "local",
+            K::Local,
+            Some("http://host.docker.internal:11434"),
+        )];
+        let probe = FakeProbe(Err("connection refused"));
+        let err = apply_model_auto_defaults(&mut providers, &probe)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("requires a model name"),
+            "must still surface the model-required error, got: {err}"
+        );
+        assert!(
+            err.contains("could not auto-select a model") && err.contains("connection refused"),
+            "must enrich the error with the probe failure, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_model_never_overwritten() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut or_entry = v2_entry("openrouter", K::OpenRouter, None);
+        or_entry.model = Some("deepseek/deepseek-v4-flash".to_string());
+        let mut local_entry =
+            v2_entry("local", K::Local, Some("http://host.docker.internal:11434"));
+        local_entry.model = Some("llama-3.1-8b".to_string());
+        let mut providers = vec![or_entry, local_entry];
+        // A probe that would fail/return something else if it were (wrongly) called.
+        let probe = FakeProbe(Err("must not be called"));
+        apply_model_auto_defaults(&mut providers, &probe)
+            .await
+            .unwrap();
+        assert_eq!(
+            providers[0].model.as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        assert_eq!(providers[1].model.as_deref(), Some("llama-3.1-8b"));
+    }
+
+    #[tokio::test]
+    async fn update_llm_config_rejects_dangling_active_provider() {
         use speedwave_runtime::config::LlmProviderKind as K;
         let result = update_llm_config(LlmConfigUpdate {
             providers: Some(vec![v2_entry("openrouter", K::OpenRouter, None)]),
@@ -2298,7 +2478,8 @@ mod tests {
                 model: None,
             }),
             ..Default::default()
-        });
+        })
+        .await;
         let err = result.unwrap_err();
         assert!(
             err.contains("ghost") && err.contains("not in the provider list"),
@@ -2323,8 +2504,8 @@ mod tests {
         assert!(body.contains("save_user_config"), "must persist");
     }
 
-    #[test]
-    fn update_llm_config_rejects_invalid_v2_entries_before_any_io() {
+    #[tokio::test]
+    async fn update_llm_config_rejects_invalid_v2_entries_before_any_io() {
         use speedwave_runtime::config::LlmProviderKind as K;
         // Validation fires before the config lock / fs — even with no active
         // project the slug error must surface, not a project error.
@@ -2332,6 +2513,7 @@ mod tests {
             providers: Some(vec![v2_entry("UPPER", K::OpenRouter, None)]),
             ..Default::default()
         })
+        .await
         .unwrap_err();
         assert!(err.contains("UPPER"), "got: {err}");
     }
@@ -2406,8 +2588,8 @@ mod tests {
         assert!(validate_active_selection(&providers, &active("ghost", None)).is_err());
     }
 
-    #[test]
-    fn update_llm_config_rejects_zero_context_tokens() {
+    #[tokio::test]
+    async fn update_llm_config_rejects_zero_context_tokens() {
         // Persisted `context_tokens = 0` divides-by-zero in the chat footer;
         // reject at the boundary so it never reaches the frontend.
         let result = update_llm_config(LlmConfigUpdate {
@@ -2418,7 +2600,8 @@ mod tests {
             api_key: None,
             custom_headers: None,
             ..Default::default()
-        });
+        })
+        .await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().contains("context_tokens"),
@@ -2426,15 +2609,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_llm_config_accepts_model_with_dash_in_middle() {
+    #[tokio::test]
+    async fn update_llm_config_accepts_model_with_dash_in_middle() {
         // Common model names contain dashes (e.g. `llama-3.3`, `qwen-coder`).
         // The guard only rejects leading dashes.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("llama-3.3"),
             Some("http://localhost:11434"),
-        ));
+        ))
+        .await;
         // The save itself may fail for project-config reasons in the test env,
         // but the model-name check must not be the reason.
         if let Err(e) = result {
@@ -2445,15 +2629,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_llm_config_rejects_invalid_base_url() {
+    #[tokio::test]
+    async fn update_llm_config_rejects_invalid_base_url() {
         // Non-empty model so the model-required guard doesn't short-circuit
         // before URL validation — this exercises scheme rejection.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("placeholder-model"),
             Some("javascript:alert(1)"),
-        ));
+        ))
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         // Either the new SSRF guard (scheme denylist) or the runtime syntactic
@@ -2464,15 +2649,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_llm_config_accepts_v1_suffix() {
+    #[tokio::test]
+    async fn update_llm_config_accepts_v1_suffix() {
         // Regression: a `…/v1` URL must be accepted (render strips the suffix
         // before validating); the error, if any, must NOT be the path rejection.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("llama3.3"),
             Some("http://localhost:11434/v1"),
-        ));
+        ))
+        .await;
         if let Err(err) = result {
             assert!(
                 !err.contains("must not contain a path"),
@@ -2486,55 +2672,58 @@ mod tests {
 
     /// Helper for SSRF URL tests; passes a placeholder model so the
     /// model-required guard doesn't short-circuit before URL validation.
-    fn url_rejection_err(url: &str) -> String {
-        update_llm_config(llm_update("ollama", Some("placeholder-model"), Some(url))).unwrap_err()
+    async fn url_rejection_err(url: &str) -> String {
+        update_llm_config(llm_update("ollama", Some("placeholder-model"), Some(url)))
+            .await
+            .unwrap_err()
     }
 
-    #[test]
-    fn update_llm_config_rejects_metadata_ip() {
-        let err = url_rejection_err("http://169.254.169.254:8080");
+    #[tokio::test]
+    async fn update_llm_config_rejects_metadata_ip() {
+        let err = url_rejection_err("http://169.254.169.254:8080").await;
         assert!(
             err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
             "metadata IP must be rejected with a private/reserved error, got: {err}"
         );
     }
 
-    #[test]
-    fn update_llm_config_rejects_link_local_ipv6() {
-        let err = url_rejection_err("http://[fe80::1]");
+    #[tokio::test]
+    async fn update_llm_config_rejects_link_local_ipv6() {
+        let err = url_rejection_err("http://[fe80::1]").await;
         assert!(
             err.to_lowercase().contains("private") || err.to_lowercase().contains("reserved"),
             "IPv6 link-local must be rejected, got: {err}"
         );
     }
 
-    #[test]
-    fn update_llm_config_rejects_credentials() {
-        let err = url_rejection_err("http://user:pass@localhost:11434");
+    #[tokio::test]
+    async fn update_llm_config_rejects_credentials() {
+        let err = url_rejection_err("http://user:pass@localhost:11434").await;
         assert!(
             err.to_lowercase().contains("credentials"),
             "embedded credentials must be rejected, got: {err}"
         );
     }
 
-    #[test]
-    fn update_llm_config_rejects_query_string() {
-        let err = url_rejection_err("http://localhost:11434?foo=bar");
+    #[tokio::test]
+    async fn update_llm_config_rejects_query_string() {
+        let err = url_rejection_err("http://localhost:11434?foo=bar").await;
         assert!(
             err.to_lowercase().contains("query"),
             "query string must be rejected, got: {err}"
         );
     }
 
-    #[test]
-    fn update_llm_config_accepts_loopback_via_validation() {
+    #[tokio::test]
+    async fn update_llm_config_accepts_loopback_via_validation() {
         // `update_llm_config` may fail later (no active project) — we just need
         // the error (if any) NOT to be a URL rejection.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("llama3.3"),
             Some("http://127.0.0.1:11434"),
-        ));
+        ))
+        .await;
         if let Err(err) = result {
             assert!(
                 !err.to_lowercase().contains("private")
@@ -2545,13 +2734,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_llm_config_accepts_rfc1918_via_validation() {
+    #[tokio::test]
+    async fn update_llm_config_accepts_rfc1918_via_validation() {
         let result = update_llm_config(llm_update(
             "ollama",
             Some("llama3.3"),
             Some("http://192.168.1.50:11434"),
-        ));
+        ))
+        .await;
         if let Err(err) = result {
             assert!(
                 !err.to_lowercase().contains("private") && !err.to_lowercase().contains("blocked"),
@@ -2560,14 +2750,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_llm_config_accepts_public_domain_via_validation() {
+    #[tokio::test]
+    async fn update_llm_config_accepts_public_domain_via_validation() {
         // Per ADR-041: user-written URL == user's threat model (align with Redmine).
         let result = update_llm_config(llm_update(
             "ollama",
             Some("x"),
             Some("http://my-ollama.company.com"),
-        ));
+        ))
+        .await;
         if let Err(err) = result {
             assert!(
                 !err.to_lowercase().contains("blocked"),
