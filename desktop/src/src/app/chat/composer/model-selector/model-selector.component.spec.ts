@@ -548,3 +548,85 @@ describe('ModelSelectorComponent', () => {
     expect(fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'))).toBeFalsy();
   });
 });
+
+describe('ModelSelectorComponent badge fallback (anthropic carries no config model)', () => {
+  let fixture: ComponentFixture<ModelSelectorComponent>;
+  let tauriInvoke: ReturnType<typeof vi.fn>;
+
+  // The REAL backend shape: effective_active_model() is None for anthropic
+  // (license-default rules the model; clear_anthropic_models wipes any stored one).
+  const configlessSummary: ActiveProviderSummary = {
+    provider_id: 'anthropic',
+    kind: 'anthropic_oauth',
+    model: null,
+    base_url: null,
+  };
+
+  const catalog: AnthropicModel[] = [
+    {
+      id: 'claude-fable-5',
+      family: 'Fable 5',
+      context_tokens: 200_000,
+      latest: true,
+      premium: false,
+      selectable: true,
+      has_1m: true,
+    } as AnthropicModel,
+  ];
+
+  beforeEach(async () => {
+    tauriInvoke = vi.fn(async (cmd: string) => {
+      if (cmd === 'get_active_provider_summary') return configlessSummary;
+      if (cmd === 'list_anthropic_models') return catalog;
+      if (cmd === 'get_effort_pin') return null;
+      if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+    await TestBed.configureTestingModule({
+      imports: [ModelSelectorComponent],
+      providers: [{ provide: TauriService, useValue: { invoke: tauriInvoke } }],
+    }).compileComponents();
+    fixture = TestBed.createComponent(ModelSelectorComponent);
+    fixture.componentRef.setInput('projectId', 'proj-1');
+    fixture.componentRef.setInput('streaming', false);
+    fixture.detectChanges();
+  });
+
+  function badgeText(): string {
+    return (
+      fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]')).nativeElement
+        .textContent ?? ''
+    ).trim();
+  }
+
+  it('shows the live session model when the config carries none', async () => {
+    fixture.componentRef.setInput('sessionModel', 'claude-fable-5');
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-fable-5');
+  });
+
+  it('shows "default" before any session when the config carries no model', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(badgeText()).toBe('default');
+  });
+
+  it('shows the picked catalog id optimistically after a live anthropic selection', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    fixture.debugElement
+      .query(By.css('[data-testid="composer-model-badge"]'))
+      .nativeElement.click();
+    await fixture.whenStable();
+    await fixture.componentInstance.whenOptionsSettled();
+    fixture.detectChanges();
+    const option = fixture.debugElement.query(
+      By.css('[data-testid="model-selector-option-claude-fable-5"]')
+    );
+    expect(option).toBeTruthy();
+    option.nativeElement.click();
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-fable-5');
+  });
+});

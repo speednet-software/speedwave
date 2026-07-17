@@ -9,6 +9,7 @@ import {
   signal,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { TooltipDirective } from '../../../shared/tooltip.directive';
 import { TauriService } from '../../../services/tauri.service';
 import { AnthropicModelsService } from '../../../services/anthropic-models.service';
 import { LoggerService } from '../../../services/logger.service';
@@ -41,76 +42,123 @@ export interface ModelSelection {
  */
 @Component({
   selector: 'app-model-selector',
-  imports: [FormsModule],
+  imports: [FormsModule, TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <button
-      type="button"
-      data-testid="composer-model-badge"
-      class="hidden text-[var(--teal)] md:inline disabled:cursor-not-allowed disabled:opacity-50"
-      [disabled]="streaming()"
-      [attr.title]="streaming() ? 'Model locked while a turn is streaming' : 'Change model'"
-      (click)="openCombobox()"
-    >
-      {{ displayModel() }}
-    </button>
-    @if (modelError()) {
-      <span data-testid="model-selection-error" role="alert" class="ml-2 text-red-300">{{
-        modelError()
-      }}</span>
-    }
-    @if (open()) {
-      <div class="model-selector-popover" role="dialog">
-        <input
-          data-testid="model-selector-search"
-          type="text"
-          [ngModel]="query()"
-          (ngModelChange)="onQueryChange($event)"
-          placeholder="Search models..."
-        />
-        @if (loading()) {
-          <div data-testid="model-selector-loading">Loading models...</div>
-        } @else if (error()) {
-          <div data-testid="model-selector-error">
-            {{ error() }}
-            <button type="button" data-testid="model-selector-retry" (click)="fetchOptions(true)">
-              Retry
-            </button>
-          </div>
-        } @else {
-          @for (opt of filteredOptions(); track opt.id) {
+    <div class="relative inline-flex items-center gap-2">
+      <button
+        type="button"
+        data-testid="composer-model-badge"
+        class="hidden text-[var(--teal)] hover:underline md:inline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
+        [disabled]="streaming()"
+        [attr.title]="streaming() ? 'Model locked while a turn is streaming' : 'Change model'"
+        (click)="openCombobox()"
+      >
+        {{ displayModel() }}
+      </button>
+      @if (modelError()) {
+        <span data-testid="model-selection-error" role="alert" class="ml-2 text-red-300">{{
+          modelError()
+        }}</span>
+      }
+      @if (open()) {
+        <div
+          class="absolute bottom-full left-0 z-40 mb-2 w-80 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
+          role="dialog"
+        >
+          <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
+            <input
+              data-testid="model-selector-search"
+              type="text"
+              class="mono w-full bg-transparent text-[12px] text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none"
+              [ngModel]="query()"
+              (ngModelChange)="onQueryChange($event)"
+              placeholder="Search models..."
+            />
             <button
               type="button"
-              [attr.data-testid]="'model-selector-option-' + opt.id"
-              (click)="select(opt)"
+              aria-label="Close model list"
+              class="text-[var(--ink-mute)] hover:text-[var(--ink)]"
+              (click)="open.set(false)"
             >
-              {{ opt.label }}
-              @if (opt.promptPrice !== undefined) {
-                <span>\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span>
+              &#x2715;
+            </button>
+          </div>
+          <div class="max-h-72 overflow-y-auto py-1">
+            @if (loading()) {
+              <div
+                data-testid="model-selector-loading"
+                class="mono px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+              >
+                Loading models...
+              </div>
+            } @else if (error()) {
+              <div
+                data-testid="model-selector-error"
+                class="mono flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--ink-mute)]"
+              >
+                {{ error() }}
+                <button
+                  type="button"
+                  data-testid="model-selector-retry"
+                  class="hover-bg rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink)]"
+                  (click)="fetchOptions(true)"
+                >
+                  Retry
+                </button>
+              </div>
+            } @else {
+              @for (opt of filteredOptions(); track opt.id) {
+                <button
+                  type="button"
+                  [attr.data-testid]="'model-selector-option-' + opt.id"
+                  class="mono hover-bg flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[11px] text-[var(--ink)]"
+                  (click)="select(opt)"
+                >
+                  <span>{{ opt.label }}</span>
+                  @if (opt.promptPrice !== undefined) {
+                    <span class="text-[var(--ink-mute)]"
+                      >\${{ opt.promptPrice }}/\${{ opt.completionPrice }}</span
+                    >
+                  }
+                </button>
               }
+            }
+          </div>
+        </div>
+      }
+      @if (showEffortControl()) {
+        <div data-testid="effort-control" class="hidden items-center gap-1 md:flex">
+          <span
+            class="mono text-[10px] text-[var(--ink-mute)]"
+            appTooltip="Reasoning effort pin - applies from the next session (Claude Code reads it at session start)"
+            placement="top"
+            >{{ currentEffortPin() ?? 'auto' }}</span
+          >
+          @for (level of effortLevels(); track level) {
+            <button
+              type="button"
+              [attr.data-testid]="'effort-option-' + level"
+              [disabled]="streaming()"
+              class="mono rounded border px-1.5 py-0.5 text-[10px] disabled:cursor-not-allowed disabled:opacity-50"
+              [class]="
+                effectiveEffort() === level
+                  ? 'border-[var(--teal)] text-[var(--teal)]'
+                  : 'border-[var(--line)] text-[var(--ink-mute)] hover:text-[var(--ink)]'
+              "
+              (click)="selectEffortLevel(level)"
+            >
+              {{ level }}
             </button>
           }
-        }
-      </div>
-    }
-    @if (showEffortControl()) {
-      <div data-testid="effort-control">
-        <span>{{ currentEffortPin() ?? 'auto' }}</span>
-        @for (level of effortLevels(); track level) {
-          <button
-            type="button"
-            [attr.data-testid]="'effort-option-' + level"
-            [disabled]="streaming()"
-            (click)="selectEffortLevel(level)"
-          >
-            {{ level }}
-          </button>
-        }
-        @if (pendingEffortPin(); as pending) {
-          <span data-testid="effort-pending">{{ pending }} - next session</span>
-        }
-      </div>
-    }
+          @if (pendingEffortPin(); as pending) {
+            <span data-testid="effort-pending" class="mono ml-1 text-[10px] text-[var(--amber)]"
+              >{{ pending }} - next session</span
+            >
+          }
+        </div>
+      }
+    </div>
   `,
 })
 export class ModelSelectorComponent {
@@ -125,6 +173,9 @@ export class ModelSelectorComponent {
 
   /** Write-through error from `ChatStateService.applyModelSelection`; '' when none. */
   readonly modelError = input('');
+
+  /** Live session model (SystemInit); the anthropic badge fallback, since config carries no model. */
+  readonly sessionModel = input('');
 
   /** The one event this component emits; routed to `ChatStateService.applyModelSelection`. */
   readonly modelSelected = output<ModelSelection>();
@@ -151,6 +202,13 @@ export class ModelSelectorComponent {
   protected readonly effortLevels = signal<string[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly pendingEffortPin = signal<string | null>(null);
+  /** Level highlighted in the segmented control: the freshly-picked pin, else the stored one. */
+  protected readonly effectiveEffort = computed(
+    () => this.pendingEffortPin() ?? this.currentEffortPin()
+  );
+
+  /** Optimistic badge value after a live anthropic pick (no config write to re-read it from). */
+  private readonly lastPicked = signal('');
 
   /** Anthropic-only: `effortLevel` is a Claude Code settings.json concept, not a provider one. */
   protected readonly showEffortControl = computed(() => {
@@ -170,11 +228,18 @@ export class ModelSelectorComponent {
     });
   }
 
-  /** Model shown on the badge, normalized via the SSOT mirror (strips only an exact `<entry_id>/`). */
+  /**
+   * Badge text, never empty: config model (normalized) -> optimistic live pick ->
+   * observed session model -> 'default' (anthropic license-default pre-session).
+   */
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
-    if (!s?.model) return '';
-    return normalizeObserved(s.model, s.provider_id);
+    if (s?.model) return normalizeObserved(s.model, s.provider_id);
+    const picked = this.lastPicked();
+    if (picked) return picked;
+    const live = this.sessionModel();
+    if (live) return s ? normalizeObserved(live, s.provider_id) : live;
+    return 'default';
   });
 
   readonly filteredOptions = computed<ModelOption[]>(() => {
@@ -307,6 +372,7 @@ export class ModelSelectorComponent {
       providerId: summary.provider_id,
       kind: summary.kind,
     });
+    if (isAnthropicKind(summary.kind)) this.lastPicked.set(opt.id);
     this.open.set(false);
   }
 
@@ -325,6 +391,7 @@ export class ModelSelectorComponent {
       if (this.projectId() !== projectId) return;
       this.summary.set(summary);
       this.summaryProjectId = projectId;
+      this.lastPicked.set('');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       this.log.warn(`model-selector: get_active_provider_summary failed: ${msg}`);

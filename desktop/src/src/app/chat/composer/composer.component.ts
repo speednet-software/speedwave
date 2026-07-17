@@ -178,6 +178,7 @@ const PLAN_MODE_PREFIX =
           [projectId]="projectId()"
           [streaming]="streaming()"
           [modelError]="modelError()"
+          [sessionModel]="model()"
           (modelSelected)="modelSelected.emit($event)"
         />
         @if (contextLabel()) {
