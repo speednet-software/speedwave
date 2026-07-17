@@ -1429,10 +1429,12 @@ pub(crate) trait ModelAutoDefaultProbe: Send + Sync {
     async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String>;
 }
 
-/// Production probe: no transient credential (save path carries none) - falls
-/// back to the stored per-project token file, matching discovery-time behavior.
+/// Production probe: prefers the save payload's transient credentials (a fresh
+/// entry's key is not yet in the token store), else discovery's stored fallback.
 struct LiveModelAutoDefaultProbe<'a> {
     active_project: Option<&'a str>,
+    transient_api_key: Option<&'a str>,
+    transient_custom_headers: Option<&'a str>,
 }
 
 #[async_trait::async_trait]
@@ -1441,8 +1443,8 @@ impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
         let result = crate::llm_cmd::discovery::discover_llm_models_with_fallback(
             entry_id,
             base_url,
-            None,
-            None,
+            self.transient_api_key,
+            self.transient_custom_headers,
             self.active_project,
         )
         .await?;
@@ -1453,6 +1455,15 @@ impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
             .map(|m| m.id)
             .ok_or_else(|| "empty".to_string())
     }
+}
+
+/// The save payload's non-empty transient value of a `double_option` field.
+fn transient_credential(field: &Option<Option<String>>) -> Option<&str> {
+    field
+        .as_ref()
+        .and_then(|inner| inner.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// A settings save carries the full provider list but the UI never writes a
@@ -1576,6 +1587,8 @@ async fn update_llm_config_in(
         let active_project = loaded.and_then(|c| c.active_project);
         let probe = LiveModelAutoDefaultProbe {
             active_project: active_project.as_deref(),
+            transient_api_key: transient_credential(&update.api_key),
+            transient_custom_headers: transient_credential(&update.custom_headers),
         };
         apply_model_auto_defaults(providers, &probe).await?;
         for entry in providers.iter() {
@@ -3280,6 +3293,58 @@ mod tests {
                 Err(e) => Err(e.to_string()),
             }
         }
+    }
+
+    #[test]
+    fn transient_credential_extracts_only_a_non_empty_value() {
+        assert_eq!(transient_credential(&None), None);
+        assert_eq!(transient_credential(&Some(None)), None);
+        assert_eq!(transient_credential(&Some(Some("  ".into()))), None);
+        assert_eq!(
+            transient_credential(&Some(Some(" sk-x ".into()))),
+            Some("sk-x")
+        );
+    }
+
+    #[tokio::test]
+    async fn live_probe_forwards_the_transient_api_key_a_fresh_save_carries() {
+        // Field regression: a keyed local server 401s the save-time auto-default
+        // probe unless the just-typed key is forwarded (it is not yet stored).
+        // Two servers, one mock each — no reliance on mockito match ordering.
+        let mut keyed = mockito::Server::new_async().await;
+        let _authed = keyed
+            .mock("GET", "/v1/models")
+            .match_header("authorization", "Bearer sk-fresh")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"first-model"},{"id":"second-model"}]}"#)
+            .create_async()
+            .await;
+        let with_key = LiveModelAutoDefaultProbe {
+            active_project: None,
+            transient_api_key: Some("sk-fresh"),
+            transient_custom_headers: None,
+        };
+        assert_eq!(
+            with_key.first_local_model("local", &keyed.url()).await,
+            Ok("first-model".to_string())
+        );
+
+        let mut rejecting = mockito::Server::new_async().await;
+        let _unauthed = rejecting
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .create_async()
+            .await;
+        let without_key = LiveModelAutoDefaultProbe {
+            active_project: None,
+            transient_api_key: None,
+            transient_custom_headers: None,
+        };
+        assert!(without_key
+            .first_local_model("local", &rejecting.url())
+            .await
+            .is_err());
     }
 
     #[tokio::test]
