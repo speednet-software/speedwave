@@ -1423,6 +1423,26 @@ impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
     }
 }
 
+/// A settings save carries the full provider list but the UI never writes a
+/// user-chosen model (Task 18); an incoming entry with no model inherits the
+/// stored entry's model by id, so a plain resave can never erase it.
+fn preserve_stored_entry_models(
+    incoming: &mut [speedwave_runtime::config::LlmProviderEntry],
+    stored: &[speedwave_runtime::config::LlmProviderEntry],
+) {
+    for entry in incoming.iter_mut() {
+        if entry.model.is_some() {
+            continue;
+        }
+        if let Some(prior) = stored.iter().find(|p| p.id == entry.id) {
+            entry.model = prior.model.clone();
+            if entry.context_tokens.is_none() {
+                entry.context_tokens = prior.context_tokens;
+            }
+        }
+    }
+}
+
 /// Applies decision 7 (spec `2026-07-16-chat-slash-commands-design.md` §4.5):
 /// an OpenRouter entry saved with no model gets the verified default; a Local
 /// entry saved with no model gets the first probed model. Runs BEFORE
@@ -1478,9 +1498,20 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
     }
     if let Some(ref mut providers) = update.providers {
         canonicalize_provider_base_urls(providers);
-        let active_project = config::load_user_config()
-            .ok()
-            .and_then(|c| c.active_project);
+        let loaded = config::load_user_config().ok();
+        let stored_providers = loaded
+            .as_ref()
+            .and_then(|c| c.active_project_entry())
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .map(|llm| llm.providers.as_slice())
+            .unwrap_or(&[]);
+        // The settings component never carries a model control (Task 18); an
+        // incoming entry with no model must inherit the stored one by id
+        // BEFORE auto-default runs, or a plain resave triggers a live
+        // discovery probe (or worse, clobbers a working model with `None`).
+        preserve_stored_entry_models(providers, stored_providers);
+        let active_project = loaded.and_then(|c| c.active_project);
         let probe = LiveModelAutoDefaultProbe {
             active_project: active_project.as_deref(),
         };
@@ -1495,8 +1526,23 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
         update.api_key.is_some(),
         update.custom_headers.is_some(),
     );
+    // v2 saves (Task 18) never carry a flat `model` for a provider whose model
+    // already lives in `providers[]` (preserved above); only fall back to the
+    // legacy flat-field check when no v2 entry resolves a model for it.
+    let local_model_in_providers = update
+        .provider
+        .as_deref()
+        .and_then(|provider_id| {
+            update
+                .providers
+                .as_ref()?
+                .iter()
+                .find(|p| p.id == provider_id)
+        })
+        .is_some_and(|entry| entry.model.as_deref().is_some_and(|m| !m.is_empty()));
     if config::is_local_provider(update.provider.as_deref())
         && update.model.as_deref().is_none_or(str::is_empty)
+        && !local_model_in_providers
     {
         return Err(format!(
             "{} — configure it in Settings → LLM Provider → Model.",
@@ -1588,6 +1634,15 @@ pub async fn update_llm_config(mut update: LlmConfigUpdate) -> Result<(), String
         merged.providers = update.providers.clone().unwrap_or(stored.providers);
         merged.active = update.active.clone().or(stored.active);
         merged.proxy_enabled = update.proxy_enabled.or(stored.proxy_enabled);
+        // The active pointer must not desync from the entry after the merge:
+        // a resend with no active.model inherits the (now-preserved) entry model.
+        if let Some(ref mut active) = merged.active {
+            if active.model.is_none() {
+                if let Some(entry) = merged.providers.iter().find(|p| p.id == active.provider_id) {
+                    active.model = entry.model.clone();
+                }
+            }
+        }
         // Anthropic entries never carry a stored model (spec 4.5): clear it
         // on every save, regardless of what the caller sent.
         merged.clear_active_anthropic_model();
@@ -2268,6 +2323,100 @@ mod tests {
                  model-required guard, got: {err}"
             );
         }
+    }
+
+    /// Isolates `consts::data_dir()` (a process-wide `OnceLock`) to a tempdir, writing
+    /// `cfg` first — the `SPEEDWAVE_DATA_DIR` swap pattern used by `oauth_cmd.rs`'s
+    /// `provider_success_saves_tokens_and_emits_success`. Returns the restore guard;
+    /// caller must mark the test `#[serial_test::serial(data_dir_swap)]`.
+    fn set_temp_user_config(cfg: &SpeedwaveUserConfig) -> (tempfile::TempDir, Option<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
+        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
+        config::save_user_config(cfg).unwrap();
+        (tmp, prev)
+    }
+
+    fn restore_data_dir(prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
+            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(data_dir_swap)]
+    async fn settings_save_preserves_existing_entry_models() {
+        // A prior save (or the auto-default at provider-save time) stored a
+        // model on the local entry; a later settings save - where the
+        // component no longer carries a model control - sends the same
+        // entry back with `model: None`. The merge must not clobber it.
+        let mut cfg = make_config_with_active_project();
+        {
+            let project = cfg.find_project_mut("alpha").unwrap();
+            project.claude = Some(config::ClaudeOverrides {
+                env: None,
+                settings: None,
+                llm: Some(LlmConfig {
+                    provider: Some("local".to_string()),
+                    schema_version: Some(config::LLM_SCHEMA_VERSION),
+                    providers: vec![speedwave_runtime::config::LlmProviderEntry {
+                        id: "local".to_string(),
+                        kind: speedwave_runtime::config::LlmProviderKind::Local,
+                        base_url: Some("http://localhost:11434".to_string()),
+                        model: Some("llama3.3".to_string()),
+                        has_api_key: false,
+                        context_tokens: Some(128_000),
+                        has_custom_headers: false,
+                    }],
+                    active: Some(speedwave_runtime::config::LlmActive {
+                        provider_id: "local".to_string(),
+                        model: Some("llama3.3".to_string()),
+                    }),
+                    ..Default::default()
+                }),
+            });
+        }
+        let (_tmp, prev) = set_temp_user_config(&cfg);
+
+        // Settings component resend: same entry, no model field carried.
+        let update = LlmConfigUpdate {
+            provider: Some("local".to_string()),
+            model: None,
+            base_url: Some("http://localhost:11434".to_string()),
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some("http://localhost:11434".to_string()),
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        let result = update_llm_config(update).await;
+        result.as_ref().expect("save must succeed");
+
+        let saved = config::load_user_config().unwrap();
+        let entry = saved
+            .active_project_entry()
+            .and_then(|p| p.claude.as_ref())
+            .and_then(|c| c.llm.as_ref())
+            .and_then(|llm| llm.providers.iter().find(|p| p.id == "local"))
+            .expect("local entry must survive the save");
+        assert_eq!(
+            entry.model.as_deref(),
+            Some("llama3.3"),
+            "a settings save carrying no model must not erase the \
+             stored entry model"
+        );
+
+        restore_data_dir(prev);
     }
 
     #[test]
