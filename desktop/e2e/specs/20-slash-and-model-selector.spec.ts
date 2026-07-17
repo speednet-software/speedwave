@@ -22,6 +22,7 @@ import {
   openChat,
   configureLocalProvider,
   configureOpenRouter,
+  pickComposerModel,
   sendMessageAndWait,
   startNewConversation,
   resumeNewestConversation,
@@ -183,15 +184,16 @@ describe('Slash Popover + Model/Effort Selector', function () {
     if (localLlmUnreachable()) this.skip();
     const local = requireLocalLlm();
     await openSettings();
-    await configureLocalProvider(local.baseUrl, local.apiKey, local.model);
+    await configureLocalProvider(local.baseUrl, local.apiKey);
     await confirmRestartAndWait();
     await openChat();
 
-    // Badge shows the normalized id - never the `<entry_id>/` routing prefix
-    // (4.3.1 id-triad rule; the local entry id itself is never a display shape).
+    // The composer pick is the write-through terrain under test (ADR-082 §3).
+    await pickComposerModel(local.model);
+    // Badge shows exactly the normalized id - never the `<entry_id>/` routing
+    // prefix (4.3.1 id-triad rule; equality covers both requirements at once).
     const badgeText = await (await $('[data-testid="composer-model-badge"]')).getText();
-    expect(badgeText).toContain(local.model);
-    expect(badgeText).not.toMatch(/^[^/]+\//);
+    expect(badgeText.trim()).toBe(local.model);
 
     // Switch back to OpenRouter so the following spec's fixture state is intact.
     await openSettings();

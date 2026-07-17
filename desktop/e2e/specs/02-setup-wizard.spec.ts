@@ -20,7 +20,14 @@
  */
 
 import { mockDialogOpen, clearDialogMock } from '../helpers/dialog-mock';
-import { openSettings, configureOpenRouter, requireOpenrouterKey } from '../helpers/llm';
+import {
+  openSettings,
+  openChat,
+  configureOpenRouter,
+  pickComposerModel,
+  requireOpenrouterKey,
+  requireOpenrouterModel,
+} from '../helpers/llm';
 import { waitForShellReady } from '../helpers/shell';
 
 const E2E_PROJECT_NAME = 'e2e-test';
@@ -229,5 +236,10 @@ describe('Setup Wizard — Full Flow', function () {
     // Saving the first provider starts the containers; wait for the project to
     // return to ready before the container-health spec inspects it.
     await waitForShellReady(150_000);
+    // A fresh save auto-defaults the model (ADR-082 §8); route the rest of the
+    // suite onto the cheap OPENROUTER_MODEL via the composer — the single model
+    // control — whose non-anthropic pick writes through to the project config.
+    await openChat();
+    await pickComposerModel(requireOpenrouterModel());
   });
 });

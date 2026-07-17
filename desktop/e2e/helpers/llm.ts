@@ -36,48 +36,8 @@ export async function openSettings(): Promise<void> {
   await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
 }
 
-/** Picks `value` in a <select> and dispatches a native change so Angular's
- *  (change) handler runs and the form becomes dirty. Tolerates single-model
- *  catalogs (the component auto-selects the sole model, so no <option> count
- *  threshold is assumed — we wait for the target value to be present). */
-async function selectModel(testid: string, value: string): Promise<void> {
-  const select = await $(`[data-testid="${testid}"]`);
-  await select.waitForExist({ timeout: 30_000 });
-  await browser.waitUntil(
-    async () =>
-      await browser.execute(
-        (id: string, v: string) => {
-          const el = document.querySelector<HTMLSelectElement>(`[data-testid="${id}"]`);
-          return !!el && Array.from(el.options).some((o) => o.value === v);
-        },
-        testid,
-        value
-      ),
-    {
-      timeout: 30_000,
-      timeoutMsg: `model catalog never offered ${value} for ${testid}`,
-    }
-  );
-  await select.selectByAttribute('value', value);
-  // WDIO's selectByAttribute may not fire a native change in this Angular
-  // build; dispatch one explicitly so onModelSelect / isDirty run.
-  await browser.execute(
-    (id: string, v: string) => {
-      const el = document.querySelector<HTMLSelectElement>(`[data-testid="${id}"]`);
-      if (!el) return;
-      el.value = v;
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    },
-    testid,
-    value
-  );
-  await browser.waitUntil(async () => (await select.getValue()) === value, {
-    timeout: 5_000,
-    timeoutMsg: `select ${testid} did not settle on ${value}`,
-  });
-}
-
-/** Selects OpenRouter, enters the key, discovers models, picks OPENROUTER_MODEL, saves. */
+/** Selects OpenRouter, enters the key, validates it via a catalog discovery, saves.
+ *  Model choice moved to the composer (ADR-082); a fresh save auto-defaults it. */
 export async function configureOpenRouter(apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
@@ -87,19 +47,25 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   await keyInput.waitForExist({ timeout: 5_000 });
   await keyInput.setValue(apiKey);
 
-  await (await $('[data-testid="settings-llm-extra-refresh-openrouter"]')).click();
-
-  await selectModel('settings-llm-extra-model-openrouter', requireOpenrouterModel());
+  // Discovery is a live key check: a bad OPENROUTER_API_KEY fails HERE with a
+  // clear reason instead of somewhere downstream in a chat spec.
+  const refresh = await $('[data-testid="settings-llm-extra-refresh-openrouter"]');
+  await refresh.click();
+  await browser.waitUntil(async () => !(await refresh.getText()).includes('discovering'), {
+    timeout: 60_000,
+    timeoutMsg: 'OpenRouter catalog discovery never settled',
+  });
+  const orError = await $('[data-testid="settings-llm-extra-discovery-error-openrouter"]');
+  if (await orError.isExisting()) {
+    throw new Error(`OpenRouter discovery failed: ${await orError.getText()}`);
+  }
 
   await saveProvider();
 }
 
-/** Selects the local provider, enters base_url + key, discovers, picks the model, saves. */
-export async function configureLocalProvider(
-  baseUrl: string,
-  apiKey: string,
-  model: string
-): Promise<void> {
+/** Selects the local provider, enters base_url + key, validates via discovery, saves.
+ *  Model choice moved to the composer (ADR-082); a fresh save auto-defaults it. */
+export async function configureLocalProvider(baseUrl: string, apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-provider-local"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
   await selectBtn.click();
@@ -113,10 +79,35 @@ export async function configureLocalProvider(
   await keyInput.setValue(apiKey);
 
   await (await $('[data-testid="settings-llm-refresh"]')).click();
-
-  await selectModel('settings-llm-model', model);
+  await browser.waitUntil(
+    async () => !(await $('[data-testid="settings-llm-discovering"]').isExisting()),
+    { timeout: 60_000, timeoutMsg: 'local model discovery never settled' }
+  );
+  const localError = await $('[data-testid="settings-llm-discovery-error"]');
+  if (await localError.isExisting()) {
+    throw new Error(`local discovery failed: ${await localError.getText()}`);
+  }
 
   await saveProvider();
+}
+
+/** Picks `catalogId` in the composer model selector — the single model control
+ *  (ADR-082); non-anthropic picks write through to the project config. */
+export async function pickComposerModel(catalogId: string): Promise<void> {
+  await (await $('[data-testid="composer-model-badge"]')).click();
+  const search = await $('[data-testid="model-selector-search"]');
+  await search.waitForExist({ timeout: 10_000 });
+  await search.setValue(catalogId);
+  const option = await $(`[data-testid="model-selector-option-${catalogId}"]`);
+  await option.waitForExist({
+    timeout: 30_000,
+    timeoutMsg: `model option ${catalogId} never appeared in the composer selector`,
+  });
+  await option.click();
+  await browser.waitUntil(async () => !(await search.isExisting()), {
+    timeout: 10_000,
+    timeoutMsg: 'model selector never closed after the pick',
+  });
 }
 
 /** Clicks Save, waits for the enabled state then the saved confirmation. */

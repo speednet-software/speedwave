@@ -24,6 +24,7 @@ import {
   openUsage,
   configureLocalProvider,
   configureOpenRouter,
+  pickComposerModel,
   sendMessageAndWait,
   lastAssistantText,
   conversationText,
@@ -57,9 +58,13 @@ describe('Local Provider + Resume', function () {
     this.timeout(240_000);
     const local = requireLocalLlm();
     await openSettings();
-    await configureLocalProvider(local.baseUrl, local.apiKey, local.model);
+    await configureLocalProvider(local.baseUrl, local.apiKey);
     // Provider change requests a restart; confirm it and wait for completion.
     await confirmRestartAndWait();
+    // Pin the suite's LOCAL_LLM_MODEL via the composer (write-through) so the
+    // usage-dashboard assertions below see rows for exactly that model.
+    await openChat();
+    await pickComposerModel(local.model);
   });
 
   it('recalls the fact by continuing the open window (a)', async function () {
