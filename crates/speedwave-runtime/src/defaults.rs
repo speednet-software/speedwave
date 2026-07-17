@@ -568,11 +568,8 @@ mod tests {
 
     #[test]
     fn fable_5_bare_id_reports_its_actual_session_window() {
-        // Empirically verified (design spec 1.4/4.6): the bare `claude-fable-5` id
-        // resolves to a 200k session window; only the `[1m]` alias gets 1M. The
-        // family still carries a priced `[1m]` variant via `pricing_1m`, so
-        // `pricing_1m` presence is no longer inferred from `context_tokens >= 1M`
-        // for this one entry - it is an explicit exception, asserted here.
+        // claude-fable-5's bare id has a 200k session window but still ships
+        // a priced `[1m]` alias — an explicit exception, asserted here.
         let fable = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-fable-5")
@@ -722,10 +719,8 @@ mod tests {
 
     #[test]
     fn one_m_pricing_present_iff_million_token_context() {
-        // `pricing_1m` must be present iff the model has a 1M-token context,
-        // except `claude-fable-5`: its bare id's session window is 200k (the
-        // empirically-verified default) while its family still exposes a
-        // priced `[1m]` alias.
+        // `pricing_1m` present iff 1M-token context, except claude-fable-5
+        // (200k bare id, still exposes a priced `[1m]` alias).
         for m in ANTHROPIC_MODELS {
             let is_million = m.context_tokens >= 1_000_000;
             let expected = is_million || m.id == "claude-fable-5";

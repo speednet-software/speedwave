@@ -909,9 +909,8 @@ mod tests {
 
     #[test]
     fn cache_1m_variant_uses_1m_pricing() {
-        // sonnet-4-6 1M output (22.5/MTok) differs from base (15.0/MTok) — its
-        // legacy long-context premium. This assertion was briefly "corrected"
-        // away and had to be restored; it is exactly the regression it guards.
+        // sonnet-4-6's legacy long-context premium: 1M output (22.5/MTok)
+        // differs from base (15.0/MTok) — briefly regressed, now restored.
         let e = compute_cost_with(
             &record(
                 "anthropic_apikey",

@@ -47,9 +47,8 @@ fn every_catalog_entry_is_priced() {
 
 #[test]
 fn million_context_entries_have_a_priced_1m_variant() {
-    // Require `pricing_1m` exactly when the family is 1M-context, except the
-    // documented `claude-fable-5` exception (its bare id's session window is
-    // 200k; the family still ships a priced `[1m]` alias).
+    // Require `pricing_1m` exactly when 1M-context, except claude-fable-5
+    // (200k bare id, still ships a priced `[1m]` alias).
     for m in ANTHROPIC_MODELS {
         let is_million = m.context_tokens >= 1_000_000 || m.id == "claude-fable-5";
         match (&m.pricing_1m, is_million) {
