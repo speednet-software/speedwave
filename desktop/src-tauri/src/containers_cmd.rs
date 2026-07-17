@@ -965,6 +965,52 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     })
 }
 
+/// Frontend mirror in `models/llm.ts::ActiveProviderSummary`; keep both in sync.
+#[derive(serde::Serialize, Debug)]
+pub struct ActiveProviderSummary {
+    pub provider_id: String,
+    pub kind: config::LlmProviderKind,
+    pub model: Option<String>,
+    /// Local providers only (`kind == Local`); the composer's local discovery
+    /// probe needs it and must never call `discover_llm_models` with the bare
+    /// `provider_id` as a URL.
+    pub base_url: Option<String>,
+}
+
+/// Pure logic over an already-loaded config - unit-testable without touching
+/// `consts::data_dir()` (process-wide `OnceLock`), same split as `apply_llm_config`.
+fn active_provider_summary_from(
+    user_config: &config::SpeedwaveUserConfig,
+    project: &str,
+) -> Result<ActiveProviderSummary, String> {
+    let project_entry = user_config
+        .find_project(project)
+        .ok_or_else(|| format!("unknown project: {project}"))?;
+    let llm = project_entry
+        .claude
+        .as_ref()
+        .and_then(|c| c.llm.clone())
+        .unwrap_or_default();
+    let entry = llm
+        .active_provider()
+        .ok_or("no active provider configured")?;
+    Ok(ActiveProviderSummary {
+        provider_id: entry.id.clone(),
+        kind: entry.kind,
+        model: llm.effective_active_model(),
+        base_url: entry.base_url.clone(),
+    })
+}
+
+/// The active provider+model+base_url, for the composer badge/combobox to
+/// normalize the observed wire id and drive per-provider discovery, without
+/// duplicating `effective_active_model`.
+#[tauri::command]
+pub fn get_active_provider_summary(project: String) -> Result<ActiveProviderSummary, String> {
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    active_provider_summary_from(&user_config, &project)
+}
+
 /// Backend-authoritative default base URL for a provider (so the frontend
 /// duplicates no URL strings). `None` for unknown providers, e.g. anthropic.
 #[tauri::command]
@@ -2525,6 +2571,67 @@ mod tests {
             body.contains("apply_set_provider_model"),
             "must delegate to the pure helper"
         );
+    }
+
+    // ── get_active_provider_summary (composer badge/combobox) ──────────
+
+    #[test]
+    fn active_provider_summary_reflects_effective_active_model() {
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = make_config_with_active_project();
+        let project = cfg.find_project_mut("alpha").unwrap();
+        project.claude = Some(ClaudeOverrides {
+            env: None,
+            settings: None,
+            llm: Some(LlmConfig {
+                schema_version: Some(config::LLM_SCHEMA_VERSION),
+                providers: vec![config::LlmProviderEntry {
+                    id: "my-ollama".to_string(),
+                    kind: K::Local,
+                    base_url: Some("http://host.docker.internal:11434".to_string()),
+                    model: Some("my-ollama/llama3.3".to_string()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                }],
+                active: Some(config::LlmActive {
+                    provider_id: "my-ollama".to_string(),
+                    model: Some("my-ollama/llama3.3".to_string()),
+                }),
+                ..Default::default()
+            }),
+        });
+
+        let summary = active_provider_summary_from(&cfg, "alpha").unwrap();
+        assert_eq!(summary.provider_id, "my-ollama");
+        assert_eq!(summary.kind, K::Local);
+        assert_eq!(
+            summary.model.as_deref(),
+            Some("my-ollama/llama3.3"),
+            "effective_active_model returns the entry model (provenance)"
+        );
+        assert_eq!(
+            summary.base_url.as_deref(),
+            Some("http://host.docker.internal:11434"),
+            "local discovery needs the entry's base_url, not the provider_id"
+        );
+    }
+
+    #[test]
+    fn active_provider_summary_none_when_unconfigured() {
+        let cfg = make_config_with_active_project();
+        // alpha has no claude config at all, so no active provider.
+
+        let err = active_provider_summary_from(&cfg, "alpha").unwrap_err();
+        assert!(err.contains("no active provider"), "got: {err}");
+    }
+
+    #[test]
+    fn active_provider_summary_rejects_unknown_project() {
+        let cfg = make_config_with_active_project();
+
+        let err = active_provider_summary_from(&cfg, "does-not-exist").unwrap_err();
+        assert!(err.contains("does-not-exist"), "got: {err}");
     }
 
     #[test]

@@ -1282,6 +1282,7 @@ fn main() {
             // Settings
             containers_cmd::factory_reset,
             containers_cmd::get_llm_config,
+            containers_cmd::get_active_provider_summary,
             containers_cmd::get_default_base_url,
             containers_cmd::list_anthropic_models,
             containers_cmd::update_llm_config,
