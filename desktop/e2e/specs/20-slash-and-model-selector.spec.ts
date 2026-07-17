@@ -165,14 +165,6 @@ describe('Slash Popover + Model/Effort Selector', function () {
       timeout: 30_000,
       timeoutMsg: `model control-chip never rendered after switching to ${targetId}`,
     });
-    await browser.waitUntil(
-      async () =>
-        (await (await $('[data-testid="composer-model-badge"]')).getText()) !== currentBadge,
-      {
-        timeout: 30_000,
-        timeoutMsg: `composer-model-badge never updated after switching to ${targetId}`,
-      }
-    );
 
     // Switch back to the suite's cheap model before chatting (an arbitrary
     // catalog pick must never take real token traffic) — a second live switch,
@@ -180,6 +172,17 @@ describe('Slash Popover + Model/Effort Selector', function () {
     await pickComposerModel(requireOpenrouterModel());
     await sendMessageAndWait('Say goodbye in one word.');
     expect(await assistantMessageCount()).toBeGreaterThan(beforeCount);
+    // Non-anthropic badge truth is init-driven, never optimistic (ADR-082 §3):
+    // assert it only now, after the reply's SystemInit reported the model.
+    await browser.waitUntil(
+      async () =>
+        (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() ===
+        requireOpenrouterModel(),
+      {
+        timeout: 30_000,
+        timeoutMsg: 'composer-model-badge never settled on the cheap model after the reply',
+      }
+    );
 
     // Resume survival: navigate away (new conversation) and back into this one.
     await startNewConversation();
@@ -217,7 +220,15 @@ describe('Slash Popover + Model/Effort Selector', function () {
     // the clean system; at this suite point the entry re-saves with its model.
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
-    await confirmRestartAndWait();
+    // An idempotent resave (same provider/key/model) rightly requests no
+    // restart — confirm one only if the provider change actually demanded it.
+    const restartBtn = await $('[data-testid="restart-now-btn"]');
+    try {
+      await restartBtn.waitForExist({ timeout: 10_000 });
+      await confirmRestartAndWait();
+    } catch {
+      // No restart requested — the save was a config no-op.
+    }
     await openChat();
     await startNewConversation();
 
