@@ -24,13 +24,13 @@ describe('aggregateDetections', () => {
     ];
 
     const events = aggregateDetections(
-      [{ layer: 'B-result', tool: 'slack.sendChannel', detections }],
+      [{ layer: 'tool-result', tool: 'slack.sendChannel', detections }],
       'sess-1'
     );
 
     expect(events).toEqual([
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         category: 'EMAIL',
         action: 'tokenized',
         count: 6,
@@ -61,7 +61,7 @@ describe('aggregateDetections', () => {
 
   it('preserves the action of each category', () => {
     const detections: Detection[] = [{ category: 'IBAN', action: 'passed', count: 1 }];
-    const events = aggregateDetections([{ layer: 'B-result', tool: null, detections }]);
+    const events = aggregateDetections([{ layer: 'tool-result', tool: null, detections }]);
     expect(events[0].action).toBe('passed');
   });
 
@@ -72,7 +72,7 @@ describe('aggregateDetections', () => {
   it('defaults session to null when omitted', () => {
     const events = aggregateDetections([
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         tool: null,
         detections: [{ category: 'EMAIL', action: 'tokenized', count: 1 }],
       },
@@ -84,12 +84,12 @@ describe('aggregateDetections', () => {
   it('merges two batches for the same (layer, tool) into one summed event per category', () => {
     const batches: DetectionBatch[] = [
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         tool: 'slack.sendChannel',
         detections: [{ category: 'EMAIL', action: 'tokenized', count: 1 }],
       },
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         tool: 'slack.sendChannel',
         detections: [{ category: 'EMAIL', action: 'tokenized', count: 1 }],
       },
@@ -99,7 +99,7 @@ describe('aggregateDetections', () => {
 
     expect(events).toEqual([
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         category: 'EMAIL',
         action: 'tokenized',
         count: 2,
@@ -112,12 +112,12 @@ describe('aggregateDetections', () => {
   it('keeps two different tools reporting the same category as separate events (attribution)', () => {
     const batches: DetectionBatch[] = [
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         tool: 'slack.sendChannel',
         detections: [{ category: 'EMAIL', action: 'tokenized', count: 1 }],
       },
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         tool: 'sharepoint.uploadFile',
         detections: [{ category: 'EMAIL', action: 'tokenized', count: 1 }],
       },
@@ -139,7 +139,7 @@ describe('aggregateDetections', () => {
   it('keeps the same (layer, category, tool) with different actions as separate events', () => {
     const batches: DetectionBatch[] = [
       {
-        layer: 'B-result',
+        layer: 'tool-result',
         tool: 'slack.sendChannel',
         detections: [
           { category: 'EMAIL', action: 'tokenized', count: 1 },
@@ -162,7 +162,14 @@ describe('writePiiAudit', () => {
     vi.stubEnv('AUDIT_DIR', dir);
 
     writePiiAudit([
-      { layer: 'B-result', category: 'EMAIL', action: 'tokenized', count: 2, tool: 'slack.sendChannel', session: null },
+      {
+        layer: 'tool-result',
+        category: 'EMAIL',
+        action: 'tokenized',
+        count: 2,
+        tool: 'slack.sendChannel',
+        session: null,
+      },
       { layer: 'sandbox-return', category: 'PHONE_PL', action: 'passed', count: 1 },
     ]);
 
@@ -173,7 +180,7 @@ describe('writePiiAudit', () => {
 
     const rows = lines.map((l) => JSON.parse(l));
     expect(rows[0]).toMatchObject({
-      layer: 'B-result',
+      layer: 'tool-result',
       category: 'EMAIL',
       action: 'tokenized',
       count: 2,
@@ -201,8 +208,8 @@ describe('writePiiAudit', () => {
     dir = mkdtempSync(join(tmpdir(), 'audit-pii-'));
     vi.stubEnv('AUDIT_DIR', dir);
 
-    writePiiAudit([{ layer: 'B-result', category: 'EMAIL', action: 'tokenized', count: 1 }]);
-    writePiiAudit([{ layer: 'B-result', category: 'EMAIL', action: 'tokenized', count: 1 }]);
+    writePiiAudit([{ layer: 'tool-result', category: 'EMAIL', action: 'tokenized', count: 1 }]);
+    writePiiAudit([{ layer: 'tool-result', category: 'EMAIL', action: 'tokenized', count: 1 }]);
 
     const content = readFileSync(join(dir, 'audit-hub.jsonl'), 'utf-8');
     expect(content.trim().split('\n')).toHaveLength(2);
@@ -213,7 +220,7 @@ describe('writePiiAudit', () => {
     dir = mkdtempSync(join(tmpdir(), 'audit-pii-'));
 
     expect(() =>
-      writePiiAudit([{ layer: 'B-result', category: 'EMAIL', action: 'tokenized', count: 1 }])
+      writePiiAudit([{ layer: 'tool-result', category: 'EMAIL', action: 'tokenized', count: 1 }])
     ).not.toThrow();
 
     expect(existsSync(join(dir, 'audit-hub.jsonl'))).toBe(false);
@@ -237,7 +244,7 @@ describe('writePiiAudit', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(() =>
-      writePiiAudit([{ layer: 'B-result', category: 'EMAIL', action: 'tokenized', count: 1 }])
+      writePiiAudit([{ layer: 'tool-result', category: 'EMAIL', action: 'tokenized', count: 1 }])
     ).not.toThrow();
 
     expect(errSpy).toHaveBeenCalled();
