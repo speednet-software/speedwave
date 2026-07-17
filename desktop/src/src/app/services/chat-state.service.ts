@@ -1239,6 +1239,9 @@ export class ChatStateService {
   async resumeConversation(sessionId: string): Promise<void> {
     if (this._resumeInProgress) return;
     this._resumeInProgress = true;
+    // Resuming an existing conversation is a context change: a pick queued for the
+    // fresh session being composed must not fire into this old transcript instead.
+    this._pendingModelOverride.set(null);
 
     this.resetForNewConversation();
     this.beginTranscriptLoad();

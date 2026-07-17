@@ -1461,6 +1461,30 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
+    it('resumeConversation clears a queued override so a later SystemInit sends no /model', async () => {
+      // The pick targeted the fresh session being composed, not an old transcript
+      // the user resumes afterward — resuming must not leak it into that session.
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async () => undefined;
+      service.setPendingModelOverride('claude-haiku-4-5');
+
+      await service.resumeConversation('old-sess');
+      expect(service.pendingModelOverride()).toBeNull();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'old-sess' },
+      });
+      await Promise.resolve();
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
     it('a project switch clears a queued override so a later SystemInit sends no /model', async () => {
       // project_switch_started → 'switching' only fires once projectState.init()
       // has wired the Tauri listener (mirrors the 'resume on restart' setup).
