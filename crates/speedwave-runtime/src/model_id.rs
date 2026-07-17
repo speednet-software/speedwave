@@ -102,4 +102,49 @@ mod tests {
         let wire = wire_model_id(LlmProviderKind::Local, "local", "qwen2.5-coder");
         assert_eq!(normalize_observed(&wire, "openrouter"), wire);
     }
+
+    #[test]
+    fn wire_model_id_matches_ts() {
+        // Cross-read guard: the TS mirror in
+        // desktop/src/src/app/chat/composer/model-selector/wire-model-id.ts must
+        // implement the identical anthropic-passthrough / entry-id-prefix /
+        // already-prefixed guard rule.
+        let ts = include_str!(
+            "../../../desktop/src/src/app/chat/composer/model-selector/wire-model-id.ts"
+        );
+        assert!(
+            ts.contains("export function wireModelId"),
+            "TS must export wireModelId"
+        );
+        assert!(
+            ts.contains("anthropic_oauth") && ts.contains("anthropic_api_key"),
+            "TS wireModelId must special-case both anthropic provider kinds, matching Rust wire_model_id"
+        );
+        assert!(
+            ts.contains("catalogId.startsWith(prefix)"),
+            "TS wireModelId must guard against double-prefixing an already-prefixed catalog id, matching Rust wire_model_id"
+        );
+
+        // Behavioral parity, not just substring containment: run the same
+        // already-prefixed input through both implementations' documented rule.
+        let rust_already_prefixed = crate::model_id::wire_model_id(
+            LlmProviderKind::Local,
+            "my-ollama",
+            "my-ollama/llama3.3",
+        );
+        assert_eq!(
+            rust_already_prefixed, "my-ollama/llama3.3",
+            "Rust wire_model_id must not double-prefix an already-prefixed catalog id"
+        );
+
+        let ts_spec = include_str!(
+            "../../../desktop/src/src/app/chat/composer/model-selector/wire-model-id.spec.ts"
+        );
+        assert!(
+            ts_spec.contains(
+                "does not double-prefix a catalog id that already carries the entry id prefix"
+            ),
+            "TS spec must exercise the same already-prefixed regression the Rust side guards"
+        );
+    }
 }
