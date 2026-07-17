@@ -962,6 +962,30 @@ mod tests {
         assert_eq!(parse_control_command("/"), None);
     }
 
+    #[test]
+    fn parse_control_command_matches_ts_is_control_shaped() {
+        // Cross-language SSOT guard (cf. is_bare_slash_matches_ts_mirror):
+        // TS `isControlShaped` in slash.service.ts must stay byte-identical in shape.
+        let src = include_str!("../../../desktop/src/src/app/chat/slash/slash.service.ts");
+        let re = regex::Regex::new(
+            r"const CONTROL_COMMAND_RE = /\^\\/\(model\|effort\)\\s\+\(\\S\+\)\$/;",
+        )
+        .unwrap();
+        assert!(
+            re.is_match(src),
+            "slash.service.ts::CONTROL_COMMAND_RE must stay `/^\\/(model|effort)\\s+(\\S+)$/` \
+             to match Rust parse_control_command's `^/(model|effort)\\s+\\S+$` shape"
+        );
+        let body_re = regex::Regex::new(
+            r"export function isControlShaped\(text: string\): boolean \{\s*return CONTROL_COMMAND_RE\.test\(text\.trim\(\)\);\s*\}",
+        )
+        .unwrap();
+        assert!(
+            body_re.is_match(src),
+            "slash.service.ts::isControlShaped must test CONTROL_COMMAND_RE against text.trim()"
+        );
+    }
+
     fn sample_init_json() -> String {
         serde_json::json!({
             "type": "system",
