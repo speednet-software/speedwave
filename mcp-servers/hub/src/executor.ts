@@ -301,7 +301,7 @@ function createToolWrappers(
    * Generic wrapper for bridge calls with PII handling; `serviceName` labels error reports.
    * @param bridgeCall - Function that makes the bridge call to execute.
    * @param serviceName - Name of the service being called for error reporting.
-   * @param toolName - camelCase tool method name, for B-result PII audit attribution.
+   * @param toolName - camelCase tool method name, for tool-result PII audit attribution.
    */
   const wrapBridgeCall: WrapBridgeCallFn = async <T>(
     bridgeCall: () => Promise<T>,
@@ -310,11 +310,11 @@ function createToolWrappers(
   ): Promise<T> => {
     try {
       const result = await bridgeCall();
-      // Tokenize result (replace sensitive data with tokens); buffer the raw B-result detections.
+      // Tokenize result (replace sensitive data with tokens); buffer the raw tool-result detections.
       const { value, detections } = getEngine().tokenize(result);
       const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
       if (detections.length > 0) {
-        detectionBatches.push({ layer: 'B-result', tool, detections });
+        detectionBatches.push({ layer: 'tool-result', tool, detections });
       }
       return value as T;
     } catch (error) {
@@ -326,7 +326,7 @@ function createToolWrappers(
       const { value: tokenizedMessage, detections } = tokenizeErrorText(message);
       if (detections.length > 0) {
         const tool = toolName ? `${serviceName}.${toolName}` : serviceName;
-        detectionBatches.push({ layer: 'B-result', tool, detections });
+        detectionBatches.push({ layer: 'tool-result', tool, detections });
       }
       throw new Error(`${serviceName}: ${tokenizedMessage}`);
     }
@@ -488,7 +488,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
   // Create audit context for tracking tool executions
   const auditContext = createAuditContext();
 
-  // Create tool wrappers with timeout context; detectionBatches accumulates raw B-result
+  // Create tool wrappers with timeout context; detectionBatches accumulates raw tool-result
   // detections across every bridge call, aggregated once below alongside the sandbox-return scan.
   const { tools, detectionBatches } = createToolWrappers(auditContext, startTime, timeoutMs);
 
@@ -559,7 +559,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     const result = await Promise.race([fn(...contextValues), timeoutPromise]);
 
     // Safety-net scan: sandbox code can assemble PII from fragments that individually passed
-    // B-result scanning untouched (an encoded/re-cased value can still slip through; accepted).
+    // tool-result scanning untouched (an encoded/re-cased value can still slip through; accepted).
     const sandboxScan = getEngine().tokenize(result);
     if (sandboxScan.detections.length > 0) {
       detectionBatches.push({
