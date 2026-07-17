@@ -758,24 +758,44 @@ pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Resul
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
 
-/// Session-START model of the newest transcript: what a NEW session will resolve.
-/// Mid-session wire `/model` switches are session-scoped, so later models are ignored.
-pub fn last_session_model(project: &str) -> Option<String> {
-    last_session_model_impl(consts::data_dir(), project)
+/// Session-START model of the newest transcript accepted by `accept`: what a NEW
+/// session will resolve. Mid-session wire `/model` switches are session-scoped.
+pub fn last_session_model(project: &str, accept: impl Fn(&str) -> bool) -> Option<String> {
+    last_session_model_impl(consts::data_dir(), project, accept)
 }
 
-fn last_session_model_impl(data_dir: &Path, project: &str) -> Option<String> {
+/// Aborted "/" sessions leave frequent model-less transcripts, so the hint walks
+/// newest-first; the cap bounds badge-render IO on a large history dir.
+const LAST_SESSION_MODEL_SCAN_CAP: usize = 20;
+
+fn last_session_model_impl(
+    data_dir: &Path,
+    project: &str,
+    accept: impl Fn(&str) -> bool,
+) -> Option<String> {
     let dir = sessions_dir_impl(data_dir, project);
-    let newest = fs::read_dir(&dir)
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&dir)
         .ok()?
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .max_by_key(|e| {
-            e.metadata()
+        .map(|e| {
+            let modified = e
+                .metadata()
                 .and_then(|m| m.modified())
-                .unwrap_or(std::time::UNIX_EPOCH)
-        })?;
-    let file = fs::File::open(newest.path()).ok()?;
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (modified, e.path())
+        })
+        .collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries
+        .into_iter()
+        .take(LAST_SESSION_MODEL_SCAN_CAP)
+        .find_map(|(_, path)| session_start_model(&path).filter(|m| accept(m)))
+}
+
+/// First non-synthetic model line of one transcript — its session-start model.
+fn session_start_model(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
     for line in BufReader::new(file)
         .lines()
         .take(10_000)
@@ -3049,7 +3069,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            last_session_model_impl(tmp.path(), "proj"),
+            last_session_model_impl(tmp.path(), "proj", |_| true),
             Some("claude-opus-4-8".to_string())
         );
     }
@@ -3069,7 +3089,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            last_session_model_impl(tmp.path(), "proj"),
+            last_session_model_impl(tmp.path(), "proj", |_| true),
             Some("claude-opus-4-8".to_string())
         );
     }
@@ -3077,10 +3097,89 @@ mod tests {
     #[test]
     fn last_session_model_none_for_missing_dir_or_empty_transcripts() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(last_session_model_impl(tmp.path(), "proj"), None);
+        assert_eq!(last_session_model_impl(tmp.path(), "proj", |_| true), None);
         let dir = setup_sessions_dir(tmp.path(), "proj");
         write_session(&dir, "s1", &[r#"{"type":"result"}"#]);
-        assert_eq!(last_session_model_impl(tmp.path(), "proj"), None);
+        assert_eq!(last_session_model_impl(tmp.path(), "proj", |_| true), None);
+    }
+
+    fn set_session_mtime(dir: &Path, session_id: &str, secs_ago: u64) {
+        let path = dir.join(format!("{session_id}.jsonl"));
+        let f = fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago))
+            .unwrap();
+    }
+
+    #[test]
+    fn last_session_model_walks_past_a_model_less_newest_transcript() {
+        // Aborted "/" sessions leave model-less transcripts as the newest file;
+        // the hint must fall back to the newest transcript that HAS a model.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "old-real",
+            &[r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#],
+        );
+        write_session(
+            &dir,
+            "new-garbage",
+            &[r#"{"type":"queue-operation","operation":"enqueue","content":"/"}"#],
+        );
+        set_session_mtime(&dir, "old-real", 60);
+        set_session_mtime(&dir, "new-garbage", 1);
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("claude-opus-4-8".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_walks_past_a_predicate_rejected_model() {
+        // After a provider switch the newest transcript starts on a foreign model;
+        // the claude-* predicate must skip it, not blank the hint.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "old-claude",
+            &[r#"{"type":"system","subtype":"init","model":"claude-sonnet-5"}"#],
+        );
+        write_session(
+            &dir,
+            "new-foreign",
+            &[r#"{"type":"assistant","message":{"model":"unsloth/qwen-x"}}"#],
+        );
+        set_session_mtime(&dir, "old-claude", 60);
+        set_session_mtime(&dir, "new-foreign", 1);
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |m| m.starts_with("claude-")),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("unsloth/qwen-x".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_scan_is_capped() {
+        // A resolvable transcript older than the newest LAST_SESSION_MODEL_SCAN_CAP
+        // files is out of budget: the walk must return None, not scan unbounded.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "beyond-cap",
+            &[r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#],
+        );
+        set_session_mtime(&dir, "beyond-cap", 10_000);
+        for i in 0..LAST_SESSION_MODEL_SCAN_CAP {
+            let id = format!("garbage-{i}");
+            write_session(&dir, &id, &[r#"{"type":"result"}"#]);
+            set_session_mtime(&dir, &id, 100 + i as u64);
+        }
+        assert_eq!(last_session_model_impl(tmp.path(), "proj", |_| true), None);
     }
 
     #[test]
@@ -3096,7 +3195,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            last_session_model_impl(tmp.path(), "proj"),
+            last_session_model_impl(tmp.path(), "proj", |_| true),
             Some("claude-fable-5".to_string())
         );
     }

@@ -44,7 +44,9 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
     let project_name = resolve_project_name(&project_id)?;
     Ok(
         crate::effort_pin::get_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
-            .or_else(|| crate::history::last_session_model(&project_name))
+            .or_else(|| {
+                crate::history::last_session_model(&project_name, |m| m.starts_with("claude-"))
+            })
             .filter(|m| m.starts_with("claude-")),
     )
 }
