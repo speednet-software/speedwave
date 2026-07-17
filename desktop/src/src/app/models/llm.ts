@@ -124,6 +124,18 @@ export interface LlmActive {
 }
 
 /**
+ * Mirror of Rust `containers_cmd::ActiveProviderSummary` (`get_active_provider_summary`).
+ * Used by the composer badge/combobox: `base_url` is required for local-provider
+ * discovery (never pass `provider_id` as a URL).
+ */
+export interface ActiveProviderSummary {
+  provider_id: string;
+  kind: LlmProviderKind;
+  model: string | null;
+  base_url: string | null;
+}
+
+/**
  * One aggregate bucket of the usage dashboard. Mirror of the Rust
  * `speedwave_runtime::usage::UsageBucket` returned by `get_llm_usage`.
  */
