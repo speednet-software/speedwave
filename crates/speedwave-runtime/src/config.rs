@@ -1522,8 +1522,9 @@ fn apply_repo_model_suggestion(llm: &mut LlmConfig, suggestion: Option<String>) 
     let Some(entry) = llm.active_provider() else {
         return;
     };
-    if entry.kind.is_anthropic() && is_foreign_anthropic_model(&model) {
-        log::warn!("llm config: ignoring foreign repo model suggestion under anthropic provider");
+    if entry.kind.is_anthropic() {
+        // Anthropic entries never store a model (spec 4.5); the repo
+        // suggestion applies only to local/OpenRouter active entries.
         return;
     }
     let id = entry.id.clone();
@@ -3980,19 +3981,35 @@ mod tests {
     }
 
     /// F10: the documented repo `.speedwave.json` model suggestion fills a
-    /// model-less active entry after migration.
+    /// model-less active entry after migration (non-Anthropic kinds only —
+    /// see `repo_suggestion_ignored_for_anthropic`).
     #[test]
     fn repo_model_suggestion_fills_modelless_active_entry() {
-        let mut llm = LlmConfig::default();
-        assert!(llm.set_active_to_anthropic());
-        apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:1234".into()),
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        apply_repo_model_suggestion(&mut llm, Some("qwen2.5-coder".into()));
         assert_eq!(
             llm.effective_active_model().as_deref(),
-            Some("claude-opus-4-6")
+            Some("qwen2.5-coder")
         );
         assert_eq!(
             llm.model.as_deref(),
-            Some("claude-opus-4-6"),
+            Some("qwen2.5-coder"),
             "flat mirror for the legacy renderer"
         );
     }
@@ -4023,6 +4040,75 @@ mod tests {
         apply_repo_model_suggestion(&mut llm, Some("openrouter/z-ai/glm-5.2".into()));
         assert_eq!(llm.effective_active_model(), None);
         assert_eq!(llm.model, None);
+    }
+
+    #[test]
+    fn repo_suggestion_ignored_for_anthropic() {
+        // Anthropic entries never store a model (spec 4.5): a repo-suggested
+        // model must not be written under them, even a valid Anthropic id.
+        let mut llm = LlmConfig::default();
+        llm.set_active_to_anthropic();
+        apply_repo_model_suggestion(&mut llm, Some("claude-opus-4-6".into()));
+        assert_eq!(
+            llm.effective_active_model(),
+            None,
+            "repo suggestion must not apply to an anthropic active entry"
+        );
+        assert_eq!(llm.model, None, "flat mirror must stay untouched too");
+    }
+
+    #[test]
+    fn repo_suggestion_still_applies_for_local() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:1234".into()),
+                model: None,
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        apply_repo_model_suggestion(&mut llm, Some("llama3.3".into()));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("llama3.3"),
+            "repo suggestion must still apply to a local active entry"
+        );
+    }
+
+    #[test]
+    fn repo_suggestion_still_applies_for_openrouter() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "openrouter".into(),
+                kind: LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: None,
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "openrouter".into(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+        apply_repo_model_suggestion(&mut llm, Some("anthropic/claude-sonnet-5".into()));
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("anthropic/claude-sonnet-5"),
+            "repo suggestion must still apply to an openrouter active entry"
+        );
     }
 
     #[test]
