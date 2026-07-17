@@ -184,6 +184,30 @@ impl LlmConfig {
         true
     }
 
+    /// Clears the active entry's model when its kind is Anthropic (oauth or
+    /// api-key): the composer never writes a stored model for it (spec
+    /// section 4.5). No-op for any other active kind or when unconfigured.
+    pub fn clear_active_anthropic_model(&mut self) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let provider_id = active.provider_id.clone();
+        let is_anthropic = self
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .is_some_and(|p| p.kind.is_anthropic());
+        if !is_anthropic {
+            return;
+        }
+        if let Some(entry) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            entry.model = None;
+        }
+        if let Some(active) = &mut self.active {
+            active.model = None;
+        }
+    }
+
     /// Routing model for the active provider, enforcing provenance (ADR-073):
     /// the entry's `model` wins over a disagreeing `active.model`.
     pub fn effective_active_model(&self) -> Option<String> {
@@ -2021,6 +2045,60 @@ mod tests {
         };
         assert!(llm.set_active_to_anthropic());
         assert_eq!(llm.active.as_ref().unwrap().model, None);
+    }
+
+    #[test]
+    fn clear_active_anthropic_model_clears_entry_and_pointer() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                model: Some("claude-opus-4-6".into()),
+                ..anthropic_entry()
+            }],
+            active: Some(LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("claude-opus-4-6".into()),
+            }),
+            ..Default::default()
+        };
+        llm.clear_active_anthropic_model();
+        assert_eq!(llm.active_provider().unwrap().model, None);
+        assert_eq!(llm.active.as_ref().unwrap().model, None);
+        assert_eq!(llm.effective_active_model(), None);
+    }
+
+    #[test]
+    fn clear_active_anthropic_model_noop_for_non_anthropic_active() {
+        let mut llm = LlmConfig {
+            schema_version: Some(LLM_SCHEMA_VERSION),
+            providers: vec![LlmProviderEntry {
+                id: "local".into(),
+                kind: LlmProviderKind::Local,
+                base_url: Some("http://host.docker.internal:1234".into()),
+                model: Some("llama3.3".into()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(LlmActive {
+                provider_id: "local".into(),
+                model: Some("llama3.3".into()),
+            }),
+            ..Default::default()
+        };
+        llm.clear_active_anthropic_model();
+        assert_eq!(
+            llm.effective_active_model().as_deref(),
+            Some("llama3.3"),
+            "non-anthropic active entries must keep their model"
+        );
+    }
+
+    #[test]
+    fn clear_active_anthropic_model_noop_when_unconfigured() {
+        let mut llm = LlmConfig::default();
+        llm.clear_active_anthropic_model();
+        assert!(llm.is_unconfigured());
     }
 
     #[test]
