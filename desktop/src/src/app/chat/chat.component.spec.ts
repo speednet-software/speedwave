@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
 import { RouterModule } from '@angular/router';
+import { By } from '@angular/platform-browser';
 import { ChatComponent } from './chat.component';
+import { ComposerComponent } from './composer/composer.component';
 import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
@@ -1245,6 +1247,32 @@ describe('ChatComponent', () => {
       ]);
       expect(component.isLastAssistant(1)).toBe(false);
       expect(component.isLastAssistant(3)).toBe(true);
+    });
+  });
+
+  describe('model selector wiring', () => {
+    it('forwards the composer modelSelected event straight to ChatStateService.applyModelSelection', () => {
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      fixture.detectChanges();
+      const applySpy = vi
+        .spyOn(fixture.componentInstance.chat, 'applyModelSelection')
+        .mockResolvedValue(undefined);
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+
+      composer.triggerEventHandler('modelSelected', {
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(applySpy).toHaveBeenCalledWith({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
     });
   });
 });

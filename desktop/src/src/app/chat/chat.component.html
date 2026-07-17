@@ -65,10 +65,12 @@
             [streaming]="chat.isStreamingFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
+            [projectId]="projectState.activeProject() ?? ''"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"
             (stopRequested)="onStopClicked()"
+            (modelSelected)="chat.applyModelSelection($event)"
           />
           <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />
         </div>
