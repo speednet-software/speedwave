@@ -1672,9 +1672,7 @@ describe('executor', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
-      expect(result.error?.message).toBe(
-        'slack: Worker slack returned 500: Internal Server Error'
-      );
+      expect(result.error?.message).toBe('slack: Worker slack returned 500: Internal Server Error');
     });
 
     it('degrades to a generic message when the PII engine itself fails to tokenize an error', async () => {
@@ -1748,7 +1746,7 @@ describe('executor', () => {
       expect(result.success).toBe(true);
     });
 
-    it('writes B-result and sandbox-return audit events when AUDIT_DIR is set', async () => {
+    it('writes tool-result and sandbox-return audit events when AUDIT_DIR is set', async () => {
       auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
       vi.stubEnv('AUDIT_DIR', auditDir);
 
@@ -1776,7 +1774,10 @@ describe('executor', () => {
       vi.stubEnv('AUDIT_DIR', notADir);
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-      const result = await executeCode({ code: `return { email: 'carol@example.com' };`, timeoutMs: 5000 });
+      const result = await executeCode({
+        code: `return { email: 'carol@example.com' };`,
+        timeoutMs: 5000,
+      });
 
       expect(result.success).toBe(true);
       expect(errSpy).toHaveBeenCalled();
@@ -1784,7 +1785,7 @@ describe('executor', () => {
     });
   });
 
-  describe('B-result audit aggregation across repeated calls within one executeCode (F3.4 fix)', () => {
+  describe('tool-result audit aggregation across repeated calls within one executeCode (F3.4 fix)', () => {
     const savedEnabledServices = process.env.ENABLED_SERVICES;
     const workerUrls: Record<string, string | undefined> = {};
     let originalFetch: typeof globalThis.fetch;
@@ -1843,7 +1844,7 @@ describe('executor', () => {
       }) as unknown as typeof fetch;
     }
 
-    it('collapses two calls to the SAME tool into one B-result row with a summed count', async () => {
+    it('collapses two calls to the SAME tool into one tool-result row with a summed count', async () => {
       auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
       vi.stubEnv('AUDIT_DIR', auditDir);
       mockWorkerJsonResponseWithEmail();
@@ -1862,14 +1863,14 @@ describe('executor', () => {
         .split('\n')
         .map((l) => JSON.parse(l));
 
-      const bResultEmailRows = rows.filter(
-        (r) => r.layer === 'B-result' && r.category === 'EMAIL' && r.tool === 'slack.sendChannel'
+      const toolResultEmailRows = rows.filter(
+        (r) => r.layer === 'tool-result' && r.category === 'EMAIL' && r.tool === 'slack.sendChannel'
       );
-      expect(bResultEmailRows).toHaveLength(1);
-      expect(bResultEmailRows[0]).toMatchObject({ action: 'tokenized', count: 2 });
+      expect(toolResultEmailRows).toHaveLength(1);
+      expect(toolResultEmailRows[0]).toMatchObject({ action: 'tokenized', count: 2 });
     });
 
-    it('keeps two DIFFERENT tools reporting the same category as two separate B-result rows', async () => {
+    it('keeps two DIFFERENT tools reporting the same category as two separate tool-result rows', async () => {
       auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
       vi.stubEnv('AUDIT_DIR', auditDir);
       mockWorkerJsonResponseWithEmail();
@@ -1888,10 +1889,12 @@ describe('executor', () => {
         .split('\n')
         .map((l) => JSON.parse(l));
 
-      const bResultEmailRows = rows.filter((r) => r.layer === 'B-result' && r.category === 'EMAIL');
-      const tools = bResultEmailRows.map((r) => r.tool).sort();
+      const toolResultEmailRows = rows.filter(
+        (r) => r.layer === 'tool-result' && r.category === 'EMAIL'
+      );
+      const tools = toolResultEmailRows.map((r) => r.tool).sort();
       expect(tools).toEqual(['sharepoint.uploadFile', 'slack.sendChannel']);
-      for (const row of bResultEmailRows) {
+      for (const row of toolResultEmailRows) {
         expect(row).toMatchObject({ action: 'tokenized', count: 1 });
       }
     });
