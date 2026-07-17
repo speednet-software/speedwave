@@ -196,3 +196,11 @@ export class ThemeService implements OnDestroy {
     this.native.syncWindowTheme(effective);
   }
 }
+
+/**
+ * App-initializer hook: instantiates ThemeService so the persisted theme reaches
+ * the DOM at boot, not only after Settings is first opened.
+ */
+export function applyPersistedThemeOnStartup(): void {
+  inject(ThemeService);
+}
