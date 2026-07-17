@@ -1335,6 +1335,52 @@ describe('ChatStateService', () => {
     it('pendingModelOverride is null when nothing was set', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
+
+    it('resetForNewConversation clears a queued override so a later SystemInit sends no /model', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.setPendingModelOverride('claude-opus-4-8[1m]');
+
+      service.resetForNewConversation();
+      expect(service.pendingModelOverride()).toBeNull();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-new' },
+      });
+      await Promise.resolve();
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
+    });
+
+    it('a project switch clears a queued override so a later SystemInit sends no /model', async () => {
+      // project_switch_started → 'switching' only fires once projectState.init()
+      // has wired the Tauri listener (mirrors the 'resume on restart' setup).
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.setPendingModelOverride('claude-opus-4-8[1m]');
+
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(service.pendingModelOverride()).toBeNull();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-other' },
+      });
+      await Promise.resolve();
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
+    });
   });
 
   describe('RateLimit chunk handling', () => {

@@ -259,6 +259,9 @@ export class ChatStateService {
   clearSessionTracking(): void {
     this._lastKnownSessionId = null;
     this._optimisticSessionId = null;
+    // A queued override targets the session it was set for; it must not
+    // survive into an unrelated later session/project.
+    this._pendingModelOverride.set(null);
   }
 
   private tauri = inject(TauriService);
