@@ -533,7 +533,7 @@ mod tests {
         let contents = std::fs::read_to_string(&audit_path).unwrap();
         let line: serde_json::Value =
             serde_json::from_str(contents.lines().next().unwrap()).unwrap();
-        assert_eq!(line["layer"], "A-in");
+        assert_eq!(line["layer"], "llm-request");
         assert_eq!(line["category"], "EMAIL");
         assert_eq!(line["action"], "tokenized");
         assert_eq!(line["session"], serde_json::Value::Null);
