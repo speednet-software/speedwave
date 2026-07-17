@@ -118,6 +118,27 @@ export class ChatStateService {
     return this._pendingQueue;
   }
 
+  /** Anthropic model chosen while no session was live (composer, Task 16); sent once after the next SystemInit. */
+  private readonly _pendingModelOverride = signal<string | null>(null);
+  /** Read-only: the composer's queued model switch, or null when none/already sent. */
+  readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
+
+  /**
+   * Queues an Anthropic model switch to send once the next SystemInit arrives.
+   * @param modelId - Wire model id to switch to, or null to clear the queue.
+   */
+  setPendingModelOverride(modelId: string | null): void {
+    this._pendingModelOverride.set(modelId);
+  }
+
+  /** Sends the queued override as a normal `/model` message and clears it (fires at most once per queued value). */
+  private sendPendingOverrideAfterInit(): void {
+    const pending = this._pendingModelOverride();
+    if (!pending) return;
+    this._pendingModelOverride.set(null);
+    void this.sendMessage(`/model ${pending}`);
+  }
+
   /** Session cost/usage stats signal — drives the OnPush footer reactively. */
   private readonly _sessionStats = signal<SessionStats | null>(null);
   /** Session cost/usage stats from the most recent result. */
@@ -725,6 +746,7 @@ export class ChatStateService {
           this.seedSessionId(chunk.data.session_id);
           void this.flushDeferredQueue(chunk.data.session_id);
         }
+        this.sendPendingOverrideAfterInit();
         break;
 
       case 'ControlChip': {

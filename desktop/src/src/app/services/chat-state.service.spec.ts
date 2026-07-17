@@ -1293,6 +1293,50 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('pendingModelOverride', () => {
+    it('sends the pending Anthropic override once after SystemInit and clears it', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.setPendingModelOverride('claude-opus-4-8[1m]');
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-1' },
+      });
+      await Promise.resolve();
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) =>
+          cmd === 'send_message' && JSON.stringify(args).includes('/model claude-opus-4-8[1m]')
+      );
+      expect(modelSendCall).toBeTruthy();
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('does not resend the pending override on a second SystemInit', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.setPendingModelOverride('claude-opus-4-8[1m]');
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-1' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8[1m]', session_id: 'sess-1' },
+      });
+      await Promise.resolve();
+
+      expect(invokeSpy).not.toHaveBeenCalled();
+    });
+
+    it('pendingModelOverride is null when nothing was set', () => {
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+  });
+
   describe('RateLimit chunk handling', () => {
     it('RateLimit with utilization updates sessionStats immediately if present', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
