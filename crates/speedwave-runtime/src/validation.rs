@@ -49,6 +49,15 @@ pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rejects any control character (newline/CR/NUL/etc). A control char in a value
+/// spliced into an unquoted YAML/compose scalar can inject extra entries.
+pub fn reject_control_chars(value: &str, field: &str) -> anyhow::Result<()> {
+    if value.chars().any(|c| c.is_control()) {
+        anyhow::bail!("{field} must not contain control characters");
+    }
+    Ok(())
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -109,5 +118,17 @@ mod tests {
     fn test_validate_project_name_path_traversal() {
         assert!(validate_project_name("..").is_err());
         assert!(validate_project_name("a..b").is_err());
+    }
+
+    #[test]
+    fn test_reject_control_chars() {
+        assert!(reject_control_chars("/tmp/ok", "Project directory").is_ok());
+        for bad in ["a\nb", "a\rb", "a\0b", "a\tb"] {
+            let err = reject_control_chars(bad, "Project directory").unwrap_err();
+            assert!(
+                err.to_string().contains("control characters"),
+                "for {bad:?}"
+            );
+        }
     }
 }

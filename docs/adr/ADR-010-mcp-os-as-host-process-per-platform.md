@@ -1,7 +1,9 @@
 # ADR-010: mcp-os as Host Process Per Platform
 
-> **Status:** Accepted
+> **Status:** Accepted (Windows bind revised by [ADR-080](ADR-080-wsl2-mirrored-container-host-relay.md))
 > **Context:** Native OS integrations (Calendar, Mail, Reminders, Notes, Outlook) need host-only APIs that an isolated container cannot reach.
+>
+> **Update (ADR-080):** the "Windows binds the WSL vEthernet adapter IP" claim below holds only under **NAT** networking. Under **mirrored** networking (the default) the worker binds `127.0.0.1` and containers reach it via a guest-side `socat` relay; `host_bind_address()` returns the adapter IP only in NAT mode.
 
 ## Decision
 

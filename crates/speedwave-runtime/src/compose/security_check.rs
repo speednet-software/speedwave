@@ -56,26 +56,39 @@ impl SecurityExpectedPaths {
     }
 }
 
-/// Extracts (host_path, mode) for `target` from a volume string by matching
-/// ":<target>:" or trailing ":<target>"; None if not found.
+/// Parses a short-form `host:/target[:mode]` volume string into (host, target, mode);
+/// None when no `:/`-separated absolute target exists (anonymous/named volume).
+pub(crate) fn parse_short_form_volume(vol: &str) -> Option<(&str, &str, Option<&str>)> {
+    let mut search_from = 0;
+    let sep = loop {
+        let pos = vol[search_from..].find(":/")? + search_from;
+        // A lone drive letter before the colon is a Windows host (`C:/Users/…`),
+        // not the host/target separator — keep scanning past it.
+        if pos == 1 && vol.as_bytes()[0].is_ascii_alphabetic() {
+            search_from = pos + 1;
+            continue;
+        }
+        break pos;
+    };
+    let host = &vol[..sep];
+    let rest = &vol[sep + 1..];
+    // Trim a trailing :ro/:rw/:z-style mode; a tail containing '/' is not a mode.
+    match rest.rfind(':') {
+        Some(pos) if pos > 0 && !rest[pos + 1..].contains('/') => {
+            Some((host, &rest[..pos], Some(&rest[pos + 1..])))
+        }
+        _ => Some((host, rest, None)),
+    }
+}
+
+/// Extracts (host_path, mode) for `target` from a short-form volume string;
+/// None when the entry does not parse or its target differs.
 pub(crate) fn extract_volume_for_target(
     vol: &str,
     target: &str,
 ) -> Option<(String, Option<String>)> {
-    // Try :<target>:<mode> first (e.g., /path:/tokens:ro)
-    let with_mode = format!(":{}:", target);
-    if let Some(pos) = vol.find(&with_mode) {
-        let host = &vol[..pos];
-        let mode = &vol[pos + with_mode.len()..];
-        return Some((host.to_string(), Some(mode.to_string())));
-    }
-    // Try :<target> at end (e.g., /path:/tokens)
-    let at_end = format!(":{}", target);
-    if vol.ends_with(&at_end) {
-        let host = &vol[..vol.len() - at_end.len()];
-        return Some((host.to_string(), None));
-    }
-    None
+    let (host, parsed_target, mode) = parse_short_form_volume(vol)?;
+    (parsed_target == target).then(|| (host.to_string(), mode.map(str::to_string)))
 }
 
 /// Normalizes a compose mount path (container target or host source):
@@ -403,6 +416,15 @@ pub enum SecurityRule {
     #[strum(props(description = "claude has no PII policy or audit directory mount"))]
     NoPolicyOrAuditMountClaude,
 
+    /// Every claude volume is an allowlisted renderer target with the expected
+    /// source and mode (/workspace = exactly the project dir; plugin claude-resources :ro).
+    #[strum(to_string = "CLAUDE_WORKSPACE_MOUNT")]
+    #[strum(props(
+        description = "claude volumes match the renderer target allowlist (sources and modes; plugin claude-resources :ro)"
+    ))]
+    ClaudeWorkspaceMount,
+
+    // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
     /// Host file/dir has wrong mode bits or UID (Unix-only, skipped on Windows).
@@ -579,6 +601,8 @@ impl SecurityCheck {
             Self::check_audit_mount(&doc, data_dir, project, "mcp-hub"),
             // claude must never receive the policy or audit directories
             Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
+            // claude volumes: renderer target allowlist + per-target source/mode
+            Self::check_claude_workspace_mount(&doc, expected_paths, data_dir, project),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
@@ -1523,6 +1547,200 @@ impl SecurityCheck {
         violations
     }
 
+    /// Fail-closed allowlist over every claude volume: only renderer-known targets,
+    /// each validated for host source and mode (where the template fixes one).
+    fn check_claude_workspace_mount(
+        doc: &serde_yaml_ng::Value,
+        expected_paths: &SecurityExpectedPaths,
+        data_dir: &std::path::Path,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
+            return violations;
+        };
+        let vols = claude
+            .get("volumes")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        let expected = expected_paths.project_engine_path();
+        let managed_target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
+        // Renderer conventions (compose.template.yml + render_compose) for the fixed
+        // claude mounts: exact target -> (required host-source suffix, required mode).
+        let claude_home_suffix = format!("/{}/{project}", crate::consts::CLAUDE_HOME_SUBDIR);
+        let usage_suffix = format!("/usage/{project}/proxy");
+        let fixed_targets: [(&str, &str, &str); 4] = [
+            ("/home/speedwave", claude_home_suffix.as_str(), "rw"),
+            ("/home/speedwave/.claude/ide", "/ide-bridge", "ro"),
+            ("/speedwave/resources", "/claude-resources", "ro"),
+            ("/usage", usage_suffix.as_str(), "ro"),
+        ];
+        let mut matches = 0;
+        for vol in &vols {
+            // Fail-closed: a long-form mapping is never renderer output on claude
+            // (same precedent as validate_service_volume_mounts' volume_long_form).
+            let Some(s) = vol.as_str() else {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: "claude volume uses long-form YAML mapping; only short-form strings are rendered"
+                        .into(),
+                    remediation: "Re-render compose; the renderer emits only short-form claude volumes.",
+                });
+                continue;
+            };
+            // Fail-closed: anonymous/named volumes without an absolute target are
+            // never renderer output either.
+            let Some((host, target, mode)) = parse_short_form_volume(s) else {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: format!(
+                        "claude volume entry '{s}' is not a parseable host:/target[:mode] mount"
+                    ),
+                    remediation: "Re-render compose; every claude mount is a short-form host:/target[:mode] string.",
+                });
+                continue;
+            };
+            if target == "/workspace" {
+                matches += 1;
+                if host != expected {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!("/workspace source '{host}' != expected '{expected}'"),
+                        remediation:
+                            "The claude /workspace mount must come from exactly the project directory.",
+                    });
+                }
+                // The template renders no mode here (compose defaults to rw);
+                // fixture composes carry an explicit :rw. Anything else is a tamper.
+                if mode.is_some_and(|m| m != "rw") {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!("/workspace mount must be :rw, got: {s}"),
+                        remediation: "Re-render compose; /workspace is the writable project mount.",
+                    });
+                }
+                continue;
+            }
+            if let Some(slug) = target.strip_prefix("/speedwave/plugins/") {
+                violations.extend(Self::check_plugin_resources_mount(
+                    slug, host, mode, data_dir,
+                ));
+                continue;
+            }
+            if target == managed_target {
+                // Source and :ro mode of this exact target are enforced per-entry
+                // by ManagedSettingsMount (check_claude_managed_settings).
+                continue;
+            }
+            if let Some((_, suffix, want_mode)) =
+                fixed_targets.iter().find(|(t, _, _)| target == *t)
+            {
+                if !host.ends_with(suffix) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!(
+                            "claude {target} mount source '{host}' does not end with the renderer's '{suffix}' directory"
+                        ),
+                        remediation: "Re-render compose; this mount must come from its canonical data-dir subdirectory.",
+                    });
+                }
+                if mode != Some(want_mode) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::ClaudeWorkspaceMount,
+                        message: format!("claude {target} mount must be :{want_mode}, got: {s}"),
+                        remediation: "Re-render compose; the template fixes this mount's mode.",
+                    });
+                }
+                continue;
+            }
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!("claude mounts an unexpected target '{target}'"),
+                remediation:
+                    "Re-render compose; a control char in the project path can inject extra mounts.",
+            });
+        }
+        if matches != 1 {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!("claude must have exactly one /workspace mount, found {matches}"),
+                remediation: "Re-render compose; a control char in the project path can inject extra mounts.",
+            });
+        }
+        violations
+    }
+
+    /// Validates one `/speedwave/plugins/<slug>` claude-resources mount: valid slug,
+    /// `:ro`, and sourced from exactly the plugin's own claude-resources dir.
+    fn check_plugin_resources_mount(
+        slug: &str,
+        host: &str,
+        mode: Option<&str>,
+        data_dir: &std::path::Path,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        if !plugin::is_valid_slug(slug) {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!("plugin claude-resources mount has a malformed slug '{slug}'"),
+                remediation: "Re-render compose; plugin slug is malformed.",
+            });
+            return violations;
+        }
+        if mode != Some("ro") {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!("plugin '{slug}' claude-resources mount must be :ro"),
+                remediation: "Re-render compose; plugin claude-resources mounts are read-only.",
+            });
+        }
+        // A path-resolution failure must fail closed: never let an unverifiable
+        // mount source pass through as if the mount were merely absent.
+        let plugin_dir = data_dir.join("plugins").join(slug);
+        let resources_dir = plugin::plugin_claude_resources_dir(&plugin_dir);
+        let expected_source = match to_engine_path(&resources_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                violations.push(SecurityViolation {
+                    container: "claude".into(),
+                    rule: SecurityRule::ClaudeWorkspaceMount,
+                    message: format!(
+                        "cannot resolve expected claude-resources source for plugin '{slug}': {e}"
+                    ),
+                    remediation:
+                        "Ensure the data directory path is resolvable by the container engine.",
+                });
+                return violations;
+            }
+        };
+        if host != expected_source {
+            violations.push(SecurityViolation {
+                container: "claude".into(),
+                rule: SecurityRule::ClaudeWorkspaceMount,
+                message: format!(
+                    "plugin '{slug}' claude-resources source '{host}' != expected '{expected_source}'"
+                ),
+                remediation:
+                    "Re-render compose; a plugin mount must come from its own claude-resources dir.",
+            });
+        }
+        violations
+    }
+
     /// Validates volumes for built-in mcp-sharepoint service (not a plugin).
     fn check_builtin_sharepoint_volumes(
         doc: &serde_yaml_ng::Value,
@@ -2145,6 +2363,281 @@ mod tests {
             v.iter()
                 .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
             "source outside claude-managed must fail"
+        );
+    }
+
+    #[test]
+    fn claude_plugin_resources_mount_is_allowed() {
+        // A plugin's claude-resources dir mounts read-only at /speedwave/plugins/<slug>.
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host/.speedwave/plugins/figma/claude-resources:/speedwave/plugins/figma:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.is_empty(),
+            "plugin claude-resources mount must be allowed, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_plugin_resources_mount_from_foreign_root_rejected() {
+        // Correct /plugins/<slug>/claude-resources suffix but wrong root must not
+        // pass as a mere substring/suffix match (the ends_with bypass).
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /tmp/foreign/plugins/presalefix/claude-resources:/speedwave/plugins/presalefix:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message
+                        .contains("/tmp/foreign/plugins/presalefix/claude-resources")),
+            "a plugin mount sourced from a foreign root must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_unexpected_mount_target_still_rejected() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host/evil:/etc/cron.d:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("/etc/cron.d")),
+            "an unexpected mount target must still be rejected, got: {v:?}"
+        );
+    }
+
+    // ── parse_short_form_volume: the one short-form volume grammar ──────────
+
+    #[test]
+    fn parse_short_form_volume_with_and_without_mode() {
+        assert_eq!(
+            parse_short_form_volume("/host/dir:/tokens:ro"),
+            Some(("/host/dir", "/tokens", Some("ro")))
+        );
+        assert_eq!(
+            parse_short_form_volume("/host/dir:/workspace"),
+            Some(("/host/dir", "/workspace", None))
+        );
+    }
+
+    #[test]
+    fn parse_short_form_volume_windows_backslash_host() {
+        // `C:\` is a colon followed by a backslash, never the `:/` separator.
+        assert_eq!(
+            parse_short_form_volume(r"C:\Users\x:/workspace:rw"),
+            Some((r"C:\Users\x", "/workspace", Some("rw")))
+        );
+        assert_eq!(
+            parse_short_form_volume(r"C:\Users\x:/workspace"),
+            Some((r"C:\Users\x", "/workspace", None))
+        );
+    }
+
+    #[test]
+    fn parse_short_form_volume_windows_forward_slash_host() {
+        // Pinned contract: the drive-letter `C:/` at index 1 is skipped, so the
+        // whole `C:/Users/x` is the host and the target starts at the next `:/`.
+        assert_eq!(
+            parse_short_form_volume("C:/Users/x:/workspace:rw"),
+            Some(("C:/Users/x", "/workspace", Some("rw")))
+        );
+        assert_eq!(
+            parse_short_form_volume("C:/Users/x:/workspace"),
+            Some(("C:/Users/x", "/workspace", None))
+        );
+    }
+
+    #[test]
+    fn parse_short_form_volume_anonymous_and_named_forms() {
+        // No `:/`-separated absolute target = anonymous volume = None (fail-closed).
+        assert_eq!(parse_short_form_volume("cache-vol"), None);
+        assert_eq!(parse_short_form_volume("/data"), None);
+        assert_eq!(parse_short_form_volume(""), None);
+        // A named volume with an absolute target parses; source checks reject it later.
+        assert_eq!(
+            parse_short_form_volume("myvol:/data"),
+            Some(("myvol", "/data", None))
+        );
+    }
+
+    #[test]
+    fn parse_short_form_volume_mode_tail_with_slash_is_not_a_mode() {
+        assert_eq!(
+            parse_short_form_volume("/h:/target:/odd"),
+            Some(("/h", "/target:/odd", None))
+        );
+    }
+
+    // ── check_claude_workspace_mount: fail-closed entry + per-target checks ─
+
+    #[test]
+    fn claude_long_form_volume_entry_fails_closed() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - type: bind\n        source: /evil\n        target: /usage\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("long-form")),
+            "a long-form claude volume entry must fail closed, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_anonymous_volume_entry_fails_closed() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - cache-vol\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("not a parseable")),
+            "an anonymous claude volume must fail closed, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_usage_mount_with_foreign_source_rejected() {
+        // Right target and mode, wrong host source: must not clear the gate.
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /evil:/usage:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("does not end with")
+                    && x.message.contains("/usage/test/proxy")),
+            "a /usage mount from a foreign source must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_fixed_target_wrong_mode_rejected() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        // :rw where the template fixes :ro.
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host/.speedwave/usage/test/proxy:/usage:rw\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("must be :ro")),
+            "a :rw mount on the ro-fixed /usage target must be rejected, got: {v:?}"
+        );
+        // A missing mode on an ro-fixed target is equally a tamper.
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host/.speedwave/claude-resources:/speedwave/resources\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("must be :ro")),
+            "a modeless mount on the ro-fixed /speedwave/resources target must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_workspace_wrong_mode_rejected() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("must be :rw")),
+            "a :ro /workspace mount must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_bare_plugins_prefix_target_rejected() {
+        // Exactly `/speedwave/plugins` (no slug) is not an allowlisted target.
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /proj:/workspace:rw\n      \
+                    - /host:/speedwave/plugins:rw\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("unexpected target '/speedwave/plugins'")),
+            "the bare /speedwave/plugins target must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_missing_workspace_mount_rejected() {
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let yaml = "services:\n  claude:\n    volumes:\n      \
+                    - /host/.speedwave/claude-resources:/speedwave/resources:ro\n";
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::ClaudeWorkspaceMount
+                    && x.message.contains("found 0")),
+            "a claude service without a /workspace mount must be rejected, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_full_renderer_volume_set_passes() {
+        // Mirrors render_compose output for project "p": every fixed target, the
+        // modeless /workspace, the managed-settings mount, and a plugin mount.
+        let data_dir = std::path::Path::new("/host/.speedwave");
+        let managed = managed_source(data_dir, "p");
+        let yaml = format!(
+            "services:\n  claude:\n    volumes:\n      \
+             - /host/.speedwave/claude-home/p:/home/speedwave:rw\n      \
+             - /proj:/workspace\n      \
+             - /host/.speedwave/claude-resources:/speedwave/resources:ro\n      \
+             - /host/.speedwave/ide-bridge:/home/speedwave/.claude/ide:ro\n      \
+             - /host/.speedwave/usage/p/proxy:/usage:ro\n      \
+             - {managed}:/etc/claude-code/managed-settings.json:ro\n      \
+             - /host/.speedwave/plugins/figma/claude-resources:/speedwave/plugins/figma:ro\n"
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
+        let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "p");
+        assert!(
+            v.is_empty(),
+            "the renderer's own claude volume set must pass, got: {v:?}"
         );
     }
 

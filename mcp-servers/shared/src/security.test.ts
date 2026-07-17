@@ -8,6 +8,8 @@ import {
   validateWorkerUrl,
   loadToken,
   loadTokenFile,
+  loadPluginSettings,
+  PLUGIN_SETTINGS_FILE,
   tokensDir,
   BASE_SAFE_ENV_KEYS,
 } from './security.js';
@@ -662,6 +664,69 @@ describe('security', () => {
       const caught = await loadTokenFile('missing').catch((e: Error) => e);
       expect(caught.message).toBe('Token file not found: /tokens/missing');
       expect((caught.cause as NodeJS.ErrnoException).code).toBe('ENOENT');
+    });
+  });
+
+  describe('loadPluginSettings', () => {
+    const original = process.env.TOKENS_DIR;
+    afterEach(() => {
+      vi.restoreAllMocks();
+      if (original === undefined) delete process.env.TOKENS_DIR;
+      else process.env.TOKENS_DIR = original;
+    });
+
+    it('reads and parses the settings file from the tokens dir', async () => {
+      delete process.env.TOKENS_DIR;
+      const { default: fs } = await import('fs/promises');
+      const spy = vi
+        .spyOn(fs, 'readFile')
+        .mockResolvedValue('{"scope":"read","pageSize":50}' as unknown as Uint8Array);
+
+      const settings = await loadPluginSettings();
+      expect(settings).toEqual({ scope: 'read', pageSize: 50 });
+      expect(spy).toHaveBeenCalledWith(`/tokens/${PLUGIN_SETTINGS_FILE}`, 'utf-8');
+    });
+
+    it('honours a custom TOKENS_DIR', async () => {
+      process.env.TOKENS_DIR = '/custom';
+      const { default: fs } = await import('fs/promises');
+      const spy = vi.spyOn(fs, 'readFile').mockResolvedValue('{}' as unknown as Uint8Array);
+
+      await loadPluginSettings();
+      expect(spy).toHaveBeenCalledWith(`/custom/${PLUGIN_SETTINGS_FILE}`, 'utf-8');
+    });
+
+    it('returns an empty object when the settings file is absent (ENOENT)', async () => {
+      delete process.env.TOKENS_DIR;
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      expect(await loadPluginSettings()).toEqual({});
+    });
+
+    it('throws on a non-ENOENT read error', async () => {
+      delete process.env.TOKENS_DIR;
+      const { default: fs } = await import('fs/promises');
+      const err = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      vi.spyOn(fs, 'readFile').mockRejectedValue(err);
+
+      const caught = await loadPluginSettings().catch((e: Error) => e);
+      expect(caught.message).toBe(
+        'Failed to read plugin settings file: /tokens/_settings.json (EACCES)'
+      );
+      expect((caught.cause as NodeJS.ErrnoException).code).toBe('EACCES');
+    });
+
+    it('throws when the settings file is not valid JSON', async () => {
+      delete process.env.TOKENS_DIR;
+      const { default: fs } = await import('fs/promises');
+      vi.spyOn(fs, 'readFile').mockResolvedValue('not json' as unknown as Uint8Array);
+
+      const caught = await loadPluginSettings().catch((e: Error) => e);
+      expect(caught.message).toMatch(
+        /Plugin settings file is not valid JSON: \/tokens\/_settings\.json/
+      );
     });
   });
 

@@ -18,11 +18,11 @@ pub mod transcript_store;
 pub use accel::{best_model_for_this_build, compiled_backends, has_gpu_backend, Backend};
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
-    AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
-    CaptureError, CaptureWarning, FileAudioCapture, CHUNK_DURATION, DEFAULT_MIXED_SOURCE_LABEL,
-    SAMPLE_RATE_HZ,
+    wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream,
+    CaptureCapabilities, CaptureError, CaptureWarning, FileAudioCapture, CHUNK_DURATION,
+    DEFAULT_MIXED_SOURCE_LABEL, SAMPLE_RATE_HZ,
 };
-pub use mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
+pub use mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 pub use model_catalog::{whisper_model, ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS};
 pub use model_store::{
     no_progress, DownloadProgress, ModelStatusEntry, ModelStore, ModelStoreError,

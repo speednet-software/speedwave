@@ -1,10 +1,10 @@
-# ADR-080: Policy Engine, PII Tokenization
+# ADR-082: Policy Engine, PII Tokenization
 
-**Status:** Superseded by [ADR-081](ADR-081-vaultless-pii-tokenization.md)
+**Status:** Superseded by [ADR-083](ADR-083-vaultless-pii-tokenization.md)
 
 **Date:** 2026-07-09
 
-**Note:** Most of this ADR's mechanics (the map-based tokenizer, the v1 boolean `policy.json` contract, and the absence of a proxy enforcement point, a tokenization key, and a detection audit trail) were replaced by ADR-081. What survives from this ADR: per-project, host-rendered policy resolution; YAML-authored policy templates as the shipped-preset mechanism; and MDM-shaped delivery of an org-forced policy layer.
+**Note:** Most of this ADR's mechanics (the map-based tokenizer, the v1 boolean `policy.json` contract, and the absence of a proxy enforcement point, a tokenization key, and a detection audit trail) were replaced by ADR-083. What survives from this ADR: per-project, host-rendered policy resolution; YAML-authored policy templates as the shipped-preset mechanism; and MDM-shaped delivery of an org-forced policy layer.
 
 ## Context
 

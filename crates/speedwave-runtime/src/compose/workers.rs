@@ -114,14 +114,14 @@ pub(crate) fn apply_worker_auth_tokens_in(
     yaml: &str,
     project_name: &str,
     integrations: &ResolvedIntegrationsConfig,
+    installed_plugins: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let secrets_dir = init_secrets_dir_in(data_dir, project_name)?;
-    let plugins = plugin::list_installed_plugins().unwrap_or_default();
-    apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, &plugins)
+    apply_worker_auth_tokens_with_dir(yaml, &secrets_dir, integrations, installed_plugins)
 }
 
-/// Testable version: accepts explicit secrets directory and plugin list. Reads or generates a
-/// Bearer auth token, writes it atomically at 0o600, injects the env var, mounts into the hub.
+/// Reads or generates one worker's Bearer auth token, writes it atomically at 0o600,
+/// injects the env var into the worker, and mounts the token file into the hub.
 fn ensure_worker_auth_token(
     doc: &mut serde_yaml_ng::Value,
     secrets_dir: &std::path::Path,
@@ -134,15 +134,25 @@ fn ensure_worker_auth_token(
 
     // Reject symlinks before is_file() — is_file() follows symlinks.
     let token = if !token_path.is_symlink() && token_path.is_file() {
-        let content = std::fs::read_to_string(&token_path)?.trim().to_string();
-        if content.is_empty() {
-            log::warn!(
-                "Token file at {} is empty — generating new auth token; MCP workers will require restart",
-                token_path.display()
-            );
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            content
+        // An unreadable token (e.g. a DACL corrupted by an interrupted write) must self-heal
+        // like an empty one, not hard-fail every container start with a bare ACCESS_DENIED.
+        match std::fs::read_to_string(&token_path) {
+            Ok(content) if !content.trim().is_empty() => content.trim().to_string(),
+            Ok(_) => {
+                log::warn!(
+                    "Token file at {} is empty — generating new auth token; MCP workers will require restart",
+                    token_path.display()
+                );
+                uuid::Uuid::new_v4().to_string()
+            }
+            Err(e) => {
+                log::warn!(
+                    "Token file at {} is unreadable ({e}) — regenerating; MCP workers will require restart",
+                    token_path.display()
+                );
+                let _ = std::fs::remove_file(&token_path);
+                uuid::Uuid::new_v4().to_string()
+            }
         }
     } else {
         if token_path.is_symlink() {
@@ -222,21 +232,30 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
     Ok(serde_yaml_ng::to_string(&doc)?)
 }
 
-/// Service IDs enabled by `integrations` (`ENABLED_SERVICES`): MCP keys, `os` if any sub-on,
-/// plugin IDs (excl. `claude`/`mcp-hub`). SSOT; `build::enabled_images` reuses is_service_enabled.
-pub fn enabled_hub_service_ids(integrations: &ResolvedIntegrationsConfig) -> Vec<String> {
+/// SSOT for `apply_integrations_filter`'s `ENABLED_SERVICES`: enabled built-in MCP keys, `os` when
+/// any OS sub-integration is on, and plugin service IDs backed by an MCP manifest (never a slug).
+pub fn enabled_hub_service_ids(
+    integrations: &ResolvedIntegrationsConfig,
+    plugin_manifests: &[plugin::PluginManifest],
+) -> Vec<String> {
     let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
         .iter()
+        // `build::enabled_images` applies this same per-service predicate to the `IMAGES` list.
         .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
         .map(|svc| svc.config_key.to_string())
         .collect();
     if integrations.any_os_enabled() {
         ids.push("os".to_string());
     }
+    let mcp_plugin_ids: std::collections::HashSet<&str> = plugin_manifests
+        .iter()
+        .filter_map(|m| m.service_id.as_deref())
+        .collect();
     ids.extend(
         integrations
             .enabled_plugin_service_ids()
             .into_iter()
+            .filter(|id| mcp_plugin_ids.contains(*id))
             .map(String::from),
     );
     ids
@@ -248,6 +267,7 @@ pub(crate) fn apply_integrations_filter(
     yaml: &str,
     integrations: &ResolvedIntegrationsConfig,
     network_name: &str,
+    plugin_manifests: &[plugin::PluginManifest],
 ) -> anyhow::Result<String> {
     let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
 
@@ -290,7 +310,7 @@ pub(crate) fn apply_integrations_filter(
     }
 
     // Hub uses ENABLED_SERVICES for tool routing; claude entrypoint uses it to gate claude-resources.
-    let enabled_csv = enabled_hub_service_ids(integrations).join(",");
+    let enabled_csv = enabled_hub_service_ids(integrations, plugin_manifests).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
     inject_env_into(&mut doc, "mcp-hub", "ENABLED_SERVICES", &enabled_csv);
     inject_env_into(&mut doc, "claude", "ENABLED_SERVICES", &enabled_csv);
@@ -397,8 +417,10 @@ pub(crate) fn read_lock_port(
     crate::host_mcp_process::lock::read(lock_path, service).map(|lock| lock.port)
 }
 
-/// URL where a host-side worker listens, as seen from inside a container.
+/// Container-facing URL of a host-side worker: under WSL2 mirrored mode the container
+/// dials the guest relay port via `container_facing_port`, not the loopback bind (ADR-080).
 pub(crate) fn worker_gateway_url(port: u16) -> String {
+    let port = super::container_facing_port(port);
     format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
 }
 

@@ -570,8 +570,8 @@ pub async fn add_project(
             crate::ensure_oauth_running(&oauth_arc, proj);
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
-                log::error!("failed to start containers: {e}");
-                e.to_string()
+                log::error!("failed to start containers: {e:#}");
+                speedwave_runtime::build::user_facing_engine_error(&e)
             })
         })
     })
@@ -691,8 +691,8 @@ pub async fn start_containers(
         }
         log::info!("starting containers for project={project}");
         setup_wizard::start_containers(&project).map_err(|e| {
-            log::error!("failed to start containers: {e}");
-            e.to_string()
+            log::error!("failed to start containers: {e:#}");
+            speedwave_runtime::build::user_facing_engine_error(&e)
         })
     })
     .await
@@ -1909,6 +1909,26 @@ mod tests {
     use super::*;
     use crate::types::SecurityPolicyCustomPatternInput;
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
+
+    /// Structural: every `start_containers` error string crossing IPC goes through
+    /// the one condensing+sanitizing helper (the chain carries nerdctl argv echoes).
+    #[test]
+    fn start_container_errors_route_through_the_owning_helper() {
+        let source = include_str!("containers_cmd.rs");
+        for pat in [
+            "setup_wizard::start_containers(proj).map_err",
+            "setup_wizard::start_containers(&project).map_err",
+        ] {
+            let site = source
+                .find(pat)
+                .unwrap_or_else(|| panic!("call site '{pat}' must exist"));
+            let end = speedwave_runtime::build::char_boundary_at_or_after(source, site + 300);
+            assert!(
+                source[site..end].contains("user_facing_engine_error"),
+                "'{pat}' must route through build::user_facing_engine_error before Err(String)"
+            );
+        }
+    }
 
     fn make_config_with_active_project() -> SpeedwaveUserConfig {
         SpeedwaveUserConfig {

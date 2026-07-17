@@ -58,12 +58,13 @@ guard-not-prod-data-dir:
 	    exit 1;; \
 	esac
 
-.PHONY: all build test check clean dev install-deps setup-dev install-hooks guard-not-prod-data-dir \
+.PHONY: all build test check clean dev install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
+        test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
         check-mcp-lint check-angular-lint check-all \
         coverage coverage-rust coverage-mcp coverage-html \
@@ -199,6 +200,17 @@ setup-dev:
 	@echo "\n✅ Dev environment ready. Next:"
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
+
+# ── Windows one-shot toolchain install (requires admin; self-elevates) ───────
+# Package list SSOT: scripts/setup-dev-windows.ps1. Run once from Git Bash, then open
+# a NEW Git Bash and run `make setup-dev` + `make dev`.
+setup-dev-windows:
+	@case "$$(uname -s 2>/dev/null)" in \
+	  MINGW*|MSYS*|CYGWIN*) ;; \
+	  *) echo "❌ setup-dev-windows is Windows-only (run from Git Bash)."; exit 1;; \
+	esac
+	@ps="$${SYSTEMROOT:-C:\\Windows}"; ps="$${ps//\\//}/System32/WindowsPowerShell/v1.0/powershell.exe"; \
+	 "$$ps" -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-windows.ps1
 
 # ── Aggregate targets ────────────────────────────────────────────────────────
 
@@ -575,6 +587,20 @@ test-e2e: build-cli
 test-e2e-plugin-tamper-release: build-cli-release
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
+
+# `env` prefix is load-bearing (word-split at use sites, not a shell assignment); the
+# bundled-limactl path mirrors scripts/e2e-vm.sh's MACOS_ENGINE_BATS_PREAMBLE and engine.ts::engineExec (manual alignment).
+ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave-dev -- sudo
+
+test-engine-contract:
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" bats --print-output-on-failure _tests/e2e/engine-contract.bats
+
+test-e2e-update-dirty: build-cli
+	@test -n "$(SPW_E2E_PROJECT)" || { echo "SPW_E2E_PROJECT is required (e.g. make test-e2e-update-dirty SPW_E2E_PROJECT=speedwave)"; exit 1; }
+	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" SPEEDWAVE_DATA_DIR=$(HOME)/.speedwave-dev \
+	SPW_E2E_PROJECT="$(SPW_E2E_PROJECT)" SPEEDWAVE_BIN=$(CURDIR)/target/debug/speedwave \
+	bats --print-output-on-failure _tests/e2e/update-dirty-state.bats
 
 test-entrypoint:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }

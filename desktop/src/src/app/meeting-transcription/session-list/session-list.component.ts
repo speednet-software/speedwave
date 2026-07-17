@@ -4,6 +4,7 @@ import {
   Component,
   OnDestroy,
   OnInit,
+  computed,
   inject,
   output,
   signal,
@@ -67,7 +68,17 @@ function statusLabel(s: TranscriptStatus): string {
                 {{ s.language }} · {{ label(s) }} · {{ s.live_segments.length }} segments
               </div>
             </button>
-            <div class="mt-1 flex items-center text-[10px]">
+            <div class="mt-1 flex items-center gap-2 text-[10px]">
+              @if (s.status.state === 'done' && !recordingInProgress()) {
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line)] px-2 py-0.5 text-[var(--ink)] hover:bg-[var(--bg-2)]"
+                  [attr.data-testid]="'resume-' + s.id"
+                  (click)="resume(s)"
+                >
+                  resume
+                </button>
+              }
               <button
                 type="button"
                 class="mono ml-auto rounded border border-red-500/40 px-2 py-0.5 text-red-300 hover:bg-red-500/10"
@@ -88,6 +99,8 @@ export class SessionListComponent implements OnInit, OnDestroy {
   readonly opened = output<TranscriptSession>();
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
+  /** `true` while any recording is in flight — resume is hidden then. */
+  readonly recordingInProgress = computed(() => this.transcription.recordingSessionId() !== null);
 
   /** Recorded sessions on disk (newest first). */
   readonly sessions = signal<TranscriptSession[]>([]);
@@ -160,6 +173,26 @@ export class SessionListComponent implements OnInit, OnDestroy {
   open(s: TranscriptSession): void {
     this.selectedId.set(s.id);
     this.opened.emit(s);
+  }
+
+  /**
+   * Resumes a finished session: appends a new recording part to it.
+   * @param s - the session to reopen.
+   */
+  async resume(s: TranscriptSession): Promise<void> {
+    try {
+      await this.transcription.resumeRecording(s.id);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.error.set(msg);
+      this.errorOccurred.emit(msg);
+      this.cdr.markForCheck();
+      return;
+    }
+    // resumeRecording already activated the fresh snapshot and attached the live
+    // listener — re-emitting `opened` would re-subscribe and drop events in the gap.
+    this.selectedId.set(s.id);
+    await this.refresh();
   }
 
   /**

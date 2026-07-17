@@ -64,6 +64,10 @@ fn claude_session_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     Some(consts::claude_session_log_path_under(data_dir, project))
 }
 
+fn entrypoint_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
+    Some(consts::entrypoint_log_path_under(data_dir, project))
+}
+
 fn lima_serial_path(data_dir: &Path, _project: &str) -> Option<PathBuf> {
     Some(
         data_dir
@@ -114,6 +118,13 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         displayable: true,
         platforms: Platforms::All,
         kind: SourceKind::File(claude_session_path),
+    },
+    DiagnosticSource {
+        key: "entrypoint",
+        zip_entry: "claude/entrypoint.log",
+        displayable: true,
+        platforms: Platforms::All,
+        kind: SourceKind::File(entrypoint_path),
     },
     DiagnosticSource {
         key: "lima",
@@ -209,6 +220,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn entrypoint_source_is_registered_and_displayable() {
+        let s = DIAGNOSTIC_SOURCES
+            .iter()
+            .find(|s| s.key == "entrypoint")
+            .expect("entrypoint source must be registered");
+        assert!(s.displayable);
+        assert_eq!(s.zip_entry, "claude/entrypoint.log");
     }
 
     #[test]

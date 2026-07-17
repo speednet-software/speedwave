@@ -1,10 +1,7 @@
 //! Drift detector: every `SecurityExpectedPaths::compute` call site must chain
 //! `.with_telemetry_locked(...)` or the MDM mount requirement silently degrades.
 
-#![expect(
-    clippy::expect_used,
-    reason = "test assertions on setup/mock calls that must not silently fail"
-)]
+#![expect(clippy::expect_used, reason = "test code")]
 
 use std::path::{Path, PathBuf};
 

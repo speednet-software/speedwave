@@ -358,6 +358,121 @@ mod tests {
     }
 
     #[test]
+    fn sweep_wxs_passes_installdir_via_file_arg_not_command_literal() {
+        // H-03: [INSTALLDIR] inside a -Command PS literal lets a crafted install
+        // path inject commands run as SYSTEM. It must be a -File script argument.
+        // Inspect the CustomAction command line only (skip the XML comment prose).
+        let cmd = SWEEP_WXS
+            .lines()
+            .find(|l| l.contains("powershell.exe") && l.contains("Value="))
+            .expect("sweep.wxs must have a powershell CustomAction Value line");
+        assert!(
+            cmd.contains("-File"),
+            "sweep.wxs must invoke sweep.ps1 via -File, not -Command"
+        );
+        assert!(
+            !cmd.contains("-Command"),
+            "sweep.wxs must not use -Command (interpolating [INSTALLDIR] into PS source is injectable)"
+        );
+        assert!(
+            !cmd.contains("$env:SPW_INSTDIR"),
+            "sweep.wxs must not assign [INSTALLDIR] into a PS string literal"
+        );
+    }
+
+    #[test]
+    fn sweep_wxs_installdir_arg_survives_trailing_backslash() {
+        // WiX resolves [INSTALLDIR] with a trailing "\". A lone "\" before the
+        // closing quote escapes it (Win32 argv), swallowing the next arg. The
+        // property must be doubled so the quoted arg still closes.
+        let line = SWEEP_WXS
+            .lines()
+            .find(|l| l.contains("powershell.exe") && l.contains("Value="))
+            .expect("sweep.wxs must have a powershell CustomAction Value line");
+        // Extract the command-line string inside Value="...".
+        let inner = line
+            .split_once("Value=\"")
+            .and_then(|(_, rest)| rest.rsplit_once('"'))
+            .map(|(v, _)| v)
+            .expect("Value attribute must be quoted");
+        let expanded = inner
+            .replace("[INSTALLDIR]", "C:\\Program Files\\Speedwave\\")
+            .replace("[%USERPROFILE]", "C:\\Users\\bob")
+            .replace("[SystemFolder]", "C:\\Windows\\System32\\")
+            .replace("&quot;", "\"");
+        // Count args split by the real Win32 backslash/quote rule; -DataDir must survive.
+        let argv = win32_argv(&expanded);
+        assert!(
+            argv.iter().any(|a| a == "-DataDir"),
+            "-DataDir must reach argv (a trailing backslash must not swallow it): {argv:?}"
+        );
+        let inst = argv
+            .iter()
+            .position(|a| a == "-InstDir")
+            .and_then(|i| argv.get(i + 1))
+            .expect("-InstDir must have a value argument");
+        assert!(
+            !inst.contains('"'),
+            "-InstDir value must not have absorbed a quote/next arg: {inst:?}"
+        );
+    }
+
+    /// Minimal CommandLineToArgvW backslash/quote splitter for the test above.
+    #[cfg(test)]
+    fn win32_argv(cmd: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut cur = String::new();
+        let mut in_quotes = false;
+        let mut backslashes = 0usize;
+        let mut started = false;
+        for c in cmd.chars() {
+            match c {
+                '\\' => {
+                    backslashes += 1;
+                    started = true;
+                }
+                '"' => {
+                    for _ in 0..backslashes / 2 {
+                        cur.push('\\');
+                    }
+                    if backslashes % 2 == 1 {
+                        cur.push('"');
+                    } else {
+                        in_quotes = !in_quotes;
+                    }
+                    backslashes = 0;
+                    started = true;
+                }
+                ' ' | '\t' if !in_quotes => {
+                    for _ in 0..backslashes {
+                        cur.push('\\');
+                    }
+                    backslashes = 0;
+                    if started {
+                        args.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                _ => {
+                    for _ in 0..backslashes {
+                        cur.push('\\');
+                    }
+                    backslashes = 0;
+                    cur.push(c);
+                    started = true;
+                }
+            }
+        }
+        for _ in 0..backslashes {
+            cur.push('\\');
+        }
+        if started {
+            args.push(cur);
+        }
+        args
+    }
+
+    #[test]
     fn firewall_wxs_install_and_uninstall_both_sequenced() {
         assert!(
             FIREWALL_WXS.contains("-Mode install") && FIREWALL_WXS.contains("-Mode uninstall"),

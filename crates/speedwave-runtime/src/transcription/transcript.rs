@@ -63,6 +63,10 @@ pub struct TranscriptSession {
     pub final_segments: Option<Vec<Segment>>,
     /// On-disk audio file (`None` if missing/never recorded).
     pub audio_path: Option<PathBuf>,
+    /// Audio files recorded by later resumes (`audio-2.wav`, …), in order,
+    /// after `audio_path` (ADR-056 Amendment 10). Empty on never-resumed sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_parts: Vec<PathBuf>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
     /// Last event seq emitted for this session — for snapshot+stream resume.
@@ -96,10 +100,20 @@ impl TranscriptSession {
             live_segments: Vec::new(),
             final_segments: None,
             audio_path: Some(audio_path),
+            audio_parts: Vec::new(),
             models_used: ModelsUsed::default(),
             last_seq: 0,
             live_draft: String::new(),
         }
+    }
+
+    /// Every audio part in recording order: `audio_path` then `audio_parts`.
+    pub fn all_audio_parts(&self) -> Vec<PathBuf> {
+        self.audio_path
+            .iter()
+            .chain(self.audio_parts.iter())
+            .cloned()
+            .collect()
     }
 
     /// `final_segments` if the offline pass ran, else `live_segments`.
@@ -115,20 +129,27 @@ impl TranscriptSession {
         self.final_segments = Some(final_segs);
     }
 
-    /// Renders the transcript as markdown: a header plus one timestamped line
-    /// per segment. (Speaker labels were removed — ADR-075.)
+    /// Renders the transcript as markdown: a header plus one timestamped line per segment,
+    /// channel-labelled on paired captures (channel attribution, not diarization — ADR-075).
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("# Meeting transcript ({})\n\n", self.created_at));
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
         s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
-        for seg in self.effective_segments() {
+        // Live segments interleave across per-channel decode cycles — render chronologically.
+        let mut segments: Vec<&Segment> = self.effective_segments().iter().collect();
+        segments.sort_by_key(|seg| seg.start);
+        for seg in segments {
             let text = seg.text.trim();
             if text.is_empty() {
                 continue;
             }
-            s.push_str(&format!("**({})** {text}\n\n", fmt_ts(seg.start)));
+            let label = match seg.source {
+                Some(src) => format!(" {}:", src.label()),
+                None => String::new(),
+            };
+            s.push_str(&format!("**({}){label}** {text}\n\n", fmt_ts(seg.start)));
         }
         s.push_str("---\n");
         s.push_str("_Transcript generated locally by Speedwave._\n");
@@ -247,6 +268,7 @@ mod tests {
             end: Duration::from_secs_f32(end_s),
             text: text.to_string(),
             words: vec![],
+            source: None,
         }
     }
 
@@ -309,6 +331,90 @@ mod tests {
         assert!(md.contains("**(00:02.50)** Witaj."));
         assert!(!md.contains("Speaker"), "no speaker labels after ADR-075");
         assert!(md.ends_with("_Transcript generated locally by Speedwave._\n"));
+    }
+
+    #[test]
+    fn to_markdown_labels_channel_tagged_segments() {
+        use crate::transcription::transcriber::TranscriptSource;
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        let mut sys = seg(0.0, 2.0, "Dzień dobry państwu.");
+        sys.source = Some(TranscriptSource::System);
+        let mut mic = seg(2.0, 3.0, "Cześć.");
+        mic.source = Some(TranscriptSource::Mic);
+        s.live_segments = vec![sys, mic, seg(3.0, 4.0, "bez kanału")];
+        let md = s.to_markdown();
+        assert!(md.contains("**(00:00.00) Meeting:** Dzień dobry państwu."));
+        assert!(md.contains("**(00:02.00) You:** Cześć."));
+        // An untagged segment renders exactly as before.
+        assert!(md.contains("**(00:03.00)** bez kanału"));
+    }
+
+    #[test]
+    fn to_markdown_renders_live_segments_chronologically() {
+        use crate::transcription::transcriber::TranscriptSource;
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
+        // Cross-lane commits can land out of order in storage.
+        let mut late = seg(5.0, 6.0, "później");
+        late.source = Some(TranscriptSource::System);
+        let mut early = seg(1.0, 2.0, "wcześniej");
+        early.source = Some(TranscriptSource::Mic);
+        s.live_segments = vec![late, early];
+        let md = s.to_markdown();
+        let early_at = md.find("wcześniej").unwrap();
+        let late_at = md.find("później").unwrap();
+        assert!(
+            early_at < late_at,
+            "markdown must follow start time, not storage order"
+        );
+    }
+
+    #[test]
+    fn audio_parts_field_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("audio_parts?: string[]"),
+            "models/transcript.ts TranscriptSession must carry the optional audio_parts field"
+        );
+    }
+
+    #[test]
+    fn transcript_source_variants_match_ts_union() {
+        use crate::transcription::transcriber::TranscriptSource;
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        for (variant, json) in [
+            (TranscriptSource::System, "system"),
+            (TranscriptSource::Mic, "mic"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&variant).unwrap(),
+                format!("\"{json}\"")
+            );
+        }
+        assert!(
+            src.contains("export type TranscriptSource = 'system' | 'mic'"),
+            "models/transcript.ts must mirror the TranscriptSource union"
+        );
+        assert!(
+            src.contains("source?: TranscriptSource | null"),
+            "models/transcript.ts Segment must carry the optional source field"
+        );
+    }
+
+    #[test]
+    fn segment_source_serde_defaults_to_none_and_round_trips() {
+        use crate::transcription::transcriber::TranscriptSource;
+        // Pre-Amendment-9 JSON (no `source` key) loads as None.
+        let legacy = r#"{"start":{"secs":0,"nanos":0},"end":{"secs":1,"nanos":0},
+            "text":"hej","words":[]}"#;
+        let s: Segment = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.source, None);
+        // None is omitted on the wire; Some round-trips.
+        let mut tagged = seg(0.0, 1.0, "x");
+        assert!(!serde_json::to_string(&tagged).unwrap().contains("source"));
+        tagged.source = Some(TranscriptSource::Mic);
+        let j = serde_json::to_string(&tagged).unwrap();
+        assert!(j.contains("\"source\":\"mic\""));
+        assert_eq!(serde_json::from_str::<Segment>(&j).unwrap(), tagged);
     }
 
     #[test]

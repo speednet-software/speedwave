@@ -6,10 +6,11 @@ use crate::types::check_project;
 /// Read a log file, take the last `tail` lines, and sanitize secrets.
 /// Returns an empty string if the file does not exist.
 fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(e) => return Err(format!("Failed to read log file: {e}")),
+    // claude-home is container-writable: the no-follow read (Unix O_NOFOLLOW,
+    // Windows reparse rejection) keeps symlink-swapped host files out of /logs.
+    let content = match speedwave_runtime::fs_perms::read_regular_file_no_follow(path)? {
+        Some(c) => c,
+        None => return Ok(String::new()),
     };
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(tail);
@@ -156,6 +157,7 @@ pub(crate) struct LogSources {
     pub claude: String,
     /// Lima VM serial log (macOS only; empty elsewhere).
     pub lima: String,
+    pub entrypoint: String,
     /// PII audit JSONL written by the proxy's scanner (F4).
     pub audit_proxy: String,
     /// PII audit JSONL written by the hub's scanner (F3).
@@ -170,12 +172,13 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let mcp_os = prefix_lines("mcp-os", &sources.mcp_os, None);
     let claude = prefix_lines("claude", &sources.claude, None);
     let lima = prefix_lines("lima", &sources.lima, None);
+    let entrypoint = prefix_lines("entrypoint", &sources.entrypoint, None);
     let audit_proxy = prefix_lines("audit-proxy", &sources.audit_proxy, None);
     let audit_hub = prefix_lines("audit-hub", &sources.audit_hub, None);
 
     // Defence-in-depth sanitizer pass over the merged buffer (idempotent).
     speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{claude}{lima}{audit_proxy}{audit_hub}"
+        "{compose}{desktop}{mcp_os}{claude}{lima}{entrypoint}{audit_proxy}{audit_hub}"
     ))
 }
 
@@ -265,6 +268,7 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
                 mcp_os: read_source("mcp-os"),
                 claude: read_source("claude"),
                 lima: read_source("lima"),
+                entrypoint: read_source("entrypoint"),
                 audit_proxy: read_source("audit-proxy"),
                 audit_hub: read_source("audit-hub"),
             },
@@ -389,6 +393,22 @@ mod tests {
     }
 
     // -- read_tail_sanitized --
+
+    #[cfg(unix)]
+    #[test]
+    fn read_tail_sanitized_refuses_a_symlinked_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("secret.txt");
+        std::fs::write(&secret, "sk-ant-SECRET\n").unwrap();
+        let link = tmp.path().join("entrypoint.log");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let out = read_tail_sanitized(&link, 100);
+        assert!(
+            out.is_err() || !out.unwrap().contains("SECRET"),
+            "a symlinked log source must not be followed"
+        );
+    }
 
     #[test]
     fn read_tail_sanitized_returns_empty_for_missing_file() {
@@ -581,12 +601,32 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
+                entrypoint: String::new(),
                 audit_proxy: String::new(),
                 audit_hub: String::new(),
             },
             "testproj",
         );
         assert_eq!(merged, "");
+    }
+
+    #[test]
+    fn merge_log_sources_includes_entrypoint_block() {
+        let merged = merge_log_sources(
+            LogSources {
+                compose: String::new(),
+                desktop: String::new(),
+                mcp_os: String::new(),
+                claude: String::new(),
+                lima: String::new(),
+                entrypoint: "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n"
+                    .to_string(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
+            },
+            "proj",
+        );
+        assert!(merged.contains("entrypoint | 2026-07-13T12:00:01+02:00 ERROR FAIL superpowers"));
     }
 
     #[test]
@@ -600,6 +640,7 @@ mod tests {
                 mcp_os: "ready\n".to_string(),
                 claude: "session started\n".to_string(),
                 lima: String::new(),
+                entrypoint: String::new(),
                 audit_proxy: String::new(),
                 audit_hub: String::new(),
             },
@@ -626,6 +667,7 @@ mod tests {
                 mcp_os: "MARKER_mcp_os\n".to_string(),
                 claude: "MARKER_claude\n".to_string(),
                 lima: "MARKER_lima\n".to_string(),
+                entrypoint: "MARKER_entrypoint\n".to_string(),
                 audit_proxy: "MARKER_audit_proxy\n".to_string(),
                 audit_hub: "MARKER_audit_hub\n".to_string(),
             },
@@ -658,6 +700,7 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
+                entrypoint: String::new(),
                 audit_proxy: String::new(),
                 audit_hub: String::new(),
             },
@@ -680,6 +723,7 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
+                entrypoint: String::new(),
                 audit_proxy: String::new(),
                 audit_hub: String::new(),
             },
@@ -699,6 +743,7 @@ mod tests {
                 mcp_os: "mcp_os_line\n".to_string(),
                 claude: "claude_line\n".to_string(),
                 lima: String::new(),
+                entrypoint: String::new(),
                 audit_proxy: String::new(),
                 audit_hub: String::new(),
             },

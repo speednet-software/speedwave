@@ -8,7 +8,7 @@ use crate::consts;
 use crate::defaults;
 // Host→engine path conversion is the SSOT in `crate::engine_path`.
 use crate::engine_path::{str_to_engine_path, to_engine_path};
-use crate::plugin::{self};
+use crate::plugin::{self, PluginManifest};
 use crate::{build, bundle};
 use std::path::{Path, PathBuf};
 
@@ -27,17 +27,20 @@ mod workers;
 pub(crate) use proxy::migrate_legacy_local_key_in;
 pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
-    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL, PROXY_PORT,
+    spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL,
+    PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
 };
 
 // Host addressing SSOT (ADR-067) — public API surface.
 pub use addressing::{
-    host_addressing, host_bind_address, host_gateway_ip, invalidate_host_addressing_cache,
-    HostAddressing, HostAddressingComputer,
+    container_facing_port, container_facing_port_for, host_addressing, host_bind_address,
+    host_bind_port_for_container_facing, host_gateway_ip, invalidate_host_addressing_cache,
+    mirror_relay_port, AddressingMode, HostAddressing, HostAddressingComputer,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use addressing::{
-    reset_host_addressing_computer_for_test, set_host_addressing_computer_for_test,
+    pin_direct_addressing, pin_mirrored_addressing, reset_host_addressing_computer_for_test,
+    set_host_addressing_computer_for_test, AddressingGuard,
 };
 
 // Final YAML env-scalar quoting pass — `harden_env_scalar_quoting` is called by
@@ -48,8 +51,6 @@ pub(crate) use quoting::harden_env_scalar_quoting;
 
 // Security validation framework — public surface; the volume/service helpers
 // are crate-internal and referenced only by tests in this module.
-#[cfg(test)]
-use crate::plugin::PluginManifest;
 #[cfg(test)]
 use security_check::{extract_volume_for_target, get_services};
 pub use security_check::{SecurityCheck, SecurityExpectedPaths, SecurityRule, SecurityViolation};
@@ -64,9 +65,8 @@ pub use llm::{
 };
 
 // Plugin compose injection.
-#[cfg(test)]
 use plugins::apply_plugins_from_verified;
-pub(crate) use plugins::{apply_plugins, ApplyPluginsCtx};
+pub(crate) use plugins::ApplyPluginsCtx;
 
 // Token / secrets directory paths.
 pub use tokens::{
@@ -277,6 +277,14 @@ pub fn render_compose_in(
     let resources_dir = data_dir.join("claude-resources");
     let network_name = format!("{}_{}_network", consts::compose_prefix(), project_name);
 
+    // The one verified-plugin listing for this render (fail-loud): service injection, worker
+    // auth tokens, the ENABLED_SERVICES filter, and host-worker warnings all share it.
+    let verified_plugins = plugin::list_verified_from_dir(&data_dir.join("plugins"))?;
+    let plugin_manifests: Vec<PluginManifest> = verified_plugins
+        .iter()
+        .map(|vp| vp.manifest().clone())
+        .collect();
+
     let port_hub = consts::PORT_BASE;
     let port_worker = consts::PORT_WORKER;
     let bundle_manifest = resolve_bundle_manifest()?;
@@ -403,7 +411,7 @@ pub fn render_compose_in(
     }
 
     // Integrate installed plugins
-    yaml = apply_plugins(
+    yaml = apply_plugins_from_verified(
         &yaml,
         &ApplyPluginsCtx {
             project_name,
@@ -413,6 +421,7 @@ pub fn render_compose_in(
             tokens_dir: &tokens_dir,
             bridges,
         },
+        &verified_plugins,
     )?;
 
     // Propagate host timezone into every service; must run after plugin injection.
@@ -443,10 +452,17 @@ pub fn render_compose_in(
     yaml = apply_oauth_config_in(data_dir, &yaml, project_name)?;
 
     // Inject per-worker Bearer auth tokens (SEC-035)
-    yaml = apply_worker_auth_tokens_in(data_dir, &yaml, project_name, integrations)?;
+    yaml = apply_worker_auth_tokens_in(
+        data_dir,
+        &yaml,
+        project_name,
+        integrations,
+        &plugin_manifests,
+    )?;
 
-    // Filter services based on integrations config
-    yaml = apply_integrations_filter(&yaml, integrations, &network_name)?;
+    // Filter services based on integrations config; only manifests with a
+    // service_id are real hub services — resource-only plugins have no worker.
+    yaml = apply_integrations_filter(&yaml, integrations, &network_name, &plugin_manifests)?;
 
     // Per-worker credentials digest: token rotation changes config-hash for idempotent recreate.
     yaml = workers::apply_credentials_digests_in(data_dir, &yaml, project_name)?;
@@ -458,29 +474,23 @@ pub fn render_compose_in(
     // rootful nerdctl creates missing sources as root:root (ADR-052).
     ensure_data_dir_mount_sources(data_dir, &yaml)?;
 
-    warn_if_host_workers_unavailable(data_dir, project_name, &yaml, integrations);
+    // Warn when the stack expects a Desktop-supervised host worker (oauth
+    // refresh / mcp-os) that is not running — CLI with Desktop closed.
+    for w in host_worker_warnings(
+        data_dir,
+        project_name,
+        &yaml,
+        integrations,
+        &plugin_manifests,
+    ) {
+        log::warn!("{w}");
+    }
 
     Ok(yaml)
 }
 
-/// Warns when the rendered stack expects a Desktop-supervised host worker
-/// (oauth refresh / mcp-os) that is not running — CLI with Desktop closed.
-fn warn_if_host_workers_unavailable(
-    data_dir: &Path,
-    project: &str,
-    yaml: &str,
-    integrations: &ResolvedIntegrationsConfig,
-) {
-    let manifests: Vec<crate::plugin::PluginManifest> = crate::plugin::list_verified_plugins()
-        .map(|ps| ps.into_iter().map(|p| p.manifest().clone()).collect())
-        .unwrap_or_default();
-    for w in host_worker_warnings(data_dir, project, yaml, integrations, &manifests) {
-        log::warn!("{w}");
-    }
-}
-
-/// Pure core of [`warn_if_host_workers_unavailable`] — testable, no I/O
-/// beyond the mcp-os token existence probe.
+/// Warnings for Desktop-supervised host workers the rendered stack expects but
+/// that are not running — testable, no I/O beyond the mcp-os token existence probe.
 fn host_worker_warnings(
     data_dir: &Path,
     project: &str,
@@ -632,11 +642,14 @@ pub fn save_compose_in(data_dir: &Path, project: &str, yaml: &str) -> anyhow::Re
     validate_compose_network_refs(yaml)
         .map_err(|e| anyhow::anyhow!("save_compose: in-memory YAML failed validation: {e}"))?;
 
+    use anyhow::Context;
     let path = compose_output_path_in(data_dir, project)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating compose dir {}", parent.display()))?;
     }
-    crate::fs_perms::write_restricted_file_atomic(&path, yaml)?;
+    crate::fs_perms::write_restricted_file_atomic(&path, yaml)
+        .with_context(|| format!("writing {}", path.display()))?;
 
     let on_disk = read_back_compose(&path).map_err(|e| {
         anyhow::anyhow!(
@@ -1228,7 +1241,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 51;
+    const SECURITY_RULE_COUNT: usize = 52;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1686,6 +1699,42 @@ mod tests {
         );
     }
 
+    /// A failing verified-plugin listing must abort the render: silently degrading
+    /// would drop plugin services from ENABLED_SERVICES while their containers render.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_fails_loud_when_plugin_listing_fails() {
+        let data_dir = tempfile::tempdir().unwrap();
+        // Unverifiable plant: no SIGNATURE and an unparseable manifest, so the
+        // listing errors whether or not a signature bypass is active elsewhere.
+        let plugin_dir = data_dir.path().join("plugins").join("badplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.json"), b"{}").unwrap();
+
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let err = render_compose_isolated(
+            data_dir.path(),
+            "bad-plugin-project",
+            tmp_project_dir(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect_err("a failing plugin listing must propagate out of render_compose_in");
+        assert!(
+            err.to_string().contains("badplug"),
+            "error must name the offending plugin, got: {err}"
+        );
+    }
+
     /// A stale `anthropic_api_key` file with an active OpenRouter provider must NOT get
     /// `ANTHROPIC_API_KEY` re-injected into `claude` (flat provider masquerades as `anthropic`).
     #[test]
@@ -1990,7 +2039,7 @@ services:
       - /tmp:noexec,nosuid,size=512m
     volumes:
       - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
-      - /home/user/projects/test:/workspace
+      - /test/project:/workspace:rw
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
     environment:
       - CLAUDE_VERSION=1.0.3
@@ -2122,6 +2171,76 @@ networks:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_claude_workspace_mount_flags_injected_extra_mount() {
+        // Simulates H-02: a control char in the project path injected an extra
+        // /:/host:ro volume plus a second /workspace entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = valid_compose_yaml().replace(
+            "      - /test/project:/workspace:rw\n",
+            "      - /test/project:/workspace:rw\n      - /:/host:ro\n      - /evil:/workspace:rw\n",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount),
+            "injected extra /workspace mount must fire CLAUDE_WORKSPACE_MOUNT: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_claude_workspace_mount_flags_wrong_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml =
+            valid_compose_yaml().replacen("/test/project:/workspace:rw", "/etc:/workspace:rw", 1);
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("!= expected")),
+            "a wrong /workspace source must fire CLAUDE_WORKSPACE_MOUNT: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_claude_workspace_mount_flags_injected_non_workspace_target() {
+        // An injected mount to a DIFFERENT target (host root -> /host) must also
+        // fire, not just a second /workspace: nothing else allowlists claude volumes.
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = valid_compose_yaml().replace(
+            "      - /test/project:/workspace:rw\n",
+            "      - /test/project:/workspace:rw\n      - /:/host:ro\n",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("unexpected target '/host'")),
+            "an injected /host mount must fire CLAUDE_WORKSPACE_MOUNT: {violations:?}"
         );
     }
 
@@ -2978,7 +3097,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
@@ -3004,7 +3123,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
@@ -3735,7 +3854,7 @@ services:
             office: true,
             ..Default::default()
         };
-        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net", &[]).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
 
         let claude_env = find_env_value(&get_service_env_seq(&doc, "claude"), "ENABLED_SERVICES=")
@@ -3757,7 +3876,7 @@ services:
             os_calendar: true,
             ..Default::default()
         };
-        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net").unwrap();
+        let yaml = apply_integrations_filter(VALID_COMPOSE, &resolved, "test-net", &[]).unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
 
         let claude_disabled = find_env_value(
@@ -5859,8 +5978,10 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_os_config_injects_when_token_exists() {
         use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp.path().join("mcp-os-auth-token");
         let lock_path = tmp.path().join(consts::MCP_OS_LOCK_FILE);
@@ -5933,18 +6054,29 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_mcp_os_gateway_url_uses_gateway_not_bind_addr() {
         let port: u16 = 12345;
+        // Direct (non-mirrored): the port passes through unchanged.
+        let _direct = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
         let url = mcp_os_gateway_url(port);
         assert_eq!(
             url,
             format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS),
-            "containers reach mcp-os via the canonical host gateway alias"
+            "direct: containers reach mcp-os via the canonical alias, port unchanged"
         );
         // URL must never contain 0.0.0.0 — that's the bind address, not a routable address
         assert!(
             !url.contains("0.0.0.0"),
             "mcp_os_gateway_url must not use 0.0.0.0 — containers can't route to it"
+        );
+
+        // Mirrored: the URL must carry the relay port, not the bind port (ADR-080).
+        let _mirrored = super::pin_mirrored_addressing();
+        assert_eq!(
+            mcp_os_gateway_url(port),
+            format!("http://{}:{}", consts::HOST_GATEWAY_ALIAS, port ^ 0x4000),
+            "mirrored: URL uses the relay port, not the bind port"
         );
     }
 
@@ -6151,7 +6283,9 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_oauth_config_injects_url_and_bearer_into_sharepoint_only() {
+        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         write_live_oauth_lock(&lock_path, 49301);
@@ -6411,8 +6545,10 @@ services:
 
     /// Negative-injection test: `apply_oauth_config` must NOT touch services other than SharePoint.
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_oauth_config_injects_url_and_bearer_into_slack_consumer() {
         // ADR-071: slack consumes the host oauth worker exactly like sharepoint.
+        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
         write_live_oauth_lock(&lock_path, 49302);
@@ -7542,7 +7678,7 @@ services:
 
         let yaml = serde_yaml_ng::to_string(&doc).unwrap();
         let filtered =
-            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network", &[]).unwrap();
 
         let filtered_doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let filtered_services = filtered_doc.get("services").unwrap().as_mapping().unwrap();
@@ -7562,7 +7698,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
 
@@ -7596,7 +7732,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
@@ -7612,7 +7748,7 @@ services:
 
     #[test]
     fn test_enabled_hub_service_ids() {
-        let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default());
+        let default_ids = enabled_hub_service_ids(&ResolvedIntegrationsConfig::default(), &[]);
         assert!(default_ids.is_empty());
 
         let mut cfg = ResolvedIntegrationsConfig {
@@ -7623,13 +7759,31 @@ services:
         };
         cfg.plugins.insert("example-plugin".to_string(), true);
         cfg.plugins.insert("disabled-one".to_string(), false);
-        let ids = enabled_hub_service_ids(&cfg);
+        // Resource-only plugin (skills/commands, no worker): toggled on via the
+        // same generic map, keyed by slug — must never surface as a hub service.
+        cfg.plugins.insert("stallion".to_string(), true);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mcp_manifest =
+            fixture_verified_plugin("example-plugin", Some("example-plugin"), tmp.path(), None)
+                .manifest()
+                .clone();
+        let resource_only_manifest = fixture_verified_plugin("stallion", None, tmp.path(), None)
+            .manifest()
+            .clone();
+        let manifests = [mcp_manifest, resource_only_manifest];
+
+        let ids = enabled_hub_service_ids(&cfg, &manifests);
         assert!(ids.contains(&"slack".to_string()));
         assert!(ids.contains(&"gitlab".to_string()));
         assert!(ids.contains(&"os".to_string()));
         assert!(ids.contains(&"example-plugin".to_string()));
         assert!(!ids.contains(&"redmine".to_string()));
         assert!(!ids.contains(&"disabled-one".to_string()));
+        assert!(
+            !ids.contains(&"stallion".to_string()),
+            "a resource-only plugin (no service_id) must never be discovered as a hub service"
+        );
         assert!(!ids.contains(&"claude".to_string()));
         assert!(!ids.contains(&"mcp-hub".to_string()));
     }
@@ -7639,7 +7793,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default();
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
@@ -7660,7 +7814,7 @@ services:
         // reminders and mail remain false (default)
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
@@ -7684,7 +7838,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let env = get_hub_env_seq(&doc);
@@ -7703,6 +7857,7 @@ services:
             VALID_COMPOSE_ALL_WORKERS,
             &integrations,
             "speedwave_test_network",
+            &[],
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
@@ -7740,6 +7895,7 @@ services:
             VALID_COMPOSE_ALL_WORKERS,
             &integrations,
             "speedwave_test_network",
+            &[],
         )
         .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
@@ -7855,7 +8011,7 @@ services:
         let integrations = ResolvedIntegrationsConfig::default(); // all false
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
@@ -7920,7 +8076,7 @@ services:
         let tmp = tempfile::tempdir().unwrap();
         let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let filtered =
-            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network").unwrap();
+            apply_integrations_filter(&yaml, &integrations, "speedwave_test_network", &[]).unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
             "test",
@@ -7946,7 +8102,7 @@ services:
         };
 
         let filtered =
-            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network")
+            apply_integrations_filter(VALID_COMPOSE, &integrations, "speedwave_test_network", &[])
                 .unwrap();
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&filtered).unwrap();
         let services = doc.get("services").unwrap().as_mapping().unwrap();
@@ -9714,7 +9870,7 @@ services:
       - /tmp:noexec,nosuid,size=512m
     volumes:
       - /home/user/.speedwave/claude-home/test:/home/speedwave:rw
-      - /home/user/projects/test:/workspace
+      - /home/user/projects/test:/workspace:rw
       - /home/user/.speedwave/claude-resources:/speedwave/resources:ro
     environment:
       - CLAUDE_VERSION=1.0.3
@@ -10162,6 +10318,52 @@ networks:
         assert_eq!(
             first_tokens, second_tokens,
             "tokens should persist across renders"
+        );
+    }
+
+    #[test]
+    fn test_worker_auth_token_regenerated_when_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let integrations = ResolvedIntegrationsConfig {
+            slack: true,
+            ..Default::default()
+        };
+
+        apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        )
+        .unwrap();
+        let token_path = tmp.path().join("slack-auth-token");
+        let first = std::fs::read_to_string(&token_path).unwrap();
+
+        crate::fs_perms::make_unreadable_for_test(&token_path);
+        assert!(
+            std::fs::read_to_string(&token_path).is_err(),
+            "artifact must be unreadable"
+        );
+
+        let result = apply_worker_auth_tokens_with_dir(
+            VALID_COMPOSE_ALL_WORKERS,
+            tmp.path(),
+            &integrations,
+            &[],
+        );
+        assert!(
+            result.is_ok(),
+            "an unreadable token must self-heal, not fail the render: {:?}",
+            result.err()
+        );
+        let regenerated = std::fs::read_to_string(&token_path).unwrap();
+        assert!(
+            uuid::Uuid::parse_str(regenerated.trim()).is_ok(),
+            "regenerated token must be a valid UUID, got '{regenerated}'"
+        );
+        assert_ne!(
+            first, regenerated,
+            "a fresh token must replace the corrupt one"
         );
     }
 
@@ -11335,7 +11537,7 @@ services:
     #[serial_test::serial(host_addressing)]
     fn test_ensure_plugin_images_called_before_apply_plugins() {
         // Structural test: verify render_compose() uses ensure_plugin_images (not
-        // build_pending_plugin_images) and calls it BEFORE apply_plugins.
+        // build_pending_plugin_images) and calls it BEFORE apply_plugins_from_verified.
         let source = include_str!("mod.rs");
 
         // Find the render_compose function body
@@ -11350,22 +11552,24 @@ services:
             "render_compose must call ensure_plugin_images (not build_pending_plugin_images)"
         );
         assert!(
-            !fn_body[..fn_body.find("apply_plugins(").unwrap_or(fn_body.len())]
+            !fn_body[..fn_body
+                .find("apply_plugins_from_verified(")
+                .unwrap_or(fn_body.len())]
                 .contains("build_pending_plugin_images"),
             "render_compose must not call build_pending_plugin_images"
         );
 
-        // Verify ensure_plugin_images appears before apply_plugins
+        // Verify ensure_plugin_images appears before the plugin injection pass
         let ensure_pos = fn_body
             .find("ensure_plugin_images")
             .expect("ensure_plugin_images call must exist in render_compose");
         let apply_pos = fn_body
-            .find("apply_plugins(")
-            .expect("apply_plugins call must exist in render_compose");
+            .find("apply_plugins_from_verified(")
+            .expect("apply_plugins_from_verified call must exist in render_compose");
         assert!(
             ensure_pos < apply_pos,
             "ensure_plugin_images (offset {ensure_pos}) must appear before \
-             apply_plugins (offset {apply_pos}) in render_compose"
+             apply_plugins_from_verified (offset {apply_pos}) in render_compose"
         );
 
         // Verify project scoping via enabled_plugin_service_ids
@@ -11740,6 +11944,48 @@ services:
         );
     }
 
+    /// One fail-loud verified-plugin listing feeds every plugin consumer in the render:
+    /// plugin injection, worker auth tokens, ENABLED_SERVICES filter, host-worker warnings.
+    #[test]
+    fn render_compose_in_lists_verified_plugins_exactly_once() {
+        let source = include_str!("mod.rs");
+        let fn_start = source
+            .find("pub fn render_compose_in(")
+            .expect("render_compose_in must exist");
+        let after_start = &source[fn_start..];
+        let fn_end = after_start
+            .find("\n}\n")
+            .expect("render_compose_in body must close");
+        let fn_body = &after_start[..fn_end];
+
+        assert_eq!(
+            fn_body.matches("list_verified").count(),
+            1,
+            "render_compose_in must read the verified-plugin list exactly once"
+        );
+        assert!(
+            !fn_body.contains("unwrap_or_default"),
+            "a plugin-listing failure must propagate, never silently degrade"
+        );
+        let list_pos = fn_body
+            .find("list_verified_from_dir(")
+            .expect("the single listing must be the data_dir-rooted list_verified_from_dir");
+        for consumer in [
+            "apply_plugins_from_verified(",
+            "apply_worker_auth_tokens_in(",
+            "apply_integrations_filter(",
+            "host_worker_warnings(",
+        ] {
+            let pos = fn_body
+                .find(consumer)
+                .unwrap_or_else(|| panic!("{consumer} must be called in render_compose_in"));
+            assert!(
+                list_pos < pos,
+                "{consumer} must run after (and consume) the single verified-plugin listing"
+            );
+        }
+    }
+
     /// Minimal valid YAML doc for `apply_plugins_from_verified` to mutate; the shape mirrors
     /// `compose.template.yml` enough that the renderer finds `services.claude` and `services.mcp-hub`.
     fn fixture_compose_yaml() -> &'static str {
@@ -11770,18 +12016,10 @@ services:
         fixture_verified_plugin_full(slug, service_id, plugin_dir, mem_limit, None)
     }
 
-    fn fixture_verified_plugin_full(
-        slug: &str,
-        service_id: Option<&str>,
-        plugin_dir: &Path,
-        mem_limit: Option<&str>,
-        host_bridge: Option<plugin::HostBridgeManifest>,
-    ) -> plugin::VerifiedPlugin {
-        if service_id.is_some() {
-            std::fs::create_dir_all(plugin_dir).ok();
-            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
-        }
-        let manifest = plugin::PluginManifest {
+    /// The single `PluginManifest` literal every plugin fixture below builds on —
+    /// `service_id` toggles the MCP-service vs resource-only plugin shape.
+    fn fixture_plugin_manifest(slug: &str, service_id: Option<&str>) -> plugin::PluginManifest {
+        plugin::PluginManifest {
             name: slug.into(),
             service_id: service_id.map(String::from),
             slug: slug.into(),
@@ -11795,13 +12033,29 @@ services:
             settings_schema: None,
             speedwave_compat: None,
             extra_env: None,
-            mem_limit: mem_limit.map(String::from),
+            mem_limit: None,
             cpu_limit: None,
             requires_integrations: vec![],
-            host_bridge,
+            host_bridge: None,
             instructions: None,
             oauth: None,
-        };
+        }
+    }
+
+    fn fixture_verified_plugin_full(
+        slug: &str,
+        service_id: Option<&str>,
+        plugin_dir: &Path,
+        mem_limit: Option<&str>,
+        host_bridge: Option<plugin::HostBridgeManifest>,
+    ) -> plugin::VerifiedPlugin {
+        if service_id.is_some() {
+            std::fs::create_dir_all(plugin_dir).ok();
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").ok();
+        }
+        let mut manifest = fixture_plugin_manifest(slug, service_id);
+        manifest.mem_limit = mem_limit.map(String::from);
+        manifest.host_bridge = host_bridge;
         plugin::VerifiedPlugin::new(
             manifest,
             plugin_dir.to_path_buf(),
@@ -11837,27 +12091,9 @@ services:
         slug: &str,
         host_bridge: Option<plugin::HostBridgeManifest>,
     ) -> plugin::PluginManifest {
-        plugin::PluginManifest {
-            name: slug.into(),
-            service_id: Some(slug.into()),
-            slug: slug.into(),
-            version: "1.0.0".into(),
-            description: "fixture".into(),
-            port: None,
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-            host_bridge,
-            instructions: None,
-            oauth: None,
-        }
+        let mut manifest = fixture_plugin_manifest(slug, Some(slug));
+        manifest.host_bridge = host_bridge;
+        manifest
     }
 
     fn manifest_with_bridge_knobs(
@@ -11963,8 +12199,8 @@ services:
         assert!(dbg.contains("60123"));
     }
 
-    /// `apply_plugins` re-runs `validate_manifest`, rejecting at render time a manifest
-    /// that fails the ruleset (here: `mem_limit` above PLUGIN_MEM_LIMIT_MAX_MIB).
+    /// `apply_plugins_from_verified` re-runs `validate_manifest`, rejecting at render time a
+    /// manifest that fails the ruleset (here: `mem_limit` above PLUGIN_MEM_LIMIT_MAX_MIB).
     #[test]
     fn test_apply_plugins_revalidates_manifest() {
         let tmp = tempfile::tempdir().unwrap();
@@ -11989,8 +12225,8 @@ services:
         assert!(err.to_string().contains("exceeds maximum"));
     }
 
-    /// `apply_plugins` MUST reject a plugin whose derived compose name would overwrite an
-    /// existing `services.<name>` entry (defence in depth beyond `validate_manifest`).
+    /// `apply_plugins_from_verified` MUST reject a plugin whose derived compose name would
+    /// overwrite an existing `services.<name>` entry (defence in depth beyond `validate_manifest`).
     #[test]
     fn test_apply_plugins_rejects_compose_name_collision() {
         let tmp = tempfile::tempdir().unwrap();
@@ -12071,6 +12307,207 @@ services:
             .expect("deep real-directory tree must be accepted");
     }
 
+    /// #931-class gate: a plugin shipping claude-resources must (a) emit its
+    /// `/speedwave/plugins/<slug>:ro` mount and (b) pass the full SecurityCheck.
+    #[test]
+    fn plugin_render_emits_claude_resources_mount_and_passes_security_check() {
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let (yaml, manifest) =
+            render_presalefix_plugin_mount(tmp_data_dir.path(), Some("presalefix"), true);
+        assert!(
+            yaml.contains(":/speedwave/plugins/presalefix:ro"),
+            "regression surface not exercised — claude-resources mount missing"
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(violations.is_empty(), "got: {violations:?}");
+    }
+
+    /// #900-adjacent variant: a RESOURCE-ONLY plugin (no service_id) must also
+    /// mount its claude-resources and pass — the helper creates the dir itself.
+    #[test]
+    fn resource_only_plugin_render_mounts_resources_and_passes_security_check() {
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let (yaml, manifest) = render_presalefix_plugin_mount(tmp_data_dir.path(), None, false);
+        assert!(
+            yaml.contains(":/speedwave/plugins/presalefix:ro"),
+            "regression surface not exercised — claude-resources mount missing"
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(violations.is_empty(), "got: {violations:?}");
+    }
+
+    #[test]
+    fn plugin_render_with_retargeted_mount_fails_security_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (yaml, manifest) = render_presalefix_plugin_mount(tmp.path(), Some("presalefix"), true);
+        let tampered = yaml.replace("/speedwave/plugins/presalefix", "/etc/evil");
+        // A data dir NOT holding the plugin: the retargeted mount cannot resolve to it.
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[manifest],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            !violations.is_empty(),
+            "retargeted plugin mount must fail SecurityCheck"
+        );
+    }
+
+    /// Renders a presalefix plugin with claude-resources under `data_dir` (the SAME dir the
+    /// caller must pass to `SecurityCheck::run_with_data_dir`); returns the YAML + manifest.
+    fn render_presalefix_plugin_mount(
+        data_dir: &std::path::Path,
+        service_id: Option<&str>,
+        with_containerfile: bool,
+    ) -> (String, plugin::PluginManifest) {
+        let plugin_dir = data_dir.join("plugins").join("presalefix");
+        std::fs::create_dir_all(plugin_dir.join("claude-resources")).unwrap();
+        std::fs::write(plugin_dir.join("claude-resources").join("s.md"), "x").unwrap();
+        if with_containerfile {
+            std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        }
+        let manifest = fixture_plugin_manifest("presalefix", service_id);
+        let plugin = plugin::VerifiedPlugin::new(
+            manifest.clone(),
+            plugin_dir.to_path_buf(),
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let cfg = fixture_integrations_with_enabled("presalefix");
+        let ctx = ApplyPluginsCtx {
+            project_name: "test",
+            project_dir: "/test/project",
+            integrations: &cfg,
+            network_name: "test-net",
+            tokens_dir: Path::new("/test/.speedwave/tokens/test"),
+            bridges: &HostBridgesInfo::default(),
+        };
+        let base = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
+        let yaml = apply_plugins_from_verified(&base, &ctx, &[plugin]).unwrap();
+        (yaml, manifest)
+    }
+
+    #[test]
+    fn plugin_mount_with_foreign_source_fails_security_check() {
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let (yaml, _) = render_presalefix_plugin_mount(tmp_data_dir.path(), None, false);
+        assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
+        // A valid render must first pass, isolating this test's tamper to the source check.
+        let baseline = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(baseline.is_empty(), "valid render must pass: {baseline:?}");
+        let tampered = yaml.replace(
+            "claude-resources:/speedwave/plugins/presalefix:ro",
+            "/etc:/speedwave/plugins/presalefix:ro",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("presalefix")),
+            "foreign plugin mount source must be rejected, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_mount_with_traversal_slug_fails_security_check() {
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let (yaml, _) = render_presalefix_plugin_mount(tmp_data_dir.path(), None, false);
+        assert!(yaml.contains("claude-resources:/speedwave/plugins/presalefix:ro"));
+        // The unnormalized source the vulnerable code built: a bare string-equality
+        // check would pass it, though it resolves outside `legit/` at mount time.
+        let traversal_source = tmp_data_dir
+            .path()
+            .join("plugins")
+            .join("legit/../evil")
+            .join("claude-resources");
+        let traversal_source = traversal_source.to_string_lossy();
+        let original_line = yaml
+            .lines()
+            .find(|l| l.contains("claude-resources:/speedwave/plugins/presalefix:ro"))
+            .unwrap()
+            .trim_start()
+            .trim_start_matches("- ");
+        let tampered = yaml.replace(
+            original_line,
+            &format!("{traversal_source}:/speedwave/plugins/legit/../evil:ro"),
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("evil")),
+            "traversal plugin slug must be rejected before any path is built from it, got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_mount_without_ro_fails_security_check() {
+        let tmp_data_dir = tempfile::tempdir().unwrap();
+        let (yaml, _) = render_presalefix_plugin_mount(tmp_data_dir.path(), None, false);
+        assert!(yaml.contains(":/speedwave/plugins/presalefix:ro"));
+        // A valid render must first pass, isolating this test's tamper to the mode check.
+        let baseline = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(baseline.is_empty(), "valid render must pass: {baseline:?}");
+        let tampered = yaml.replace(
+            ":/speedwave/plugins/presalefix:ro",
+            ":/speedwave/plugins/presalefix:rw",
+        );
+        let violations = SecurityCheck::run_with_data_dir(
+            &tampered,
+            "test",
+            &[],
+            &test_expected_paths(),
+            tmp_data_dir.path(),
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::ClaudeWorkspaceMount
+                    && v.message.contains("presalefix")),
+            "writable plugin mount must be rejected, got: {violations:?}"
+        );
+    }
+
     // ── Host-bridge env injection (generic plugin host-bridge plumbing) ─────
 
     fn render_with_host_bridge_plugin(
@@ -12121,7 +12558,9 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_with_host_bridge_registration_injects_url_and_token() {
+        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
                 plugin_slug: "example-plugin".to_string(),
@@ -12337,7 +12776,9 @@ services:
     }
 
     #[test]
+    #[serial_test::serial(host_addressing)]
     fn test_render_compose_host_bridge_url_uses_host_docker_internal() {
+        let _guard = super::pin_direct_addressing(consts::LIMA_VZ_HOST_IP);
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
                 plugin_slug: "example-plugin".to_string(),
@@ -12358,6 +12799,40 @@ services:
         assert!(
             yaml.contains("ws://host.docker.internal:54321/"),
             "URL must use host.docker.internal alias"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_render_compose_host_bridge_url_uses_relay_port_under_mirrored() {
+        // Under mirrored mode the container dials the guest relay port, not the loopback
+        // bind port — exercises `mirror_relay_port(port).unwrap_or(port)` in the injector.
+        let _guard = super::pin_mirrored_addressing();
+        let bridges = super::HostBridgesInfo {
+            bridges: vec![super::HostBridgeRegistration {
+                plugin_slug: "example-plugin".to_string(),
+                port: 54321,
+                auth_token: "tok".to_string(),
+                url_env: "EXAMPLE_PLUGIN_BRIDGE_URL".to_string(),
+                token_env: "EXAMPLE_PLUGIN_BRIDGE_TOKEN".to_string(),
+            }],
+        };
+        let yaml = render_with_host_bridge_plugin(
+            "example-plugin",
+            "EXAMPLE_PLUGIN_BRIDGE_URL",
+            "EXAMPLE_PLUGIN_BRIDGE_TOKEN",
+            &bridges,
+        )
+        .unwrap();
+        let relay = 54321u16 ^ 0x4000;
+        // No `{yaml}`: this render carries the bridge auth token (cleartext-logging).
+        assert!(
+            yaml.contains(&format!("ws://host.docker.internal:{relay}/")),
+            "container URL must use the relay port {relay}, not the bind port"
+        );
+        assert!(
+            !yaml.contains("host.docker.internal:54321"),
+            "must not use the raw bind port under mirrored mode"
         );
     }
 

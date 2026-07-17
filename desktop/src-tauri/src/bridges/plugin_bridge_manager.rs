@@ -30,11 +30,18 @@ pub fn stop_for(slug: &str) {
         log::warn!("plugin bridge[{slug}] stop: global registry not initialized");
         return;
     };
-    if let Ok(mut guard) = map.lock() {
-        if let Some(mut bridge) = guard.remove(slug) {
-            if let Err(e) = bridge.stop() {
-                log::warn!("plugin bridge[{slug}] stop error: {e}");
-            }
+    // Remove under the lock, release BEFORE stop(): its synchronous relay teardown can take
+    // tens of seconds behind a wedged wsl.exe (ADR-080) and would stall every bridge command.
+    let bridge = match map.lock() {
+        Ok(mut guard) => guard.remove(slug),
+        Err(e) => {
+            log::warn!("plugin bridge[{slug}] stop: map mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(mut bridge) = bridge {
+        if let Err(e) = bridge.stop() {
+            log::warn!("plugin bridge[{slug}] stop error: {e}");
         }
     }
 }

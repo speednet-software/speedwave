@@ -82,6 +82,8 @@ pub const AUDIT_HUB_FILE: &str = "audit-hub.jsonl";
 
 /// Log filename for the Claude session output.
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
+/// Entrypoint's startup diagnostics log, written by the container into claude-home.
+pub const ENTRYPOINT_LOG_FILE: &str = ".speedwave-entrypoint.log";
 /// Path to the Claude Code binary inside the container.
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
 
@@ -96,6 +98,10 @@ pub const HOST_GATEWAY_ALIAS: &str = "host.docker.internal";
 /// IP of the macOS host as seen from inside nerdctl containers in the Lima vzNAT network.
 /// Lima vzNAT always assigns 192.168.5.2 to the host — this is static, not DHCP.
 pub const LIMA_VZ_HOST_IP: &str = "192.168.5.2";
+
+/// Guest-local gateway IP for the WSL2 mirrored-mode host relay (ADR-080): a `socat`
+/// unit on the distro's `lo` forwards its relay port here to the bridge's loopback bind port.
+pub const MIRROR_RELAY_GATEWAY_IP: &str = "10.200.0.1";
 
 /// Container user for unprivileged mode (macOS Lima, Windows WSL2).
 /// containerd runs as root inside the VM → UID 1000 maps to UID 1000 on host.
@@ -179,6 +185,26 @@ pub const NERDCTL_INSTALL_TIMEOUT_SECS: u64 = 1200;
 const _: () = assert!(NERDCTL_DOWNLOAD_CONNECT_TIMEOUT_SECS < NERDCTL_DOWNLOAD_MAX_TIME_SECS);
 const _: () = assert!(NERDCTL_DOWNLOAD_MAX_TIME_SECS < NERDCTL_INSTALL_TIMEOUT_SECS);
 const _: () = assert!(NERDCTL_DOWNLOAD_RETRY_DELAY_SECS > NERDCTL_INSTALL_TIMEOUT_SECS);
+
+/// In-VM nerdctl state root (`--data-root` default); never overridden by Speedwave.
+pub const NERDCTL_DATA_ROOT: &str = "/var/lib/nerdctl";
+
+/// In-VM containerd socket (`--address` default); never overridden by Speedwave.
+pub const CONTAINERD_ADDRESS: &str = "/run/containerd/containerd.sock";
+
+/// containerd namespace nerdctl operates in (`--namespace` default).
+pub const CONTAINERD_NAMESPACE: &str = "default";
+
+/// nerdctl per-address datastore dir name for `CONTAINERD_ADDRESS`:
+/// `sha256(address)[0..8]` (`<data-root>/<hash>/…`, matching nerdctl's `getAddrHash`).
+pub fn nerdctl_addr_hash() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(CONTAINERD_ADDRESS.as_bytes());
+    let mut hex = crate::bundle::bytes_to_hex(&hasher.finalize());
+    hex.truncate(8);
+    hex
+}
 
 /// amd64 Ubuntu WSL rootfs URL; SHA256 below pins the version. `current` is
 /// rolling — a download/verify failure on clean dev/CI means bump the SHA256 (#183).
@@ -976,6 +1002,11 @@ pub fn claude_session_log_path(project: &str) -> std::path::PathBuf {
     claude_session_log_path_under(data_dir(), project)
 }
 
+/// Host-side path of the container entrypoint's startup log (claude-home is mounted `:rw`).
+pub fn entrypoint_log_path_under(data_dir: &std::path::Path, project: &str) -> std::path::PathBuf {
+    crate::claude_home::claude_home_dir(data_dir, project).join(ENTRYPOINT_LOG_FILE)
+}
+
 /// SSOT for the mcp-os drain log path — never re-join `data_dir()` by hand.
 pub fn mcp_os_log_path() -> std::path::PathBuf {
     data_dir().join(MCP_OS_LOG_FILE)
@@ -1082,6 +1113,10 @@ pub const PLUGIN_INSTRUCTIONS_MAX_BYTES: usize = 16 * 1024;
 /// rendered on the plugin Changelog tab. Part of the signed tree.
 pub const PLUGIN_CHANGELOG_FILE: &str = "CHANGELOG.md";
 
+/// Non-secret settings JSON in the per-plugin token dir, mounted `:ro` at `/tokens/_settings.json`.
+/// Reserved `auth_fields` key; mirrored in mcp-shared (cross-read test).
+pub const PLUGIN_SETTINGS_FILE: &str = "_settings.json";
+
 /// Byte cap for a plugin's `CHANGELOG.md` (grows with every release, so it
 /// gets more headroom than `instructions`). Bounds `PluginStatusEntry` size.
 pub const PLUGIN_CHANGELOG_MAX_BYTES: usize = 64 * 1024;
@@ -1089,6 +1124,14 @@ pub const PLUGIN_CHANGELOG_MAX_BYTES: usize = 64 * 1024;
 /// Max length of an `auth_fields[].validation.pattern` regex. 512 chars is an
 /// engine-agnostic guard (the JS `<input pattern>` engine can backtrack).
 pub const PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN: usize = 512;
+
+/// ZIP-bomb guards for plugin archive extraction (checked before writing to
+/// disk). Generous vs any real plugin tree; small enough to stop a bomb.
+pub const PLUGIN_ZIP_MAX_ENTRIES: usize = 100_000;
+/// Total uncompressed size cap across all entries (2 GiB).
+pub const PLUGIN_ZIP_MAX_TOTAL_UNCOMPRESSED: u64 = 2 * 1024 * 1024 * 1024;
+/// Per-entry compression-ratio cap (uncompressed / compressed).
+pub const PLUGIN_ZIP_MAX_COMPRESSION_RATIO: u64 = 200;
 
 /// Max length of `host_bridge.url_env` / `token_env` names. 128 leaves headroom
 /// over typical POSIX names without a manifest shipping a huge env name.
@@ -1333,6 +1376,13 @@ mod tests {
     fn test_wsl_rootfs_urls_are_https() {
         assert!(WSL_ROOTFS_URL_AMD64.starts_with("https://"));
         assert!(WSL_ROOTFS_URL_ARM64.starts_with("https://"));
+    }
+
+    /// Pins nerdctl's `getAddrHash` for the default socket — the live VM dir
+    /// is `/var/lib/nerdctl/1935db59` on both platforms.
+    #[test]
+    fn nerdctl_addr_hash_matches_default_socket_digest() {
+        assert_eq!(nerdctl_addr_hash(), "1935db59");
     }
 
     // Lock and backoff markers are flat filenames directly under data_dir().
@@ -2477,6 +2527,16 @@ mod tests {
     }
 
     #[test]
+    fn wsl_distro_name_appears_in_container_health_spec() {
+        let src = include_str!("../../../desktop/e2e/specs/03-container-health.spec.ts");
+        assert!(
+            src.contains(&format!("'{PRODUCTION_WSL_DISTRO}'")),
+            "production WSL distro name ({PRODUCTION_WSL_DISTRO}) not found in \
+             03-container-health.spec.ts (flock assertion); rename it there too"
+        );
+    }
+
+    #[test]
     fn data_dir_appears_in_installer_hooks_template() {
         // DATA_DIR = ".speedwave"; the NSIS hook hard-codes "$PROFILE\.speedwave"
         // in the hand-edited template.
@@ -2573,6 +2633,23 @@ mod tests {
         assert_eq!(
             &cap[1], HOST_GATEWAY_ALIAS,
             "TS HOST_GATEWAY_ALIAS must match Rust consts::HOST_GATEWAY_ALIAS"
+        );
+    }
+
+    // Cross-language SSOT for the settings-file name: the host writes `/tokens/_settings.json`
+    // and the TS worker reader (`loadPluginSettings`) must read the same name.
+    #[test]
+    fn plugin_settings_file_matches_mcp_shared_ts() {
+        let src = include_str!("../../../mcp-servers/shared/src/security.ts");
+        let re =
+            regex::Regex::new(r#"export\s+const\s+PLUGIN_SETTINGS_FILE\s*=\s*['"]([^'"]+)['"]"#)
+                .unwrap();
+        let cap = re.captures(src).expect(
+            "mcp-servers/shared/src/security.ts must declare `export const PLUGIN_SETTINGS_FILE`",
+        );
+        assert_eq!(
+            &cap[1], PLUGIN_SETTINGS_FILE,
+            "TS PLUGIN_SETTINGS_FILE must match Rust consts::PLUGIN_SETTINGS_FILE"
         );
     }
 
@@ -2775,5 +2852,149 @@ mod tests {
     fn strip_compose_container_prefix_leaves_unrelated_name_unchanged() {
         let out = strip_compose_container_prefix("other_unrelated_thing", "acme");
         assert_eq!(out, "other_unrelated_thing");
+    }
+
+    #[test]
+    fn entrypoint_log_path_lives_in_claude_home() {
+        let data_dir = std::path::Path::new("/tmp/sw-data");
+        let p = entrypoint_log_path_under(data_dir, "proj");
+        assert_eq!(
+            p,
+            crate::claude_home::claude_home_dir(data_dir, "proj").join(ENTRYPOINT_LOG_FILE)
+        );
+    }
+
+    /// SSOT guard: the Rust const and the shell producer must name the same file.
+    #[test]
+    fn entrypoint_log_file_matches_entrypoint_sh() {
+        let sh = include_str!("../../../containers/entrypoint.sh");
+        assert!(sh.contains(ENTRYPOINT_LOG_FILE));
+    }
+
+    // Cross-read guards for the e2e helper/bats mirrors below: the hash pin above covers only
+    // the hash segment, not the full downstream nerdctl name-store / token-path / prefix copies.
+
+    #[test]
+    fn name_store_dir_literal_matches_e2e_engine_ts_and_bats_suites() {
+        let expected = format!(
+            "{NERDCTL_DATA_ROOT}/{}/names/{CONTAINERD_NAMESPACE}",
+            nerdctl_addr_hash()
+        );
+        assert_eq!(expected, "/var/lib/nerdctl/1935db59/names/default");
+
+        let engine_ts = include_str!("../../../desktop/e2e/helpers/engine.ts");
+        assert!(
+            engine_ts.contains(&format!("'{expected}'")),
+            "engine.ts nameStoreDir() must return '{expected}'; rename it there too"
+        );
+
+        let engine_contract = include_str!("../../../_tests/e2e/engine-contract.bats");
+        assert!(
+            engine_contract.contains(&format!("STORE={expected}")),
+            "engine-contract.bats STORE= must match the Rust-computed name-store dir '{expected}'"
+        );
+
+        let update_dirty_state = include_str!("../../../_tests/e2e/update-dirty-state.bats");
+        assert!(
+            update_dirty_state.contains(&format!("STORE={expected}")),
+            "update-dirty-state.bats STORE= must match the Rust-computed name-store \
+             dir '{expected}'"
+        );
+    }
+
+    /// Pins the concrete default-basename literals `derive_wsl_distro_name_from` produces,
+    /// then asserts engine.ts's hand-written composePrefix()/wslDistroName() mirror them.
+    #[test]
+    fn engine_ts_compose_prefix_and_wsl_distro_derivation_mirrors_consts() {
+        let default_prefix =
+            derive_instance_name_from(std::path::Path::new("/home/user/.speedwave"));
+        let default_distro =
+            derive_wsl_distro_name_from(std::path::Path::new("/home/user/.speedwave"));
+        assert_eq!(default_prefix, "speedwave");
+        assert_eq!(default_distro, "Speedwave");
+
+        let engine_ts = include_str!("../../../desktop/e2e/helpers/engine.ts");
+        assert!(
+            engine_ts.contains(r"replace(/^\.+/, '')"),
+            "engine.ts composePrefix() must strip ALL leading dots like \
+             derive_instance_name_from's trim_start_matches('.'); rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("basename === '{default_prefix}'")),
+            "engine.ts wslDistroName() must special-case the default basename '{default_prefix}'; \
+             rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("return '{default_distro}'")),
+            "engine.ts wslDistroName() must return '{default_distro}' for the default basename; \
+             rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("'{default_prefix}-'")),
+            "engine.ts wslDistroName() must strip the '{default_prefix}-' prefix like \
+             derive_wsl_distro_name_from's strip_prefix; rename it there too"
+        );
+        assert!(
+            engine_ts.contains(&format!("`{default_distro}-")),
+            "engine.ts wslDistroName() must build '{default_distro}-<suffix>' for non-default \
+             basenames; rename it there too"
+        );
+    }
+
+    /// Extracts the literal directory name / filename suffix `tokens.rs` and `workers.rs`
+    /// actually use, then asserts the dirty-state spec's serviceTokenPath() mirrors them.
+    #[test]
+    fn dirty_state_spec_service_token_path_matches_tokens_and_workers_shape() {
+        let tokens_src = include_str!("../../../crates/speedwave-runtime/src/compose/tokens.rs");
+        let marker = "let secrets_dir = data_dir.join(\"";
+        let after_marker = tokens_src
+            .find(marker)
+            .map(|i| &tokens_src[i + marker.len()..])
+            .expect("tokens.rs must build the secrets dir via data_dir.join(\"...\")");
+        let secrets_dir_name = &after_marker[..after_marker
+            .find('"')
+            .expect("secrets dir name must be a quoted literal")];
+
+        let workers_src = include_str!("../../../crates/speedwave-runtime/src/compose/workers.rs");
+        let marker = "{token_key}";
+        let after_marker = workers_src
+            .find(marker)
+            .map(|i| &workers_src[i + marker.len()..])
+            .expect("workers.rs must format the token filename using {token_key}");
+        let token_suffix = &after_marker[..after_marker
+            .find('"')
+            .expect("token filename suffix must be a quoted literal")];
+        assert!(
+            token_suffix.starts_with('-') && !token_suffix.is_empty(),
+            "token filename suffix must be a non-empty, hyphen-prefixed literal, \
+             got: {token_suffix:?}"
+        );
+
+        let spec_src = include_str!("../../../desktop/e2e/specs/19-dirty-state-self-heal.spec.ts");
+        assert!(
+            spec_src.contains(&format!("'{secrets_dir_name}'")),
+            "19-dirty-state-self-heal.spec.ts serviceTokenPath() must use the same \
+             '{secrets_dir_name}' directory name as tokens::init_secrets_dir_in; \
+             rename it there too"
+        );
+        assert!(
+            spec_src.contains(&format!("{token_suffix}`")),
+            "19-dirty-state-self-heal.spec.ts serviceTokenPath() must keep the '{token_suffix}' \
+             filename suffix from workers::ensure_worker_auth_token; rename it there too"
+        );
+    }
+
+    /// Pins the update-dirty-state.bats PREFIX derivation against the same data-dir-basename,
+    /// leading-dot-stripped shape as `compose_prefix()`/`derive_instance_name_from`.
+    #[test]
+    fn update_dirty_state_bats_prefix_derivation_mirrors_compose_prefix() {
+        let bats = include_str!("../../../_tests/e2e/update-dirty-state.bats");
+        assert!(
+            bats.contains(
+                r#"PREFIX=$(basename "${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"); PREFIX=${PREFIX#.}"#
+            ),
+            "update-dirty-state.bats PREFIX derivation must mirror consts::compose_prefix() \
+             (data-dir basename, leading dot stripped); rename it there too"
+        );
     }
 }

@@ -13,7 +13,7 @@ use super::audio::{
     CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
     SAMPLE_RATE_HZ,
 };
-use super::mix::{poll_mixed_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
+use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 
 /// How long the wasapi capture loop waits for the buffer-ready event before re-checking the stop
 /// flag — short enough for snappy teardown on silence, long enough to not busy-spin.
@@ -546,6 +546,7 @@ impl ResamplerSink {
                 // try_send: never block the cpal callback — a full channel drops, not glitches.
                 let _ = tx.try_send(AudioChunk {
                     samples,
+                    mic: None,
                     offset: Duration::from_nanos(offset_ns),
                 });
             }
@@ -779,7 +780,7 @@ impl AudioStream for MixedWasapiAudioStream {
         if self.aborted() {
             return Err(Self::abort_err());
         }
-        let res = poll_mixed_chunk(&self.buf);
+        let res = poll_paired_chunk(&self.buf);
         if res.is_err() && self.aborted() {
             return Err(Self::abort_err());
         }
@@ -816,6 +817,7 @@ impl Drop for MixedWasapiAudioStream {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
 mod tests {
+    use super::super::mix::PairedPcm;
     use super::*;
 
     #[test]
@@ -1017,7 +1019,7 @@ mod tests {
 
     #[test]
     fn resampler_mixed_sink_pushes_into_the_shared_buffer() {
-        // Two resamplers (system + mic) feeding one MixBuffer, summed. Same rate, mono → 1:1.
+        // Two resamplers (system + mic) feeding one MixBuffer, paired. Same rate, mono → 1:1.
         let buf = std::sync::Arc::new(std::sync::Mutex::new(MixBuffer::new()));
         let sys_sink = ResamplerSink::Mixed {
             buf: std::sync::Arc::clone(&buf),
@@ -1033,13 +1035,13 @@ mod tests {
         rs.feed(&ones, &sys_sink);
         let mut rm = Resampler::new(16_000, 1);
         rm.feed(&ones, &mic_sink);
-        // Both streams delivered ~CHUNK_SAMPLES at offset 0 → mix pops 0.5+0.5=1.
+        // Both streams delivered ~CHUNK_SAMPLES at offset 0 → an aligned pair pops.
         let mut b = buf.lock().unwrap();
-        let chunk = b.pop(1, CHUNK_SAMPLES).expect("a mixed chunk is ready");
-        assert!(!chunk.is_empty());
-        assert!(
-            chunk.iter().all(|&s| (s - 1.0).abs() < 1e-4),
-            "system 1.0 + mic 1.0, each ×0.5, summed = 1.0"
-        );
+        let PairedPcm { system: sys, mic } = b
+            .pop_pair(1, CHUNK_SAMPLES)
+            .expect("a paired chunk is ready");
+        assert!(!sys.is_empty());
+        assert!(sys.iter().all(|&s| (s - 1.0).abs() < 1e-4));
+        assert!(mic.iter().all(|&s| (s - 1.0).abs() < 1e-4));
     }
 }
