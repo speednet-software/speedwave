@@ -1342,6 +1342,81 @@ describe('ChatStateService', () => {
   });
 
   describe('pendingModelOverride', () => {
+    it('startChatSession passes a queued pick as the spawn model_override and consumes it', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.setPendingModelOverride('claude-haiku-4-5');
+
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      const startCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
+      expect(startCall?.[1]).toMatchObject({ project: 'test', modelOverride: 'claude-haiku-4-5' });
+      expect(service.pendingModelOverride()).toBeNull();
+
+      // The spawn already applied the pick — SystemInit must not wire a duplicate /model.
+      invokeSpy.mockClear();
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-haiku-4-5', session_id: 'sess-spawned' },
+      });
+      await Promise.resolve();
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
+    });
+
+    it('a reset during an in-flight resume discards its transcript and starts fresh', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      let resolveTranscript: ((t: ConversationTranscript) => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation')
+          return new Promise<ConversationTranscript>((resolve) => {
+            resolveTranscript = resolve;
+          });
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      const resume = service.resumeConversation('old-sess');
+      await new Promise((r) => setTimeout(r, 0));
+      // The "+" click racing the in-flight resume.
+      service.resetForNewConversation();
+      resolveTranscript!({
+        session_id: 'old-sess',
+        messages: [{ role: 'assistant', content: 'old reply', timestamp: null }],
+      });
+      await resume;
+      await new Promise((r) => setTimeout(r, 0));
+
+      // The stale transcript must not repopulate the cleared conversation…
+      expect(service.messagesFromState()).toHaveLength(0);
+      // …nor re-stamp the old durable session id.
+      expect(service.lastKnownSessionId).toBeNull();
+      // The fresh start gated out by the resume is re-kicked.
+      const startCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
+      expect(startCall).toBeDefined();
+    });
+
+    it('an undisturbed resume still loads its transcript and seeds the session id', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation')
+          return {
+            session_id: 'old-sess',
+            messages: [{ role: 'assistant', content: 'old reply', timestamp: null }],
+          };
+        return undefined;
+      };
+
+      await service.resumeConversation('old-sess');
+
+      expect(service.messagesFromState()).toHaveLength(1);
+      expect(service.lastKnownSessionId).toBe('old-sess');
+    });
+
     it('sends the pending Anthropic override once after SystemInit and clears it', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.setPendingModelOverride('claude-opus-4-8[1m]');

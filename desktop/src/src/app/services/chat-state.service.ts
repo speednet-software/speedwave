@@ -432,9 +432,13 @@ export class ChatStateService {
     if (project && !this.startingSession) {
       this.startingSession = true;
       const gen = this._sessionGeneration;
+      // A pre-session pick applies at spawn (--model) so the FIRST turn honors it;
+      // consumed synchronously so the SystemInit flush cannot double-send /model.
+      const modelOverride = this._pendingModelOverride();
+      if (modelOverride) this._pendingModelOverride.set(null);
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       try {
-        await this.tauri.invoke('start_chat', { project });
+        await this.tauri.invoke('start_chat', { project, modelOverride });
         this.log.debug('[chat-state] startChatSession: success');
       } catch (err) {
         // A resume superseded this start while it was in flight — don't surface
@@ -1008,6 +1012,9 @@ export class ChatStateService {
   /** Clears all chat state to start a fresh conversation. */
   resetForNewConversation(): void {
     this.log.debug('[chat-state] resetForNewConversation');
+    // A reset is a context change — an in-flight session acquisition (start or
+    // resume) must no-op instead of repopulating the cleared conversation.
+    this._sessionGeneration += 1;
     this.resetCoreStreamState();
     this._pendingQueue = null;
     this._queueAwaitingSession = false;
@@ -1271,6 +1278,9 @@ export class ChatStateService {
     // Mark start in progress so a racing send waits instead of tearing down this
     // resumed session; disposer released in the `finally` below.
     const endStartingSession = this.beginStartingSession();
+    // A reset (new conversation, delete, project switch) during the awaits below
+    // bumps the generation; this resume must then discard its results.
+    const gen = this._sessionGeneration;
     // Stamp session id optimistically so drawer accent follows click without flicker.
     this._optimisticSessionId = sessionId;
     // Early durable stamp: needed even when the transcript fetch fails, so the
@@ -1291,6 +1301,7 @@ export class ChatStateService {
       const resumePromise = this.tauri.invoke('resume_conversation', { project, sessionId });
 
       const [transcript] = await Promise.all([transcriptPromise, resumePromise]);
+      if (gen !== this._sessionGeneration) return;
       if (transcript) {
         this.loadMessages(toChatMessages(transcript));
       } else {
@@ -1318,6 +1329,10 @@ export class ChatStateService {
     } catch (err) {
       // Drop the optimistic accent so a failed resume isn't shown as active.
       this._optimisticSessionId = null;
+      if (gen !== this._sessionGeneration) {
+        this.log.debug(`[chat-state] resumeConversation superseded by a reset: ${String(err)}`);
+        return;
+      }
       this.log.error(`[chat-state] resumeConversation failed: ${String(err)}`);
       const msg = String(err);
       if (isNotAuthenticatedError(msg)) {
@@ -1336,6 +1351,12 @@ export class ChatStateService {
       this.endTranscriptLoad();
       endStartingSession();
       this._resumeInProgress = false;
+      // A reset superseded this resume: it also gated out the fresh start that
+      // the reset wanted, so hand the session slot to that path now.
+      if (gen !== this._sessionGeneration) {
+        this._optimisticSessionId = null;
+        void this.startChatSession();
+      }
     }
   }
 
