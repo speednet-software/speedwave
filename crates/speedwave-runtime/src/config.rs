@@ -1819,18 +1819,16 @@ fn resolve_project_config_in_for_test(
     resolve_project_config_in_with_managed(data_dir, project_dir, user_config, project_name, None)
 }
 
+/// Test-only seam: reuses the caller's tempdir as `data_dir` too — every call
+/// site already passes a fresh `tempfile::tempdir()` as `project_dir`, and the
+/// two subtrees (`secrets/`, `claude-home/` vs `.speedwave.json`) never collide.
 #[cfg(test)]
 fn resolve_project_config_for_test(
     project_dir: &Path,
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
-    resolve_project_config_in_for_test(
-        crate::consts::data_dir(),
-        project_dir,
-        user_config,
-        project_name,
-    )
+    resolve_project_config_in_for_test(project_dir, project_dir, user_config, project_name)
 }
 
 #[cfg(test)]

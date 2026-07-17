@@ -449,7 +449,13 @@ pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
 /// Path to a project's compose file: `~/.speedwave/compose/<project>/compose.yml`.
 /// Delegates to the validating compose-path SSOT — invalid names are an error.
 pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
-    let path = crate::compose::compose_output_path_in(consts::data_dir(), project)?;
+    compose_file_path_in(consts::data_dir(), project)
+}
+
+/// `compose_file_path` resolved under an explicit data directory — the env-free
+/// core used by tests to avoid resolving the production `consts::data_dir()`.
+pub fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<String> {
+    let path = crate::compose::compose_output_path_in(data_dir, project)?;
     Ok(path.to_string_lossy().to_string())
 }
 
