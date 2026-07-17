@@ -1380,11 +1380,37 @@ pub fn set_provider_model(
     provider_id: String,
     model: String,
 ) -> Result<(), String> {
+    set_provider_model_in(
+        speedwave_runtime::consts::data_dir(),
+        project_id,
+        provider_id,
+        model,
+    )
+}
+
+/// `data_dir`-parameterized variant of [`set_provider_model`]; use in tests
+/// and any caller that must not depend on the process-wide `data_dir()`
+/// OnceLock. Reads and mutates the stored config entirely UNDER the config
+/// lock (never a pre-lock snapshot), mirroring `update_llm_config_in`.
+fn set_provider_model_in(
+    data_dir: &std::path::Path,
+    project_id: String,
+    provider_id: String,
+    model: String,
+) -> Result<(), String> {
     log::info!("setting provider model project_id={project_id} provider_id={provider_id}");
-    config::with_config_lock(|| {
-        let mut user_config = config::load_user_config()?;
+    config::with_config_lock_in(data_dir, || {
+        let config_path = data_dir.join("config.json");
+        let mut user_config = config::load_user_config_from(&config_path)?;
         apply_set_provider_model(&mut user_config, &project_id, &provider_id, &model)?;
-        config::save_user_config(&user_config)?;
+        if let Some(llm) = user_config
+            .find_project_mut(&project_id)
+            .and_then(|p| p.claude.as_mut())
+            .and_then(|c| c.llm.as_mut())
+        {
+            config::sync_llm_legacy_fields(llm);
+        }
+        config::save_user_config_to(&user_config, &config_path)?;
         Ok(())
     })
     .map_err(|e: anyhow::Error| e.to_string())
@@ -1574,7 +1600,13 @@ async fn update_llm_config_in(
                 .iter()
                 .find(|p| p.id == provider_id)
         })
-        .is_some_and(|entry| entry.model.as_deref().is_some_and(|m| !m.is_empty()));
+        .is_some_and(|entry| {
+            entry
+                .model
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|m| !m.is_empty())
+        });
     if config::is_local_provider(update.provider.as_deref())
         && update.model.as_deref().is_none_or(str::is_empty)
         && !local_model_in_providers
@@ -2828,23 +2860,198 @@ mod tests {
     }
 
     #[test]
-    fn set_provider_model_command_uses_lock_and_saves() {
-        // Structural: the Tauri wrapper must go through the same lock/save
-        // path as every other config writer (set_llm_provider_key pattern).
+    fn set_provider_model_command_delegates_to_data_dir_variant() {
+        // Structural: the #[tauri::command] wrapper must be thin and call the
+        // data_dir-injectable variant with the process-wide SSOT, mirroring
+        // update_llm_config / update_llm_config_in.
         let src = include_str!("containers_cmd.rs");
         let start = src
             .find("pub fn set_provider_model(")
             .expect("set_provider_model command must exist");
         let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
         assert!(
-            body.contains("with_config_lock"),
-            "must use the config lock"
+            body.contains("set_provider_model_in("),
+            "must delegate to the data_dir-parameterized variant"
         );
-        assert!(body.contains("save_user_config"), "must persist");
+        assert!(
+            body.contains("speedwave_runtime::consts::data_dir()"),
+            "must pass the process-wide data_dir SSOT"
+        );
+    }
+
+    #[test]
+    fn set_provider_model_in_uses_lock_and_saves() {
+        // Structural: the data_dir-parameterized variant must go through the
+        // same lock/save path as every other config writer, reconciling and
+        // syncing legacy fields UNDER the lock.
+        let src = include_str!("containers_cmd.rs");
+        let start = src
+            .find("fn set_provider_model_in(")
+            .expect("set_provider_model_in must exist");
+        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
+        assert!(
+            body.contains("with_config_lock_in"),
+            "must use the data_dir-parameterized config lock"
+        );
+        assert!(body.contains("save_user_config_to"), "must persist");
         assert!(
             body.contains("apply_set_provider_model"),
             "must delegate to the pure helper"
         );
+        assert!(
+            body.contains("sync_llm_legacy_fields"),
+            "must sync legacy flat fields, like every other LLM config mutation path"
+        );
+    }
+
+    #[test]
+    fn set_provider_model_in_persists_to_injected_data_dir_only() {
+        // Defect 8: set_provider_model must be data_dir-injectable, never
+        // resolving the process-wide data_dir() OnceLock directly, so tests
+        // (and any future caller) can never write prod ~/.speedwave.
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let data_dir = tmp.path().to_path_buf();
+
+        set_provider_model_in(
+            &data_dir,
+            "alpha".to_string(),
+            "local".to_string(),
+            "llama-new".to_string(),
+        )
+        .expect("set_provider_model_in must succeed");
+
+        let final_cfg = config::load_user_config_from(&data_dir.join("config.json"))
+            .expect("reload injected-dir config");
+        let llm = final_cfg
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            llm.providers
+                .iter()
+                .find(|p| p.id == "local")
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("llama-new"),
+            "the picked model must persist to the injected tmp config"
+        );
+    }
+
+    #[test]
+    fn set_provider_model_in_syncs_legacy_flat_fields() {
+        // Defect 8b: for a legacy direct-path user (proxy_enabled=false), the
+        // flat llm.model/llm.provider fields read by apply_llm_config_legacy_in
+        // must reflect the newly-picked model, not go stale.
+        let tmp = seeded_config_tempdir_with_local_model("llama-old");
+        let data_dir = tmp.path().to_path_buf();
+        {
+            let config_path = data_dir.join("config.json");
+            let mut cfg = config::load_user_config_from(&config_path).unwrap();
+            {
+                let llm = cfg
+                    .find_project_mut("alpha")
+                    .unwrap()
+                    .claude
+                    .as_mut()
+                    .unwrap()
+                    .llm
+                    .as_mut()
+                    .unwrap();
+                llm.proxy_enabled = Some(false);
+            }
+            config::save_user_config_to(&cfg, &config_path).unwrap();
+        }
+
+        set_provider_model_in(
+            &data_dir,
+            "alpha".to_string(),
+            "local".to_string(),
+            "llama-new".to_string(),
+        )
+        .expect("set_provider_model_in must succeed");
+
+        let final_cfg = config::load_user_config_from(&data_dir.join("config.json"))
+            .expect("reload injected-dir config");
+        let llm = final_cfg
+            .find_project("alpha")
+            .unwrap()
+            .claude
+            .as_ref()
+            .unwrap()
+            .llm
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            llm.provider.as_deref(),
+            Some("local"),
+            "legacy flat provider field must be synced from the new active entry"
+        );
+        assert_eq!(
+            llm.model.as_deref(),
+            Some("llama-new"),
+            "legacy flat model field must be synced from the new active entry"
+        );
+    }
+
+    #[test]
+    fn apply_set_provider_model_whitespace_only_model_is_rejected_like_empty() {
+        // Defect 16: a whitespace-only model must be treated as "no model",
+        // consistent with LlmConfig::effective_active_model's trim+non-empty
+        // filter — not accepted as a valid pick by an ad-hoc hand-scan.
+        use speedwave_runtime::config::LlmProviderKind as K;
+        let mut cfg = cfg_with_providers(
+            "local",
+            None,
+            vec![v2_entry("local", K::Local, Some("http://127.0.0.1:11434"))],
+        );
+        let err = apply_set_provider_model(&mut cfg, "alpha", "local", "   \t  ").unwrap_err();
+        assert!(err.to_string().contains("model"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn update_llm_config_in_whitespace_only_provider_model_still_requires_model() {
+        // Defect 16: the local_model_in_providers hand-scan in
+        // update_llm_config_in must trim before checking non-emptiness, same
+        // as effective_active_model - a whitespace-only model sent in the v2
+        // providers[] payload must NOT be treated as "has a model" and must
+        // not bypass the model-required guard for a local provider save.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().to_path_buf();
+        config::save_user_config_to(
+            &make_config_with_active_project(),
+            &data_dir.join("config.json"),
+        )
+        .expect("seed config");
+
+        let update = LlmConfigUpdate {
+            provider: Some("local".to_string()),
+            model: None,
+            providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
+                id: "local".to_string(),
+                kind: speedwave_runtime::config::LlmProviderKind::Local,
+                base_url: Some("http://127.0.0.1:11434".to_string()),
+                model: Some("   ".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }]),
+            active: Some(speedwave_runtime::config::LlmActive {
+                provider_id: "local".to_string(),
+                model: None,
+            }),
+            ..Default::default()
+        };
+
+        let err = update_llm_config_in(&data_dir, update)
+            .await
+            .expect_err("a whitespace-only model must not satisfy the model-required guard");
+        assert!(err.contains("requires a model name"), "got: {err}");
     }
 
     // ── get_active_provider_summary (composer badge/combobox) ──────────
