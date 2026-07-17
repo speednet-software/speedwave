@@ -27,6 +27,7 @@ const ALL_SPECS = [
   './specs/17-logs-diagnostics.spec.ts',
   './specs/18-anthropic-oauth-login.spec.ts',
   './specs/19-dirty-state-self-heal.spec.ts',
+  './specs/20-slash-and-model-selector.spec.ts',
   FACTORY_RESET_SPEC,
 ];
 
