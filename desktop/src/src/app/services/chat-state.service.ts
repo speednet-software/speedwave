@@ -92,6 +92,14 @@ export function isNotAuthenticatedError(msg: string): boolean {
   return msg.includes('not authenticated');
 }
 
+/** Composer model-selector pick handed to `applyModelSelection` (Task 16 contract). */
+export interface ModelSelectionInput {
+  catalogId: string;
+  wireId: string;
+  providerId: string;
+  kind: string;
+}
+
 /** Singleton service that holds chat session state across navigation. */
 @Injectable({ providedIn: 'root' })
 export class ChatStateService {
@@ -137,6 +145,45 @@ export class ChatStateService {
     if (!pending) return;
     this._pendingModelOverride.set(null);
     void this.sendMessage(`/model ${pending}`);
+  }
+
+  /** Surface for a failed write-through from the composer model selector. */
+  private readonly _modelSelectionError = signal('');
+  /** Read-only: last composer write-through error, or '' when none. */
+  readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
+
+  /**
+   * The single handler for a composer model-selector pick (Task 16): config
+   * write first for non-anthropic kinds, then live wire switch / pending override.
+   * @param sel - Selected model triad emitted by the model selector.
+   */
+  async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
+    this._modelSelectionError.set('');
+    const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
+    if (!isAnthropic) {
+      try {
+        await this.anthropicModels.setProviderModel(
+          this.projectState.activeProject() ?? '',
+          sel.providerId,
+          sel.catalogId
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.log.warn(`model selection write-through failed: ${msg}`);
+        this._modelSelectionError.set(msg);
+        return;
+      }
+    }
+    if (this.hasLiveSession()) {
+      await this.sendMessage(`/model ${sel.wireId}`);
+    } else if (isAnthropic) {
+      this.setPendingModelOverride(sel.wireId);
+    }
+  }
+
+  /** True once a session id has been seeded for the current conversation. */
+  private hasLiveSession(): boolean {
+    return this._lastKnownSessionId !== null;
   }
 
   /** Session cost/usage stats signal — drives the OnPush footer reactively. */

@@ -3912,4 +3912,118 @@ describe('ChatStateService', () => {
       expect(msg.blocks).toEqual([nested]);
     });
   });
+
+  describe('applyModelSelection', () => {
+    it('awaits setProviderModel BEFORE sending the wire command for a live non-anthropic selection', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const calls: string[] = [];
+      let resolveSet!: () => void;
+      vi.spyOn(anthropicModels, 'setProviderModel').mockImplementation(
+        () =>
+          new Promise<void>((r) => {
+            calls.push('setProviderModel-start');
+            resolveSet = () => {
+              calls.push('setProviderModel-resolved');
+              r();
+            };
+          })
+      );
+      vi.spyOn(service, 'sendMessage').mockImplementation(async () => {
+        calls.push('sendMessage');
+      });
+      // A live session already has a seeded session id.
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'my-or/anthropic/claude-sonnet-5', session_id: 'sess-1' },
+      });
+
+      const pending = service.applyModelSelection({
+        catalogId: 'anthropic/claude-haiku-4-5',
+        wireId: 'my-or/anthropic/claude-haiku-4-5',
+        providerId: 'my-or',
+        kind: 'open_router',
+      });
+      expect(calls).toEqual(['setProviderModel-start']);
+      resolveSet();
+      await pending;
+      expect(calls).toEqual(['setProviderModel-start', 'setProviderModel-resolved', 'sendMessage']);
+    });
+
+    it('does not send the wire command when setProviderModel rejects', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      vi.spyOn(anthropicModels, 'setProviderModel').mockRejectedValue(new Error('locked config'));
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'anthropic/claude-haiku-4-5',
+        wireId: 'my-or/anthropic/claude-haiku-4-5',
+        providerId: 'my-or',
+        kind: 'open_router',
+      });
+
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.modelSelectionError()).toContain('locked config');
+    });
+
+    it('sends the wire command directly for a live anthropic selection (no config write-through)', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const setProviderModelSpy = vi.spyOn(anthropicModels, 'setProviderModel');
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-2' },
+      });
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-4-8',
+        wireId: 'claude-opus-4-8',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(setProviderModelSpy).not.toHaveBeenCalled();
+      expect(sendMessageSpy).toHaveBeenCalledWith('/model claude-opus-4-8');
+    });
+
+    it('queues a pending anthropic override, not a wire send, when no session is live', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-4-8',
+        wireId: 'claude-opus-4-8',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.pendingModelOverride()).toBe('claude-opus-4-8');
+    });
+
+    it('does nothing further for a no-session non-anthropic selection beyond the write-through', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const setProviderModelSpy = vi
+        .spyOn(anthropicModels, 'setProviderModel')
+        .mockResolvedValue(undefined);
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+      });
+
+      expect(setProviderModelSpy).toHaveBeenCalledWith(expect.any(String), 'my-ollama', 'llama4');
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+  });
 });
