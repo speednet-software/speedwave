@@ -619,41 +619,44 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
     for name in raw.slash_commands {
         let (clean_name, plugin) = split_plugin_prefix(&name);
         let is_agent = raw.agents.iter().any(|a| a == clean_name);
+        let native = if plugin.is_none() && !is_agent {
+            crate::native_slash::native_command(clean_name)
+        } else {
+            None
+        };
 
         // Native allowlist hit (and not shadowed by a plugin/agent name): badge
         // and show-filter come from the allowlist, but an on-disk skill/command
         // of the same bare name is consulted first so a user's own frontmatter
         // (description, user-invocable: false) is never silently dropped.
-        if plugin.is_none() && !is_agent {
-            if let Some(native) = crate::native_slash::native_command(clean_name) {
-                let (on_disk, _origin) = lookup_frontmatter(
-                    clean_name,
-                    None,
-                    project_dir,
-                    personal_dir.as_deref(),
-                    &raw.plugins,
-                );
-                if matches!(on_disk.user_invocable, Some(false)) {
-                    continue;
-                }
-                if native.show {
-                    let description = on_disk
-                        .description
-                        .map(|d| d.trim().to_string())
-                        .or_else(|| Some(native.description.to_string()));
-                    commands.push(SlashCommand {
-                        name: name.clone(),
-                        description,
-                        argument_hint: on_disk.argument_hint,
-                        kind: native.badge,
-                        plugin: None,
-                    });
-                }
+        if let Some(native) = native {
+            let (on_disk, _origin) = lookup_frontmatter(
+                clean_name,
+                None,
+                project_dir,
+                personal_dir.as_deref(),
+                &raw.plugins,
+            );
+            if matches!(on_disk.user_invocable, Some(false)) {
                 continue;
             }
+            if native.show {
+                let description = on_disk
+                    .description
+                    .map(|d| d.trim().to_string())
+                    .or_else(|| Some(native.description.to_string()));
+                commands.push(SlashCommand {
+                    name: name.clone(),
+                    description,
+                    argument_hint: on_disk.argument_hint,
+                    kind: native.badge,
+                    plugin: None,
+                });
+            }
+            continue;
         }
 
-        let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents);
+        let kind = classify_kind(clean_name, plugin.as_deref(), &raw.agents, native);
         let (frontmatter, origin) = lookup_frontmatter(
             clean_name,
             plugin.as_deref(),
@@ -734,15 +737,22 @@ fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
 }
 
 /// Classifies a command by plugin prefix, `agents` presence, and the native
-/// allowlist. Default `Command` is the safest fallback (UI renders `cmd`).
-fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKind {
+/// allowlist. `native` is the caller's already-computed
+/// `native_slash::native_command` lookup (avoids re-scanning the table).
+/// Default `Command` is the safest fallback (UI renders `cmd`).
+fn classify_kind(
+    name: &str,
+    plugin: Option<&str>,
+    agents: &[String],
+    native: Option<&'static crate::native_slash::NativeSlashCommand>,
+) -> SlashKind {
     if plugin.is_some() {
         return SlashKind::Plugin;
     }
     if agents.iter().any(|a| a == name) {
         return SlashKind::Agent;
     }
-    if let Some(native) = crate::native_slash::native_command(name) {
+    if let Some(native) = native {
         return native.badge;
     }
     // Default; refined to Skill by enrich_and_filter when the file is under skills/.
@@ -1672,13 +1682,23 @@ mod tests {
     #[test]
     fn classify_kind_prefers_plugin_then_agent_then_native_then_command() {
         let agents = vec!["my-agent".to_string()];
+        let help_native = crate::native_slash::native_command("help");
         assert_eq!(
-            classify_kind("anything", Some("p"), &agents),
+            classify_kind("anything", Some("p"), &agents, help_native),
             SlashKind::Plugin
         );
-        assert_eq!(classify_kind("my-agent", None, &agents), SlashKind::Agent);
-        assert_eq!(classify_kind("help", None, &agents), SlashKind::Builtin);
-        assert_eq!(classify_kind("other", None, &agents), SlashKind::Command);
+        assert_eq!(
+            classify_kind("my-agent", None, &agents, None),
+            SlashKind::Agent
+        );
+        assert_eq!(
+            classify_kind("help", None, &agents, help_native),
+            SlashKind::Builtin
+        );
+        assert_eq!(
+            classify_kind("other", None, &agents, None),
+            SlashKind::Command
+        );
     }
 
     #[test]

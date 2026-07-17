@@ -16,8 +16,6 @@ pub struct NativeSlashCommand {
     pub badge: SlashKind,
     /// Whether the popover displays this entry (a display filter only).
     pub show: bool,
-    /// Extra selectable levels (currently only `effort` carries these).
-    pub levels: Option<&'static [&'static str]>,
 }
 
 /// The full native-command table. Visible entries (`show: true`) must all
@@ -30,182 +28,156 @@ pub const NATIVE_SLASH_COMMANDS: &[NativeSlashCommand] = &[
         description: "Clear the conversation",
         badge: SlashKind::Builtin,
         show: true,
-        levels: None,
     },
     NativeSlashCommand {
         name: "compact",
         description: "Compact the conversation to save context",
         badge: SlashKind::Builtin,
         show: true,
-        levels: None,
     },
     NativeSlashCommand {
         name: "context",
         description: "Show the current context window usage",
         badge: SlashKind::Builtin,
         show: true,
-        levels: None,
     },
     NativeSlashCommand {
         name: "usage",
         description: "Show the current subscription usage",
         badge: SlashKind::Builtin,
         show: true,
-        levels: None,
     },
     NativeSlashCommand {
         name: "model",
         description: "Show or switch the model for this session",
         badge: SlashKind::Builtin,
         show: true,
-        levels: None,
     },
     NativeSlashCommand {
         name: "effort",
         description: "Show or set the reasoning effort level",
         badge: SlashKind::Builtin,
         show: true,
-        levels: Some(&["low", "medium", "high", "xhigh", "max", "ultracode", "auto"]),
     },
     NativeSlashCommand {
         name: "config",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "doctor",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "mcp",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "debug",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "heapdump",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "agents",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "init",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "insights",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "extra-usage",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "fast",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "color",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "batch",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "review",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "exit",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "logout",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "login",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "resume",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "memory",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "help",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
     NativeSlashCommand {
         name: "cost",
         description: "",
         badge: SlashKind::Builtin,
         show: false,
-        levels: None,
     },
 ];
 
@@ -293,30 +265,6 @@ mod tests {
             let entry = native_command(name).unwrap_or_else(|| panic!("missing entry: {name}"));
             assert!(!entry.show, "hidden entry '{name}' must have show=false");
         }
-    }
-
-    #[test]
-    fn only_effort_carries_levels_metadata() {
-        for entry in NATIVE_SLASH_COMMANDS {
-            if entry.name == "effort" {
-                assert!(entry.levels.is_some(), "effort must carry levels metadata");
-            } else {
-                assert!(
-                    entry.levels.is_none(),
-                    "'{}' must not carry levels metadata",
-                    entry.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn effort_levels_match_expected_set() {
-        let effort = native_command("effort").expect("effort must be registered");
-        assert_eq!(
-            effort.levels,
-            Some(["low", "medium", "high", "xhigh", "max", "ultracode", "auto"].as_slice())
-        );
     }
 
     #[test]
