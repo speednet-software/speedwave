@@ -3670,14 +3670,15 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        // The mount-source checks (policy, audit, managed-settings) compare the
+        // rendered volume against `data_dir`: must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
             &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
-            tmp.path(),
+            data_dir.path(),
         );
         assert!(
             violations.is_empty(),
