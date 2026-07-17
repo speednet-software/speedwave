@@ -71,7 +71,7 @@ export class SlashService {
   /** Error message from the last failed discovery, if any. */
   readonly error = signal<string | null>(null);
   /** True when the last discovery reported `source: 'Unavailable'`. */
-  readonly unavailable = signal<boolean>(false);
+  readonly unavailable = computed(() => this.source() === 'Unavailable');
 
   /** Convenience computed: is the popover "empty and loading"? */
   readonly isLoadingEmpty = computed(() => this.discovering() && this.commands().length === 0);
@@ -89,7 +89,6 @@ export class SlashService {
       this.commands.set([]);
       this.source.set(null);
       this.error.set(null);
-      this.unavailable.set(false);
       return;
     }
     if (this.inFlight) {
@@ -110,11 +109,9 @@ export class SlashService {
       });
       this.commands.set(result.commands);
       this.source.set(result.source);
-      this.unavailable.set(result.source === 'Unavailable');
     } catch (err) {
       this.source.set(null);
       this.error.set(String(err));
-      this.unavailable.set(false);
     } finally {
       this.discovering.set(false);
     }

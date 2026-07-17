@@ -400,8 +400,8 @@ fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
     }
 }
 
-/// One-time upgrade self-heal: anthropic-kind entries stop carrying a stored
-/// model (the license default rules the session; the composer switches it).
+/// Permanent invariant, enforced every boot: anthropic-kind entries never carry
+/// a stored model (the license default rules the session; the composer switches it).
 pub(crate) fn clear_anthropic_models(llm: &mut LlmConfig) -> bool {
     let mut changed = false;
     for entry in &mut llm.providers {

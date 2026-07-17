@@ -1915,6 +1915,35 @@ describe('LlmProviderComponent', () => {
     expect(emittedError).toContain('model name is required');
   });
 
+  it('canSave and saveConfig agree a whitespace-only local model is no model (Defect 19)', async () => {
+    // Both gates share `localModelSatisfied()` — a model of "   " must be
+    // treated as absent by BOTH, not just the trimmed canSave() computed.
+    let invokeCalled = false;
+    mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'update_llm_config') {
+        invokeCalled = true;
+      }
+      return undefined;
+    };
+
+    let emittedError = '';
+    component.errorOccurred.subscribe((msg: string) => {
+      emittedError = msg;
+    });
+
+    component.provider.set('ollama');
+    component.baseUrl.set('');
+    component.defaultBaseUrl.set('');
+    component.model.set('   ');
+
+    expect(component['canSave']()).toBe(false);
+
+    await component.saveConfig();
+
+    expect(invokeCalled).toBe(false);
+    expect(emittedError).toContain('model name is required');
+  });
+
   it('save_allows_anthropic_with_empty_model', async () => {
     // Anthropic infers the model from ANTHROPIC_MODEL env or Claude's
     // default — no model in config is legal.

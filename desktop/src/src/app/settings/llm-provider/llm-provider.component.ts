@@ -1171,15 +1171,20 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) return !!extra.model.trim();
-    // No local UI control writes `model` anymore (Task 18) — a stored entry
-    // model, or a base_url alone (server-side auto-default, Task 11),
-    // satisfies the gate just like the saveConfig guard above.
+    return this.localModelSatisfied();
+  });
+
+  /**
+   * True when the local provider has a routable model: composer value, stored entry model, or base_url alone (server auto-default).
+   * Shared by `canSave` and `saveConfig`'s guard so the two never drift.
+   */
+  private localModelSatisfied(): boolean {
     return (
       !!this.model().trim() ||
       !!this.loadedLocalEntry?.model ||
       !!(this.baseUrl() || this.defaultBaseUrl())
     );
-  });
+  }
 
   /**
    * Finds a permanent remote row by exact id, falling back to kind so legacy generated ids (`openrouter-2`) still land on their fixed row.
@@ -1267,14 +1272,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     // also rejects it but only at container start (no immediate feedback).
     const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
-    // No local UI control writes `model` anymore (Task 18): a stored entry
-    // model satisfies the guard, and so does a base_url alone — the backend
-    // auto-defaults an empty local model via a live probe (Task 11).
-    const localCanSave =
-      !!this.model() ||
-      !!this.loadedLocalEntry?.model ||
-      !!(this.baseUrl() || this.defaultBaseUrl());
-    if (provider !== 'anthropic' && !localCanSave && localIsActive) {
+    if (provider !== 'anthropic' && !this.localModelSatisfied() && localIsActive) {
       this.errorOccurred.emit('A model name is required for local providers');
       return;
     }
