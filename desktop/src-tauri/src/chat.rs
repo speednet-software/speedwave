@@ -378,8 +378,9 @@ pub struct StreamParser {
     /// Cumulative session cost in USD from the previous `Result`. Per-turn
     /// cost = current total - previous total, when both are authoritative.
     previous_session_cost: Option<f64>,
-    /// Last model seen (from `SystemInit` or `modelUsage` in a result).
-    last_model: Option<String>,
+    /// Chronological last-observed model (init or real assistant turn wins
+    /// over cumulative-usage dominance — survives a mid-session /model switch).
+    model_tracker: crate::session_model::SessionModelTracker,
     /// Unhandled top-level stream-json `type` values, each logged once per
     /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
     seen_unknown_types: std::collections::HashSet<String>,
@@ -399,7 +400,7 @@ impl StreamParser {
             previous_session_usage: TurnUsage::default(),
             last_context_usage: None,
             previous_session_cost: None,
-            last_model: None,
+            model_tracker: crate::session_model::SessionModelTracker::default(),
             seen_unknown_types: std::collections::HashSet::new(),
         }
     }
@@ -415,7 +416,9 @@ impl StreamParser {
     ) {
         self.previous_session_usage = usage;
         self.previous_session_cost = total_cost;
-        self.last_model = model;
+        if let Some(m) = model.as_deref() {
+            self.model_tracker.observe_init(m);
+        }
         self.last_context_usage = context_usage;
     }
 
@@ -440,6 +443,7 @@ impl StreamParser {
             "result" => option_to_vec(self.parse_result(parsed)),
             "assistant" => {
                 self.capture_assistant_uuid(parsed);
+                self.capture_assistant_model(parsed);
                 self.capture_context_usage(parsed);
                 (Vec::new(), None)
             }
@@ -477,6 +481,14 @@ impl StreamParser {
         }
     }
 
+    /// Feed `message.model` into the session model tracker (chronological
+    /// last-observed wins). Missing/empty models are silently ignored.
+    fn capture_assistant_model(&mut self, parsed: &serde_json::Value) {
+        if let Some(model) = parsed["message"]["model"].as_str() {
+            self.model_tracker.observe_assistant(model);
+        }
+    }
+
     /// Track `message.usage` of main-chain assistant events (last one wins).
     /// Sidechain (subagent) calls and all-zero usage never move the meter.
     fn capture_context_usage(&mut self, parsed: &serde_json::Value) {
@@ -507,7 +519,7 @@ impl StreamParser {
         self.previous_session_usage = TurnUsage::default();
         self.last_context_usage = None;
         self.previous_session_cost = None;
-        self.last_model = None;
+        self.model_tracker = crate::session_model::SessionModelTracker::default();
         self.seen_unknown_types.clear();
     }
 
@@ -897,26 +909,38 @@ impl StreamParser {
 
         // modelUsage: cumulative per-model stats; used for contextWindow + model id.
         let model_usage = parsed["modelUsage"].as_object();
-        // contextWindow from the dominant model (highest outputTokens).
-        let context_window_size = model_usage
-            .and_then(|mu| {
-                mu.values()
-                    .max_by_key(|stats| stats["outputTokens"].as_u64().unwrap_or(0))
+        // Dominant-by-usage model: only a fallback when the tracker resolved nothing.
+        let usage_dominant_model = model_usage.and_then(|mu| {
+            mu.iter()
+                .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
+                .map(|(k, _)| k.clone())
+        });
+
+        // Chronological last-observed model wins; usage-dominance is the final fallback.
+        let model = self
+            .model_tracker
+            .resolve()
+            .map(str::to_string)
+            .or_else(|| usage_dominant_model.clone());
+
+        // Fed AFTER resolving (so this turn's dominance can't overwrite a value
+        // already observed this turn) — keeps a later plain-usage-only turn correct.
+        if let Some(m) = usage_dominant_model.as_deref() {
+            self.model_tracker.observe_assistant(m);
+        }
+
+        // contextWindow from the resolved model's modelUsage entry; falls back to
+        // the dominant entry only when the tracker resolved nothing.
+        let context_window_size = model
+            .as_deref()
+            .and_then(|m| model_usage.and_then(|mu| mu.get(m)))
+            .or_else(|| {
+                model_usage.and_then(|mu| {
+                    mu.values()
+                        .max_by_key(|stats| stats["outputTokens"].as_u64().unwrap_or(0))
+                })
             })
             .and_then(|stats| stats["contextWindow"].as_u64());
-
-        // Model with the most output tokens; falls back to last SystemInit model.
-        let model = model_usage
-            .and_then(|mu| {
-                mu.iter()
-                    .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
-                    .map(|(k, _)| k.clone())
-            })
-            .or_else(|| self.last_model.clone());
-        // Keep `last_model` in sync for turns without modelUsage.
-        if let Some(m) = model.as_deref() {
-            self.last_model = Some(m.to_string());
-        }
 
         // Option-preserving reader (absent cache fields stay `None` for the UI);
         // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
@@ -1041,7 +1065,7 @@ impl StreamParser {
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
                     // Cache the model for subsequent result chunks.
-                    self.last_model = Some(model.to_string());
+                    self.model_tracker.observe_init(model);
                     let log_entry = Some(LogEntry {
                         prefix: "SYSTEM",
                         message: format!("init: model={model}"),
@@ -3119,6 +3143,51 @@ mod tests {
                     Some(1_000_000),
                     "context_window_size must come from the same dominant model — picking Haiku's 200k here would misreport the cap for 1M sessions"
                 );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_chronological_model_wins_over_usage_dominant_old_model() {
+        // Regression: a mid-session /model switch to B produces little B usage
+        // next to a lot of accumulated A usage. Chronological last-observed
+        // model (B) must win — usage-dominance would wrongly report A.
+        let mut parser = StreamParser::new();
+        let init_a = r#"{"type":"system","subtype":"init","model":"model-a"}"#;
+        parse_line_str(&mut parser, init_a);
+        let init_b = r#"{"type":"system","subtype":"init","model":"model-b"}"#;
+        parse_line_str(&mut parser, init_b);
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"model-a":{"inputTokens":1000,"outputTokens":5000,"contextWindow":200000},"model-b":{"inputTokens":10,"outputTokens":5,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("model-b"));
+                assert_eq!(context_window_size, Some(1_000_000));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_assistant_model_feeds_result_without_modelusage() {
+        // Only `capture_assistant_model` (via parse_line's "assistant" arm) can
+        // seed the tracker here: no preceding system init in this transcript.
+        let mut parser = StreamParser::new();
+        let assistant =
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"model-observed","usage":{}}}"#;
+        parse_line_all_str(&mut parser, assistant);
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("model-observed"));
             }
             other => panic!("expected Result, got {other:?}"),
         }

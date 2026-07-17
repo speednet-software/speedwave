@@ -49,6 +49,7 @@ mod queue_cmd;
 mod reconcile;
 mod redmine_api_cmd;
 mod retry_cmd;
+mod session_model;
 mod setup_wizard;
 mod slash_cmd;
 mod system_settings_cmd;

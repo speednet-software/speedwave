@@ -728,6 +728,7 @@ fn compute_resume_snapshot_impl(
     let mut latest_modelusage_model: Option<String> = None;
     let mut latest_init_model: Option<String> = None;
     let mut last_context_usage: Option<crate::chat::TurnUsage> = None;
+    let mut tracker = crate::session_model::SessionModelTracker::default();
 
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
@@ -806,11 +807,15 @@ fn compute_resume_snapshot_impl(
                     if let Some(model) = parsed["model"].as_str() {
                         if !model.is_empty() {
                             latest_init_model = Some(model.to_string());
+                            tracker.observe_init(model);
                         }
                     }
                 }
             }
             "assistant" => {
+                if let Some(model) = parsed["message"]["model"].as_str() {
+                    tracker.observe_assistant(model);
+                }
                 // Last main-chain call's usage = context occupancy; sidechain
                 // (subagent) lines have their own context and are skipped.
                 if !crate::chat::is_sidechain_event(&parsed) {
@@ -828,7 +833,11 @@ fn compute_resume_snapshot_impl(
 
     let mut snap = latest_cumulative.unwrap_or(summed);
     snap.total_cost = latest_cost;
-    snap.model = latest_modelusage_model.or(latest_init_model);
+    snap.model = tracker
+        .resolve()
+        .map(str::to_string)
+        .or(latest_modelusage_model)
+        .or(latest_init_model);
     snap.context_usage = last_context_usage;
     Ok(snap)
 }
@@ -2293,23 +2302,66 @@ mod tests {
     }
 
     #[test]
-    fn compute_resume_snapshot_prefers_modelusage_model_over_init() {
+    fn compute_resume_snapshot_chronological_model_wins_over_usage_dominant_old_model() {
+        // Regression: init A, many A assistant turns (large usage), init B, ONE
+        // B turn — chronological model (B) must win over A's usage dominance.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // On a mid-session model switch, the seed reflects the latest `modelUsage` model.
         write_session(
             &dir,
             id,
             &[
-                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
-                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"claude-sonnet-4-7":{"inputTokens":1,"outputTokens":1}}}"#,
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"model-a","usage":{"input_tokens":100,"output_tokens":900}}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"model-a","usage":{"input_tokens":100,"output_tokens":900}}}"#,
+                r#"{"type":"system","subtype":"init","model":"model-b"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"model-b","usage":{"input_tokens":1,"output_tokens":1}}}"#,
             ],
         );
 
         let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
-        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
+        assert_eq!(snap.model.as_deref(), Some("model-b"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_synthetic_assistant_model_without_later_init_is_ignored() {
+        // A synthetic-model assistant turn (no later init) must not mask the
+        // real init model.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>"}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("model-a"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_assistant_model_wins_when_no_init_line() {
+        // No `system init` line at all; the assistant-observed model (read in
+        // `compute_resume_snapshot_impl`'s own "assistant" arm) resolves the snapshot.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[r#"{"type":"assistant","message":{"role":"assistant","model":"claude-haiku-4-5"}}"#],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("claude-haiku-4-5"));
     }
 
     #[test]
