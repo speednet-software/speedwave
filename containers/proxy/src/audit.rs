@@ -8,9 +8,9 @@ use std::path::Path;
 
 const AUDIT_FILE_NAME: &str = "audit-proxy.jsonl";
 
-/// Proxy scans the whole request body as one boundary (A-in): it does not distinguish the
-/// fresh prompt from replayed history (C), so every line carries the same fixed layer tag.
-const LAYER: &str = "A-in";
+/// Proxy scans the whole request body as one boundary (llm-request): it does not distinguish
+/// the fresh prompt from replayed history and file content, so every line carries one layer tag.
+const LAYER: &str = "llm-request";
 
 #[derive(Serialize)]
 struct PiiAuditLine {
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
 
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(first["layer"], "A-in");
+        assert_eq!(first["layer"], "llm-request");
         assert_eq!(first["category"], "EMAIL");
         assert_eq!(first["action"], "tokenized");
         assert_eq!(first["count"], 3);
