@@ -1825,7 +1825,10 @@ mod tests {
                 assert_eq!(command, "model");
                 assert_eq!(argument, "claude-sonnet-5");
             }
-            other => panic!("expected ControlChip, got {other:?}"),
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
         }
         assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
         assert_eq!(transcript.messages[1].content, "what is 2+2?");
@@ -1855,7 +1858,10 @@ mod tests {
                 assert_eq!(command, "effort");
                 assert_eq!(argument, "high");
             }
-            other => panic!("expected ControlChip, got {other:?}"),
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
 
