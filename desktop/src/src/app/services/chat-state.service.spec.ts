@@ -455,6 +455,54 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('control-shape check runs on the wire text, not displayText', () => {
+    // The backend's parse_control_command parses the wire blocks (built from
+    // chatInput.text), never displayText — plan mode prefixes only the wire text.
+    const PLAN_MODE_PREFIX = '[Plan mode] Produce a plan only.\n\n';
+
+    it('suppresses the optimistic bubble when the wire text is control-shaped even though displayText carries a plan-mode prefix', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      // Composer contract: payload (wire) gets prefixed in plan mode, displayText does not.
+      await service.sendMessage(
+        { text: '/model claude-sonnet-5', attachments: [] },
+        '/model claude-sonnet-5'
+      );
+
+      // No optimistic bubble — the backend will emit a ControlChip for this wire text.
+      expect(service.messages).toHaveLength(0);
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: '/model claude-sonnet-5' }],
+        displayText: '/model claude-sonnet-5',
+      });
+    });
+
+    it('shows the optimistic bubble when displayText looks control-shaped but the wire text (plan-mode prefixed) is not', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      const wireText = `${PLAN_MODE_PREFIX}/model claude-sonnet-5`;
+      // Composer contract: displayText is the unprefixed bubble text; here it
+      // happens to look control-shaped even though the wire text is not.
+      await service.sendMessage({ text: wireText, attachments: [] }, '/model claude-sonnet-5');
+
+      // Backend's parse_control_command sees the prefixed wire text, which does not
+      // match `^/(model|effort)\s+\S+$`, so no ControlChip is emitted — the bubble
+      // must render, or the message would silently vanish from the UI.
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+      expect(service.messages[0].blocks[0]).toEqual({
+        type: 'text',
+        content: '/model claude-sonnet-5',
+      });
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: wireText }],
+        displayText: '/model claude-sonnet-5',
+      });
+    });
+  });
+
   describe('ControlChip chunk handling', () => {
     it('appends a chip message when a control-shaped send is emitted', () => {
       const beforeLen = service.messages.length;

@@ -465,7 +465,9 @@ export class ChatStateService {
     }
     // A control-shaped send (`/model x`, `/effort y`) arrives via a `ControlChip`
     // stream event instead — skip the optimistic bubble to avoid double-rendering.
-    const isControlSend = chatInput.attachments.length === 0 && isControlShaped(surfaceText);
+    // Must check the wire text (what the backend's parse_control_command sees),
+    // not the display text — plan mode prefixes only the wire text.
+    const isControlSend = chatInput.attachments.length === 0 && isControlShaped(chatInput.text);
     if (!isControlSend) {
       this._messages = [
         ...this._messages,
