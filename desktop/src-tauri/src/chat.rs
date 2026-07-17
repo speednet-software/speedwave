@@ -93,6 +93,17 @@ pub enum StreamChunk {
     /// Commits a UUID onto the most recent user entry (ADR-046) on the first
     /// text-bearing user message (not a tool_result wrapper).
     UserMessageCommit { uuid: String },
+    /// A user control command (`/model <id>` or `/effort <level>`), recognized
+    /// by shape at send time and rendered as a self-describing chip instead of
+    /// a plain user bubble. `uuid` is `None` at emission — the wire carries no
+    /// user-echo event for a tool-free session; a later user-type event with a
+    /// matching `message.id` may still commit a uuid via `UserMessageCommit`.
+    ControlChip {
+        command: String,
+        argument: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
     /// One-slot queued message (ADR-045) drained at turn end; frontend clears
     /// `state.pending_queue` since the message is already in flight via stdin.
     QueueDrained { session_id: String, text: String },
@@ -3615,6 +3626,62 @@ mod tests {
             json,
             r#"{"chunk_type":"SystemInit","data":{"model":"test","session_id":"abc"}}"#
         );
+    }
+
+    #[test]
+    fn stream_chunk_control_chip_round_trips() {
+        let chunk = StreamChunk::ControlChip {
+            command: "model".to_string(),
+            argument: "claude-sonnet-5".to_string(),
+            uuid: Some("u-model-1".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(
+            json,
+            r#"{"chunk_type":"ControlChip","data":{"command":"model","argument":"claude-sonnet-5","uuid":"u-model-1"}}"#
+        );
+        let decoded: StreamChunk = serde_json::from_str(&json).unwrap();
+        match decoded {
+            StreamChunk::ControlChip {
+                command,
+                argument,
+                uuid,
+            } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+                assert_eq!(uuid.as_deref(), Some("u-model-1"));
+            }
+            other => panic!("expected ControlChip after round-trip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_chunk_control_chip_omits_uuid_when_none() {
+        let chunk = StreamChunk::ControlChip {
+            command: "effort".to_string(),
+            argument: "high".to_string(),
+            uuid: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(
+            !json.contains("uuid"),
+            "None uuid must be omitted, got: {json}"
+        );
+    }
+
+    #[test]
+    fn stream_chunk_control_chip_unicode_argument_round_trips() {
+        let chunk = StreamChunk::ControlChip {
+            command: "model".to_string(),
+            argument: "modèle-🌊".to_string(),
+            uuid: Some("u-2".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let decoded: StreamChunk = serde_json::from_str(&json).unwrap();
+        match decoded {
+            StreamChunk::ControlChip { argument, .. } => assert_eq!(argument, "modèle-🌊"),
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
     }
 
     #[test]
