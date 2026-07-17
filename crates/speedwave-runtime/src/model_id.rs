@@ -1,19 +1,10 @@
-//! Model id triad (ADR pending, design section 4.3.1): `catalog_id` (provider-native),
-//! `wire_id` (what `/model` and `ANTHROPIC_MODEL` carry), `observed_id` (init.model shape,
-//! same as wire_id). This module owns the mapping both ways. The wire prefix is ALWAYS
-//! `entry_id` (never a hardcoded per-kind literal) - `compose/proxy.rs`'s rendered route
-//! `prefix` must equal the same `entry_id` for `containers/proxy/src/router.rs::resolve`
-//! (which splits the model on its first `/`) to find the route this module builds ids for.
+//! Model id triad: `catalog_id` (provider-native) vs `wire_id`/`observed_id` (`ANTHROPIC_MODEL`
+//! shape). The wire prefix is always `entry_id`, matching `compose/proxy.rs`'s route `prefix`.
 
 use crate::config::LlmProviderKind;
 
-/// Builds the wire id from a catalog id for the given provider entry.
-/// Anthropic kinds: unchanged. Other kinds: `<entry_id>/<catalog_id>`, unless
-/// `catalog_id` is already prefixed with `<entry_id>/` (mirrors
-/// `compose/llm.rs`'s `routed_model` rule exactly). `entry_id` is always the
-/// route prefix on the proxy side too (`compose/proxy.rs` renders `prefix:
-/// entry.id` for every non-anthropic route) - this holds for ANY valid slug,
-/// not just the built-in `openrouter`/`local` ids.
+/// Builds the wire id from a catalog id: unchanged for Anthropic kinds, else
+/// `<entry_id>/<catalog_id>` (no double-prefix if already wire-shaped).
 pub fn wire_model_id(kind: LlmProviderKind, entry_id: &str, catalog_id: &str) -> String {
     if kind.is_anthropic() {
         return catalog_id.to_string();
@@ -27,8 +18,7 @@ pub fn wire_model_id(kind: LlmProviderKind, entry_id: &str, catalog_id: &str) ->
 }
 
 /// Strips one leading `<entry_id>/` from an observed wire id, for display and
-/// comparison against `catalog_id`. Anthropic ids (no such prefix) and any
-/// non-matching prefix pass through unchanged.
+/// comparison against `catalog_id`; a non-matching prefix passes through unchanged.
 pub fn normalize_observed(observed: &str, entry_id: &str) -> String {
     let prefix = format!("{entry_id}/");
     observed

@@ -451,6 +451,56 @@ mod tests {
         }
     }
 
+    /// Pins the actual rendered `ANTHROPIC_MODEL` value through `wire_model_id`
+    /// for both a nested-catalog OpenRouter id and a Local id.
+    #[test]
+    fn routed_model_env_pins_wire_model_id() {
+        let cases = [
+            (
+                crate::config::LlmProviderKind::OpenRouter,
+                "openrouter",
+                "anthropic/claude-sonnet-5",
+                "openrouter/anthropic/claude-sonnet-5",
+            ),
+            (
+                crate::config::LlmProviderKind::Local,
+                "local",
+                "qwen2.5-coder",
+                "local/qwen2.5-coder",
+            ),
+        ];
+        for (kind, id, model, expected_wire) in cases {
+            let cfg = crate::config::LlmConfig {
+                providers: vec![crate::config::LlmProviderEntry {
+                    id: id.into(),
+                    kind,
+                    base_url: Some("http://host.docker.internal:1234".into()),
+                    model: Some(model.into()),
+                    has_api_key: false,
+                    context_tokens: None,
+                    has_custom_headers: false,
+                }],
+                active: Some(crate::config::LlmActive {
+                    provider_id: id.into(),
+                    model: Some(model.into()),
+                }),
+                proxy_enabled: Some(true),
+                ..Default::default()
+            };
+            let rendered = apply_llm_config_proxy(
+                "services:\n  claude:\n    environment: []\n",
+                &cfg,
+                "test-caller-token",
+            )
+            .unwrap();
+            let expected_line = format!("ANTHROPIC_MODEL={expected_wire}");
+            assert!(
+                rendered.contains(&expected_line),
+                "id={id}: expected `{expected_line}` in rendered env: {rendered}"
+            );
+        }
+    }
+
     fn emptied_v2(proxy_enabled: Option<bool>) -> crate::config::LlmConfig {
         crate::config::LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
