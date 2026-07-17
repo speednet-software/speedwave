@@ -362,6 +362,38 @@ describe('ChatComponent', () => {
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeTruthy();
     });
+
+    it('binds composerContextLabel to the composer contextLabel input, formatted from session stats', () => {
+      projectState.status.set('ready');
+      chatState._setState({
+        sessionStats: {
+          session_id: 's1',
+          total_cost: 0,
+          context_window_size: 200000,
+          total_output_tokens: 0,
+        },
+      });
+      fixture.detectChanges();
+
+      expect(component.composerContextLabel()).toBe('200k');
+      const composer = fixture.debugElement.query(By.directive(ComposerComponent));
+      expect(composer.componentInstance.contextLabel()).toBe('200k');
+    });
+
+    it('leaves contextLabel empty when the context window is unknown (local model)', () => {
+      projectState.status.set('ready');
+      chatState._setState({
+        sessionStats: {
+          session_id: 's1',
+          total_cost: 0,
+          context_window_size: null,
+          total_output_tokens: 0,
+        },
+      });
+      fixture.detectChanges();
+
+      expect(component.composerContextLabel()).toBe('');
+    });
   });
 
   // ── onQuestionAnswered ──────────────────────────────────────────────────

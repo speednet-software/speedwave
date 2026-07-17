@@ -18,6 +18,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
 import type { ConversationSummary, ChatAttachment } from '../models/chat';
+import { formatContextLabel } from '../models/llm';
 import { ChatHeaderComponent } from './header/chat-header.component';
 import { ChatMessageListComponent } from './message-list/chat-message-list.component';
 import { ComposerComponent } from './composer/composer.component';
@@ -68,6 +69,12 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (msgs[i].role === 'assistant') return i;
     }
     return -1;
+  });
+
+  /** Composer's max-context hint (e.g. `200k`); empty when the window is unknown (local model). */
+  readonly composerContextLabel = computed(() => {
+    const windowSize = this.chat.sessionStatsFromState()?.context_window_size;
+    return windowSize ? formatContextLabel(windowSize) : '';
   });
 
   /** Controls the context-overflow confirm dialog visibility. */

@@ -539,4 +539,29 @@ describe('ComposerComponent', () => {
       ]);
     });
   });
+
+  describe('overlayWidth', () => {
+    it('reflects the textarea width read at call time, not a cached first read', () => {
+      const el = textarea();
+      Object.defineProperty(el, 'offsetWidth', { value: 300, configurable: true });
+      expect(component.overlayWidth()).toBe('300px');
+
+      Object.defineProperty(el, 'offsetWidth', { value: 500, configurable: true });
+      expect(component.overlayWidth()).toBe('500px');
+    });
+  });
+
+  describe('contextLabel', () => {
+    it('does not render the context span when contextLabel is empty (default)', () => {
+      const span = rootEl.querySelector('[data-testid="composer-context"]');
+      expect(span).toBeNull();
+    });
+
+    it('renders the bound contextLabel text', () => {
+      fixture.componentRef.setInput('contextLabel', '200k');
+      fixture.detectChanges();
+      const span = rootEl.querySelector('[data-testid="composer-context"]');
+      expect(span?.textContent?.trim()).toBe('200k');
+    });
+  });
 });

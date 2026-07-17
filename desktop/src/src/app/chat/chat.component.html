@@ -67,6 +67,7 @@
             [model]="chat.sessionStatsFromState()?.model ?? ''"
             [projectId]="projectState.activeProject() ?? ''"
             [modelError]="chat.modelSelectionError()"
+            [contextLabel]="composerContextLabel()"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"

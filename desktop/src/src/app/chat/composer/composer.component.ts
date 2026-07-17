@@ -345,10 +345,15 @@ export class ComposerComponent implements AfterViewInit {
     },
   ];
 
-  /** Width binding used so the overlay matches the textarea width. */
-  readonly overlayWidth = computed<string>(() =>
-    this.textareaRef?.nativeElement ? `${this.textareaRef.nativeElement.offsetWidth}px` : 'auto'
-  );
+  /**
+   * Width binding so the overlay matches the textarea width. A plain method, not a `computed()` —
+   * it reads live DOM layout (`offsetWidth`), not a signal, and must re-run every CD cycle.
+   */
+  overlayWidth(): string {
+    return this.textareaRef?.nativeElement
+      ? `${this.textareaRef.nativeElement.offsetWidth}px`
+      : 'auto';
+  }
 
   /** True when the user closed the slash menu while the trigger still matches, suppressing auto-reopen. */
   private slashSuppressedByUser = false;
