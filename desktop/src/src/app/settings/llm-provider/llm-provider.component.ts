@@ -14,7 +14,6 @@ import {
 import { CommonModule } from '@angular/common';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
-import { AnthropicModelsService } from '../../services/anthropic-models.service';
 import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
@@ -23,12 +22,10 @@ import { AuthTerminalComponent } from '../auth-terminal.component';
 import { OauthCompletionWatcher } from './oauth-completion-watcher';
 import type { AuthStatusResponse } from '../../services/project-state.service';
 import {
-  AnthropicModel,
   DiscoveredModel,
   DiscoverResult,
   ExtraProviderId,
   FlatProviderId,
-  formatContextLabel,
   LEGACY_LOCAL_PROVIDERS,
   LlmActive,
   LlmConfigResponse,
@@ -280,41 +277,10 @@ function classifyDiscoveryFailure(msg: string): {
               }
             }
 
-            <!-- Default model -->
             <div class="mt-3">
-              <label
-                class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                for="llm-model"
-                >default_model</label
-              >
-              <select
-                id="llm-model"
-                [value]="model()"
-                (change)="model.set(inputValue($event))"
-                class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                data-testid="settings-llm-model"
-              >
-                <!-- Empty value = no ANTHROPIC_MODEL injected; real default is
-                     plan-dependent (Pro→Sonnet, Max→Opus), unseen by Speedwave. -->
-                <option value="">Default — depends on your plan (switchable via /model)</option>
-                @if (latestAnthropicModels().length > 0) {
-                  <optgroup label="Latest">
-                    @for (m of latestAnthropicModels(); track m.id) {
-                      <option [value]="m.id">{{ formatModelLabel(m) }}</option>
-                    }
-                  </optgroup>
-                }
-                @if (legacyAnthropicModels().length > 0) {
-                  <optgroup label="Legacy">
-                    @for (m of legacyAnthropicModels(); track m.id) {
-                      <option [value]="m.id">{{ formatModelLabel(m) }}</option>
-                    }
-                  </optgroup>
-                }
-                @if (model() && !modelInCatalog(model())) {
-                  <option [value]="model()">{{ model() }} (not in catalog)</option>
-                }
-              </select>
+              <p class="mono text-[11px] text-[var(--ink-mute)]">
+                Model wybierasz w oknie czatu - użyj selektora modelu w composerze.
+              </p>
             </div>
           </div>
         }
@@ -440,37 +406,14 @@ function classifyDiscoveryFailure(msg: string): {
               </div>
             }
 
-            @if (discoveryState().kind === 'ready' || hasSavedModel()) {
-              <div class="mt-3">
-                <label
-                  class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                  for="llm-model"
-                  >default_model</label
-                >
-                @let ds = discoveryState();
-                <select
-                  id="llm-model"
-                  (change)="onLocalModelChange(inputValue($event))"
-                  class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                  data-testid="settings-llm-model"
-                >
-                  @if (ds.kind === 'ready') {
-                    @if (model() && !discoveredModelIds().includes(model())) {
-                      <option [value]="model()" [selected]="true">
-                        {{ model() }} (not on server)
-                      </option>
-                    }
-                    @for (m of ds.models; track m.id) {
-                      <option [value]="m.id" [selected]="m.id === model()">
-                        {{ formatLocalModelLabel(m) }}
-                      </option>
-                    }
-                  } @else {
-                    <!-- Saved config: show the model without re-probing. -->
-                    <option [value]="model()" [selected]="true">{{ model() }}</option>
-                  }
-                </select>
-              </div>
+            @if (discoveryState().kind === 'ready') {
+              <p
+                class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
+                data-testid="settings-llm-local-model-hint"
+              >
+                Model dla nowych sesji dobierany automatycznie z pierwszego wyniku discover; wybór
+                modelu w bieżącej sesji - w oknie czatu.
+              </p>
             }
 
             <details class="mt-3">
@@ -576,32 +519,14 @@ function classifyDiscoveryFailure(msg: string): {
                 </p>
               }
 
-              @if (entry.models && entry.models.length > 0) {
-                <div class="mt-3">
-                  <label
-                    class="mono mb-1 block text-[10px] uppercase tracking-widest text-[var(--ink-mute)]"
-                    [attr.for]="'extra-model-' + entry.id"
-                    >default_model</label
-                  >
-                  <!-- Selection lives on the options, not a [value] binding: catalog options load async. -->
-                  <select
-                    [id]="'extra-model-' + entry.id"
-                    (change)="onExtraModelSelect(entry, inputValue($event))"
-                    class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
-                    [attr.data-testid]="'settings-llm-extra-model-' + entry.id"
-                  >
-                    <option value="" disabled [selected]="!entry.model">select model…</option>
-                    @if (entry.model && !catalogHasModel(entry, entry.model)) {
-                      <option [value]="entry.model" [selected]="true">{{ entry.model }}</option>
-                    }
-                    @for (m of entry.models; track m.id) {
-                      <option [value]="m.id" [selected]="m.id === entry.model">
-                        {{ m.id
-                        }}{{ m.context_tokens ? ' (' + ctxLabel(m.context_tokens) + ')' : '' }}
-                      </option>
-                    }
-                  </select>
-                </div>
+              @if (entry.hasKey || entry.keyInput.trim()) {
+                <p
+                  class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
+                  [attr.data-testid]="'settings-llm-extra-model-hint-' + entry.id"
+                >
+                  Model wybierasz w oknie czatu; nowa konfiguracja startuje z domyślnym modelem
+                  OpenRouter.
+                </p>
               }
             </div>
           }
@@ -735,79 +660,18 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     });
   }
 
-  private anthropicModels = inject(AnthropicModelsService);
   private chatState = inject(ChatStateService);
   private log = inject(LoggerService);
 
-  /** Cached SSOT Anthropic model catalog (`list_anthropic_models`). Empty until the first fetch settles; optgroups render nothing while loading. */
-  protected readonly anthropicCatalog = signal<readonly AnthropicModel[]>([]);
-
-  /** Models flagged `latest = true` — rendered in the "Latest" optgroup. */
-  protected readonly latestAnthropicModels = computed<readonly AnthropicModel[]>(() =>
-    this.anthropicCatalog().filter((m) => m.latest)
-  );
-
-  /** Remaining still-available snapshots — rendered in the "Legacy" optgroup. */
-  protected readonly legacyAnthropicModels = computed<readonly AnthropicModel[]>(() =>
-    this.anthropicCatalog().filter((m) => !m.latest)
-  );
-
-  /** Loads the LLM configuration + the SSOT model catalog from the backend on init. */
+  /** Loads the LLM configuration from the backend on init. */
   ngOnInit(): void {
     this.loadConfig();
-    void this.loadAnthropicCatalog();
     this.oauthWatcher.watchWindowFocus();
   }
 
   /** Tears down the external-login watcher (poll + focus listener). */
   ngOnDestroy(): void {
     this.oauthWatcher.destroy();
-  }
-
-  /**
-   * Format a catalog entry into the dropdown label, e.g. `"Opus 4.7 · 1M ctx (claude-opus-4-7)"` — the id keeps copied aliases honest.
-   * @param m - the catalog entry to format
-   */
-  protected formatModelLabel(m: AnthropicModel): string {
-    return `${m.family} · ${formatContextLabel(m.context_tokens)} ctx (${m.id})`;
-  }
-
-  /**
-   * Whether the given model id is present in the SSOT catalog.
-   * @param id - the model id to look up
-   */
-  protected modelInCatalog(id: string): boolean {
-    return this.anthropicCatalog().some((m) => m.id === id);
-  }
-
-  /**
-   * Format a discovered local model into a dropdown label: `id · 32k ctx` when a context window is known, otherwise the bare id.
-   * @param m - the discovered model to format
-   */
-  protected formatLocalModelLabel(m: DiscoveredModel): string {
-    if (m.context_tokens && m.context_tokens > 0) {
-      return `${m.id} · ${formatContextLabel(m.context_tokens)} ctx`;
-    }
-    return m.id;
-  }
-
-  /** Ids of every model returned by the most recent discovery probe. */
-  protected readonly discoveredModelIds = computed<string[]>(() => {
-    const s = this.discoveryState();
-    return s.kind === 'ready' ? s.models.map((m) => m.id) : [];
-  });
-
-  /** True when a non-empty model should render while discovery is idle. */
-  protected readonly hasSavedModel = computed<boolean>(
-    () => this.discoveryState().kind === 'idle' && !!this.model()
-  );
-
-  /**
-   * Local-model `<select>` change handler. `context_tokens` are derived on demand from `discoveryState.models` (one source), not cached here.
-   * @param id - the selected model id
-   */
-  protected onLocalModelChange(id: string): void {
-    this.model.set(id);
   }
 
   /**
@@ -839,26 +703,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.customHeadersTouched.set(true);
   }
 
-  /** `context_tokens` to save: anthropic→catalog lookup; local+discovery→picked model's window; local pre-discovery→loaded config value; else `null`. */
+  /** `context_tokens` to save — no model control writes it anymore (Task 18); anthropic never carries one, local reuses the loaded value. */
   private resolveContextTokensForSave(): number | null {
-    const model = this.model();
-    if (!model) return null;
-    if (this.provider() === 'anthropic') {
-      return this.anthropicCatalog().find((m) => m.id === model)?.context_tokens ?? null;
-    }
-    const s = this.discoveryState();
-    if (s.kind === 'ready') {
-      const picked = s.models.find((m) => m.id === model);
-      return picked?.context_tokens ?? null;
-    }
-    return this.loadedLocalContextTokens;
-  }
-
-  /** Loads the catalog through the shared service and pushes it into the signal. */
-  private async loadAnthropicCatalog(): Promise<void> {
-    const list = await this.anthropicModels.list();
-    this.anthropicCatalog.set(list);
-    this.cdr.markForCheck();
+    return this.provider() === 'anthropic' ? null : this.loadedLocalContextTokens;
   }
 
   /**
@@ -936,10 +783,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       if (row && models.length > 0) {
         row.models = models;
         row.discoverError = null;
-        if (row.model) {
-          row.contextTokens =
-            models.find((m) => m.id === row.model)?.context_tokens ?? row.contextTokens;
-        }
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -968,34 +811,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Dropdown selection handler for an openrouter row — records the model and its catalog context window.
-   * @param entry - the remote provider row being edited
-   * @param modelId - the selected model id
-   */
-  onExtraModelSelect(entry: ExtraProviderEdit, modelId: string): void {
-    entry.model = modelId;
-    entry.contextTokens = entry.models?.find((m) => m.id === modelId)?.context_tokens ?? null;
-    this.extraProviders.set([...this.extraProviders()]);
-  }
-
-  /**
-   * Whether the discovered catalog contains `modelId` — drives the extra `<option>` preserving a previously saved model that left the catalog.
-   * @param entry - the remote provider row to check
-   * @param modelId - the model id to look up
-   */
-  catalogHasModel(entry: ExtraProviderEdit, modelId: string): boolean {
-    return !!entry.models?.some((m) => m.id === modelId);
-  }
-
-  /**
-   * Context window as a short label (`128k`, `1M`) for dropdown options.
-   * @param tokens - the context window size in tokens
-   */
-  ctxLabel(tokens: number): string {
-    return formatContextLabel(tokens);
-  }
-
-  /**
    * Key-field input handler for a remote provider row.
    * @param entry - the remote provider row being edited
    * @param value - the new API key input value
@@ -1007,14 +822,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     entry.discoverError = null;
     this.extraProviders.set([...this.extraProviders()]);
   }
-
-  /** Placeholder model name per provider. Anthropic derives it from the SSOT catalog (latest everyday Sonnet); empty while loading to avoid a stale id. */
-  readonly modelPlaceholder = computed<string>(() => {
-    if (this.provider() === 'anthropic') {
-      return this.anthropicModels.latestEverydayModelId() ?? '';
-    }
-    return 'llama3.3';
-  });
 
   /** Human-readable reason the discovery probe failed, shown inline under the discover button. */
   discoveryFailureMessage(): string {
@@ -1135,10 +942,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       // Invariant: do_discover_llm_models maps empty lists to Err("empty"), so a resolved Ok always carries a non-empty array.
       this.discoveryState.set({ kind: 'ready', url: effectiveUrl, models: result.models });
       this.messagesEndpointOk.set(result.messages_endpoint_ok ?? null);
-      // Auto-select only when blank (a3): a restored-but-unlisted model is deliberate — keep it (template offers "not on server").
-      if (!this.model() && result.models[0]?.id) {
-        this.model.set(result.models[0].id);
-      }
     } catch (e: unknown) {
       const live = this.discoveryState();
       if (live.kind !== 'in-flight' || live.id !== id) return;
@@ -1258,15 +1061,13 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   private buildProviderSet(anthropicHasApiKey: boolean): LlmProviderEntry[] {
     // Resolve the active target once — it's stable for this invocation.
     const target = this.effectiveTarget();
-    const model = this.model();
-    // Anthropic card active → `this.model`; else the load-time snapshot, so
-    // an explicit Anthropic model survives activating another provider.
-    const anthropicModel = target === 'anthropic' ? model : this.loadedAnthropicModel;
+    // Settings never writes a user-chosen Anthropic model (Task 18) — the
+    // composer owns model selection; the backend clears it on every save anyway.
     const providers: LlmProviderEntry[] = [
       {
         id: 'anthropic',
         kind: anthropicHasApiKey ? 'anthropic_api_key' : 'anthropic_oauth',
-        model: anthropicModel || null,
+        model: null,
         has_api_key: anthropicHasApiKey,
       },
     ];
@@ -1284,7 +1085,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
           id: 'local',
           kind: 'local',
           base_url: localUrl,
-          model: (editingLocal ? model : this.loadedLocalEntry?.model) || null,
+          // No local UI control writes `model` anymore — always the loaded entry's.
+          model: this.loadedLocalEntry?.model || null,
           has_api_key: this.hasApiKey() || (this.apiKeyTouched() && this.apiKey().trim() !== ''),
           has_custom_headers:
             this.hasCustomHeaders() ||
@@ -1369,7 +1171,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
     if (extra) return !!extra.model.trim();
-    return !!this.model().trim();
+    // No local UI control writes `model` anymore (Task 18) — a stored entry
+    // model, or a base_url alone (server-side auto-default, Task 11),
+    // satisfies the gate just like the saveConfig guard above.
+    return (
+      !!this.model().trim() ||
+      !!this.loadedLocalEntry?.model ||
+      !!(this.baseUrl() || this.defaultBaseUrl())
+    );
   });
 
   /**
@@ -1422,6 +1231,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (extra) {
       return { provider_id: extra.id, model: extra.model || null };
     }
+    if (target === 'anthropic') {
+      return { provider_id: target, model: null };
+    }
     return {
       provider_id: target,
       model: this.model() || null,
@@ -1455,7 +1267,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     // also rejects it but only at container start (no immediate feedback).
     const provider = this.provider();
     const localIsActive = this.effectiveTarget() === 'local';
-    if (provider !== 'anthropic' && !this.model() && localIsActive) {
+    // No local UI control writes `model` anymore (Task 18): a stored entry
+    // model satisfies the guard, and so does a base_url alone — the backend
+    // auto-defaults an empty local model via a live probe (Task 11).
+    const localCanSave =
+      !!this.model() ||
+      !!this.loadedLocalEntry?.model ||
+      !!(this.baseUrl() || this.defaultBaseUrl());
+    if (provider !== 'anthropic' && !localCanSave && localIsActive) {
       this.errorOccurred.emit('A model name is required for local providers');
       return;
     }
