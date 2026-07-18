@@ -511,6 +511,29 @@ pub fn unalias_text(text: &str, match_text: &str, alias: &str, case_sensitive: b
     substitute_preserving_case(text, alias, match_text, case_sensitive)
 }
 
+/// [`unalias_text`], but skipping any already-formed PII token span (the same
+/// `TOKEN_SPAN_RE` masking [`mask_spans`] uses for scan idempotency): a coincidental
+/// alias-shaped substring inside a token's base64 ciphertext is never touched (design
+/// doc §7.2 — the response path unmasks keywords before PII spans are detokenized, so
+/// the spans are still present as literal text when this runs).
+pub fn unalias_text_preserving_tokens(
+    text: &str,
+    match_text: &str,
+    alias: &str,
+    case_sensitive: bool,
+) -> String {
+    match mask_spans(text) {
+        Ok(segments) => segments
+            .into_iter()
+            .map(|segment| match segment {
+                Segment::Plain(s) => unalias_text(&s, match_text, alias, case_sensitive),
+                Segment::Masked(s) => s,
+            })
+            .collect(),
+        Err(_) => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -1021,5 +1044,36 @@ mod tests {
             alias_text("nothing to see here", "Coca-Cola", "Brandex", false),
             "nothing to see here"
         );
+    }
+
+    // ── unalias_text_preserving_tokens: keyword unmask must skip PII token spans ──
+
+    #[test]
+    fn preserving_tokens_unmasks_plain_text_normally() {
+        let result =
+            unalias_text_preserving_tokens("Use Brandex API", "Coca-Cola", "Brandex", true);
+        assert_eq!(result, "Use Coca-Cola API");
+    }
+
+    #[test]
+    fn preserving_tokens_never_touches_a_token_spans_ciphertext() {
+        let key = test_key();
+        // An alias-shaped ciphertext substring is astronomically unlikely in practice, but
+        // the mechanism must still leave the whole span untouched byte-for-byte: build a
+        // real token and confirm it survives verbatim even when it appears next to the
+        // alias in plain text.
+        let ciphertext = siv_seal(&key, "EMAIL", b"alias@example.com").expect("seal succeeds");
+        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let text = format!("Brandex sent from {token}");
+
+        let result = unalias_text_preserving_tokens(&text, "Coca-Cola", "Brandex", true);
+        assert_eq!(result, format!("Coca-Cola sent from {token}"));
+    }
+
+    #[test]
+    fn preserving_tokens_is_a_noop_with_no_match() {
+        let result =
+            unalias_text_preserving_tokens("nothing to see here", "Coca-Cola", "Brandex", false);
+        assert_eq!(result, "nothing to see here");
     }
 }

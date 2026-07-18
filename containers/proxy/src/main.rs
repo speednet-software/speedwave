@@ -157,6 +157,37 @@ mod tests {
         addr
     }
 
+    /// Mock SSE backend that echoes `text` back as a single content delta — used to simulate
+    /// a model response that still carries a PII token span and/or a keyword alias exactly as
+    /// the proxy's outbound scan left them, so the inbound rewrite can be exercised end to end.
+    async fn spawn_mock_sse_backend_with_text(text: String) -> std::net::SocketAddr {
+        use axum::response::IntoResponse;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/v1/messages",
+                axum::routing::post(move || {
+                    let text = text.clone();
+                    async move {
+                        let delta = serde_json::json!({
+                            "type": "content_block_delta",
+                            "delta": {"type": "text_delta", "text": text}
+                        });
+                        let sse = format!("data: {delta}\n\ndata: [DONE]\n\n");
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            sse,
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
     /// Mock backend that captures the raw request body it received (for asserting what the
     /// proxy actually forwards) and replies with a minimal SSE-shaped 200.
     async fn spawn_capturing_backend() -> (
@@ -538,5 +569,68 @@ mod tests {
         assert_eq!(line["action"], "tokenized");
         assert_eq!(line["session"], serde_json::Value::Null);
         assert_eq!(line["tool"], serde_json::Value::Null);
+    }
+
+    /// Full round trip end to end: what the outbound `scan_request` leaves in a request
+    /// (a PII token span plus a masked keyword alias) is exactly what a real model would
+    /// echo back; the inbound rewrite must hand the client the original plaintext, with no
+    /// token span or alias surviving in the streamed response body (design doc §5.1/§7.3).
+    #[tokio::test]
+    async fn v1_messages_detokenizes_pii_and_unmasks_keywords_in_streamed_response() {
+        let policy_json = r#"{
+            "version": 3,
+            "source": { "policies": [], "forced": [] },
+            "rules": [
+                { "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": true, "log": false }
+            ],
+            "keywords": [
+                { "match": "Coca-Cola", "alias": "Brandex", "caseSensitive": true }
+            ]
+        }"#;
+        let policy = speedwave_pii_engine::compile_policy_v3(policy_json).unwrap();
+        let key = speedwave_pii_engine::EngineKey::from_bytes([9u8; 32]);
+
+        // Exactly what the outbound scan left in the request the model actually saw.
+        let mut body = serde_json::json!({"system": "Contact bob@example.com at Coca-Cola"});
+        crate::pii::scan_request(&policy, &key, &mut body).unwrap();
+        let upstream_echo = body["system"].as_str().unwrap().to_string();
+        assert!(upstream_echo.contains("[EMAIL:TOKEN_"));
+        assert!(upstream_echo.contains("Brandex"));
+
+        let usage_dir = tempfile::tempdir().unwrap();
+        let addr = spawn_mock_sse_backend_with_text(upstream_echo).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.pii = std::sync::Arc::new(crate::pii::PiiEngineState::Ready { policy, key });
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_text = String::from_utf8_lossy(&body_bytes);
+
+        assert!(
+            body_text.contains("Contact bob@example.com at Coca-Cola"),
+            "response must be fully detokenized and unmasked: {body_text}"
+        );
+        assert!(
+            !body_text.contains("TOKEN_"),
+            "no literal PII token may reach the agent: {body_text}"
+        );
+        assert!(
+            !body_text.contains("Brandex"),
+            "no keyword alias may reach the agent: {body_text}"
+        );
     }
 }

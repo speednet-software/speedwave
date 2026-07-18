@@ -14,7 +14,7 @@ pub use policy::{
 };
 pub use scan::{
     alias_text, detokenize_json, detokenize_text, detokenize_text_lossy, scan_json, scan_text,
-    unalias_text, Detection, DetectionAction, DetokenizeError, ScanError, ScanOutcome,
-    TOKEN_SPAN_RE,
+    unalias_text, unalias_text_preserving_tokens, Detection, DetectionAction, DetokenizeError,
+    ScanError, ScanOutcome, TOKEN_SPAN_RE,
 };
 pub use siv::{EngineKey, SivError};

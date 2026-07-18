@@ -303,24 +303,39 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
     let status_code = status.as_u16();
+    // Cheap Arc clone: the spawned task outlives this handler and needs its own handle to
+    // unmask keywords and detokenize PII spans before the response reaches the agent (§5.1).
+    let pii_state = cfg.pii.clone();
 
-    // Channel-based unbuffered relay: each upstream chunk is forwarded immediately.
-    // The spawned task sniffs SSE frames while forwarding — RAM stays flat.
+    // Channel-based relay: each upstream chunk is rewritten (keywords unmasked, PII spans
+    // detokenized) then forwarded as soon as the rolling buffer judges it safe.
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     tokio::spawn(async move {
+        let PiiEngineState::Ready { policy, key } = pii_state.as_ref() else {
+            // Unreachable: `messages` already required `Ready` before ever calling upstream,
+            // and the engine state never changes after startup. Fail closed rather than
+            // forward a response nobody has rewritten.
+            log::error!("PII engine unavailable for response rewrite; dropping stream");
+            return;
+        };
         let mut byte_stream = upstream.bytes_stream();
         let mut acc = UsageAcc::default();
-        // Buffer for incomplete SSE lines across chunks.
+        // Buffer for incomplete SSE lines across chunks (usage sniffing only).
         let mut line_buf = String::new();
-        // Stream aborted mid-flight (upstream byte error) → failure, even on a 2xx.
+        let mut rewrite_buffer = pii::ResponseRewriteBuffer::new();
+        // Stream aborted mid-flight (upstream byte error, or a detokenization failure) →
+        // failure, even on a 2xx.
         let mut stream_errored = false;
+        // The client dropped the connection — stop pushing, and skip the final flush send.
+        let mut client_disconnected = false;
 
         use futures_util::StreamExt;
         while let Some(chunk) = byte_stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    // Sniff SSE frames from the chunk before forwarding.
+                    // Sniff SSE frames from the original chunk — unaffected by the rewrite
+                    // below, since usage numbers reflect what the upstream actually billed.
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         line_buf.push_str(text);
                         for line in drain_complete_lines(&mut line_buf) {
@@ -337,11 +352,27 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                                 }
                             }
                         }
-                        // Only sniffing is bounded; the byte relay below stays verbatim.
+                        // Only sniffing is bounded; the rewrite buffer below is separate.
                         bound_sniff_buffer(&mut line_buf, MAX_SNIFF_BUF);
                     }
-                    // Forward chunk immediately — no buffering.
-                    if tx.send(Ok(bytes)).await.is_err() {
+                    // Unmask keywords then detokenize PII spans (§5.1/§7.2/§7.3), holding
+                    // back only what might still be the start of a split token span.
+                    let forward_bytes =
+                        match rewrite_buffer.push_chunk(&bytes, policy.keywords(), key) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                log::error!(
+                                    "PII detokenization failed mid-response, aborting stream: {e}"
+                                );
+                                let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                                stream_errored = true;
+                                break;
+                            }
+                        };
+                    if !forward_bytes.is_empty()
+                        && tx.send(Ok(Bytes::from(forward_bytes))).await.is_err()
+                    {
+                        client_disconnected = true;
                         break; // Client disconnected.
                     }
                 }
@@ -349,6 +380,19 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     stream_errored = true;
                     break;
+                }
+            }
+        }
+
+        if !stream_errored && !client_disconnected {
+            match rewrite_buffer.finish(policy.keywords(), key) {
+                Ok(remaining) if !remaining.is_empty() => {
+                    let _ = tx.send(Ok(Bytes::from(remaining))).await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    log::error!("PII detokenization failed flushing response tail: {e}");
+                    stream_errored = true;
                 }
             }
         }
