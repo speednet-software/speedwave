@@ -7,16 +7,14 @@ pub mod scan;
 pub mod siv;
 mod validators;
 
-pub use patterns::{
-    builtin_rules, default_sensitive_keys, is_sensitive_key, BuiltinRule, PatternError,
-    BUILTIN_CATEGORIES, SENSITIVE_FIELD,
-};
+pub use patterns::validator_by_name;
 pub use policy::{
-    compile_policy_v2, default_policy_json, CategoryFlags, CompiledPolicy, CompiledRule,
-    PolicyError,
+    compile_policy_v3, default_policy_json, CategoryFlags, CompiledKeyword, CompiledPolicy,
+    CompiledRule, PolicyError,
 };
 pub use scan::{
-    detokenize_json, detokenize_text, detokenize_text_lossy, scan_json, scan_text, Detection,
-    DetectionAction, DetokenizeError, ScanError, ScanOutcome, TOKEN_SPAN_RE,
+    alias_text, detokenize_json, detokenize_text, detokenize_text_lossy, scan_json, scan_text,
+    unalias_text, Detection, DetectionAction, DetokenizeError, ScanError, ScanOutcome,
+    TOKEN_SPAN_RE,
 };
 pub use siv::{EngineKey, SivError};

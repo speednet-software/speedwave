@@ -1,62 +1,81 @@
-//! Parser and compiler for the `policy.json` v2 inter-component contract
-//! (host renders it, proxy and hub consume the compiled form).
+//! Parser and compiler for the `policy.json` v3 inter-component contract
+//! (host renders it, proxy and hub consume the compiled form). Rules are
+//! data: every category comes from the document, none are hardcoded here.
 
-use crate::patterns::{self, BUILTIN_CATEGORIES, SENSITIVE_FIELD};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
-/// Per-category protection flags from policy.json v2.
+/// A rule may declare at most this many patterns; a document may declare at
+/// most this many rules, keywords, and total patterns across all rules.
+const MAX_RULES: usize = 256;
+const MAX_PATTERNS: usize = 1024;
+const MAX_KEYWORDS: usize = 256;
+const MAX_PATTERN_LEN: usize = 512;
+
+static RULE_ID_RE: LazyLock<Result<Regex, regex::Error>> =
+    LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9_]{0,63}$"));
+static ALIAS_RE: LazyLock<Result<Regex, regex::Error>> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9]*$"));
+
+/// Per-rule protection flags from policy.json v3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CategoryFlags {
-    /// Whether hits in this category are tokenized (sealed) before leaving the engine.
+    /// Whether hits in this rule are tokenized (sealed) before leaving the engine.
     pub tokenize: bool,
-    /// Whether hits in this category are logged (observation mode).
+    /// Whether hits in this rule are logged (observation mode).
     pub log: bool,
 }
 
-/// One ready-to-scan rule: category id, compiled regex, optional checksum validator, flags.
+/// One ready-to-scan rule: category id, compiled patterns, optional checksum validator, flags.
+#[derive(Debug)]
 pub struct CompiledRule {
-    /// Category id: a built-in category or a `customPatterns[].id`.
+    /// Category id: a `rules[].id` from policy.json.
     pub category: String,
-    /// Compiled value-match regex for this category.
-    pub regex: Regex,
-    /// Checksum validator run on a regex match before it counts as a hit.
+    /// Compiled value-match regexes for this rule; any pattern matching counts as a hit.
+    pub patterns: Vec<Regex>,
+    /// Checksum validator run on a match before it counts as a hit.
     pub validator: Option<fn(&str) -> bool>,
-    /// Tokenize/log flags resolved from policy.json for this category.
+    /// Tokenize/log flags resolved from policy.json for this rule.
     pub flags: CategoryFlags,
 }
 
-/// A policy.json v2, parsed, validated and compiled for scanning.
+/// One literal keyword substitution: an exact string and its stand-in alias.
+#[derive(Debug)]
+pub struct CompiledKeyword {
+    /// The literal text to mask.
+    pub match_text: String,
+    /// The alias substituted for `match_text`.
+    pub alias: String,
+    /// Whether matching is case-sensitive.
+    pub case_sensitive: bool,
+}
+
+/// A policy.json v3, parsed, validated and compiled for scanning.
+#[derive(Debug)]
 pub struct CompiledPolicy {
     rules: Vec<CompiledRule>,
-    sensitive_field_flags: CategoryFlags,
-    sensitive_keys: Vec<String>,
+    keywords: Vec<CompiledKeyword>,
 }
 
 impl CompiledPolicy {
-    /// Value-pattern rules with at least one flag on, built-ins first then custom (file order).
+    /// Value-pattern rules with at least one flag on, in file order.
     pub fn rules(&self) -> &[CompiledRule] {
         &self.rules
     }
 
-    /// Flags for SENSITIVE_FIELD key-name detection.
-    pub fn sensitive_field_flags(&self) -> CategoryFlags {
-        self.sensitive_field_flags
-    }
-
-    /// Lowercased sensitive key-name substrings.
-    pub fn sensitive_keys(&self) -> &[String] {
-        &self.sensitive_keys
+    /// Literal keyword substitutions, in file order.
+    pub fn keywords(&self) -> &[CompiledKeyword] {
+        &self.keywords
     }
 }
 
-/// A policy.json v2 document failed to parse or violates the contract's semantics.
+/// A policy.json v3 document failed to parse or violates the contract's semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyError {
-    /// Malformed JSON or a v2 shape mismatch; the message carries only line/column, never content.
+    /// Malformed JSON or a v3 shape mismatch; the message carries only line/column, never content.
     Parse(String),
-    /// A v2 semantic rule was violated; the message carries only field/category/pattern ids.
+    /// A v3 semantic rule was violated; the message carries only field/category/pattern ids.
     Semantic(String),
 }
 
@@ -72,16 +91,14 @@ impl std::fmt::Display for PolicyError {
 impl std::error::Error for PolicyError {}
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct PolicyFileV2 {
+#[serde(deny_unknown_fields)]
+struct PolicyFileV3 {
     version: u32,
     #[serde(rename = "source")]
     _source: SourceMeta,
-    categories: HashMap<String, CategoryConfig>,
+    rules: Vec<RuleV3>,
     #[serde(default)]
-    custom_patterns: Vec<CustomPatternConfig>,
-    #[serde(default)]
-    sensitive_keys: Vec<String>,
+    keywords: Vec<KeywordV3>,
 }
 
 /// Policy provenance metadata; parsed and validated structurally but not
@@ -96,27 +113,36 @@ struct SourceMeta {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CategoryConfig {
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RuleV3 {
+    id: String,
+    #[serde(rename = "displayName")]
+    _display_name: String,
+    patterns: Vec<String>,
+    #[serde(default)]
+    validator: Option<String>,
+    #[serde(default = "default_case_sensitive")]
+    case_sensitive: bool,
     tokenize: bool,
     log: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct CustomPatternConfig {
-    id: String,
-    #[serde(rename = "displayName")]
-    _display_name: String,
-    pattern: String,
-    case_insensitive: bool,
-    tokenize: bool,
-    log: bool,
+struct KeywordV3 {
+    r#match: String,
+    alias: String,
+    #[serde(default = "default_case_sensitive")]
+    case_sensitive: bool,
 }
 
-/// Parses + validates + compiles policy.json v2. Any structural or semantic problem is Err.
-pub fn compile_policy_v2(json: &str) -> Result<CompiledPolicy, PolicyError> {
-    let file: PolicyFileV2 = serde_json::from_str(json).map_err(|e| {
+fn default_case_sensitive() -> bool {
+    true
+}
+
+/// Parses + validates + compiles policy.json v3. Any structural or semantic problem is Err.
+pub fn compile_policy_v3(json: &str) -> Result<CompiledPolicy, PolicyError> {
+    let file: PolicyFileV3 = serde_json::from_str(json).map_err(|e| {
         PolicyError::Parse(format!(
             "malformed policy document at line {} column {}",
             e.line(),
@@ -124,140 +150,192 @@ pub fn compile_policy_v2(json: &str) -> Result<CompiledPolicy, PolicyError> {
         ))
     })?;
 
-    if file.version != 2 {
+    if file.version != 3 {
         return Err(PolicyError::Semantic(format!(
-            "unsupported policy version {}, engine supports version 2 only",
+            "unsupported policy version {}, engine supports version 3 only",
             file.version
         )));
     }
 
-    validate_categories(&file.categories)?;
-    validate_custom_patterns(&file.custom_patterns)?;
+    if file.rules.len() > MAX_RULES {
+        return Err(PolicyError::Semantic(format!(
+            "too many rules: {} exceeds limit of {MAX_RULES}",
+            file.rules.len()
+        )));
+    }
 
-    let builtin = patterns::builtin_rules().map_err(|e| PolicyError::Semantic(e.to_string()))?;
-    let mut rules = Vec::with_capacity(builtin.len() + file.custom_patterns.len());
+    let pattern_count: usize = file.rules.iter().map(|r| r.patterns.len()).sum();
+    if pattern_count > MAX_PATTERNS {
+        return Err(PolicyError::Semantic(format!(
+            "too many patterns: {pattern_count} exceeds limit of {MAX_PATTERNS}"
+        )));
+    }
 
-    for rule in builtin {
-        // Presence of every built-in category key is guaranteed by validate_categories.
-        let cfg = &file.categories[rule.category];
-        let flags = CategoryFlags {
-            tokenize: cfg.tokenize,
-            log: cfg.log,
+    if file.keywords.len() > MAX_KEYWORDS {
+        return Err(PolicyError::Semantic(format!(
+            "too many keywords: {} exceeds limit of {MAX_KEYWORDS}",
+            file.keywords.len()
+        )));
+    }
+
+    let rules = compile_rules(file.rules)?;
+    let keywords = compile_keywords(file.keywords)?;
+
+    Ok(CompiledPolicy { rules, keywords })
+}
+
+fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
+    let mut compiled = Vec::with_capacity(rules.len());
+    for rule in rules {
+        if !rule_id_format_valid(&rule.id) {
+            return Err(PolicyError::Semantic(format!(
+                "invalid rule id format '{}'",
+                rule.id
+            )));
+        }
+        if rule.patterns.is_empty() {
+            return Err(PolicyError::Semantic(format!(
+                "rule '{}' must have at least one pattern",
+                rule.id
+            )));
+        }
+
+        let mut patterns = Vec::with_capacity(rule.patterns.len());
+        for (i, pattern) in rule.patterns.iter().enumerate() {
+            if pattern.len() > MAX_PATTERN_LEN {
+                return Err(PolicyError::Semantic(format!(
+                    "rule '{}' pattern {i} exceeds {MAX_PATTERN_LEN} chars",
+                    rule.id
+                )));
+            }
+            let regex = RegexBuilder::new(pattern)
+                .case_insensitive(!rule.case_sensitive)
+                .build()
+                .map_err(|_| {
+                    PolicyError::Semantic(format!(
+                        "rule '{}' pattern {i} failed to compile",
+                        rule.id
+                    ))
+                })?;
+            patterns.push(regex);
+        }
+
+        let validator = match &rule.validator {
+            Some(name) => Some(crate::patterns::validator_by_name(name).ok_or_else(|| {
+                PolicyError::Semantic(format!("unknown validator '{name}' in rule '{}'", rule.id))
+            })?),
+            None => None,
         };
+
+        let flags = CategoryFlags {
+            tokenize: rule.tokenize,
+            log: rule.log,
+        };
+
         if flags.tokenize || flags.log {
-            rules.push(CompiledRule {
-                category: rule.category.to_string(),
-                regex: rule.regex.clone(),
-                validator: rule.validator,
+            compiled.push(CompiledRule {
+                category: rule.id,
+                patterns,
+                validator,
                 flags,
             });
         }
     }
-
-    for cp in &file.custom_patterns {
-        let flags = CategoryFlags {
-            tokenize: cp.tokenize,
-            log: cp.log,
-        };
-        if !(flags.tokenize || flags.log) {
-            continue;
-        }
-        let regex = RegexBuilder::new(&cp.pattern)
-            .case_insensitive(cp.case_insensitive)
-            .build()
-            .map_err(|_| {
-                PolicyError::Semantic(format!("custom pattern '{}' failed to compile", cp.id))
-            })?;
-        rules.push(CompiledRule {
-            category: cp.id.clone(),
-            regex,
-            validator: None,
-            flags,
-        });
-    }
-
-    // Presence of the SENSITIVE_FIELD category key is guaranteed by validate_categories.
-    let sensitive_field_cfg = &file.categories[SENSITIVE_FIELD];
-    let sensitive_field_flags = CategoryFlags {
-        tokenize: sensitive_field_cfg.tokenize,
-        log: sensitive_field_cfg.log,
-    };
-
-    let sensitive_keys = file
-        .sensitive_keys
-        .iter()
-        .map(|k| k.to_lowercase())
-        .collect();
-
-    Ok(CompiledPolicy {
-        rules,
-        sensitive_field_flags,
-        sensitive_keys,
-    })
+    Ok(compiled)
 }
 
-/// Serializes the compiled-in default policy.json v2 (every category tokenize-on, engine's
-/// default sensitive-key list): the SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
-pub fn default_policy_json() -> String {
-    let categories: serde_json::Map<String, serde_json::Value> = BUILTIN_CATEGORIES
-        .iter()
-        .map(|&category| {
-            (
-                category.to_string(),
-                serde_json::json!({ "tokenize": true, "log": false }),
-            )
-        })
-        .collect();
-    serde_json::json!({
-        "version": 2,
-        "source": { "policies": [], "forced": [] },
-        "categories": categories,
-        "customPatterns": [],
-        "sensitiveKeys": patterns::default_sensitive_keys(),
-    })
-    .to_string()
-}
-
-/// Every built-in category must be present exactly once; any other key is unknown.
-fn validate_categories(categories: &HashMap<String, CategoryConfig>) -> Result<(), PolicyError> {
-    for expected in BUILTIN_CATEGORIES {
-        if !categories.contains_key(expected) {
-            return Err(PolicyError::Semantic(format!(
-                "missing category '{expected}'"
-            )));
-        }
-    }
-    for key in categories.keys() {
-        if !BUILTIN_CATEGORIES.contains(&key.as_str()) {
-            return Err(PolicyError::Semantic(format!("unknown category '{key}'")));
-        }
-    }
-    Ok(())
-}
-
-/// Ids must be non-empty, distinct, and not collide with a built-in category.
-fn validate_custom_patterns(custom: &[CustomPatternConfig]) -> Result<(), PolicyError> {
-    let mut seen: HashSet<&str> = HashSet::new();
-    for cp in custom {
-        if cp.id.is_empty() {
+fn compile_keywords(keywords: Vec<KeywordV3>) -> Result<Vec<CompiledKeyword>, PolicyError> {
+    let mut compiled = Vec::with_capacity(keywords.len());
+    for kw in keywords {
+        if kw.r#match.len() < 3 {
             return Err(PolicyError::Semantic(
-                "custom pattern id must not be empty".to_string(),
+                "keyword match must be at least 3 characters".to_string(),
             ));
         }
-        if BUILTIN_CATEGORIES.contains(&cp.id.as_str()) {
+        if kw.alias.len() < 3 {
+            return Err(PolicyError::Semantic(
+                "keyword alias must be at least 3 characters".to_string(),
+            ));
+        }
+        if kw.r#match == kw.alias {
+            return Err(PolicyError::Semantic(
+                "keyword match and alias must be different".to_string(),
+            ));
+        }
+        if !alias_format_valid(&kw.alias) {
             return Err(PolicyError::Semantic(format!(
-                "custom pattern id '{}' collides with a built-in category",
-                cp.id
+                "invalid alias format '{}'",
+                kw.alias
             )));
         }
-        if !seen.insert(cp.id.as_str()) {
-            return Err(PolicyError::Semantic(format!(
-                "duplicate custom pattern id '{}'",
-                cp.id
-            )));
-        }
+        compiled.push(CompiledKeyword {
+            match_text: kw.r#match,
+            alias: kw.alias,
+            case_sensitive: kw.case_sensitive,
+        });
     }
-    Ok(())
+    Ok(compiled)
+}
+
+fn rule_id_format_valid(id: &str) -> bool {
+    RULE_ID_RE.as_ref().is_ok_and(|re| re.is_match(id))
+}
+
+fn alias_format_valid(alias: &str) -> bool {
+    alias.len() <= 128 && ALIAS_RE.as_ref().is_ok_and(|re| re.is_match(alias))
+}
+
+#[derive(Deserialize)]
+struct RulesYamlFile {
+    version: u32,
+    rules: Vec<RulesYamlRule>,
+}
+
+#[derive(Deserialize)]
+struct RulesYamlRule {
+    id: String,
+    #[serde(rename = "displayName")]
+    display_name: String,
+    patterns: Vec<String>,
+    #[serde(default)]
+    validator: Option<String>,
+}
+
+/// Serializes the compiled-in default policy.json v3 from the built-in rule
+/// library (`mcp-servers/policies/rules.yaml`): every rule tokenize-on, no
+/// keywords. SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
+pub fn default_policy_json() -> String {
+    let yaml = include_str!("../../../mcp-servers/policies/rules.yaml");
+    // Fail-closed rather than panic: rules.yaml is a compile-time asset guarded by
+    // rules_integration_test.rs, so a parse failure here is unreachable in practice.
+    let file: RulesYamlFile = serde_yaml_ng::from_str(yaml).unwrap_or(RulesYamlFile {
+        version: 3,
+        rules: Vec::new(),
+    });
+
+    let rules: Vec<serde_json::Value> = file
+        .rules
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "displayName": r.display_name,
+                "patterns": r.patterns,
+                "validator": r.validator,
+                "caseSensitive": true,
+                "tokenize": true,
+                "log": false,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "version": file.version,
+        "source": { "policies": [], "forced": [] },
+        "rules": rules,
+        "keywords": [],
+    })
+    .to_string()
 }
 
 #[cfg(test)]
@@ -268,347 +346,251 @@ fn validate_custom_patterns(custom: &[CustomPatternConfig]) -> Result<(), Policy
 mod tests {
     use super::*;
 
-    const FULL_EXAMPLE: &str = r#"{
-        "version": 2,
-        "source": { "policies": ["strict", "gdpr-art32"], "forced": ["gdpr-art32"] },
-        "categories": {
-            "EMAIL":           { "tokenize": true,  "log": false },
-            "PHONE_PL":        { "tokenize": true,  "log": false },
-            "PESEL":           { "tokenize": true,  "log": true  },
-            "NIP":             { "tokenize": true,  "log": false },
-            "IBAN":            { "tokenize": true,  "log": false },
-            "CARD":            { "tokenize": true,  "log": false },
-            "API_KEY":         { "tokenize": true,  "log": false },
-            "SENSITIVE_FIELD": { "tokenize": true,  "log": false }
-        },
-        "customPatterns": [
-            { "id": "EMPLOYEE_ID", "displayName": "Employee ID", "pattern": "\\bEMP-\\d{4,8}\\b",
-              "caseInsensitive": false, "tokenize": true, "log": false }
+    const VALID_V3_POLICY: &str = r#"{
+        "version": 3,
+        "source": { "policies": ["strict"], "forced": [] },
+        "rules": [
+            {
+                "id": "EMAIL",
+                "displayName": "E-mail address",
+                "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"],
+                "caseSensitive": true,
+                "tokenize": true,
+                "log": false
+            },
+            {
+                "id": "PESEL",
+                "displayName": "PESEL",
+                "patterns": ["\\d{11}"],
+                "validator": "pesel",
+                "caseSensitive": true,
+                "tokenize": true,
+                "log": false
+            }
         ],
-        "sensitiveKeys": ["password", "token", "salary"]
+        "keywords": [
+            {
+                "match": "Coca-Cola",
+                "alias": "Brandex",
+                "caseSensitive": false
+            }
+        ]
     }"#;
 
-    /// Replaces the eight canonical `categories` entries with a caller-supplied JSON object
-    /// literal, keeping the rest of [`FULL_EXAMPLE`] intact.
-    fn with_categories(categories_json: &str) -> String {
-        let categories_start = FULL_EXAMPLE.find("\"categories\"").expect("field present");
-        let brace_start = FULL_EXAMPLE[categories_start..]
-            .find('{')
-            .map(|i| categories_start + i)
-            .expect("opening brace");
-        let mut depth = 0i32;
-        let mut brace_end = brace_start;
-        for (offset, ch) in FULL_EXAMPLE[brace_start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        brace_end = brace_start + offset;
-                        break;
-                    }
-                }
-                _ => {}
+    #[test]
+    fn v3_valid_policy_compiles() {
+        let policy = compile_policy_v3(VALID_V3_POLICY).expect("valid policy");
+        assert_eq!(policy.rules().len(), 2);
+        assert_eq!(policy.keywords().len(), 1);
+        assert_eq!(policy.keywords()[0].match_text, "Coca-Cola");
+        assert_eq!(policy.keywords()[0].alias, "Brandex");
+        assert!(!policy.keywords()[0].case_sensitive);
+    }
+
+    #[test]
+    fn v3_version_2_is_rejected() {
+        let json = VALID_V3_POLICY.replacen("\"version\": 3,", "\"version\": 2,", 1);
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("version")),
+            other => panic!("expected a semantic version error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_malformed_json_is_a_parse_error() {
+        match compile_policy_v3("{ not json") {
+            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_unknown_top_level_field_is_rejected() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"version\": 3,",
+            "\"version\": 3, \"bogusTopLevel\": true,",
+            1,
+        );
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_enforces_rule_limit() {
+        let mut rules = Vec::new();
+        for i in 0..257 {
+            rules.push(format!(
+                r#"{{"id": "RULE_{i}", "displayName": "Rule {i}", "patterns": ["pattern"], "caseSensitive": true, "tokenize": true, "log": false}}"#
+            ));
+        }
+        let json = format!(
+            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [{}], "keywords": []}}"#,
+            rules.join(",")
+        );
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("too many rules")),
+            other => panic!("expected semantic error for rule limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_enforces_pattern_count_limit() {
+        let mut patterns = Vec::new();
+        for i in 0..1025 {
+            patterns.push(format!("\"p{i}\""));
+        }
+        let json = format!(
+            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [
+                {{"id": "BIG", "displayName": "Big", "patterns": [{}], "caseSensitive": true, "tokenize": true, "log": false}}
+            ], "keywords": []}}"#,
+            patterns.join(",")
+        );
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("too many patterns")),
+            other => panic!("expected semantic error for pattern limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_enforces_keyword_limit() {
+        let mut keywords = Vec::new();
+        for i in 0..257 {
+            keywords.push(format!(
+                r#"{{"match": "needle{i}", "alias": "alias{i}", "caseSensitive": true}}"#
+            ));
+        }
+        let json = format!(
+            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [], "keywords": [{}]}}"#,
+            keywords.join(",")
+        );
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("too many keywords")),
+            other => panic!("expected semantic error for keyword limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_enforces_pattern_length_limit() {
+        let long_pattern = "a".repeat(513);
+        let json = format!(
+            r#"{{"version": 3, "source": {{"policies": [], "forced": []}}, "rules": [
+                {{"id": "LONG", "displayName": "Long", "patterns": ["{long_pattern}"], "caseSensitive": true, "tokenize": true, "log": false}}
+            ], "keywords": []}}"#
+        );
+        match compile_policy_v3(&json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("exceeds")),
+            other => panic!("expected semantic error for pattern length, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_rejects_invalid_rule_id() {
+        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "123", "displayName": "Bad", "patterns": ["x"], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
+        match compile_policy_v3(json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("invalid rule id")),
+            other => panic!("expected a semantic error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_rejects_lowercase_rule_id() {
+        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "email", "displayName": "Bad", "patterns": ["x"], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
+        match compile_policy_v3(json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("invalid rule id")),
+            other => panic!("expected a semantic error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_rejects_unknown_validator() {
+        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "FOO", "displayName": "Foo", "patterns": ["x"], "validator": "bogus", "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
+        match compile_policy_v3(json) {
+            Err(PolicyError::Semantic(msg)) => {
+                assert!(msg.contains("unknown validator"));
+                assert!(msg.contains("bogus"));
             }
-        }
-        format!(
-            "{}{}{}",
-            &FULL_EXAMPLE[..brace_start],
-            categories_json,
-            &FULL_EXAMPLE[brace_end + 1..]
-        )
-    }
-
-    #[test]
-    fn happy_path_compiles_all_rules_builtin_then_custom() {
-        let policy = compile_policy_v2(FULL_EXAMPLE).expect("valid policy compiles");
-        let rules = policy.rules();
-        assert_eq!(rules.len(), 8);
-        let categories: Vec<&str> = rules.iter().map(|r| r.category.as_str()).collect();
-        assert_eq!(
-            categories,
-            &[
-                "EMAIL",
-                "PHONE_PL",
-                "PESEL",
-                "NIP",
-                "IBAN",
-                "CARD",
-                "API_KEY",
-                "EMPLOYEE_ID",
-            ]
-        );
-        assert!(rules.iter().all(|r| r.flags.tokenize || r.flags.log));
-        assert_eq!(
-            policy.sensitive_keys(),
-            &[
-                "password".to_string(),
-                "token".to_string(),
-                "salary".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn version_1_is_rejected() {
-        let json = FULL_EXAMPLE.replacen("\"version\": 2", "\"version\": 1", 1);
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("version")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a semantic version error, got {e:?}"),
+            other => panic!("expected a semantic error, got {other:?}"),
         }
     }
 
     #[test]
-    fn version_3_is_rejected() {
-        let json = FULL_EXAMPLE.replacen("\"version\": 2", "\"version\": 3", 1);
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("version")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a semantic version error, got {e:?}"),
+    fn v3_rejects_empty_patterns() {
+        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "FOO", "displayName": "Foo", "patterns": [], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
+        match compile_policy_v3(json) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("at least one pattern")),
+            other => panic!("expected a semantic error, got {other:?}"),
         }
     }
 
     #[test]
-    fn unknown_top_level_field_is_rejected() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"version\": 2,",
-            "\"version\": 2, \"bogusTopLevel\": true,",
+    fn v3_invalid_regex_pattern_is_rejected_without_leaking_it() {
+        let json = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [{"id": "FOO", "displayName": "Foo", "patterns": ["(a+"], "caseSensitive": true, "tokenize": true, "log": false}], "keywords": []}"#;
+        match compile_policy_v3(json) {
+            Err(PolicyError::Semantic(msg)) => {
+                assert!(msg.contains("FOO"));
+                assert!(!msg.contains("(a+"));
+            }
+            other => panic!("expected a semantic error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_rule_off_on_both_flags_is_excluded_from_rules() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"caseSensitive\": true,\n                \"tokenize\": true,\n                \"log\": false\n            },\n            {\n                \"id\": \"PESEL\"",
+            "\"caseSensitive\": true,\n                \"tokenize\": false,\n                \"log\": false\n            },\n            {\n                \"id\": \"PESEL\"",
             1,
         );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a parse error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn unknown_category_field_is_rejected() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"EMAIL\":           { \"tokenize\": true,  \"log\": false },",
-            "\"EMAIL\":           { \"tokenize\": true,  \"log\": false, \"bogus\": 1 },",
-            1,
-        );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a parse error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn unknown_custom_pattern_field_is_rejected() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"caseInsensitive\": false, \"tokenize\": true, \"log\": false }",
-            "\"caseInsensitive\": false, \"tokenize\": true, \"log\": false, \"bogus\": 1 }",
-            1,
-        );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Parse(msg)) => assert!(msg.contains("line")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a parse error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn missing_one_category_names_it_in_the_error() {
-        let json = with_categories(
-            r#"{
-                "PHONE_PL":        { "tokenize": true,  "log": false },
-                "PESEL":           { "tokenize": true,  "log": true  },
-                "NIP":             { "tokenize": true,  "log": false },
-                "IBAN":            { "tokenize": true,  "log": false },
-                "CARD":            { "tokenize": true,  "log": false },
-                "API_KEY":         { "tokenize": true,  "log": false },
-                "SENSITIVE_FIELD": { "tokenize": true,  "log": false }
-            }"#,
-        );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("EMAIL")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a missing-category error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn unknown_category_name_is_rejected() {
-        let json = with_categories(
-            r#"{
-                "EMAIL":           { "tokenize": true,  "log": false },
-                "PHONE_PL":        { "tokenize": true,  "log": false },
-                "PESEL":           { "tokenize": true,  "log": true  },
-                "NIP":             { "tokenize": true,  "log": false },
-                "IBAN":            { "tokenize": true,  "log": false },
-                "CARD":            { "tokenize": true,  "log": false },
-                "API_KEY":         { "tokenize": true,  "log": false },
-                "SENSITIVE_FIELD": { "tokenize": true,  "log": false },
-                "FOO":             { "tokenize": true,  "log": false }
-            }"#,
-        );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("FOO")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected an unknown-category error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn category_off_on_both_flags_is_excluded_from_rules() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"EMAIL\":           { \"tokenize\": true,  \"log\": false },",
-            "\"EMAIL\":           { \"tokenize\": false, \"log\": false },",
-            1,
-        );
-        let policy = compile_policy_v2(&json).expect("valid policy compiles");
+        let policy = compile_policy_v3(&json).expect("valid policy compiles");
         assert!(!policy.rules().iter().any(|r| r.category == "EMAIL"));
+        assert_eq!(policy.rules().len(), 1);
     }
 
     #[test]
-    fn category_log_only_is_included_in_rules() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"EMAIL\":           { \"tokenize\": true,  \"log\": false },",
-            "\"EMAIL\":           { \"tokenize\": false, \"log\": true  },",
+    fn v3_case_insensitive_rule_matches_mixed_case() {
+        let json = VALID_V3_POLICY.replacen(
+            "\"patterns\": [\"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}\"],\n                \"caseSensitive\": true,",
+            "\"patterns\": [\"EMAIL-[a-z]+\"],\n                \"caseSensitive\": false,",
             1,
         );
-        let policy = compile_policy_v2(&json).expect("valid policy compiles");
+        let policy = compile_policy_v3(&json).expect("valid policy compiles");
         let rule = policy
             .rules()
             .iter()
             .find(|r| r.category == "EMAIL")
-            .expect("log-only category still produces a rule");
-        assert!(!rule.flags.tokenize);
-        assert!(rule.flags.log);
+            .expect("EMAIL rule present");
+        assert!(rule.patterns[0].is_match("email-marker"));
     }
 
     #[test]
-    fn custom_pattern_id_colliding_with_builtin_is_rejected() {
-        let json = FULL_EXAMPLE.replacen("\"id\": \"EMPLOYEE_ID\"", "\"id\": \"EMAIL\"", 1);
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("EMAIL")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a semantic collision error, got {e:?}"),
+    fn v3_keyword_match_alias_and_min_length_rules() {
+        let too_short = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [], "keywords": [{"match": "ab", "alias": "xyz", "caseSensitive": true}]}"#;
+        match compile_policy_v3(too_short) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("match")),
+            other => panic!("expected a semantic error, got {other:?}"),
+        }
+
+        let same = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [], "keywords": [{"match": "secret", "alias": "secret", "caseSensitive": true}]}"#;
+        match compile_policy_v3(same) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("must be different")),
+            other => panic!("expected a semantic error, got {other:?}"),
+        }
+
+        let bad_alias = r#"{"version": 3, "source": {"policies": [], "forced": []}, "rules": [], "keywords": [{"match": "secretco", "alias": "123bad", "caseSensitive": true}]}"#;
+        match compile_policy_v3(bad_alias) {
+            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("invalid alias format")),
+            other => panic!("expected a semantic error, got {other:?}"),
         }
     }
 
     #[test]
-    fn duplicate_custom_pattern_id_is_rejected() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"customPatterns\": [",
-            "\"customPatterns\": [\
-                { \"id\": \"EMPLOYEE_ID\", \"displayName\": \"dup\", \"pattern\": \"x\", \
-                  \"caseInsensitive\": false, \"tokenize\": true, \"log\": false },",
-            1,
-        );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("EMPLOYEE_ID")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a duplicate id error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn invalid_custom_pattern_regex_is_rejected() {
-        let json = FULL_EXAMPLE.replacen("\\\\bEMP-\\\\d{4,8}\\\\b", "(a+", 1);
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => {
-                assert!(
-                    msg.contains("EMPLOYEE_ID"),
-                    "message should name the pattern id"
-                );
-                assert!(
-                    !msg.contains("(a+"),
-                    "message must not leak the raw pattern"
-                );
-            }
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a semantic error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn custom_pattern_case_insensitive_matches_lowercase_value() {
-        let policy = compile_policy_v2(FULL_EXAMPLE).expect("valid policy compiles");
-        let rule = policy
-            .rules()
-            .iter()
-            .find(|r| r.category == "EMPLOYEE_ID")
-            .expect("custom rule present");
-        assert!(!rule.regex.is_match("emp-1234"));
-
-        let json =
-            FULL_EXAMPLE.replacen("\"caseInsensitive\": false", "\"caseInsensitive\": true", 1);
-        let policy = compile_policy_v2(&json).expect("valid policy compiles");
-        let rule = policy
-            .rules()
-            .iter()
-            .find(|r| r.category == "EMPLOYEE_ID")
-            .expect("custom rule present");
-        assert!(rule.regex.is_match("emp-1234"));
-    }
-
-    #[test]
-    fn sensitive_field_disabled_on_both_flags_reports_both_false() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"SENSITIVE_FIELD\": { \"tokenize\": true,  \"log\": false }",
-            "\"SENSITIVE_FIELD\": { \"tokenize\": false, \"log\": false }",
-            1,
-        );
-        let policy = compile_policy_v2(&json).expect("valid policy compiles");
-        assert_eq!(
-            policy.sensitive_field_flags(),
-            CategoryFlags {
-                tokenize: false,
-                log: false
-            }
-        );
-    }
-
-    #[test]
-    fn empty_custom_patterns_and_sensitive_keys_are_valid() {
-        let json = FULL_EXAMPLE
-            .replacen(
-                "\"customPatterns\": [\n            { \"id\": \"EMPLOYEE_ID\", \"displayName\": \"Employee ID\", \"pattern\": \"\\\\bEMP-\\\\d{4,8}\\\\b\",\n              \"caseInsensitive\": false, \"tokenize\": true, \"log\": false }\n        ],",
-                "\"customPatterns\": [],",
-                1,
-            )
-            .replacen(
-                "\"sensitiveKeys\": [\"password\", \"token\", \"salary\"]",
-                "\"sensitiveKeys\": []",
-                1,
-            );
-        let policy = compile_policy_v2(&json).expect("valid policy compiles");
-        assert_eq!(policy.rules().len(), 7);
-        assert!(policy.sensitive_keys().is_empty());
-    }
-
-    #[test]
-    fn tokenize_string_value_is_rejected_without_leaking_secret() {
-        let json = FULL_EXAMPLE.replacen(
-            "\"tokenize\": true",
-            "\"tokenize\": \"MY-SECRET-VALUE-XYZ\"",
-            1,
-        );
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Parse(msg)) => {
-                assert!(msg.contains("line"), "message should contain 'line'");
-                assert!(
-                    !msg.contains("MY-SECRET-VALUE-XYZ"),
-                    "message must not leak the secret value"
-                );
-            }
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a parse error, got {e:?}"),
-        }
-    }
-
-    #[test]
-    fn default_policy_json_compiles_and_covers_every_category() {
+    fn default_policy_json_v3_compiles() {
         let json = default_policy_json();
-        let policy = compile_policy_v2(&json).expect("default policy.json v2 must compile");
-        assert_eq!(policy.rules().len(), BUILTIN_CATEGORIES.len() - 1);
-        assert!(policy.sensitive_field_flags().tokenize);
-        assert_eq!(policy.sensitive_keys(), patterns::default_sensitive_keys());
+        let policy = compile_policy_v3(&json).expect("default policy must compile");
+        assert_eq!(policy.rules().len(), 7);
+        assert!(policy.keywords().is_empty());
     }
 
     #[test]
@@ -617,12 +599,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_custom_pattern_id_is_rejected() {
-        let json = FULL_EXAMPLE.replacen("\"id\": \"EMPLOYEE_ID\"", "\"id\": \"\"", 1);
-        match compile_policy_v2(&json) {
-            Err(PolicyError::Semantic(msg)) => assert!(msg.contains("empty")),
-            Ok(_) => panic!("expected an error, got Ok"),
-            Err(e) => panic!("expected a semantic error, got {e:?}"),
-        }
+    fn default_policy_json_includes_validators() {
+        let json = default_policy_json();
+        let policy = compile_policy_v3(&json).expect("default policy must compile");
+        let pesel = policy
+            .rules()
+            .iter()
+            .find(|r| r.category == "PESEL")
+            .expect("PESEL present");
+        assert!(pesel.validator.is_some());
+        let email = policy
+            .rules()
+            .iter()
+            .find(|r| r.category == "EMAIL")
+            .expect("EMAIL present");
+        assert!(email.validator.is_none());
     }
 }

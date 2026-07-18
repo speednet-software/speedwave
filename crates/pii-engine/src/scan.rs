@@ -1,7 +1,6 @@
 //! Scanning, tokenization, and fail-closed detokenization
 //! (TS counterpart: `mcp-servers/policies/src/tokenizer.ts`).
 
-use crate::patterns::{self, SENSITIVE_FIELD};
 use crate::policy::CompiledPolicy;
 use crate::siv::{decode_payload, encode_payload, open, seal, EngineKey};
 use regex::Regex;
@@ -32,7 +31,7 @@ pub enum DetectionAction {
 /// Per-category aggregate: how many matches, and what was done with them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Detection {
-    /// Category id: a built-in category or a custom pattern id.
+    /// Category id: a rule id from policy.json.
     pub category: String,
     /// What was done with hits in this category for this scan call.
     pub action: DetectionAction,
@@ -154,21 +153,37 @@ fn apply_rule(
     Ok((new_segments, total))
 }
 
-/// Finds validated hits in one plain segment and, if tokenizing, replaces them (dedup by value).
+/// Finds validated hits in one plain segment across every pattern in the rule (any pattern
+/// matching counts as a hit) and, if tokenizing, replaces them (dedup by value).
 fn tokenize_segment(
     segment: &str,
     rule: &crate::policy::CompiledRule,
     key: &EngineKey,
 ) -> Result<(Vec<Segment>, u32), ScanError> {
-    let mut hits: Vec<(usize, usize, String)> = Vec::new();
-    for m in rule.regex.find_iter(segment) {
-        let value = m.as_str();
-        if let Some(validator) = rule.validator {
-            if !validator(value) {
-                continue;
+    let mut candidates: Vec<(usize, usize, String)> = Vec::new();
+    for pattern in &rule.patterns {
+        for m in pattern.find_iter(segment) {
+            let value = m.as_str();
+            if let Some(validator) = rule.validator {
+                if !validator(value) {
+                    continue;
+                }
             }
+            candidates.push((m.start(), m.end(), value.to_string()));
         }
-        hits.push((m.start(), m.end(), value.to_string()));
+    }
+    // Earliest start first; at equal start, longest match first, so overlapping hits from a
+    // rule's other patterns never re-match text already claimed.
+    candidates.sort_by_key(|(start, end, _)| (*start, std::cmp::Reverse(*end)));
+
+    let mut hits: Vec<(usize, usize, String)> = Vec::new();
+    let mut last_end = 0usize;
+    for (start, end, value) in candidates {
+        if start < last_end {
+            continue;
+        }
+        hits.push((start, end, value));
+        last_end = end;
     }
 
     let count = hits.len() as u32;
@@ -232,36 +247,19 @@ pub fn scan_text(
     Ok(ScanOutcome { text, detections })
 }
 
-/// Adds one hit to the aggregate, merging into an existing per-category entry if present.
-fn record_hit(agg: &mut Vec<Detection>, category: &str, action: DetectionAction, count: u32) {
-    if let Some(existing) = agg.iter_mut().find(|d| d.category == category) {
-        existing.count += count;
-    } else {
-        agg.push(Detection {
-            category: category.to_string(),
-            action,
-            count,
-        });
-    }
-}
-
 /// Merges a sub-tree's detections into the whole-tree aggregate.
 fn merge_detections(agg: &mut Vec<Detection>, more: Vec<Detection>) {
     for d in more {
-        record_hit(agg, &d.category, d.action, d.count);
+        if let Some(existing) = agg.iter_mut().find(|e| e.category == d.category) {
+            existing.count += d.count;
+        } else {
+            agg.push(d);
+        }
     }
 }
 
-/// True when `s` is nothing but a single existing token span (already masked, never re-tokenize).
-fn is_full_token_span(s: &str) -> Result<bool, ScanError> {
-    let re = token_span_regex().map_err(|_| ScanError::TokenPatternInvalid)?;
-    Ok(re
-        .find(s)
-        .is_some_and(|m| m.start() == 0 && m.end() == s.len()))
-}
-
-/// Scans a JSON tree in place: string values via value rules; keys matching the sensitive-key
-/// list tokenize the whole value under SENSITIVE_FIELD. All-or-nothing: on error, the input remains unchanged.
+/// Scans a JSON tree in place: every string value is scanned through the rule set.
+/// All-or-nothing: on error, the input remains unchanged.
 pub fn scan_json(
     policy: &CompiledPolicy,
     key: &EngineKey,
@@ -292,23 +290,7 @@ fn scan_json_value(
             }
         }
         serde_json::Value::Object(map) => {
-            let flags = policy.sensitive_field_flags();
-            for (field_name, field_value) in map.iter_mut() {
-                if let serde_json::Value::String(s) = field_value {
-                    if (flags.tokenize || flags.log)
-                        && patterns::is_sensitive_key(field_name, policy.sensitive_keys())
-                        && !is_full_token_span(s)?
-                    {
-                        if flags.tokenize {
-                            let token = build_token(key, SENSITIVE_FIELD, s)?;
-                            *s = token;
-                            record_hit(detections, SENSITIVE_FIELD, DetectionAction::Tokenized, 1);
-                        } else {
-                            record_hit(detections, SENSITIVE_FIELD, DetectionAction::Passed, 1);
-                        }
-                        continue;
-                    }
-                }
+            for (_, field_value) in map.iter_mut() {
                 scan_json_value(policy, key, field_value, detections)?;
             }
         }
@@ -405,6 +387,130 @@ pub fn detokenize_json(
     Ok(())
 }
 
+/// Case pattern detected in a matched span, applied to the substituted replacement text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CasePattern {
+    Lowercase,
+    Uppercase,
+    Title,
+    Mixed,
+}
+
+/// Classifies a span's letter casing: all-lower, all-upper, first-letter-upper-rest-lower
+/// (Title), or anything else (Mixed, returned verbatim by [`apply_case_pattern`]).
+fn detect_case_pattern(text: &str) -> CasePattern {
+    let alpha: Vec<char> = text.chars().filter(|c| c.is_alphabetic()).collect();
+    if alpha.is_empty() {
+        return CasePattern::Mixed;
+    }
+    if alpha.iter().all(|c| c.is_uppercase()) {
+        return CasePattern::Uppercase;
+    }
+    if alpha.iter().all(|c| c.is_lowercase()) {
+        return CasePattern::Lowercase;
+    }
+    let mut chars = text.chars();
+    let is_title = chars
+        .next()
+        .is_some_and(|c| !c.is_alphabetic() || c.is_uppercase())
+        && chars.all(|c| !c.is_alphabetic() || c.is_lowercase());
+    if is_title {
+        CasePattern::Title
+    } else {
+        CasePattern::Mixed
+    }
+}
+
+/// Reshapes `text` into the given case pattern; `Mixed` is returned verbatim (no single
+/// case transform represents it correctly).
+fn apply_case_pattern(text: &str, pattern: CasePattern) -> String {
+    match pattern {
+        CasePattern::Lowercase => text.to_lowercase(),
+        CasePattern::Uppercase => text.to_uppercase(),
+        CasePattern::Title => {
+            let mut chars = text.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+            }
+        }
+        CasePattern::Mixed => text.to_string(),
+    }
+}
+
+/// Byte range of the first case-insensitive match of `needle` in `text` at or after byte
+/// offset `from`. Case folding is ASCII-only (matches keyword semantics); a needle containing
+/// only ASCII letters/digits/punctuation is unaffected, non-ASCII letters compare literally.
+fn find_case_insensitive(text: &str, needle: &str, from: usize) -> Option<(usize, usize)> {
+    if needle.is_empty() {
+        return None;
+    }
+    let needle_lower: Vec<char> = needle.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let chars: Vec<(usize, char)> = text.char_indices().filter(|&(b, _)| b >= from).collect();
+
+    for i in 0..chars.len() {
+        if i + needle_lower.len() > chars.len() {
+            break;
+        }
+        let is_match = chars[i..i + needle_lower.len()]
+            .iter()
+            .zip(needle_lower.iter())
+            .all(|(&(_, c), &n)| c.to_ascii_lowercase() == n);
+        if is_match {
+            let start = chars[i].0;
+            let end = chars
+                .get(i + needle_lower.len())
+                .map_or(text.len(), |&(b, _)| b);
+            return Some((start, end));
+        }
+    }
+    None
+}
+
+/// Replaces every occurrence of `needle` with `replacement`; case-sensitive mode is a plain
+/// substring replace, case-insensitive mode preserves each match's case pattern.
+fn substitute_preserving_case(
+    text: &str,
+    needle: &str,
+    replacement: &str,
+    case_sensitive: bool,
+) -> String {
+    if case_sensitive {
+        return text.replace(needle, replacement);
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut pos = 0;
+    while pos < text.len() {
+        match find_case_insensitive(text, needle, pos) {
+            Some((start, end)) => {
+                result.push_str(&text[pos..start]);
+                let pattern = detect_case_pattern(&text[start..end]);
+                result.push_str(&apply_case_pattern(replacement, pattern));
+                pos = end;
+            }
+            None => {
+                result.push_str(&text[pos..]);
+                pos = text.len();
+            }
+        }
+    }
+    result
+}
+
+/// Masks every occurrence of `match_text` with `alias`, preserving the matched span's case
+/// pattern (lowercase/UPPERCASE/Title) when `case_sensitive` is false.
+pub fn alias_text(text: &str, match_text: &str, alias: &str, case_sensitive: bool) -> String {
+    substitute_preserving_case(text, match_text, alias, case_sensitive)
+}
+
+/// Reverses [`alias_text`]: replaces every occurrence of `alias` with `match_text`,
+/// preserving the matched span's case pattern.
+pub fn unalias_text(text: &str, match_text: &str, alias: &str, case_sensitive: bool) -> String {
+    substitute_preserving_case(text, alias, match_text, case_sensitive)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -412,7 +518,7 @@ pub fn detokenize_json(
 )]
 mod tests {
     use super::*;
-    use crate::policy::compile_policy_v2;
+    use crate::policy::compile_policy_v3;
     use crate::siv::{encode_payload as siv_encode_payload, seal as siv_seal};
 
     fn test_key() -> EngineKey {
@@ -420,24 +526,22 @@ mod tests {
     }
 
     const FULL_POLICY: &str = r#"{
-        "version": 2,
+        "version": 3,
         "source": { "policies": ["strict"], "forced": [] },
-        "categories": {
-            "EMAIL":           { "tokenize": true,  "log": false },
-            "PHONE_PL":        { "tokenize": true,  "log": false },
-            "PESEL":           { "tokenize": true,  "log": false },
-            "NIP":             { "tokenize": true,  "log": false },
-            "IBAN":            { "tokenize": true,  "log": false },
-            "CARD":            { "tokenize": true,  "log": false },
-            "API_KEY":         { "tokenize": true,  "log": false },
-            "SENSITIVE_FIELD": { "tokenize": true,  "log": false }
-        },
-        "customPatterns": [],
-        "sensitiveKeys": ["password", "token", "secret"]
+        "rules": [
+            { "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "PHONE_PL", "displayName": "Phone", "patterns": ["\\+?48[\\s-]?\\d{3}[\\s-]?\\d{3}[\\s-]?\\d{3}"], "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "PESEL", "displayName": "PESEL", "patterns": ["(?-u:\\b)\\d{11}(?-u:\\b)"], "validator": "pesel", "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "NIP", "displayName": "NIP", "patterns": ["(?-u:\\b)\\d{10}(?-u:\\b)"], "validator": "nip", "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "IBAN", "displayName": "IBAN", "patterns": ["[A-Z]{2}\\d{2}[A-Z0-9]{4}\\d{7}([A-Z0-9]?){0,16}"], "validator": "iban", "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "CARD", "displayName": "Card", "patterns": ["(?-u:\\b)(?:\\d{4}[\\s-]?){3}\\d{4}(?-u:\\b)"], "validator": "luhn", "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "API_KEY", "displayName": "API key", "patterns": ["(?-u:\\b)(sk-[a-zA-Z0-9]{20,}|xoxb-[a-zA-Z0-9-]+|xoxp-[a-zA-Z0-9-]+)(?-u:\\b)"], "caseSensitive": true, "tokenize": true, "log": false }
+        ],
+        "keywords": []
     }"#;
 
     fn full_policy() -> CompiledPolicy {
-        compile_policy_v2(FULL_POLICY).expect("valid policy compiles")
+        compile_policy_v3(FULL_POLICY).expect("valid policy compiles")
     }
 
     #[test]
@@ -514,11 +618,11 @@ mod tests {
     #[test]
     fn observation_mode_counts_without_replacing() {
         let json = FULL_POLICY.replacen(
-            "\"EMAIL\":           { \"tokenize\": true,  \"log\": false },",
-            "\"EMAIL\":           { \"tokenize\": false, \"log\": true  },",
+            r#"{ "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": true, "log": false },"#,
+            r#"{ "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": false, "log": true },"#,
             1,
         );
-        let policy = compile_policy_v2(&json).expect("valid policy compiles");
+        let policy = compile_policy_v3(&json).expect("valid policy compiles");
         let key = test_key();
         let original = "Contact alice@example.com now";
 
@@ -567,14 +671,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_json_jira_like_payload_roundtrips() {
+    fn scan_json_nested_payload_roundtrips() {
         let policy = full_policy();
         let key = test_key();
 
         let mut value = serde_json::json!({
             "issue": {
                 "reporter_email": "reporter@example.com",
-                "password": "hunter2",
                 "watchers": ["one@example.com", "two@example.com"],
                 "id": 42,
                 "resolved": false,
@@ -584,36 +687,54 @@ mod tests {
 
         let detections = scan_json(&policy, &key, &mut value).expect("scan succeeds");
         assert!(detections.iter().any(|d| d.category == "EMAIL"));
-        assert!(detections.iter().any(|d| d.category == "SENSITIVE_FIELD"));
         assert_eq!(value["issue"]["id"], 42);
         assert_eq!(value["issue"]["resolved"], false);
-        assert_ne!(value["issue"]["password"], original["issue"]["password"]);
+        assert_ne!(
+            value["issue"]["reporter_email"],
+            original["issue"]["reporter_email"]
+        );
 
         detokenize_json(&key, &mut value).expect("detokenize succeeds");
         assert_eq!(value, original);
     }
 
     #[test]
-    fn sensitive_key_non_string_value_is_left_untouched() {
+    fn scan_json_non_string_values_are_left_untouched() {
         let policy = full_policy();
         let key = test_key();
-        let mut value = serde_json::json!({ "password": 12345, "token": true });
+        let mut value = serde_json::json!({ "count": 12345, "active": true });
 
         let detections = scan_json(&policy, &key, &mut value).expect("scan succeeds");
         assert!(detections.is_empty());
-        assert_eq!(value["password"], 12345);
-        assert_eq!(value["token"], true);
+        assert_eq!(value["count"], 12345);
+        assert_eq!(value["active"], true);
     }
 
     #[test]
-    fn scan_json_is_idempotent_for_sensitive_fields() {
-        let policy = full_policy();
+    fn multiple_patterns_in_one_rule_both_match_without_double_counting_overlap() {
+        // PHONE_PL matches once via its single pattern in FULL_POLICY; verify a rule with two
+        // overlapping patterns dedupes rather than double-counting the same span.
+        let json = r#"{
+            "version": 3,
+            "source": { "policies": [], "forced": [] },
+            "rules": [
+                { "id": "MULTI", "displayName": "Multi", "patterns": ["\\d{3}-\\d{3}", "\\d{3}-\\d{3}-\\d{3}"], "caseSensitive": true, "tokenize": true, "log": false }
+            ],
+            "keywords": []
+        }"#;
+        let policy = compile_policy_v3(json).expect("valid policy compiles");
         let key = test_key();
-        let mut value = serde_json::json!({ "password": "hunter2" });
 
-        scan_json(&policy, &key, &mut value).expect("scan succeeds");
-        let second = scan_json(&policy, &key, &mut value).expect("scan succeeds");
-        assert!(second.is_empty());
+        let outcome = scan_text(&policy, &key, "id 111-222-333 end").expect("scan succeeds");
+        let multi = outcome
+            .detections
+            .iter()
+            .find(|d| d.category == "MULTI")
+            .expect("MULTI detected");
+        assert_eq!(
+            multi.count, 1,
+            "overlapping patterns in one rule must not double-count"
+        );
     }
 
     #[test]
@@ -702,7 +823,6 @@ mod tests {
     #[test]
     fn detokenize_text_two_tokens_first_valid_second_corrupted_rejects_all_or_nothing() {
         let key = test_key();
-        // First token is valid, second has a flipped bit in base64 payload.
         let first_valid_ct = siv_seal(&key, "EMAIL", b"first@example.com").expect("seal succeeds");
         let first_token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&first_valid_ct));
         let second_valid_ct =
@@ -826,5 +946,80 @@ mod tests {
             "plain text, nothing to see"
         );
         assert_eq!(detokenize_text_lossy(&key, ""), "");
+    }
+
+    // ── alias_text / unalias_text: keyword masking with case preservation ──
+
+    #[test]
+    fn alias_text_case_sensitive_replaces_exact_case_only() {
+        assert_eq!(
+            alias_text("Coca-Cola is great", "Coca-Cola", "Brandex", true),
+            "Brandex is great"
+        );
+        assert_eq!(
+            alias_text("coca-cola is great", "Coca-Cola", "Brandex", true),
+            "coca-cola is great",
+            "different case must not match under case_sensitive"
+        );
+    }
+
+    #[test]
+    fn alias_text_case_insensitive_preserves_mixed_case_verbatim() {
+        let result = alias_text("Coca-Cola Company", "Coca-Cola", "Brandex", false);
+        assert_eq!(result, "Brandex Company");
+    }
+
+    #[test]
+    fn alias_text_case_insensitive_preserves_uppercase() {
+        let result = alias_text("COCA-COLA COMPANY", "coca-cola", "BRANDEX", false);
+        assert_eq!(result, "BRANDEX COMPANY");
+    }
+
+    #[test]
+    fn alias_text_case_insensitive_preserves_lowercase() {
+        let result = alias_text("contact coca-cola today", "Coca-Cola", "brandex", false);
+        assert_eq!(result, "contact brandex today");
+    }
+
+    #[test]
+    fn alias_text_case_insensitive_preserves_title_case_single_word() {
+        let result = alias_text("Secret project underway", "secret", "public", false);
+        assert_eq!(result, "Public project underway");
+    }
+
+    #[test]
+    fn alias_text_replaces_every_occurrence() {
+        let result = alias_text("acme and ACME and Acme", "acme", "megacorp", false);
+        assert_eq!(result, "megacorp and MEGACORP and Megacorp");
+    }
+
+    #[test]
+    fn alias_and_unalias_roundtrip() {
+        // A single-word match/alias keeps every occurrence's case pattern within the
+        // lowercase/UPPERCASE/Title taxonomy, so round-tripping is exact; a multi-capital
+        // span like "Coca-Cola" detects as Mixed and is not guaranteed to round-trip (the
+        // alias itself may read as Title-shaped, e.g. "Brandex"), which is an accepted
+        // limitation of the four-bucket case model, not exercised here.
+        let original = "acme signed with ACME and Acme twice";
+        let masked = alias_text(original, "acme", "brandex", false);
+        assert!(!masked.to_lowercase().contains("acme"));
+        let restored = unalias_text(&masked, "acme", "brandex", false);
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn unalias_text_case_sensitive_replaces_exact_case_only() {
+        assert_eq!(
+            unalias_text("Brandex is great", "Coca-Cola", "Brandex", true),
+            "Coca-Cola is great"
+        );
+    }
+
+    #[test]
+    fn alias_text_no_match_is_identity() {
+        assert_eq!(
+            alias_text("nothing to see here", "Coca-Cola", "Brandex", false),
+            "nothing to see here"
+        );
     }
 }

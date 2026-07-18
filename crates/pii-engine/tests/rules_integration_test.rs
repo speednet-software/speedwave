@@ -1,6 +1,8 @@
+//! Integration test asserting the built-in rule library ships with the expected rules.
+
 #[test]
 fn rules_yaml_is_valid_and_loadable() {
-    let yaml_content = include_str!("../../mcp-servers/policies/rules.yaml");
+    let yaml_content = include_str!("../../../mcp-servers/policies/rules.yaml");
 
     // Basic validation: YAML must parse and have the expected structure
     assert!(yaml_content.contains("version: 3"), "version must be 3");
