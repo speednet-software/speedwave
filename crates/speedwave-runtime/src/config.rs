@@ -832,14 +832,15 @@ pub struct PiiPolicyDefinition {
     pub id: String,
     /// Human-readable name shown in UI.
     pub name: String,
-    /// Per-category `{tokenize, log}` pairs, exhaustive over all 8 categories.
-    pub categories: crate::pii_policy::PiiCategoryPolicies,
-    /// Additive custom detection patterns, each with its own flag pair.
+    /// Per-library-rule-id `{tokenize, log}` overrides; a rule id absent here is disabled.
     #[serde(default)]
-    pub custom_patterns: Vec<crate::pii_policy::CustomPiiPattern>,
-    /// Sensitive key-name deltas relative to the engine default list.
+    pub categories: HashMap<String, crate::pii_policy::RuleFlags>,
+    /// Additive custom detection rules, each with its own flag pair.
     #[serde(default)]
-    pub sensitive_keys: crate::pii_policy::PiiSensitiveKeyDelta,
+    pub rules: Vec<crate::pii_policy::OwnRuleV3>,
+    /// Literal keyword substitutions.
+    #[serde(default)]
+    pub keywords: Vec<crate::pii_policy::KeywordV3>,
 }
 
 /// MDM-layer PII policy: the set of policy ids forced on (presence-is-lock).
@@ -849,6 +850,60 @@ pub struct ManagedPiiPolicyConfig {
     /// Policy ids forced on regardless of the user's own selection.
     #[serde(default)]
     pub forced_policies: Vec<String>,
+}
+
+/// v1 flat per-category bool shape (the pre-v2 wire format); kept solely to
+/// parse an old on-disk config during migration, never used elsewhere.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct LegacyCategoryFlags {
+    #[serde(rename = "EMAIL")]
+    email: bool,
+    #[serde(rename = "PHONE_PL")]
+    phone_pl: bool,
+    #[serde(rename = "PESEL")]
+    pesel: bool,
+    #[serde(rename = "NIP")]
+    nip: bool,
+    #[serde(rename = "IBAN")]
+    iban: bool,
+    #[serde(rename = "CARD")]
+    card: bool,
+    #[serde(rename = "API_KEY")]
+    api_key: bool,
+    // v1 also carried SENSITIVE_FIELD; key-name-based detection was removed
+    // entirely from the engine (no v3 rule counterpart), so the value is
+    // accepted here (deny_unknown_fields would otherwise reject old configs
+    // that set it) and dropped, not mapped, during migration.
+    #[serde(rename = "SENSITIVE_FIELD")]
+    _sensitive_field: bool,
+}
+
+/// Maps a v1 flat bool-per-category shape onto the v3 `categories` map, using
+/// the 7 built-in library rule ids (`SENSITIVE_FIELD` has no v3 counterpart).
+fn legacy_categories_to_v3(
+    c: LegacyCategoryFlags,
+) -> HashMap<String, crate::pii_policy::RuleFlags> {
+    [
+        ("EMAIL", c.email),
+        ("PHONE_PL", c.phone_pl),
+        ("PESEL", c.pesel),
+        ("NIP", c.nip),
+        ("IBAN", c.iban),
+        ("CARD", c.card),
+        ("API_KEY", c.api_key),
+    ]
+    .into_iter()
+    .map(|(id, tokenize)| {
+        (
+            id.to_string(),
+            crate::pii_policy::RuleFlags {
+                tokenize,
+                log: false,
+            },
+        )
+    })
+    .collect()
 }
 
 /// v1 pattern shape (`forced` instead of `{tokenize, log}`); `forced` was dead
@@ -865,16 +920,18 @@ struct LegacyCustomPiiPattern {
 }
 
 /// Raw shape for [`PiiPolicyUserConfig`] deserialization: every v1/v2 field,
-/// all optional so shape detection can run before migration.
+/// all optional so shape detection can run before migration. `sensitive_keys`
+/// no longer maps to anything (the feature was removed) but is still accepted
+/// structurally so an old config carrying it does not hard-fail to load.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 struct PiiPolicyUserConfigShape {
     policies: Option<Vec<String>>,
     custom_policies: Option<Vec<PiiPolicyDefinition>>,
     template_id: Option<String>,
-    categories: Option<crate::pii_policy::PiiCategoryFlags>,
+    categories: Option<LegacyCategoryFlags>,
     custom_patterns: Option<Vec<LegacyCustomPiiPattern>>,
-    sensitive_keys: Option<crate::pii_policy::PiiSensitiveKeyDelta>,
+    sensitive_keys: Option<serde_json::Value>,
     // v1's token-lifecycle overrides; the mapped tokenizer never existed, the
     // field is accepted so an old config on disk still loads, then dropped.
     limits: Option<serde_json::Value>,
@@ -908,22 +965,23 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
         // v1 custom mode (categories/custom_patterns/sensitive_keys present):
         // fold into a single synthesized "custom" policy definition.
         if has_v1_custom {
-            let categories: crate::pii_policy::PiiCategoryPolicies =
-                raw.categories.unwrap_or_default().into();
-            let custom_patterns = raw
+            let categories = legacy_categories_to_v3(raw.categories.unwrap_or_default());
+            let rules = raw
                 .custom_patterns
                 .unwrap_or_default()
                 .into_iter()
-                .map(|p| crate::pii_policy::CustomPiiPattern {
+                .map(|p| crate::pii_policy::OwnRuleV3 {
                     id: p.id,
                     display_name: p.display_name,
-                    pattern: p.pattern,
-                    case_insensitive: p.case_insensitive,
+                    patterns: vec![p.pattern],
+                    validator: None,
+                    case_sensitive: !p.case_insensitive,
                     tokenize: true,
                     log: false,
                 })
                 .collect();
-            let sensitive_keys = raw.sensitive_keys.unwrap_or_default();
+            // v1's sensitive-keys concept has no v3 counterpart (key-name-based
+            // detection was removed entirely); intentionally dropped.
 
             return Ok(Self {
                 policies: vec!["custom".to_string()],
@@ -931,8 +989,8 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
                     id: "custom".to_string(),
                     name: "Custom".to_string(),
                     categories,
-                    custom_patterns,
-                    sensitive_keys,
+                    rules,
+                    keywords: Vec::new(),
                 }],
             });
         }
@@ -5509,14 +5567,17 @@ mod tests {
         assert_eq!(cfg.custom_policies.len(), 1);
         let def = &cfg.custom_policies[0];
         assert_eq!(def.id, "custom");
-        assert!(!def.categories.email.tokenize);
-        assert!(def.categories.phone_pl.tokenize);
-        assert_eq!(def.custom_patterns.len(), 1);
-        assert_eq!(def.custom_patterns[0].id, "EMPLOYEE_ID");
+        assert!(!def.categories["EMAIL"].tokenize);
+        assert!(def.categories["PHONE_PL"].tokenize);
+        assert!(!def.categories.contains_key("SENSITIVE_FIELD"));
+        assert_eq!(def.rules.len(), 1);
+        assert_eq!(def.rules[0].id, "EMPLOYEE_ID");
+        assert_eq!(def.rules[0].patterns, vec![r"\bEMP-\d{4,8}\b".to_string()]);
         // Old `forced: true` carries no effect post-migration — always {tokenize:true, log:false}.
-        assert!(def.custom_patterns[0].tokenize);
-        assert!(!def.custom_patterns[0].log);
-        assert_eq!(def.sensitive_keys.add, vec!["salary".to_string()]);
+        assert!(def.rules[0].tokenize);
+        assert!(!def.rules[0].log);
+        // v1's sensitive_keys concept has no v3 counterpart — dropped, not migrated.
+        assert!(def.keywords.is_empty());
     }
 
     #[test]
@@ -5541,11 +5602,10 @@ mod tests {
         let json = r#"{"policies": ["strict", "custom"], "custom_policies": [{
             "id": "custom", "name": "Custom",
             "categories": {
-                "EMAIL": {"tokenize": true, "log": false}, "PHONE_PL": {"tokenize": true, "log": false},
-                "PESEL": {"tokenize": true, "log": false}, "NIP": {"tokenize": true, "log": false},
-                "IBAN": {"tokenize": true, "log": false}, "CARD": {"tokenize": true, "log": false},
-                "API_KEY": {"tokenize": true, "log": false}, "SENSITIVE_FIELD": {"tokenize": true, "log": false}
-            }
+                "EMAIL": {"tokenize": true, "log": false}, "PHONE_PL": {"tokenize": true, "log": false}
+            },
+            "rules": [],
+            "keywords": []
         }]}"#;
         let cfg: PiiPolicyUserConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -5593,7 +5653,7 @@ mod tests {
             None,
         );
         let resolved = claude.pii_policy.unwrap();
-        assert!(!resolved.categories.api_key.tokenize);
+        assert!(!resolved.rules.iter().any(|r| r.id == "API_KEY"));
         assert_eq!(
             resolved.source,
             crate::pii_policy::ResolvedPiiPolicySource {
@@ -5714,7 +5774,7 @@ mod tests {
             "an MDM-forced policy id must appear as both a selected and a forced policy"
         );
         assert!(
-            resolved.categories.email.tokenize,
+            resolved.rules.iter().any(|r| r.id == "EMAIL" && r.tokenize),
             "gdpr-art32's categories must be enabled in the resolved project policy"
         );
     }
@@ -5784,8 +5844,8 @@ mod tests {
             "repo .speedwave.json must never influence the resolved PII policy"
         );
         assert_eq!(
-            resolved_with.categories,
-            crate::pii_policy::PiiCategoryFlags::ALL_ON.into()
+            resolved_with,
+            crate::pii_policy::ResolvedPiiPolicy::default()
         );
     }
 

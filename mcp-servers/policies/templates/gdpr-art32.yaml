@@ -1,4 +1,4 @@
-version: 2
+version: 3
 id: gdpr-art32
 name: "GDPR Art. 32 - EU PII Protection"
 description: "Covers the PII categories relevant to GDPR Article 32 security-of-processing obligations. API_KEY detection is off — credential leakage is out of this template's scope."
@@ -10,8 +10,5 @@ categories:
   IBAN: { tokenize: true, log: false }
   CARD: { tokenize: true, log: false }
   API_KEY: { tokenize: false, log: false }
-  SENSITIVE_FIELD: { tokenize: true, log: false }
-customPatterns: []
-sensitiveKeys:
-  add: []
-  remove: []
+rules: []
+keywords: []
