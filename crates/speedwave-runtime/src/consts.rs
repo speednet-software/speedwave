@@ -2,6 +2,12 @@
 
 use crate::resources::{ContainerResources, STANDARD_WORKER_RESOURCES};
 
+/// PII engine limits (v3 schema)
+pub const PII_MAX_RULES: usize = 256;
+pub const PII_MAX_PATTERNS: usize = 1024;
+pub const PII_MAX_KEYWORDS: usize = 256;
+pub const PII_MAX_PATTERN_LENGTH: usize = 512;
+
 /// Env var overriding the data-dir location.
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
 /// Subdirectory under the data dir holding the Lima VM state.
