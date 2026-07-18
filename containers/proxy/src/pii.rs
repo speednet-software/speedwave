@@ -5,8 +5,8 @@ use std::path::Path;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
-    compile_policy_v2, default_policy_json, scan_json, CompiledPolicy, Detection, EngineKey,
-    ScanError,
+    alias_text, compile_policy_v3, default_policy_json, scan_json, CompiledKeyword, CompiledPolicy,
+    Detection, EngineKey, ScanError,
 };
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
@@ -35,7 +35,7 @@ fn load_engine_state_from_env(policy_file: Option<String>) -> PiiEngineState {
 }
 
 fn default_state() -> PiiEngineState {
-    match compile_policy_v2(&default_policy_json()) {
+    match compile_policy_v3(&default_policy_json()) {
         Ok(policy) => PiiEngineState::Ready {
             policy,
             key: ephemeral_key(),
@@ -64,7 +64,7 @@ fn load_from_file(policy_file: &Path) -> PiiEngineState {
             ))
         }
     };
-    let policy = match compile_policy_v2(&policy_json) {
+    let policy = match compile_policy_v3(&policy_json) {
         Ok(p) => p,
         Err(e) => {
             return PiiEngineState::Failed(format!(
@@ -112,6 +112,10 @@ fn merge_detections(agg: &mut Vec<Detection>, more: Vec<Detection>) {
 
 /// Scans `system` and every `messages[].content` (tool results included); other protocol
 /// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
+///
+/// Each scanned subtree is then keyword-masked (design doc §7.3): masking runs strictly after
+/// tokenization so a keyword occurring inside a value that also matched a PII rule is already
+/// sealed behind a token span and cannot be re-exposed by the keyword pass.
 pub fn scan_request(
     policy: &CompiledPolicy,
     key: &EngineKey,
@@ -120,15 +124,61 @@ pub fn scan_request(
     let mut detections = Vec::new();
     if let Some(system) = body.get_mut("system") {
         merge_detections(&mut detections, scan_json(policy, key, system)?);
+        mask_keywords(system, policy.keywords());
     }
     if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         for message in messages.iter_mut() {
             if let Some(content) = message.get_mut("content") {
                 merge_detections(&mut detections, scan_json(policy, key, content)?);
+                mask_keywords(content, policy.keywords());
             }
         }
     }
     Ok(detections)
+}
+
+/// Masks every configured keyword to its alias across `value`'s string leaves, case-pattern
+/// preserving via `alias_text`. A no-op when `keywords` is empty.
+fn mask_keywords(value: &mut serde_json::Value, keywords: &[CompiledKeyword]) {
+    for keyword in keywords {
+        let fields_modified = mask_keyword_value(value, keyword);
+        if fields_modified > 0 {
+            log::debug!(
+                "keyword mask: alias='{}' fields_modified={fields_modified}",
+                keyword.alias
+            );
+        }
+    }
+}
+
+/// Applies one keyword's substitution recursively over string leaves; returns how many
+/// leaves it changed. Never logs or returns the matched text itself, only a count.
+fn mask_keyword_value(value: &mut serde_json::Value, keyword: &CompiledKeyword) -> u32 {
+    match value {
+        serde_json::Value::String(s) => {
+            let masked = alias_text(
+                s,
+                &keyword.match_text,
+                &keyword.alias,
+                keyword.case_sensitive,
+            );
+            if masked == *s {
+                0
+            } else {
+                *s = masked;
+                1
+            }
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(|item| mask_keyword_value(item, keyword))
+            .sum(),
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .map(|v| mask_keyword_value(v, keyword))
+            .sum(),
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -143,7 +193,7 @@ mod tests {
     use speedwave_pii_engine::DetectionAction;
 
     fn test_policy_and_key() -> (CompiledPolicy, EngineKey) {
-        let policy = compile_policy_v2(&default_policy_json()).expect("default policy compiles");
+        let policy = compile_policy_v3(&default_policy_json()).expect("default policy compiles");
         (policy, EngineKey::from_bytes([9u8; 32]))
     }
 
@@ -336,5 +386,168 @@ mod tests {
         );
         assert_eq!(agg.len(), 1);
         assert_eq!(agg[0].count, 5);
+    }
+
+    // ── keyword masking: applied by scan_request after PII tokenization ──
+
+    fn policy_with_keyword(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledPolicy {
+        let json = format!(
+            r#"{{
+                "version": 3,
+                "source": {{ "policies": [], "forced": [] }},
+                "rules": [],
+                "keywords": [
+                    {{ "match": "{match_text}", "alias": "{alias}", "caseSensitive": {case_sensitive} }}
+                ]
+            }}"#
+        );
+        compile_policy_v3(&json).expect("policy with one keyword compiles")
+    }
+
+    fn policy_with_email_rule_and_keyword(
+        match_text: &str,
+        alias: &str,
+        case_sensitive: bool,
+    ) -> CompiledPolicy {
+        let json = format!(
+            r#"{{
+                "version": 3,
+                "source": {{ "policies": [], "forced": [] }},
+                "rules": [
+                    {{ "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}"], "caseSensitive": true, "tokenize": true, "log": false }}
+                ],
+                "keywords": [
+                    {{ "match": "{match_text}", "alias": "{alias}", "caseSensitive": {case_sensitive} }}
+                ]
+            }}"#
+        );
+        compile_policy_v3(&json).expect("policy with EMAIL rule and one keyword compiles")
+    }
+
+    #[test]
+    fn scan_request_masks_keyword_in_system_field() {
+        let policy = policy_with_keyword("Globex", "BigCorp", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({"system": "Acme purchased Globex today"});
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        assert_eq!(body["system"], "Acme purchased BigCorp today");
+    }
+
+    #[test]
+    fn scan_request_masks_keyword_case_insensitively_preserving_pattern() {
+        let policy = policy_with_keyword("Coca-Cola", "Brandex", false);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({
+            "messages": [{"role": "user", "content": "coca-cola is here"}]
+        });
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        assert_eq!(body["messages"][0]["content"], "brandex is here");
+    }
+
+    #[test]
+    fn scan_request_masks_keyword_across_every_message() {
+        let policy = policy_with_keyword("Coca-Cola", "Brandex", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": "Use Coca-Cola API"},
+                {"role": "assistant", "content": "OK, done"}
+            ]
+        });
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        assert_eq!(body["messages"][0]["content"], "Use Brandex API");
+        assert_eq!(body["messages"][1]["content"], "OK, done");
+    }
+
+    #[test]
+    fn scan_request_keyword_masking_skips_non_string_leaves() {
+        let policy = policy_with_keyword("Coca-Cola", "Brandex", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Coca-Cola order", "index": 3, "cached": true, "note": null}
+                ]
+            }]
+        });
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["text"], "Brandex order");
+        assert_eq!(block["index"], 3);
+        assert_eq!(block["cached"], true);
+        assert!(block["note"].is_null());
+    }
+
+    #[test]
+    fn scan_request_masks_multiple_keywords_in_one_field() {
+        let json = r#"{
+            "version": 3,
+            "source": { "policies": [], "forced": [] },
+            "rules": [],
+            "keywords": [
+                { "match": "Coca-Cola", "alias": "Brandex", "caseSensitive": true },
+                { "match": "Sprite", "alias": "Mixer", "caseSensitive": true }
+            ]
+        }"#;
+        let policy = compile_policy_v3(json).expect("policy with two keywords compiles");
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({"system": "Use Coca-Cola with Sprite"});
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        assert_eq!(body["system"], "Use Brandex with Mixer");
+    }
+
+    #[test]
+    fn scan_request_does_not_mask_keywords_in_protocol_fields() {
+        // "model" and "role" are never scanned for PII either (see
+        // scan_request_tokenizes_system_and_message_content); a keyword whose match text
+        // happens to equal a protocol value must not touch it.
+        let policy = policy_with_keyword("claude-x", "REDACTED", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({
+            "model": "claude-x",
+            "messages": [{"role": "claude-x", "content": "hello"}]
+        });
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        assert_eq!(body["model"], "claude-x");
+        assert_eq!(body["messages"][0]["role"], "claude-x");
+    }
+
+    #[test]
+    fn scan_request_protects_keyword_already_sealed_inside_a_tokenized_pii_value() {
+        // Sequence matters (design doc §7.3): PII tokenization runs first, so a keyword
+        // that only appears as a substring of an already-tokenized PII value must not
+        // survive in cleartext, and the alias substitution must find no cleartext match.
+        let policy = policy_with_email_rule_and_keyword("secretco", "Vendor", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let mut body = json!({"system": "Contact admin@secretco.com about the merger"});
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        let system = body["system"].as_str().unwrap();
+        assert!(
+            !system.contains("secretco"),
+            "the keyword must not survive in cleartext once its containing value is tokenized"
+        );
+        assert!(
+            !system.contains("Vendor"),
+            "no alias substitution should fire: the keyword text is already gone by the time \
+             the keyword pass runs"
+        );
+        assert!(system.contains("[EMAIL:TOKEN_"));
+    }
+
+    #[test]
+    fn scan_request_keyword_masking_is_a_noop_with_no_keywords_configured() {
+        let (policy, key) = test_policy_and_key();
+        let mut body = json!({"system": "Use Coca-Cola with Sprite"});
+
+        scan_request(&policy, &key, &mut body).unwrap();
+        assert_eq!(body["system"], "Use Coca-Cola with Sprite");
     }
 }
