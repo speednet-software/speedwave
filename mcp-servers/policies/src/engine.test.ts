@@ -4,21 +4,20 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { loadEngine } from './engine.js';
 
-const VALID_POLICY_V2 = {
-  version: 2,
+const VALID_POLICY_V3 = {
+  version: 3,
   source: { policies: ['strict'], forced: [] },
-  categories: {
-    EMAIL: { tokenize: true, log: false },
-    PHONE_PL: { tokenize: true, log: false },
-    PESEL: { tokenize: true, log: false },
-    NIP: { tokenize: true, log: false },
-    IBAN: { tokenize: true, log: false },
-    CARD: { tokenize: true, log: false },
-    API_KEY: { tokenize: true, log: false },
-    SENSITIVE_FIELD: { tokenize: true, log: false },
-  },
-  customPatterns: [],
-  sensitiveKeys: ['password', 'token', 'secret'],
+  rules: [
+    {
+      id: 'EMAIL',
+      displayName: 'E-mail address',
+      patterns: ['[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}'],
+      caseSensitive: true,
+      tokenize: true,
+      log: false,
+    },
+  ],
+  keywords: [],
 };
 
 /**
@@ -54,7 +53,7 @@ describe('loadEngine', () => {
   it('loads a present, valid policy file and its sibling key', () => {
     withTempDir((dir) => {
       const policyFile = join(dir, 'policy.json');
-      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V2));
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
       writeFileSync(join(dir, 'key'), 'ab'.repeat(32));
       const engine = loadEngine({ POLICY_FILE: policyFile });
       const original = { email: 'x@y.com' };
@@ -67,7 +66,7 @@ describe('loadEngine', () => {
   it('trims trailing whitespace from the key file', () => {
     withTempDir((dir) => {
       const policyFile = join(dir, 'policy.json');
-      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V2));
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
       writeFileSync(join(dir, 'key'), `${'cd'.repeat(32)}\n`);
       expect(() => loadEngine({ POLICY_FILE: policyFile })).not.toThrow();
     });
@@ -76,7 +75,7 @@ describe('loadEngine', () => {
   it('throws when POLICY_FILE is present but unreadable', () => {
     withTempDir((dir) => {
       const policyFile = join(dir, 'policy.json');
-      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V2));
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
       chmodSync(policyFile, 0o000);
       try {
         expect(() => loadEngine({ POLICY_FILE: policyFile })).toThrow(/could not be read/);
@@ -89,7 +88,7 @@ describe('loadEngine', () => {
   it('throws when POLICY_FILE is present but the sibling key file is missing', () => {
     withTempDir((dir) => {
       const policyFile = join(dir, 'policy.json');
-      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V2));
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
       expect(() => loadEngine({ POLICY_FILE: policyFile })).toThrow(/key ".*" not found/);
     });
   });
@@ -97,7 +96,7 @@ describe('loadEngine', () => {
   it('throws when the sibling key file is unreadable', () => {
     withTempDir((dir) => {
       const policyFile = join(dir, 'policy.json');
-      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V2));
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
       const keyFile = join(dir, 'key');
       writeFileSync(keyFile, 'ab'.repeat(32));
       chmodSync(keyFile, 0o000);
@@ -123,7 +122,7 @@ describe('loadEngine', () => {
   it('throws (fail-closed) when the key is not valid hex', () => {
     withTempDir((dir) => {
       const policyFile = join(dir, 'policy.json');
-      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V2));
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
       writeFileSync(join(dir, 'key'), 'not-hex');
       expect(() => loadEngine({ POLICY_FILE: policyFile })).toThrow(
         /PII policy engine failed to initialize/

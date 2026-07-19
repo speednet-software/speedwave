@@ -5,21 +5,20 @@ import { join } from 'path';
 
 let dir: string | undefined;
 
-const VALID_POLICY_V2 = {
-  version: 2,
+const VALID_POLICY_V3 = {
+  version: 3,
   source: { policies: ['strict'], forced: [] },
-  categories: {
-    EMAIL: { tokenize: true, log: false },
-    PHONE_PL: { tokenize: true, log: false },
-    PESEL: { tokenize: true, log: false },
-    NIP: { tokenize: true, log: false },
-    IBAN: { tokenize: true, log: false },
-    CARD: { tokenize: true, log: false },
-    API_KEY: { tokenize: true, log: false },
-    SENSITIVE_FIELD: { tokenize: true, log: false },
-  },
-  customPatterns: [],
-  sensitiveKeys: ['password', 'token', 'secret'],
+  rules: [
+    {
+      id: 'EMAIL',
+      displayName: 'E-mail address',
+      patterns: ['[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}'],
+      caseSensitive: true,
+      tokenize: true,
+      log: false,
+    },
+  ],
+  keywords: [],
 };
 
 const VALID_KEY = 'ab'.repeat(32);
@@ -58,14 +57,14 @@ describe('loadPolicy', () => {
     expect((value as { note: string }).note).not.toContain('a@b.com');
   });
 
-  it('loads a present, valid policy file and disables a category per its content', async () => {
+  it('loads a present, valid policy file and disables a rule per its content', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
     writeFileSync(
       file,
       JSON.stringify({
-        ...VALID_POLICY_V2,
-        categories: { ...VALID_POLICY_V2.categories, EMAIL: { tokenize: false, log: false } },
+        ...VALID_POLICY_V3,
+        rules: [{ ...VALID_POLICY_V3.rules[0], tokenize: false }],
       })
     );
     writeFileSync(join(dir, 'key'), VALID_KEY);
@@ -103,7 +102,7 @@ describe('loadPolicy', () => {
   it('throws when the present file is unreadable', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
-    writeFileSync(file, JSON.stringify(VALID_POLICY_V2));
+    writeFileSync(file, JSON.stringify(VALID_POLICY_V3));
     chmodSync(file, 0o000);
     vi.stubEnv('POLICY_FILE', file);
     const { loadPolicy } = await import('./policy.js');
@@ -118,7 +117,7 @@ describe('loadPolicy', () => {
   it('throws when the present file has no sibling key', async () => {
     dir = mkdtempSync(join(tmpdir(), 'hub-policy-test-'));
     const file = join(dir, 'policy.json');
-    writeFileSync(file, JSON.stringify(VALID_POLICY_V2));
+    writeFileSync(file, JSON.stringify(VALID_POLICY_V3));
     vi.stubEnv('POLICY_FILE', file);
     const { loadPolicy } = await import('./policy.js');
 

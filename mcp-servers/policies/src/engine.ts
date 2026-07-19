@@ -75,7 +75,7 @@ function readKeyNextTo(policyFile: string): string {
  * Resolve the policy.json contents and tokenization key for this process. Absent `POLICY_FILE`
  * uses the engine's compiled-in default policy with an ephemeral random key (dev/fail-safe).
  * @param env - Environment to read `POLICY_FILE` from
- * @returns The policy.json v2 document text and the 64-hex tokenization key
+ * @returns The policy.json v3 document text and the 64-hex tokenization key
  */
 function resolvePolicyAndKey(env: Record<string, string | undefined>): {
   policyJson: string;

@@ -12,25 +12,33 @@ const require = createRequire(import.meta.url);
 const { PiiEngine } = require(path.join(pkgDir, 'speedwave_pii_engine_wasm.js'));
 
 const POLICY_JSON = JSON.stringify({
-  version: 2,
+  version: 3,
   source: { policies: ['strict'], forced: [] },
-  categories: {
-    EMAIL: { tokenize: true, log: false },
-    PHONE_PL: { tokenize: true, log: false },
-    PESEL: { tokenize: true, log: false },
-    NIP: { tokenize: true, log: false },
-    IBAN: { tokenize: true, log: false },
-    CARD: { tokenize: true, log: false },
-    API_KEY: { tokenize: true, log: false },
-    SENSITIVE_FIELD: { tokenize: true, log: false },
-  },
-  customPatterns: [],
-  sensitiveKeys: ['password', 'token', 'secret'],
+  rules: [
+    {
+      id: 'EMAIL',
+      displayName: 'E-mail address',
+      patterns: ['[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}'],
+      caseSensitive: true,
+      tokenize: true,
+      log: false,
+    },
+    {
+      id: 'PESEL',
+      displayName: 'PESEL',
+      patterns: ['\\d{11}'],
+      validator: 'pesel',
+      caseSensitive: true,
+      tokenize: true,
+      log: false,
+    },
+  ],
+  keywords: [],
 });
 const KEY_HEX = 'ab'.repeat(32);
 
 function run() {
-  // 1. Construction with a real v2 policy and a 64-hex key.
+  // 1. Construction with a real v3 policy and a 64-hex key.
   const engine = new PiiEngine(POLICY_JSON, KEY_HEX);
 
   // 2. tokenize an object holding an email and a valid PESEL.

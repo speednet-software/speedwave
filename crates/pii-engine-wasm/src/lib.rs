@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 use speedwave_pii_engine::{
-    compile_policy_v2, default_policy_json as core_default_policy_json, detokenize_json, scan_json,
+    compile_policy_v3, default_policy_json as core_default_policy_json, detokenize_json, scan_json,
     CompiledPolicy, Detection, DetectionAction, EngineKey,
 };
 use wasm_bindgen::prelude::*;
@@ -45,11 +45,13 @@ pub struct PiiEngine {
 
 #[wasm_bindgen]
 impl PiiEngine {
-    /// Compiles `policy_json` (policy.json v2) and decodes `key_hex` (64 hex chars, 32
-    /// bytes); either failure is returned as `Err`, never a panic (fail-closed).
+    /// Compiles `policy_json` (policy.json v3: rules + keywords) and decodes `key_hex` (64
+    /// hex chars, 32 bytes); either failure is returned as `Err`, never a panic (fail-closed).
+    /// Keywords are parsed and carried on the compiled policy but never masked/unmasked here
+    /// — the proxy is the only layer that acts on them (`alias_text`/`unalias_text`).
     #[wasm_bindgen(constructor)]
     pub fn new(policy_json: &str, key_hex: &str) -> Result<PiiEngine, JsError> {
-        let policy = compile_policy_v2(policy_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let policy = compile_policy_v3(policy_json).map_err(|e| JsError::new(&e.to_string()))?;
         let key = EngineKey::from_hex(key_hex).map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self { policy, key })
     }
@@ -78,7 +80,7 @@ impl PiiEngine {
     }
 }
 
-/// Thin re-export of the core's compiled-in default policy.json v2: SSOT for the TS
+/// Thin re-export of the core's compiled-in default policy.json v3: SSOT for the TS
 /// "no POLICY_FILE" path; the proxy (native) calls the core function directly.
 #[wasm_bindgen]
 pub fn default_policy_json() -> String {
@@ -92,19 +94,45 @@ pub fn default_policy_json() -> String {
 )]
 mod tests {
     use super::*;
-    use speedwave_pii_engine::{default_sensitive_keys, BUILTIN_CATEGORIES};
 
     #[test]
-    fn default_policy_json_compiles_and_covers_every_category() {
+    fn default_policy_json_compiles_and_covers_every_builtin_rule() {
         let json = default_policy_json();
-        let policy = compile_policy_v2(&json).expect("default policy.json v2 must compile");
-        assert_eq!(policy.rules().len(), BUILTIN_CATEGORIES.len() - 1);
-        assert!(policy.sensitive_field_flags().tokenize);
-        assert_eq!(policy.sensitive_keys(), default_sensitive_keys());
+        let policy = compile_policy_v3(&json).expect("default policy.json v3 must compile");
+        assert_eq!(policy.rules().len(), 7);
+        assert!(policy.keywords().is_empty());
     }
 
     #[test]
     fn default_policy_json_is_deterministic() {
         assert_eq!(default_policy_json(), default_policy_json());
+    }
+
+    #[test]
+    fn v3_policy_with_keywords_compiles_and_carries_them_uninterpreted() {
+        let json = serde_json::json!({
+            "version": 3,
+            "source": { "policies": ["strict"], "forced": [] },
+            "rules": [
+                {
+                    "id": "EMAIL",
+                    "displayName": "E-mail address",
+                    "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"],
+                    "caseSensitive": true,
+                    "tokenize": true,
+                    "log": false
+                }
+            ],
+            "keywords": [
+                { "match": "Coca-Cola", "alias": "Brandex", "caseSensitive": false }
+            ]
+        })
+        .to_string();
+
+        let policy = compile_policy_v3(&json).expect("valid v3 policy with keywords compiles");
+        assert_eq!(policy.rules().len(), 1);
+        // Hub never masks/unmasks keywords (the proxy does) — they are only carried through.
+        assert_eq!(policy.keywords().len(), 1);
+        assert_eq!(policy.keywords()[0].match_text, "Coca-Cola");
     }
 }
