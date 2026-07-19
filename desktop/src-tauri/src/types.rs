@@ -227,24 +227,37 @@ pub(crate) struct TelemetryConfigUpdate {
     pub(crate) logs_export_interval_ms: Option<Option<u64>>,
 }
 
-/// A built-in PII policy template's Settings-picker metadata.
+/// A built-in PII rule from the library (`mcp-servers/policies/rules.yaml`), for
+/// the Settings category checklist. PII categories are an open rule-id set, not
+/// a fixed enum — the frontend fetches this list instead of hard-coding one.
+#[derive(Serialize, Clone)]
+pub(crate) struct PiiRuleInfo {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+}
+
+/// A built-in PII policy template's Settings-picker metadata. `categories` keys
+/// are rule ids from the library; an id absent from the map is off in this template.
 #[derive(Serialize, Clone)]
 pub(crate) struct SecurityPolicyTemplateInfo {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
+    pub(crate) categories:
+        std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
 }
 
 /// A user-defined policy's Settings-picker metadata (editable); mirrors
-/// `PiiPolicyDefinition` minus the `sensitive_keys.remove` side.
+/// `PiiPolicyDefinition` (the v1 `sensitive_keys` concept has no v3 counterpart).
 #[derive(Serialize, Clone)]
 pub(crate) struct CustomPolicyDto {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
-    pub(crate) custom_patterns: Vec<speedwave_runtime::pii_policy::CustomPiiPattern>,
-    pub(crate) sensitive_keys_add: Vec<String>,
+    pub(crate) categories:
+        std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
+    pub(crate) rules: Vec<speedwave_runtime::pii_policy::OwnRuleV3>,
+    #[serde(default)]
+    pub(crate) keywords: Vec<speedwave_runtime::pii_policy::KeywordV3>,
 }
 
 /// Effective PII policy for the active project: `enabled_policies` is the
@@ -253,12 +266,14 @@ pub(crate) struct CustomPolicyDto {
 pub(crate) struct SecurityPolicyResponse {
     pub(crate) enabled_policies: Vec<String>,
     pub(crate) forced_policies: Vec<String>,
-    pub(crate) effective_categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
+    /// Rules with at least one flag on in the resolved union (mirrors `ResolvedPiiPolicy::rules`);
+    /// a rule id absent here is fully off across every enabled policy.
+    pub(crate) effective_rules: Vec<speedwave_runtime::pii_policy::RuleOutput>,
     pub(crate) custom_policies: Vec<CustomPolicyDto>,
 }
 
-/// A custom pattern as entered in the Settings form: the UI never computes
-/// the token id — the server derives it from `display_name` on every save.
+/// A custom detection rule as entered in the Settings form: the UI never
+/// computes the rule id — the server derives it from `display_name` on every save.
 #[derive(Deserialize, Clone)]
 pub(crate) struct SecurityPolicyCustomPatternInput {
     pub(crate) display_name: String,
@@ -272,9 +287,11 @@ pub(crate) struct SecurityPolicyCustomPatternInput {
 pub(crate) struct CustomPolicyDtoInput {
     pub(crate) name: String,
     pub(crate) enabled: bool,
-    pub(crate) categories: speedwave_runtime::pii_policy::PiiCategoryPolicies,
+    pub(crate) categories:
+        std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
     pub(crate) custom_patterns: Vec<SecurityPolicyCustomPatternInput>,
-    pub(crate) sensitive_keys_add: Vec<String>,
+    #[serde(default)]
+    pub(crate) keywords: Vec<speedwave_runtime::pii_policy::KeywordV3>,
 }
 
 /// User-supplied PII policy update (Settings → Security save path). `policies`
@@ -775,36 +792,6 @@ mod tests {
         assert_eq!(
             ts_val, MAX_CREDENTIAL_BYTES,
             "TS MAX_PLUGIN_CREDENTIAL_BYTES must match Rust types::MAX_CREDENTIAL_BYTES"
-        );
-    }
-
-    #[test]
-    fn pii_category_matches_models_security_policy_ts() {
-        // Cross-language SSOT guard: the Angular `PiiCategory` union must carry
-        // exactly the 8 wire strings `PiiCategory` (pii_policy.rs) serializes to.
-        let mut rust: Vec<String> = speedwave_runtime::pii_policy::PiiCategory::ALL
-            .iter()
-            .map(|c| c.wire_str().to_string())
-            .collect();
-        rust.sort();
-
-        let src = include_str!("../../src/src/app/models/security-policy.ts");
-        let marker = "export type PiiCategory =";
-        let start = src
-            .find(marker)
-            .expect("security-policy.ts must declare `export type PiiCategory`");
-        let rest = &src[start + marker.len()..];
-        let end = rest.find(';').expect("PiiCategory union must end with `;`");
-        let mut ts: Vec<String> = rest[..end]
-            .split('|')
-            .map(|s| s.trim().trim_matches(['\'', '"']).to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        ts.sort();
-
-        assert_eq!(
-            rust, ts,
-            "TS PiiCategory union must match Rust PiiCategory serde strings"
         );
     }
 }

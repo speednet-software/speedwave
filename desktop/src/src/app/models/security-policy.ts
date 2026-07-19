@@ -3,32 +3,50 @@
  * (backend is SSOT; snake_case matches the wire).
  */
 
-/** Built-in PII category; wire strings match Rust `PiiCategory` serde. */
-export type PiiCategory =
-  | 'EMAIL'
-  | 'PHONE_PL'
-  | 'PESEL'
-  | 'NIP'
-  | 'IBAN'
-  | 'CARD'
-  | 'API_KEY'
-  | 'SENSITIVE_FIELD';
-
-/** One category's tokenize/log pair; mirror of Rust `PiiCategoryPolicy`. */
-export interface CategoryFlagPair {
+/** One rule's tokenize/log pair; mirror of Rust `RuleFlags`. */
+export interface RuleFlags {
   tokenize: boolean;
   log: boolean;
 }
 
-/** Flag pair per built-in category; mirror of Rust `PiiCategoryPolicies`. */
-export type PiiCategoryPolicies = Record<PiiCategory, CategoryFlagPair>;
+/**
+ * Per-rule-id `{tokenize, log}` map. Keys are open PII rule ids sourced from
+ * `rules.yaml` (`list_pii_rules`), not a fixed enum — an id absent from the
+ * map is off.
+ */
+export type RuleCategories = Record<string, RuleFlags>;
 
-/** A user-defined detection pattern; mirror of Rust `CustomPiiPattern`. */
-export interface CustomPiiPattern {
+/** A built-in PII rule from the library; mirror of Rust `PiiRuleInfo` (`list_pii_rules`). */
+export interface PiiRuleInfo {
+  id: string;
+  display_name: string;
+}
+
+/** A literal keyword substitution; mirror of Rust `KeywordV3`. */
+export interface KeywordV3 {
+  match: string;
+  alias: string;
+  case_sensitive: boolean;
+}
+
+/** A user-defined additive detection rule; mirror of Rust `OwnRuleV3`. */
+export interface OwnRule {
   id: string;
   displayName: string;
-  pattern: string;
-  caseInsensitive: boolean;
+  patterns: string[];
+  validator: string | null;
+  caseSensitive: boolean;
+  tokenize: boolean;
+  log: boolean;
+}
+
+/** A resolved rule written to policy.json v3; mirror of Rust `RuleOutput`. */
+export interface RuleOutput {
+  id: string;
+  displayName: string;
+  patterns: string[];
+  validator?: string;
+  caseSensitive: boolean;
   tokenize: boolean;
   log: boolean;
 }
@@ -41,16 +59,16 @@ export interface SecurityPolicyTemplateInfo {
   id: string;
   name: string;
   description: string;
-  categories: PiiCategoryPolicies;
+  categories: RuleCategories;
 }
 
 /** A user-defined policy's Settings metadata; mirror of Rust `CustomPolicyDto`. */
 export interface CustomPolicyDto {
   id: string;
   name: string;
-  categories: PiiCategoryPolicies;
-  custom_patterns: CustomPiiPattern[];
-  sensitive_keys_add: string[];
+  categories: RuleCategories;
+  rules: OwnRule[];
+  keywords: KeywordV3[];
 }
 
 /**
@@ -62,15 +80,15 @@ export interface SecurityPolicyResponse {
   enabled_policies: string[];
   /** Subset of `enabled_policies` forced by MDM, locked (checked, disabled) in the UI. */
   forced_policies: string[];
-  /** Union-resolved flag pair per category; read-only preview. */
-  effective_categories: PiiCategoryPolicies;
+  /** Union-resolved rules with at least one flag on; a rule id absent here is fully off. */
+  effective_rules: RuleOutput[];
   /** The user's own policy definitions (editable). */
   custom_policies: CustomPolicyDto[];
 }
 
 /**
- * A custom pattern as entered in the Settings form; the server derives the
- * token id from `display_name`; never send one.
+ * A custom detection rule as entered in the Settings form; the server derives
+ * the rule id from `display_name`; never send one.
  */
 export interface SecurityPolicyCustomPatternInput {
   display_name: string;
@@ -86,9 +104,9 @@ export interface CustomPolicyDtoInput {
   name: string;
   /** This policy's own checklist state (custom ids aren't known before the server derive). */
   enabled: boolean;
-  categories: PiiCategoryPolicies;
+  categories: RuleCategories;
   custom_patterns: SecurityPolicyCustomPatternInput[];
-  sensitive_keys_add: string[];
+  keywords: KeywordV3[];
 }
 
 /**

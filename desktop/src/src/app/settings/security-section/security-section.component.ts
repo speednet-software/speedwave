@@ -14,21 +14,29 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { eventChecked, eventValue } from '../../shared/dom-event';
 import type {
-  CategoryFlagPair,
   CustomPolicyDtoInput,
-  PiiCategory,
-  PiiCategoryPolicies,
+  KeywordV3,
+  PiiRuleInfo,
+  RuleCategories,
+  RuleFlags,
   SecurityPolicyCustomPatternInput,
   SecurityPolicyResponse,
   SecurityPolicyTemplateInfo,
   SecurityPolicyUpdate,
 } from '../../models/security-policy';
 
-/** Editable row for a custom detection pattern (server derives the token id). */
+/** Editable row for a custom detection pattern (server derives the rule id). */
 interface CustomPatternRow {
   displayName: string;
   pattern: string;
   caseInsensitive: boolean;
+}
+
+/** Editable row for a keyword substitution. */
+interface KeywordRow {
+  match: string;
+  alias: string;
+  caseSensitive: boolean;
 }
 
 /**
@@ -40,38 +48,18 @@ interface CustomPolicyRow {
   id: string;
   name: string;
   enabled: boolean;
-  categories: PiiCategoryPolicies;
+  categories: RuleCategories;
   patterns: CustomPatternRow[];
-  sensitiveKeys: string[];
+  keywords: KeywordRow[];
 }
 
-/** Every built-in category, in the contract's declaration order (Rust `PiiCategory::ALL`). */
-const ALL_CATEGORIES: readonly PiiCategory[] = [
-  'EMAIL',
-  'PHONE_PL',
-  'PESEL',
-  'NIP',
-  'IBAN',
-  'CARD',
-  'API_KEY',
-  'SENSITIVE_FIELD',
-];
-
-/** Human-readable label per category, shown in the checkbox rows. */
-const CATEGORY_LABELS: Record<PiiCategory, string> = {
-  EMAIL: 'Email addresses',
-  PHONE_PL: 'Polish phone numbers',
-  PESEL: 'PESEL',
-  NIP: 'NIP',
-  IBAN: 'IBAN',
-  CARD: 'Payment cards',
-  API_KEY: 'API keys',
-  SENSITIVE_FIELD: 'Sensitive field names',
-};
+const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
 
 /**
  * Settings → Security: enable a set of built-in and/or custom PII policies,
- * each with per-category tokenize/log pairs. MDM-forced policies show locked.
+ * each with per-category tokenize/log pairs. Categories are an open rule-id
+ * set fetched from the library (`list_pii_rules`), not a fixed enum.
+ * MDM-forced policies show locked.
  */
 @Component({
   selector: 'app-security-section',
@@ -172,24 +160,26 @@ const CATEGORY_LABELS: Record<PiiCategory, string> = {
               </div>
 
               <div class="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
-                @for (cat of categoryList; track cat) {
+                @for (cat of categories(); track cat.id) {
                   <div class="rounded border border-[var(--line)] px-2 py-1 text-[11px]">
-                    <div class="text-[var(--ink-dim)]">{{ categoryLabels[cat] }}</div>
+                    <div class="text-[var(--ink-dim)]">{{ cat.display_name }}</div>
                     <label class="mr-2 inline-flex items-center gap-1">
                       <input
                         type="checkbox"
-                        [checked]="row.categories[cat].tokenize"
-                        (change)="onCustomCategoryToggle(row.key, cat, 'tokenize', $event)"
-                        [attr.data-testid]="'security-custom-' + row.key + '-' + cat + '-tokenize'"
+                        [checked]="rowCategoryFlags(row, cat.id).tokenize"
+                        (change)="onCustomCategoryToggle(row.key, cat.id, 'tokenize', $event)"
+                        [attr.data-testid]="
+                          'security-custom-' + row.key + '-' + cat.id + '-tokenize'
+                        "
                       />
                       tokenize
                     </label>
                     <label class="inline-flex items-center gap-1">
                       <input
                         type="checkbox"
-                        [checked]="row.categories[cat].log"
-                        (change)="onCustomCategoryToggle(row.key, cat, 'log', $event)"
-                        [attr.data-testid]="'security-custom-' + row.key + '-' + cat + '-log'"
+                        [checked]="rowCategoryFlags(row, cat.id).log"
+                        (change)="onCustomCategoryToggle(row.key, cat.id, 'log', $event)"
+                        [attr.data-testid]="'security-custom-' + row.key + '-' + cat.id + '-log'"
                       />
                       log
                     </label>
@@ -249,35 +239,60 @@ const CATEGORY_LABELS: Record<PiiCategory, string> = {
 
               <div class="mt-2">
                 <div class="mono mb-1 text-[10px] uppercase tracking-widest text-[var(--ink-mute)]">
-                  Sensitive field names
+                  Keywords
                 </div>
-                @for (key of row.sensitiveKeys; track $index; let i = $index) {
-                  <div class="mb-1 flex items-center gap-2">
+                @for (keyword of row.keywords; track $index; let i = $index) {
+                  <div class="mb-1 flex flex-wrap items-start gap-2">
                     <input
                       type="text"
-                      placeholder="e.g. salary"
-                      class="mono flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
-                      [value]="key"
-                      (input)="onKeyInput(row.key, i, eventValue($event))"
-                      [attr.data-testid]="'security-custom-' + row.key + '-key-' + i"
+                      placeholder="Match (3–128 chars)"
+                      class="min-w-[10rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                      [value]="keyword.match"
+                      (input)="onKeywordMatchInput(row.key, i, eventValue($event))"
+                      [attr.data-testid]="'security-custom-' + row.key + '-keyword-match-' + i"
                     />
+                    <input
+                      type="text"
+                      placeholder="Alias ([A-Za-z][A-Za-z0-9]*)"
+                      class="min-w-[8rem] flex-1 rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1 text-[12px] text-[var(--ink)]"
+                      [value]="keyword.alias"
+                      (input)="onKeywordAliasInput(row.key, i, eventValue($event))"
+                      [attr.data-testid]="'security-custom-' + row.key + '-keyword-alias-' + i"
+                    />
+                    <label class="flex items-center gap-1 text-[11px] text-[var(--ink-dim)]">
+                      <input
+                        type="checkbox"
+                        [checked]="keyword.caseSensitive"
+                        (change)="onKeywordCaseSensitiveToggle(row.key, i, $event)"
+                        [attr.data-testid]="'security-custom-' + row.key + '-keyword-casesensitive-' + i"
+                      />
+                      case-sensitive
+                    </label>
                     <button
                       type="button"
                       class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
-                      (click)="removeKey(row.key, i)"
-                      [attr.data-testid]="'security-custom-' + row.key + '-key-remove-' + i"
+                      (click)="removeKeyword(row.key, i)"
+                      [attr.data-testid]="'security-custom-' + row.key + '-keyword-remove-' + i"
                     >
                       remove
                     </button>
+                    @if (keywordErrorsFor(row.key)[i]; as err) {
+                      <p
+                        class="w-full text-[11px] text-[var(--red)]"
+                        [attr.data-testid]="'security-custom-' + row.key + '-keyword-error-' + i"
+                      >
+                        {{ err }}
+                      </p>
+                    }
                   </div>
                 }
                 <button
                   type="button"
                   class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)]"
-                  (click)="addKey(row.key)"
-                  [attr.data-testid]="'security-custom-' + row.key + '-key-add'"
+                  (click)="addKeyword(row.key)"
+                  [attr.data-testid]="'security-custom-' + row.key + '-keyword-add'"
                 >
-                  Add key name
+                  Add keyword
                 </button>
               </div>
             </div>
@@ -300,11 +315,11 @@ const CATEGORY_LABELS: Record<PiiCategory, string> = {
           <div
             class="grid grid-cols-1 gap-1.5 text-[11px] text-[var(--ink)] sm:grid-cols-2 lg:grid-cols-4"
           >
-            @for (cat of categoryList; track cat) {
-              <div [attr.data-testid]="'security-effective-' + cat">
-                {{ categoryLabels[cat] }}: tokenize
-                {{ effectiveCategories()[cat].tokenize ? 'on' : 'off' }}, log
-                {{ effectiveCategories()[cat].log ? 'on' : 'off' }}
+            @for (cat of categories(); track cat.id) {
+              <div [attr.data-testid]="'security-effective-' + cat.id">
+                {{ cat.display_name }}: tokenize
+                {{ effectiveCategoryFlags(cat.id).tokenize ? 'on' : 'off' }}, log
+                {{ effectiveCategoryFlags(cat.id).log ? 'on' : 'off' }}
               </div>
             }
           </div>
@@ -340,6 +355,8 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   readonly errorOccurred = output<string>();
 
   readonly templates = signal<SecurityPolicyTemplateInfo[]>([]);
+  /** Every known PII rule id + label, fetched from the library (`list_pii_rules`). */
+  readonly categories = signal<PiiRuleInfo[]>([]);
   readonly error = signal('');
   readonly saveError = signal('');
   readonly saving = signal(false);
@@ -351,7 +368,8 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   readonly enabledPolicies = signal<Set<string>>(new Set());
   /** MDM-forced ids (built-in or custom): checked, disabled, badge in the UI. */
   readonly forcedPolicies = signal<Set<string>>(new Set());
-  readonly effectiveCategories = signal<PiiCategoryPolicies>(this.allOff());
+  /** Rule id -> flags, built from the last load's `effective_rules`; a missing id is off. */
+  readonly effectiveCategories = signal<RuleCategories>({});
   readonly customPolicies = signal<CustomPolicyRow[]>([]);
 
   private readonly loadedFormSnapshot = signal('');
@@ -371,7 +389,8 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     return this.customPolicies().every(
       (row) =>
         this.rowNameError(row) === null &&
-        row.patterns.every((p) => this.patternRowError(p) === null)
+        row.patterns.every((p) => this.patternRowError(p) === null) &&
+        row.keywords.every((k) => this.keywordRowError(k) === null)
     );
   });
 
@@ -380,11 +399,9 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   private readonly projectState = inject(ProjectStateService);
   private unsubProjectReady: (() => void) | null = null;
 
-  protected readonly categoryList = ALL_CATEGORIES;
-  protected readonly categoryLabels = CATEGORY_LABELS;
   protected readonly eventValue = eventValue;
 
-  /** Loads templates + the current policy on first paint; reloads on project switch. */
+  /** Loads categories/templates/policy on first paint; reloads on project switch. */
   ngOnInit(): void {
     void this.refresh();
     this.unsubProjectReady = this.projectState.onProjectReady(() => {
@@ -398,19 +415,33 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     this.unsubProjectReady = null;
   }
 
-  private allOff(): PiiCategoryPolicies {
-    return ALL_CATEGORIES.reduce(
-      (acc, c) => ({ ...acc, [c]: { tokenize: false, log: false } }),
-      {} as PiiCategoryPolicies
-    );
+  /**
+   * A custom row's flags for one category id, defaulting to off when the row
+   * has never toggled that id (the row's map only carries entries a user touched).
+   * @param row - the policy row.
+   * @param categoryId - the rule id.
+   */
+  protected rowCategoryFlags(row: CustomPolicyRow, categoryId: string): RuleFlags {
+    return row.categories[categoryId] ?? OFF_FLAGS;
+  }
+
+  /**
+   * The resolved effective flags for one category id, defaulting to off when
+   * the id is absent from `effective_rules` (nothing in the enabled set turns it on).
+   * @param categoryId - the rule id.
+   */
+  protected effectiveCategoryFlags(categoryId: string): RuleFlags {
+    return this.effectiveCategories()[categoryId] ?? OFF_FLAGS;
   }
 
   private async refresh(): Promise<void> {
     try {
-      const [templates, policy] = await Promise.all([
+      const [categories, templates, policy] = await Promise.all([
+        this.tauri.invoke<PiiRuleInfo[]>('list_pii_rules'),
         this.tauri.invoke<SecurityPolicyTemplateInfo[]>('list_security_policy_templates'),
         this.tauri.invoke<SecurityPolicyResponse>('get_security_policy'),
       ]);
+      this.categories.set(categories);
       this.templates.set(templates);
       this.applyPolicy(policy);
       this.error.set('');
@@ -425,7 +456,11 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   private applyPolicy(policy: SecurityPolicyResponse): void {
     this.forcedPolicies.set(new Set(policy.forced_policies));
     this.enabledPolicies.set(new Set(policy.enabled_policies));
-    this.effectiveCategories.set(policy.effective_categories);
+    this.effectiveCategories.set(
+      Object.fromEntries(
+        policy.effective_rules.map((r) => [r.id, { tokenize: r.tokenize, log: r.log }])
+      )
+    );
     this.customPolicies.set(
       policy.custom_policies.map((c) => ({
         key: `srv-${c.id}`,
@@ -433,12 +468,16 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         name: c.name,
         enabled: policy.enabled_policies.includes(c.id),
         categories: c.categories,
-        patterns: c.custom_patterns.map((p) => ({
-          displayName: p.displayName,
-          pattern: p.pattern,
-          caseInsensitive: p.caseInsensitive,
+        patterns: c.rules.map((r) => ({
+          displayName: r.displayName,
+          pattern: r.patterns[0] ?? '',
+          caseInsensitive: !r.caseSensitive,
         })),
-        sensitiveKeys: c.sensitive_keys_add,
+        keywords: c.keywords.map((k) => ({
+          match: k.match,
+          alias: k.alias,
+          caseSensitive: k.case_sensitive,
+        })),
       }))
     );
   }
@@ -499,9 +538,9 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         id: '',
         name: '',
         enabled: true,
-        categories: this.allOff(),
+        categories: {},
         patterns: [],
-        sensitiveKeys: [],
+        keywords: [],
       },
     ]);
   }
@@ -528,23 +567,21 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   /**
    * Toggles one category's tokenize or log flag on a custom policy row.
    * @param key - the row's local key.
-   * @param cat - the category being toggled.
+   * @param categoryId - the rule id being toggled.
    * @param field - which half of the flag pair.
    * @param ev - the checkbox change event.
    */
-  onCustomCategoryToggle(
-    key: string,
-    cat: PiiCategory,
-    field: keyof CategoryFlagPair,
-    ev: Event
-  ): void {
+  onCustomCategoryToggle(key: string, categoryId: string, field: keyof RuleFlags, ev: Event): void {
     const on = eventChecked(ev);
     this.customPolicies.update((rows) =>
-      rows.map((r) =>
-        r.key === key
-          ? { ...r, categories: { ...r.categories, [cat]: { ...r.categories[cat], [field]: on } } }
-          : r
-      )
+      rows.map((r) => {
+        if (r.key !== key) return r;
+        const current = r.categories[categoryId] ?? OFF_FLAGS;
+        return {
+          ...r,
+          categories: { ...r.categories, [categoryId]: { ...current, [field]: on } },
+        };
+      })
     );
   }
 
@@ -617,47 +654,6 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Appends an empty sensitive-key row to a policy.
-   * @param rowKey - the owning policy row's local key.
-   */
-  addKey(rowKey: string): void {
-    this.customPolicies.update((rows) =>
-      rows.map((r) => (r.key === rowKey ? { ...r, sensitiveKeys: [...r.sensitiveKeys, ''] } : r))
-    );
-  }
-
-  /**
-   * Removes a sensitive-key row from a policy.
-   * @param rowKey - the owning policy row's local key.
-   * @param i - the key row index.
-   */
-  removeKey(rowKey: string, i: number): void {
-    this.customPolicies.update((rows) =>
-      rows.map((r) =>
-        r.key === rowKey
-          ? { ...r, sensitiveKeys: r.sensitiveKeys.filter((_, idx) => idx !== i) }
-          : r
-      )
-    );
-  }
-
-  /**
-   * Updates a sensitive-key row's value.
-   * @param rowKey - the owning policy row's local key.
-   * @param i - the key row index.
-   * @param value - the new key-name text.
-   */
-  onKeyInput(rowKey: string, i: number, value: string): void {
-    this.customPolicies.update((rows) =>
-      rows.map((r) =>
-        r.key === rowKey
-          ? { ...r, sensitiveKeys: r.sensitiveKeys.map((k, idx) => (idx === i ? value : k)) }
-          : r
-      )
-    );
-  }
-
-  /**
    * Client-side pre-validation for a policy row's name; the server derives the
    * id from this and re-validates on save. Called directly from the template.
    * @param row - the policy row to validate.
@@ -682,6 +678,119 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     return null;
   }
 
+  /**
+   * Appends an empty keyword row to a policy.
+   * @param rowKey - the owning policy row's local key.
+   */
+  addKeyword(rowKey: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              keywords: [...r.keywords, { match: '', alias: '', caseSensitive: true }],
+            }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Removes a keyword row from a policy.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the keyword row index.
+   */
+  removeKeyword(rowKey: string, i: number): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey ? { ...r, keywords: r.keywords.filter((_, idx) => idx !== i) } : r
+      )
+    );
+  }
+
+  /**
+   * Updates a keyword row's match text.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the keyword row index.
+   * @param value - the new match text.
+   */
+  onKeywordMatchInput(rowKey: string, i: number, value: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              keywords: r.keywords.map((k, idx) => (idx === i ? { ...k, match: value } : k)),
+            }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Updates a keyword row's alias text.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the keyword row index.
+   * @param value - the new alias text.
+   */
+  onKeywordAliasInput(rowKey: string, i: number, value: string): void {
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              keywords: r.keywords.map((k, idx) => (idx === i ? { ...k, alias: value } : k)),
+            }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Toggles a keyword row's case-sensitivity flag.
+   * @param rowKey - the owning policy row's local key.
+   * @param i - the keyword row index.
+   * @param ev - the checkbox change event.
+   */
+  onKeywordCaseSensitiveToggle(rowKey: string, i: number, ev: Event): void {
+    const on = eventChecked(ev);
+    this.customPolicies.update((rows) =>
+      rows.map((r) =>
+        r.key === rowKey
+          ? {
+              ...r,
+              keywords: r.keywords.map((k, idx) =>
+                idx === i ? { ...k, caseSensitive: on } : k
+              ),
+            }
+          : r
+      )
+    );
+  }
+
+  /**
+   * Client-side validation for a keyword row; the server is authoritative
+   * and re-validates on save. Spec: match/alias 3–128 chars, alias matches
+   * `^[A-Za-z][A-Za-z0-9]*$`, match ≠ alias (case-insensitive).
+   * @param row - the keyword row to validate.
+   */
+  private keywordRowError(row: KeywordRow): string | null {
+    const matchLen = row.match.length;
+    if (matchLen < 3 || matchLen > 128) return 'Match: 3–128 characters';
+    const aliasLen = row.alias.length;
+    if (aliasLen < 3 || aliasLen > 128) return 'Alias: 3–128 characters';
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(row.alias)) return 'Alias: letter + alphanumeric only';
+    if (row.match.toLowerCase() === row.alias.toLowerCase())
+      return 'Match and alias must differ';
+    return null;
+  }
+
+  /** Errors for all keyword rows in a policy; `null` entry = no error for that row. */
+  readonly keywordErrorsFor = (rowKey: string): (string | null)[] => {
+    const row = this.customPolicies().find((r) => r.key === rowKey);
+    return row ? row.keywords.map((k) => this.keywordRowError(k)) : [];
+  };
+
   private computeFormSnapshot(): string {
     return JSON.stringify({
       enabled: Array.from(this.enabledPolicies()).sort(),
@@ -690,7 +799,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         enabled: r.enabled,
         categories: r.categories,
         patterns: r.patterns,
-        sensitiveKeys: r.sensitiveKeys,
+        keywords: r.keywords,
       })),
     });
   }
@@ -711,10 +820,13 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
           case_insensitive: p.caseInsensitive,
         })
       ),
-      // The server rejects uppercase sensitive keys by contract.
-      sensitive_keys_add: row.sensitiveKeys
-        .map((k) => k.trim().toLowerCase())
-        .filter((k) => k.length > 0),
+      keywords: row.keywords.map(
+        (k): KeywordV3 => ({
+          match: k.match,
+          alias: k.alias,
+          case_sensitive: k.caseSensitive,
+        })
+      ),
     }));
     return { policies, custom_policies };
   }

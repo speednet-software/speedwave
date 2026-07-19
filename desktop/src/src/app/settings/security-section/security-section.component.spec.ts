@@ -5,29 +5,47 @@ import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import type {
-  CategoryFlagPair,
-  PiiCategoryPolicies,
+  PiiRuleInfo,
+  RuleCategories,
+  RuleFlags,
+  RuleOutput,
   SecurityPolicyResponse,
   SecurityPolicyTemplateInfo,
   SecurityPolicyUpdate,
 } from '../../models/security-policy';
 
-function pair(tokenize: boolean, log = false): CategoryFlagPair {
+/** Every built-in library rule id used across these fixtures (SENSITIVE_FIELD was removed). */
+const CATEGORY_IDS = ['EMAIL', 'PHONE_PL', 'PESEL', 'NIP', 'IBAN', 'CARD', 'API_KEY'];
+
+function pair(tokenize: boolean, log = false): RuleFlags {
   return { tokenize, log };
 }
 
-function allCategories(overrides: Partial<PiiCategoryPolicies> = {}): PiiCategoryPolicies {
-  return {
-    EMAIL: pair(true),
-    PHONE_PL: pair(true),
-    PESEL: pair(true),
-    NIP: pair(true),
-    IBAN: pair(true),
-    CARD: pair(true),
-    API_KEY: pair(true),
-    SENSITIVE_FIELD: pair(true),
-    ...overrides,
-  };
+function allCategories(overrides: RuleCategories = {}): RuleCategories {
+  const base: RuleCategories = {};
+  for (const id of CATEGORY_IDS) base[id] = pair(true);
+  return { ...base, ...overrides };
+}
+
+function categoryList(): PiiRuleInfo[] {
+  return CATEGORY_IDS.map((id) => ({ id, display_name: id }));
+}
+
+/**
+ * Mirrors the backend's `effective_rules` contract: only ids with a flag on appear.
+ * @param categories - the rule-id -> flags map to project into resolved rules.
+ */
+function effectiveRulesFrom(categories: RuleCategories): RuleOutput[] {
+  return Object.entries(categories)
+    .filter(([, flags]) => flags.tokenize || flags.log)
+    .map(([id, flags]) => ({
+      id,
+      displayName: id,
+      patterns: [],
+      caseSensitive: true,
+      tokenize: flags.tokenize,
+      log: flags.log,
+    }));
 }
 
 function baseTemplates(): SecurityPolicyTemplateInfo[] {
@@ -51,7 +69,7 @@ function baseResponse(overrides: Partial<SecurityPolicyResponse> = {}): Security
   return {
     enabled_policies: ['strict'],
     forced_policies: [],
-    effective_categories: allCategories(),
+    effective_rules: effectiveRulesFrom(allCategories()),
     custom_policies: [],
     ...overrides,
   };
@@ -65,6 +83,7 @@ describe('SecuritySectionComponent', () => {
   function setup(resp: SecurityPolicyResponse, templates = baseTemplates()): void {
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'list_pii_rules') return categoryList();
       if (cmd === 'list_security_policy_templates') return templates;
       if (cmd === 'get_security_policy') return resp;
       return undefined;
@@ -118,8 +137,8 @@ describe('SecuritySectionComponent', () => {
             id: 'my-custom',
             name: 'My Custom',
             categories: allCategories(),
-            custom_patterns: [],
-            sensitive_keys_add: [],
+            rules: [],
+            keywords: [],
           },
         ],
       })
@@ -221,8 +240,8 @@ describe('SecuritySectionComponent', () => {
       component.onCustomCategoryToggle(key, 'EMAIL', 'tokenize', checkboxEvent(true));
       component.onCustomCategoryToggle(key, 'EMAIL', 'log', checkboxEvent(true));
       const cats = component.customPolicies()[0].categories;
-      expect(cats.EMAIL).toEqual({ tokenize: true, log: true });
-      expect(cats.PHONE_PL).toEqual({ tokenize: false, log: false });
+      expect(cats['EMAIL']).toEqual({ tokenize: true, log: true });
+      expect(cats['PHONE_PL']).toBeUndefined();
     });
   });
 
@@ -266,26 +285,12 @@ describe('SecuritySectionComponent', () => {
     });
   });
 
-  describe('sensitive key rows', () => {
-    it('adds and removes a key row on a custom policy', async () => {
-      await create();
-      component.ngOnInit();
-      await fixture.whenStable();
-      component.addCustomPolicy();
-      const key = component.customPolicies()[0].key;
-      component.addKey(key);
-      component.onKeyInput(key, 0, 'Salary');
-      expect(component.customPolicies()[0].sensitiveKeys).toEqual(['Salary']);
-      component.removeKey(key, 0);
-      expect(component.customPolicies()[0].sensitiveKeys).toHaveLength(0);
-    });
-  });
-
   describe('dirty gating of Save', () => {
     it('the form and Save button are absent until get_security_policy resolves', async () => {
       let resolvePolicy!: (r: SecurityPolicyResponse) => void;
       mockTauri = new MockTauriService();
       mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_pii_rules') return categoryList();
         if (cmd === 'list_security_policy_templates') return baseTemplates();
         if (cmd === 'get_security_policy') {
           return new Promise<SecurityPolicyResponse>((r) => {
@@ -340,8 +345,9 @@ describe('SecuritySectionComponent', () => {
       component.addCustomPolicy();
       const key = component.customPolicies()[0].key;
       component.onCustomNameInput(key, 'Employee Roster');
-      component.addKey(key);
-      component.onKeyInput(key, 0, 'Salary');
+      component.addPattern(key);
+      component.onPatternNameInput(key, 0, 'Employee ID');
+      component.onPatternRegexInput(key, 0, '\\bEMP-\\d{4,8}\\b');
       const spy = vi.spyOn(mockTauri, 'invoke');
       await component.save();
       const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
@@ -351,7 +357,9 @@ describe('SecuritySectionComponent', () => {
       expect(update.custom_policies).toHaveLength(1);
       expect(update.custom_policies[0].name).toBe('Employee Roster');
       expect(update.custom_policies[0].enabled).toBe(true);
-      expect(update.custom_policies[0].sensitive_keys_add).toEqual(['salary']);
+      expect(update.custom_policies[0].custom_patterns).toEqual([
+        { display_name: 'Employee ID', pattern: '\\bEMP-\\d{4,8}\\b', case_insensitive: false },
+      ]);
     });
 
     it('never sends a forced policy id, even when it was in enabled_policies', async () => {
@@ -382,6 +390,7 @@ describe('SecuritySectionComponent', () => {
 
     it('surfaces a save error and does not request a restart', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_pii_rules') return categoryList();
         if (cmd === 'list_security_policy_templates') return baseTemplates();
         if (cmd === 'get_security_policy') return baseResponse();
         if (cmd === 'update_security_policy') throw new Error('save failed');
@@ -409,6 +418,7 @@ describe('SecuritySectionComponent', () => {
     await fixture.whenStable();
     let calls = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
+      if (cmd === 'list_pii_rules') return categoryList();
       if (cmd === 'list_security_policy_templates') return baseTemplates();
       if (cmd === 'get_security_policy') {
         calls += 1;
