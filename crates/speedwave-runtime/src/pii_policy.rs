@@ -1189,6 +1189,24 @@ mod tests {
         assert_eq!(resolver_ids, engine_ids);
     }
 
+    #[test]
+    fn rules_yaml_is_ssot_for_pii_categories() {
+        // Replaces the old enum cross-read test: PII categories are now an open
+        // rule-id set sourced from rules.yaml, not a fixed Rust/TS enum.
+        let ids: Vec<&str> = rule_library()
+            .unwrap()
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert!(ids.contains(&"EMAIL"), "EMAIL rule must exist");
+        assert!(ids.contains(&"PESEL"), "PESEL rule must exist");
+        assert!(ids.contains(&"NIP"), "NIP rule must exist");
+        assert!(
+            !ids.contains(&"SENSITIVE_FIELD"),
+            "SENSITIVE_FIELD must not exist (removed in the v3 migration)"
+        );
+    }
+
     // ---- builtin templates -----------------------------------------------
 
     #[test]

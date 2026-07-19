@@ -1304,6 +1304,7 @@ fn main() {
             containers_cmd::probe_otlp_endpoint,
             containers_cmd::get_security_policy,
             containers_cmd::list_security_policy_templates,
+            containers_cmd::list_pii_rules,
             containers_cmd::update_security_policy,
             llm_cmd::discover_llm_models,
             llm_cmd::get_llm_usage,

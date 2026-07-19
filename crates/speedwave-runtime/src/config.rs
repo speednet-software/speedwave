@@ -907,7 +907,7 @@ fn legacy_categories_to_v3(
 }
 
 /// v1 pattern shape (`forced` instead of `{tokenize, log}`); `forced` was dead
-/// (ADR-079) and is dropped, not mapped, during migration.
+/// weight even in v1 and is dropped, not mapped, during migration (ADR-084).
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LegacyCustomPiiPattern {
