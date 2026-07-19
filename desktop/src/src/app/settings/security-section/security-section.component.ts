@@ -264,7 +264,9 @@ const OFF_FLAGS: RuleFlags = { tokenize: false, log: false };
                         type="checkbox"
                         [checked]="keyword.caseSensitive"
                         (change)="onKeywordCaseSensitiveToggle(row.key, i, $event)"
-                        [attr.data-testid]="'security-custom-' + row.key + '-keyword-casesensitive-' + i"
+                        [attr.data-testid]="
+                          'security-custom-' + row.key + '-keyword-casesensitive-' + i
+                        "
                       />
                       case-sensitive
                     </label>
@@ -476,7 +478,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         keywords: c.keywords.map((k) => ({
           match: k.match,
           alias: k.alias,
-          caseSensitive: k.case_sensitive,
+          caseSensitive: k.caseSensitive,
         })),
       }))
     );
@@ -759,9 +761,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         r.key === rowKey
           ? {
               ...r,
-              keywords: r.keywords.map((k, idx) =>
-                idx === i ? { ...k, caseSensitive: on } : k
-              ),
+              keywords: r.keywords.map((k, idx) => (idx === i ? { ...k, caseSensitive: on } : k)),
             }
           : r
       )
@@ -780,12 +780,14 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
     const aliasLen = row.alias.length;
     if (aliasLen < 3 || aliasLen > 128) return 'Alias: 3–128 characters';
     if (!/^[A-Za-z][A-Za-z0-9]*$/.test(row.alias)) return 'Alias: letter + alphanumeric only';
-    if (row.match.toLowerCase() === row.alias.toLowerCase())
-      return 'Match and alias must differ';
+    if (row.match.toLowerCase() === row.alias.toLowerCase()) return 'Match and alias must differ';
     return null;
   }
 
-  /** Errors for all keyword rows in a policy; `null` entry = no error for that row. */
+  /**
+   * Errors for all keyword rows in a policy; `null` entry = no error for that row.
+   * @param rowKey - the owning policy row's local key.
+   */
   readonly keywordErrorsFor = (rowKey: string): (string | null)[] => {
     const row = this.customPolicies().find((r) => r.key === rowKey);
     return row ? row.keywords.map((k) => this.keywordRowError(k)) : [];
@@ -824,7 +826,7 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
         (k): KeywordV3 => ({
           match: k.match,
           alias: k.alias,
-          case_sensitive: k.caseSensitive,
+          caseSensitive: k.caseSensitive,
         })
       ),
     }));

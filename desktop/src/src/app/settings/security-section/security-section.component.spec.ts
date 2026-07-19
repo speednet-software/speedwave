@@ -285,6 +285,83 @@ describe('SecuritySectionComponent', () => {
     });
   });
 
+  describe('keyword rows', () => {
+    it('adds, edits and removes a keyword row on a custom policy', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.addKeyword(key);
+      component.onKeywordMatchInput(key, 0, 'Coca-Cola');
+      component.onKeywordAliasInput(key, 0, 'Brandex');
+      component.onKeywordCaseSensitiveToggle(key, 0, checkboxEvent(false));
+      expect(component.customPolicies()[0].keywords).toEqual([
+        { match: 'Coca-Cola', alias: 'Brandex', caseSensitive: false },
+      ]);
+      component.removeKeyword(key, 0);
+      expect(component.customPolicies()[0].keywords).toHaveLength(0);
+    });
+
+    it('flags a too-short match, a malformed alias, and match == alias', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.onCustomNameInput(key, 'Brands');
+      component.addKeyword(key);
+      component.onKeywordMatchInput(key, 0, 'ab');
+      component.onKeywordAliasInput(key, 0, 'Brandex');
+      expect(component.keywordErrorsFor(key)[0]).toContain('Match');
+      component.onKeywordMatchInput(key, 0, 'Coca-Cola');
+      component.onKeywordAliasInput(key, 0, '1bad');
+      expect(component.keywordErrorsFor(key)[0]).toContain('Alias');
+      component.onKeywordAliasInput(key, 0, 'coca-cola');
+      expect(component.keywordErrorsFor(key)[0]).toContain('Alias');
+      component.onKeywordMatchInput(key, 0, 'Brandex');
+      component.onKeywordAliasInput(key, 0, 'brandex');
+      expect(component.keywordErrorsFor(key)[0]).toContain('differ');
+      expect(component.canSave()).toBe(false);
+    });
+
+    it('a valid keyword row clears the error and allows Save', async () => {
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      component.addCustomPolicy();
+      const key = component.customPolicies()[0].key;
+      component.onCustomNameInput(key, 'Brands');
+      component.addKeyword(key);
+      component.onKeywordMatchInput(key, 0, 'Coca-Cola');
+      component.onKeywordAliasInput(key, 0, 'Brandex');
+      expect(component.keywordErrorsFor(key)[0]).toBeNull();
+      expect(component.canSave()).toBe(true);
+    });
+
+    it('loads keywords from the server response into the form', async () => {
+      setup(
+        baseResponse({
+          custom_policies: [
+            {
+              id: 'brands',
+              name: 'Brands',
+              categories: {},
+              rules: [],
+              keywords: [{ match: 'Coca-Cola', alias: 'Brandex', caseSensitive: false }],
+            },
+          ],
+        })
+      );
+      await create();
+      component.ngOnInit();
+      await fixture.whenStable();
+      expect(component.customPolicies()[0].keywords).toEqual([
+        { match: 'Coca-Cola', alias: 'Brandex', caseSensitive: false },
+      ]);
+    });
+  });
+
   describe('dirty gating of Save', () => {
     it('the form and Save button are absent until get_security_policy resolves', async () => {
       let resolvePolicy!: (r: SecurityPolicyResponse) => void;
@@ -348,6 +425,9 @@ describe('SecuritySectionComponent', () => {
       component.addPattern(key);
       component.onPatternNameInput(key, 0, 'Employee ID');
       component.onPatternRegexInput(key, 0, '\\bEMP-\\d{4,8}\\b');
+      component.addKeyword(key);
+      component.onKeywordMatchInput(key, 0, 'Coca-Cola');
+      component.onKeywordAliasInput(key, 0, 'Brandex');
       const spy = vi.spyOn(mockTauri, 'invoke');
       await component.save();
       const call = spy.mock.calls.find((c) => c[0] === 'update_security_policy');
@@ -359,6 +439,9 @@ describe('SecuritySectionComponent', () => {
       expect(update.custom_policies[0].enabled).toBe(true);
       expect(update.custom_policies[0].custom_patterns).toEqual([
         { display_name: 'Employee ID', pattern: '\\bEMP-\\d{4,8}\\b', case_insensitive: false },
+      ]);
+      expect(update.custom_policies[0].keywords).toEqual([
+        { match: 'Coca-Cola', alias: 'Brandex', caseSensitive: true },
       ]);
     });
 

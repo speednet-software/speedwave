@@ -22,11 +22,11 @@ export interface PiiRuleInfo {
   display_name: string;
 }
 
-/** A literal keyword substitution; mirror of Rust `KeywordV3`. */
+/** A literal keyword substitution; mirror of Rust `KeywordV3` (camelCase wire). */
 export interface KeywordV3 {
   match: string;
   alias: string;
-  case_sensitive: boolean;
+  caseSensitive: boolean;
 }
 
 /** A user-defined additive detection rule; mirror of Rust `OwnRuleV3`. */

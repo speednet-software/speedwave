@@ -1258,6 +1258,7 @@ fn build_security_policy_response(
                     name: d.name.clone(),
                     categories: d.categories.clone(),
                     rules: d.rules.clone(),
+                    keywords: d.keywords.clone(),
                 })
                 .collect()
         })
@@ -3932,8 +3933,8 @@ mod tests {
 
     /// Every library rule id tokenized on, no logging — the v3 replacement for
     /// the old fixed-enum `PiiCategoryFlags::ALL_ON` fixture.
-    fn all_categories_on() -> std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>
-    {
+    fn all_categories_on(
+    ) -> std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags> {
         speedwave_runtime::pii_policy::rule_library()
             .unwrap()
             .iter()
@@ -3970,6 +3971,7 @@ mod tests {
             enabled,
             categories,
             custom_patterns,
+            keywords: Vec::new(),
         }
     }
 
@@ -4110,6 +4112,36 @@ mod tests {
     }
 
     #[test]
+    fn build_config_custom_policy_persists_keywords() {
+        let mut input = custom_policy_input("Brand Names", true, all_categories_on(), vec![]);
+        input.keywords = vec![speedwave_runtime::pii_policy::KeywordV3 {
+            r#match: "Coca-Cola".to_string(),
+            alias: "Brandex".to_string(),
+            case_sensitive: false,
+        }];
+        let update = security_policy_input(vec![], vec![input]);
+        let cfg = build_pii_policy_user_config(&update).unwrap();
+        assert_eq!(cfg.custom_policies.len(), 1);
+        let keywords = &cfg.custom_policies[0].keywords;
+        assert_eq!(keywords.len(), 1);
+        assert_eq!(keywords[0].r#match, "Coca-Cola");
+        assert_eq!(keywords[0].alias, "Brandex");
+        assert!(!keywords[0].case_sensitive);
+    }
+
+    #[test]
+    fn build_config_rejects_keyword_with_invalid_alias() {
+        let mut input = custom_policy_input("Brand Names", true, all_categories_on(), vec![]);
+        input.keywords = vec![speedwave_runtime::pii_policy::KeywordV3 {
+            r#match: "Coca-Cola".to_string(),
+            alias: "1bad alias!".to_string(),
+            case_sensitive: true,
+        }];
+        let update = security_policy_input(vec![], vec![input]);
+        assert!(build_pii_policy_user_config(&update).is_err());
+    }
+
+    #[test]
     fn build_config_disabled_custom_policy_is_persisted_but_not_selected() {
         let update = security_policy_input(
             vec!["strict"],
@@ -4130,7 +4162,12 @@ mod tests {
     fn build_config_rejects_custom_policy_id_colliding_with_builtin() {
         let update = security_policy_input(
             vec![],
-            vec![custom_policy_input("Strict", true, all_categories_on(), vec![])],
+            vec![custom_policy_input(
+                "Strict",
+                true,
+                all_categories_on(),
+                vec![],
+            )],
         );
         assert!(build_pii_policy_user_config(&update).is_err());
     }
@@ -4167,7 +4204,8 @@ mod tests {
 
     #[test]
     fn build_config_rejects_over_cap_custom_patterns() {
-        let patterns: Vec<SecurityPolicyCustomPatternInput> = (0..=speedwave_runtime::consts::PII_MAX_RULES)
+        let patterns: Vec<SecurityPolicyCustomPatternInput> = (0
+            ..=speedwave_runtime::consts::PII_MAX_RULES)
             .map(|i| SecurityPolicyCustomPatternInput {
                 display_name: format!("Pattern {i}"),
                 pattern: r"\d{3}".to_string(),
@@ -4176,7 +4214,12 @@ mod tests {
             .collect();
         let update = security_policy_input(
             vec![],
-            vec![custom_policy_input("Custom", true, all_categories_on(), patterns)],
+            vec![custom_policy_input(
+                "Custom",
+                true,
+                all_categories_on(),
+                patterns,
+            )],
         );
         assert!(build_pii_policy_user_config(&update).is_err());
     }
