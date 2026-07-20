@@ -728,3 +728,24 @@ def test_weasyprint_render_rejects_remote_resource(tmp_path: Path) -> None:
     dst = tmp_path / "out.pdf"
     # WeasyPrint surfaces the url_fetcher ValueError → the script exits non-zero.
     run_script_expect_fail("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+
+
+@needs_matplotlib
+def test_weasyprint_render_ignores_presentational_hint_background(tmp_path: Path) -> None:
+    pytest.importorskip("weasyprint", reason="weasyprint not installed")
+    src = tmp_path / "page.html"
+    src.write_text('<html><body background="http://presentational-hint.invalid/bg.png">hi</body></html>')
+    dst = tmp_path / "out.pdf"
+    run_script("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+    assert is_pdf(dst)
+
+
+@needs_matplotlib
+def test_weasyprint_render_ignores_presentational_hint_css_injection(tmp_path: Path) -> None:
+    pytest.importorskip("weasyprint", reason="weasyprint not installed")
+    src = tmp_path / "page.html"
+    payload = "x);}body{background-image:url(http://presentational-hint.invalid/leak)}"
+    src.write_text(f'<html><body background="{payload}">hi</body></html>')
+    dst = tmp_path / "out.pdf"
+    run_script("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+    assert is_pdf(dst)
