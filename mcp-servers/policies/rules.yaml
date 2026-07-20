@@ -8,8 +8,8 @@ rules:
   - id: PHONE_PL
     displayName: "Polish phone number"
     patterns:
-      - '\+?48[\s-]?\d{3}[\s-]?\d{3}[\s-]?\d{3}'
-      - '\+?48[\s-]?\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}'
+      - '\+?(?-u:\b)48[ -]?\d{3}[ -]?\d{3}[ -]?\d{3}(?-u:\b)'
+      - '\+?(?-u:\b)48[ -]?\d{2}[ -]?\d{3}[ -]?\d{2}[ -]?\d{2}(?-u:\b)'
 
   - id: PESEL
     displayName: "PESEL"

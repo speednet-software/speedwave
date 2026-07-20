@@ -558,6 +558,43 @@ mod tests {
         assert_eq!(agg[0].count, 5);
     }
 
+    /// Builds a checksum-valid PESEL from a seed; digit runs are assembled at runtime so
+    /// no fixture literal in this file matches a PII rule.
+    fn generated_pesel(seed: u32) -> String {
+        let weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
+        let base: Vec<u32> = (0..10).map(|i| (seed + 3 * i) % 10).collect();
+        let sum: u32 = base.iter().zip(weights.iter()).map(|(d, w)| d * w).sum();
+        let checksum = (10 - sum % 10) % 10;
+        base.into_iter()
+            .chain(std::iter::once(checksum))
+            .map(|d| char::from_digit(d, 10).expect("single digit"))
+            .collect()
+    }
+
+    #[test]
+    fn scan_request_tokenizes_newline_separated_pesels_without_phone_overlap() {
+        // Regression: PHONE_PL used to glue "48"+digits across a line break, so two PESELs
+        // escaped their own rule and leaked digit fragments in cleartext.
+        let (policy, key) = test_policy_and_key();
+        let list = (0..4).map(generated_pesel).collect::<Vec<_>>().join("\n");
+        let mut body = json!({"messages": [{"role": "user", "content": list}]});
+
+        let detections = scan_request(&policy, &key, &mut body).unwrap();
+        assert!(!detections.iter().any(|d| d.category == "PHONE_PL"));
+        let pesel = detections.iter().find(|d| d.category == "PESEL").unwrap();
+        assert_eq!(pesel.count, 4);
+
+        let content = body["messages"][0]["content"].as_str().unwrap();
+        let lines: Vec<&str> = content.split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        for line in lines {
+            assert!(
+                line.starts_with("[PESEL:TOKEN_") && line.ends_with(']'),
+                "each line must be exactly one PESEL token span"
+            );
+        }
+    }
+
     // ── keyword masking: applied by scan_request after PII tokenization ──
 
     fn policy_with_keyword(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledPolicy {

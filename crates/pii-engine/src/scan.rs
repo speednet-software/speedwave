@@ -668,7 +668,7 @@ mod tests {
         "source": { "policies": ["strict"], "forced": [] },
         "rules": [
             { "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": true, "log": false },
-            { "id": "PHONE_PL", "displayName": "Phone", "patterns": ["\\+?48[\\s-]?\\d{3}[\\s-]?\\d{3}[\\s-]?\\d{3}"], "caseSensitive": true, "tokenize": true, "log": false },
+            { "id": "PHONE_PL", "displayName": "Phone", "patterns": ["\\+?(?-u:\\b)48[ -]?\\d{3}[ -]?\\d{3}[ -]?\\d{3}(?-u:\\b)", "\\+?(?-u:\\b)48[ -]?\\d{2}[ -]?\\d{3}[ -]?\\d{2}[ -]?\\d{2}(?-u:\\b)"], "caseSensitive": true, "tokenize": true, "log": false },
             { "id": "PESEL", "displayName": "PESEL", "patterns": ["(?-u:\\b)\\d{11}(?-u:\\b)"], "validator": "pesel", "caseSensitive": true, "tokenize": true, "log": false },
             { "id": "NIP", "displayName": "NIP", "patterns": ["(?-u:\\b)\\d{10}(?-u:\\b)"], "validator": "nip", "caseSensitive": true, "tokenize": true, "log": false },
             { "id": "IBAN", "displayName": "IBAN", "patterns": ["[A-Z]{2}\\d{2}[A-Z0-9]{4}\\d{7}([A-Z0-9]?){0,16}"], "validator": "iban", "caseSensitive": true, "tokenize": true, "log": false },
@@ -876,25 +876,117 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_phone_inside_iban_shaped_value_masks_deterministically() {
-        // PHONE_PL (no `\b` anchor) runs before IBAN in rule order, masking digits IBAN needs.
-        // NIP's `\b` anchor prevents it matching mid-alnum, unlike PHONE_PL.
+    fn phone_never_matches_inside_an_iban_shaped_value() {
+        // Regression: the pre-anchor PHONE_PL stole digits mid-value here, masking digits
+        // IBAN needed and leaving the leftovers in cleartext.
         let policy = full_policy();
         let key = test_key();
-        let text = "Account PL61ABCD48123456789 on file";
+        let iban = format!("PL26ABCD48{}", ["123", "123", "123"].concat());
+        let text = format!("Account {iban} on file");
 
-        let outcome = scan_text(&policy, &key, text).expect("scan succeeds");
-        assert!(!outcome.detections.iter().any(|d| d.category == "IBAN"));
-        let phone = outcome
+        let outcome = scan_text(&policy, &key, &text).expect("scan succeeds");
+        assert!(!outcome.detections.iter().any(|d| d.category == "PHONE_PL"));
+        let detected = outcome
             .detections
             .iter()
-            .find(|d| d.category == "PHONE_PL")
-            .expect("PHONE_PL detected");
-        assert_eq!(phone.count, 1);
+            .find(|d| d.category == "IBAN")
+            .expect("IBAN detected");
+        assert_eq!(detected.count, 1);
+        assert!(outcome.text.contains("[IBAN:TOKEN_"));
+        assert!(!outcome.text.contains(&iban));
+    }
 
-        let expected_token = build_token(&key, "PHONE_PL", "48123456789").expect("token builds");
-        let expected = format!("Account PL61ABCD{expected_token} on file");
-        assert_eq!(outcome.text, expected);
+    /// Builds a checksum-valid PESEL from a seed; digit runs are assembled at runtime so
+    /// no fixture literal in this file matches a PII rule.
+    fn generated_pesel(seed: u32) -> String {
+        let weights = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
+        let base: Vec<u32> = (0..10).map(|i| (seed + 3 * i) % 10).collect();
+        let sum: u32 = base.iter().zip(weights.iter()).map(|(d, w)| d * w).sum();
+        let checksum = (10 - sum % 10) % 10;
+        base.into_iter()
+            .chain(std::iter::once(checksum))
+            .map(|d| char::from_digit(d, 10).expect("single digit"))
+            .collect()
+    }
+
+    #[test]
+    fn anchored_phone_matches_standalone_forms() {
+        let policy = full_policy();
+        let key = test_key();
+        let bare = format!("48{}", ["123", "123", "123"].concat());
+        let plus_spaced = format!("+48 {} {} {}", "123", "123", "123");
+        let dashed = format!("48-{}-{}-{}", "123", "123", "123");
+        let grouped_2_3_2_2 = format!("+48 {} {} {} {}", "12", "123", "12", "12");
+        for value in [bare, plus_spaced, dashed, grouped_2_3_2_2] {
+            let text = format!("call {value} now");
+            let outcome = scan_text(&policy, &key, &text).expect("scan succeeds");
+            let phone = outcome
+                .detections
+                .iter()
+                .find(|d| d.category == "PHONE_PL")
+                .unwrap_or_else(|| panic!("PHONE_PL not detected in {value:?}"));
+            assert_eq!(phone.count, 1, "{value:?}");
+            assert!(outcome.text.contains("[PHONE_PL:TOKEN_"), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn anchored_phone_does_not_match_inside_a_digit_run() {
+        let policy = full_policy();
+        let key = test_key();
+        let digit_run = format!("12{}", ["48", "123", "123", "123"].concat());
+
+        let outcome = scan_text(&policy, &key, &digit_run).expect("scan succeeds");
+        assert!(outcome.detections.is_empty(), "{:?}", outcome.detections);
+        assert_eq!(outcome.text, digit_run);
+    }
+
+    #[test]
+    fn phone_split_across_a_newline_is_not_matched() {
+        // Deliberate trade-off of `[ -]` over `[\s-]`: a line break never joins fragments.
+        let policy = full_policy();
+        let key = test_key();
+        let text = format!("+48\n{} {} {}", "123", "123", "123");
+
+        let outcome = scan_text(&policy, &key, &text).expect("scan succeeds");
+        assert!(outcome.detections.is_empty());
+        assert_eq!(outcome.text, text);
+    }
+
+    #[test]
+    fn newline_separated_pesels_all_tokenize_with_no_cleartext_digits() {
+        // Regression: `[\s-]` in PHONE_PL matched `\n`, gluing two neighbouring PESELs into
+        // one bogus phone match and leaving their remaining digits in cleartext.
+        let policy = full_policy();
+        let key = test_key();
+        let list = (0..10).map(generated_pesel).collect::<Vec<_>>().join("\n");
+
+        let outcome = scan_text(&policy, &key, &list).expect("scan succeeds");
+        assert!(!outcome.detections.iter().any(|d| d.category == "PHONE_PL"));
+        let pesel = outcome
+            .detections
+            .iter()
+            .find(|d| d.category == "PESEL")
+            .expect("PESEL detected");
+        assert_eq!(pesel.count, 10);
+
+        let re = Regex::new(TOKEN_SPAN_RE).expect("span regex compiles");
+        let outside_spans = re.replace_all(&outcome.text, "");
+        assert!(
+            !outside_spans.chars().any(|c| c.is_ascii_digit()),
+            "no digit may survive outside token spans"
+        );
+    }
+
+    #[test]
+    fn us_and_br_phone_shapes_stay_raw() {
+        let policy = full_policy();
+        let key = test_key();
+        for text in ["call 555-1234567 now", "call +55 113 123 321 now"] {
+            let outcome = scan_text(&policy, &key, text).expect("scan succeeds");
+            assert!(outcome.detections.is_empty(), "{text}");
+            assert_eq!(outcome.text, text);
+        }
     }
 
     #[test]
