@@ -913,7 +913,7 @@ mod tests {
         let token = speedwave_pii_engine::scan_text(&policy, &key, plaintext)
             .expect("scan succeeds")
             .text;
-        assert!(token.starts_with("[SECRET:TOKEN_"), "got: {token}");
+        assert!(token.starts_with("[SECRET:TOKEN_"));
 
         let fragment = format!("{{\"content\": \"{token}\"}}");
         let out = unmask_and_detokenize_json_fragment(&fragment, &[], &key).expect("fragment ok");
