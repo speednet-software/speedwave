@@ -253,7 +253,7 @@ fn suffix_is_proper_alias_prefix(tail: &str, alias_chars: &[char], case_sensitiv
         if case_sensitive {
             t == a
         } else {
-            t.to_ascii_lowercase() == a.to_ascii_lowercase()
+            t.eq_ignore_ascii_case(&a)
         }
     })
 }
