@@ -5,7 +5,7 @@ use std::path::Path;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
-    alias_text, compile_policy_v3, default_policy_json, detokenize_text, detokenize_text_with,
+    alias_json, compile_policy_v3, default_policy_json, detokenize_text, detokenize_text_with,
     incomplete_token_span_start, scan_json, unalias_text_preserving_tokens,
     unalias_text_preserving_tokens_with, CompiledKeyword, CompiledPolicy, Detection,
     DetokenizeError, EngineKey, ScanError,
@@ -140,46 +140,16 @@ pub fn scan_request(
 }
 
 /// Masks every configured keyword to its alias across `value`'s string leaves, case-pattern
-/// preserving via `alias_text`. A no-op when `keywords` is empty.
+/// preserving via the engine's `alias_json`. A no-op when `keywords` is empty.
 fn mask_keywords(value: &mut serde_json::Value, keywords: &[CompiledKeyword]) {
     for keyword in keywords {
-        let fields_modified = mask_keyword_value(value, keyword);
+        let fields_modified = alias_json(value, keyword);
         if fields_modified > 0 {
             log::debug!(
                 "keyword mask: alias='{}' fields_modified={fields_modified}",
                 keyword.alias
             );
         }
-    }
-}
-
-/// Applies one keyword's substitution recursively over string leaves; returns how many
-/// leaves it changed. Never logs or returns the matched text itself, only a count.
-fn mask_keyword_value(value: &mut serde_json::Value, keyword: &CompiledKeyword) -> u32 {
-    match value {
-        serde_json::Value::String(s) => {
-            let masked = alias_text(
-                s,
-                &keyword.match_text,
-                &keyword.alias,
-                keyword.case_sensitive,
-            );
-            if masked == *s {
-                0
-            } else {
-                *s = masked;
-                1
-            }
-        }
-        serde_json::Value::Array(items) => items
-            .iter_mut()
-            .map(|item| mask_keyword_value(item, keyword))
-            .sum(),
-        serde_json::Value::Object(map) => map
-            .values_mut()
-            .map(|v| mask_keyword_value(v, keyword))
-            .sum(),
-        _ => 0,
     }
 }
 

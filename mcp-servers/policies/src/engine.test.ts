@@ -153,3 +153,61 @@ describe('PiiEngine tokenize/detokenize', () => {
     expect(() => engine.detokenize(tampered)).toThrow();
   });
 });
+
+describe('keyword masking', () => {
+  const KEYWORD_POLICY_V3 = {
+    ...VALID_POLICY_V3,
+    keywords: [{ match: 'coca-cola', alias: 'Brandex', caseSensitive: false }],
+  };
+
+  /**
+   * Write the keyword-bearing policy + key into `dir` and load an engine bound to it.
+   * @param dir - Temp dir to write policy.json and the sibling key into
+   * @returns The loaded engine
+   */
+  function keywordEngine(dir: string) {
+    const policyFile = join(dir, 'policy.json');
+    writeFileSync(policyFile, JSON.stringify(KEYWORD_POLICY_V3));
+    writeFileSync(join(dir, 'key'), 'ab'.repeat(32));
+    return loadEngine({ POLICY_FILE: policyFile });
+  }
+
+  it('tokenize masks keywords in nested values preserving the case pattern', () => {
+    withTempDir((dir) => {
+      const engine = keywordEngine(dir);
+      const { value, detections } = engine.tokenize({
+        note: 'coca-cola shipped',
+        tags: ['COCA-COLA', 7],
+      });
+      const v = value as { note: string; tags: [string, number] };
+      expect(v.note).toBe('brandex shipped');
+      expect(v.tags[0]).toBe('BRANDEX');
+      expect(v.tags[1]).toBe(7);
+      // Keyword masking is not a detection: the audit contract carries PII categories only.
+      expect(detections).toEqual([]);
+    });
+  });
+
+  it('detokenize unmasks aliases and round-trips together with PII tokens', () => {
+    withTempDir((dir) => {
+      const engine = keywordEngine(dir);
+      const original = { note: `coca-cola contact: ${['user', 'example.com'].join('@')}` };
+      const { value } = engine.tokenize(original);
+      const masked = value as { note: string };
+      expect(masked.note).toContain('brandex');
+      expect(masked.note).toContain('[EMAIL:TOKEN_');
+      expect(engine.detokenize(value)).toEqual(original);
+    });
+  });
+
+  it('a keyword-less policy leaves keyword-looking text untouched', () => {
+    withTempDir((dir) => {
+      const policyFile = join(dir, 'policy.json');
+      writeFileSync(policyFile, JSON.stringify(VALID_POLICY_V3));
+      writeFileSync(join(dir, 'key'), 'ab'.repeat(32));
+      const engine = loadEngine({ POLICY_FILE: policyFile });
+      const { value } = engine.tokenize({ note: 'Brandex and coca-cola stay' });
+      expect((value as { note: string }).note).toBe('Brandex and coca-cola stay');
+    });
+  });
+});

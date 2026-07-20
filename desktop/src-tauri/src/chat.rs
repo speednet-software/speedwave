@@ -1,5 +1,5 @@
 use crate::history;
-use speedwave_pii_engine::EngineKey;
+use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
     AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
 };
@@ -175,17 +175,17 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
 
 /// Detokenizes a chunk's free-text fields for display (same fields as `sanitize_chunk`).
 /// Runs before `sanitize_chunk` so redaction sees the real display text, not a token placeholder.
-fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk {
-    let Some(key) = key else {
+fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
+    if policy.is_noop() {
         return chunk;
-    };
+    }
     use crate::pii_display::detokenize_for_display as detok;
     match chunk {
         StreamChunk::Text { content } => StreamChunk::Text {
-            content: detok(Some(key), &content),
+            content: detok(policy, &content),
         },
         StreamChunk::Thinking { content } => StreamChunk::Thinking {
-            content: detok(Some(key), &content),
+            content: detok(policy, &content),
         },
         StreamChunk::ToolResult {
             tool_id,
@@ -193,11 +193,11 @@ fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk 
             is_error,
         } => StreamChunk::ToolResult {
             tool_id,
-            content: detok(Some(key), &content),
+            content: detok(policy, &content),
             is_error,
         },
         StreamChunk::Error { content } => StreamChunk::Error {
-            content: detok(Some(key), &content),
+            content: detok(policy, &content),
         },
         StreamChunk::Result {
             result_text: Some(text),
@@ -211,7 +211,7 @@ fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk 
             model,
             context_usage,
         } => StreamChunk::Result {
-            result_text: Some(detok(Some(key), &text)),
+            result_text: Some(detok(policy, &text)),
             session_id,
             total_cost,
             usage,
@@ -224,7 +224,7 @@ fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk 
         },
         StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
             session_id,
-            text: detok(Some(key), &text),
+            text: detok(policy, &text),
         },
         StreamChunk::AskUserQuestion {
             tool_id,
@@ -232,11 +232,11 @@ fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk 
             current_index,
         } => {
             for q in &mut questions {
-                q.question = detok(Some(key), &q.question);
-                q.header = detok(Some(key), &q.header);
+                q.question = detok(policy, &q.question);
+                q.header = detok(policy, &q.header);
                 for opt in &mut q.options {
-                    opt.label = detok(Some(key), &opt.label);
-                    opt.value = detok(Some(key), &opt.value);
+                    opt.label = detok(policy, &opt.label);
+                    opt.value = detok(policy, &opt.value);
                 }
             }
             StreamChunk::AskUserQuestion {
@@ -251,12 +251,8 @@ fn detokenize_chunk(chunk: StreamChunk, key: Option<&EngineKey>) -> StreamChunk 
 
 /// The ONE way to emit a `chat_stream` event: detokenizes for display, then sanitizes
 /// so no site leaks a secret. Enforced by `chat_stream_emits_go_through_helper`.
-fn emit_sanitized_chunk(
-    app_handle: &tauri::AppHandle,
-    chunk: StreamChunk,
-    key: Option<&EngineKey>,
-) {
-    let chunk = detokenize_chunk(chunk, key);
+fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, policy: &DisplayPolicy) {
+    let chunk = detokenize_chunk(chunk, policy);
     if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
         log::warn!("failed to emit chat_stream event: {e}");
     }
@@ -1613,8 +1609,8 @@ impl ChatSession {
 
         // Loaded once per turn/session (never per-chunk); `None` when the project has
         // no PII policy/key, making every detokenize call downstream a no-op.
-        let display_key =
-            crate::pii_display::load_display_key(consts::data_dir(), &self.project_name);
+        let display_policy =
+            crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
         // On resume: seed cumulative session state from the transcript so the
         // first turn reports a real delta. Non-fatal — log and use a zero baseline.
@@ -1708,7 +1704,7 @@ impl ChatSession {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
                                     },
-                                    display_key.as_ref(),
+                                    &display_policy,
                                 );
                                 break;
                             }
@@ -1720,7 +1716,7 @@ impl ChatSession {
                                 questions,
                                 current_index: 0,
                             },
-                            display_key.as_ref(),
+                            &display_policy,
                         );
                     } else {
                         // Auto-approve non-AskUserQuestion tools
@@ -1738,7 +1734,7 @@ impl ChatSession {
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
                                         },
-                                        display_key.as_ref(),
+                                        &display_policy,
                                     );
                                     break;
                                 }
@@ -1753,7 +1749,7 @@ impl ChatSession {
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
                                         },
-                                        display_key.as_ref(),
+                                        &display_policy,
                                     );
                                     break;
                                 }
@@ -1765,7 +1761,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                     },
-                                    display_key.as_ref(),
+                                    &display_policy,
                                 );
                                 break;
                             }
@@ -1821,7 +1817,7 @@ impl ChatSession {
                     parser.reset();
                 }
                 for chunk in chunks {
-                    emit_sanitized_chunk(&app_handle, chunk, display_key.as_ref());
+                    emit_sanitized_chunk(&app_handle, chunk, &display_policy);
                 }
                 // ADR-045 drain: after Result chunks emit, write any queued message to stdin.
                 if let Some(session_id) = result_session_id {
@@ -1829,7 +1825,7 @@ impl ChatSession {
                         &app_handle,
                         &session_id,
                         &stdin_for_reader,
-                        display_key.as_ref(),
+                        &display_policy,
                     );
                 }
             }
@@ -1848,7 +1844,7 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                 };
-                emit_sanitized_chunk(&app_handle, chunk, display_key.as_ref());
+                emit_sanitized_chunk(&app_handle, chunk, &display_policy);
             }
         });
         self.drain_handles.push(h);
@@ -2157,7 +2153,7 @@ fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
-    key: Option<&EngineKey>,
+    policy: &DisplayPolicy,
 ) {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
@@ -2189,7 +2185,7 @@ fn drain_queued_message(
             session_id: session_id.to_string(),
             text: drained.text,
         },
-        key,
+        policy,
     );
     log::debug!("queue drained: {} bytes for session", drained_text.len());
 }
@@ -2319,16 +2315,20 @@ mod tests {
 
     // -- detokenize_chunk: PII display detokenization at the emit chokepoint --
 
-    fn detok_test_key(tmp: &std::path::Path, project: &str) -> EngineKey {
+    fn detok_test_key(tmp: &std::path::Path, project: &str) -> speedwave_pii_engine::EngineKey {
         speedwave_runtime::pii_key::ensure_project_key_in(tmp, project)
             .expect("ensure_project_key_in");
         crate::pii_display::load_display_key(tmp, project).expect("key must load")
     }
 
-    fn tokenize_for_test(key: &EngineKey, plain: &str) -> String {
-        use speedwave_pii_engine::{compile_policy_v2, default_policy_json, scan_text};
-        let policy = compile_policy_v2(&default_policy_json()).expect("policy compiles");
+    fn tokenize_for_test(key: &speedwave_pii_engine::EngineKey, plain: &str) -> String {
+        use speedwave_pii_engine::{compile_policy_v3, default_policy_json, scan_text};
+        let policy = compile_policy_v3(&default_policy_json()).expect("policy compiles");
         scan_text(&policy, key, plain).expect("scan succeeds").text
+    }
+
+    fn key_policy(key: speedwave_pii_engine::EngineKey) -> DisplayPolicy {
+        DisplayPolicy::new(Some(key), Vec::new())
     }
 
     #[test]
@@ -2337,7 +2337,7 @@ mod tests {
         let chunk = StreamChunk::Text {
             content: tokenized.to_string(),
         };
-        match detokenize_chunk(chunk, None) {
+        match detokenize_chunk(chunk, &DisplayPolicy::default()) {
             StreamChunk::Text { content } => assert_eq!(content, tokenized),
             other => panic!("variant changed: {other:?}"),
         }
@@ -2351,7 +2351,7 @@ mod tests {
         assert!(tokenized.contains("TOKEN_"), "fixture must tokenize");
 
         let chunk = StreamChunk::Text { content: tokenized };
-        match detokenize_chunk(chunk, Some(&key)) {
+        match detokenize_chunk(chunk, &key_policy(key)) {
             StreamChunk::Text { content } => {
                 assert_eq!(content, "email me at jan@example.com");
             }
@@ -2365,11 +2365,13 @@ mod tests {
         let key = detok_test_key(tmp.path(), "proj");
         let tokenized = tokenize_for_test(&key, "secret@example.com");
 
+        let policy = key_policy(key);
+
         match detokenize_chunk(
             StreamChunk::Thinking {
                 content: tokenized.clone(),
             },
-            Some(&key),
+            &policy,
         ) {
             StreamChunk::Thinking { content } => assert_eq!(content, "secret@example.com"),
             other => panic!("variant changed: {other:?}"),
@@ -2381,7 +2383,7 @@ mod tests {
                 content: tokenized.clone(),
                 is_error: false,
             },
-            Some(&key),
+            &policy,
         ) {
             StreamChunk::ToolResult { content, .. } => {
                 assert_eq!(content, "secret@example.com");
@@ -2393,7 +2395,7 @@ mod tests {
             StreamChunk::Error {
                 content: tokenized.clone(),
             },
-            Some(&key),
+            &policy,
         ) {
             StreamChunk::Error { content } => assert_eq!(content, "secret@example.com"),
             other => panic!("variant changed: {other:?}"),
@@ -2405,6 +2407,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = detok_test_key(tmp.path(), "proj");
         let tokenized = tokenize_for_test(&key, "reach me at jan@example.com");
+
+        let policy = key_policy(key);
 
         let result_chunk = StreamChunk::Result {
             session_id: "s".into(),
@@ -2418,7 +2422,7 @@ mod tests {
             model: None,
             context_usage: None,
         };
-        match detokenize_chunk(result_chunk, Some(&key)) {
+        match detokenize_chunk(result_chunk, &policy) {
             StreamChunk::Result { result_text, .. } => {
                 assert_eq!(result_text.as_deref(), Some("reach me at jan@example.com"));
             }
@@ -2429,7 +2433,7 @@ mod tests {
             session_id: "s".into(),
             text: tokenized,
         };
-        match detokenize_chunk(queue_chunk, Some(&key)) {
+        match detokenize_chunk(queue_chunk, &policy) {
             StreamChunk::QueueDrained { text, .. } => {
                 assert_eq!(text, "reach me at jan@example.com");
             }
@@ -2457,7 +2461,7 @@ mod tests {
             }],
             current_index: 0,
         };
-        match detokenize_chunk(chunk, Some(&key)) {
+        match detokenize_chunk(chunk, &key_policy(key)) {
             StreamChunk::AskUserQuestion { questions, .. } => {
                 assert_eq!(questions[0].question, "confirm jan@example.com?");
                 assert_eq!(questions[0].header, "jan@example.com");
@@ -2478,7 +2482,7 @@ mod tests {
         let chunk = StreamChunk::Text {
             content: tokenized.clone(),
         };
-        match detokenize_chunk(chunk, Some(&key_b)) {
+        match detokenize_chunk(chunk, &key_policy(key_b)) {
             StreamChunk::Text { content } => assert_eq!(content, tokenized),
             other => panic!("variant changed: {other:?}"),
         }
@@ -2493,10 +2497,31 @@ mod tests {
             tool_id: "t1".into(),
             partial_json: raw.into(),
         };
-        match detokenize_chunk(chunk, Some(&key)) {
+        match detokenize_chunk(chunk, &key_policy(key)) {
             StreamChunk::ToolInputDelta { partial_json, .. } => {
                 assert_eq!(partial_json, raw);
             }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_unmasks_keyword_aliases_in_tool_results() {
+        let policy = DisplayPolicy::new(
+            None,
+            vec![speedwave_pii_engine::CompiledKeyword {
+                match_text: "coca-cola".to_string(),
+                alias: "Brandex".to_string(),
+                case_sensitive: false,
+            }],
+        );
+        let chunk = StreamChunk::ToolResult {
+            tool_id: "t1".into(),
+            content: "brandex shipped".into(),
+            is_error: false,
+        };
+        match detokenize_chunk(chunk, &policy) {
+            StreamChunk::ToolResult { content, .. } => assert_eq!(content, "coca-cola shipped"),
             other => panic!("variant changed: {other:?}"),
         }
     }

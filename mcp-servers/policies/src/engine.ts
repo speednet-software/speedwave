@@ -1,6 +1,7 @@
 /**
  * Thin wrapper over the compiled WASM PII engine: loads policy.json + the sibling key file
- * (or the engine's compiled-in default when absent) and exposes tokenize/detokenize.
+ * (or the engine's compiled-in default when absent) and exposes tokenize/detokenize,
+ * both keyword-aware (mask on tokenize, unmask on detokenize) like the proxy.
  * @module engine
  */
 
@@ -33,13 +34,14 @@ export interface TokenizeResult {
 /** A policy-bound PII engine instance, ready to scan or detokenize values. */
 export interface PiiEngine {
   /**
-   * Tokenize any value (string/object/array).
+   * Tokenize any value (string/object/array); policy keywords are then masked (match → alias).
    * @param value - Value to scan
    */
   tokenize(value: unknown): TokenizeResult;
   /**
-   * Detokenize; throws (fail-closed) on any bad/foreign token.
-   * @param value - Value containing tokens to resolve back to their original values
+   * Detokenize after unmasking keyword aliases (alias → match); throws (fail-closed) on any
+   * bad/foreign token.
+   * @param value - Value containing tokens/aliases to resolve back to their original values
    */
   detokenize(value: unknown): unknown;
 }

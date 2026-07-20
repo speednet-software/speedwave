@@ -1888,7 +1888,7 @@ mod tests {
     /// the source JSONL on disk stays tokenized and unchanged.
     #[test]
     fn get_conversation_detokenizes_returned_copy_but_leaves_source_file_tokenized() {
-        use speedwave_pii_engine::{compile_policy_v2, default_policy_json, scan_text, EngineKey};
+        use speedwave_pii_engine::{compile_policy_v3, default_policy_json, scan_text, EngineKey};
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
@@ -1898,7 +1898,7 @@ mod tests {
         let key_bytes =
             speedwave_runtime::pii_key::read_project_key_in(tmp.path(), "proj").unwrap();
         let key = EngineKey::from_bytes(key_bytes);
-        let policy = compile_policy_v2(&default_policy_json()).unwrap();
+        let policy = compile_policy_v3(&default_policy_json()).unwrap();
         let tokenized = scan_text(&policy, &key, "contact jan@example.com")
             .unwrap()
             .text;
@@ -1920,7 +1920,10 @@ mod tests {
         );
 
         // Detokenization happens only on this owned, in-memory copy.
-        crate::pii_display::detokenize_transcript(&mut transcript, Some(&key));
+        crate::pii_display::detokenize_transcript(
+            &mut transcript,
+            &crate::pii_display::DisplayPolicy::new(Some(key), Vec::new()),
+        );
         assert_eq!(transcript.messages[0].content, "contact jan@example.com");
 
         // The source file on disk must remain byte-for-byte tokenized.

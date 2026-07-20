@@ -16,9 +16,11 @@ pub(crate) async fn list_conversations(
             e.to_string()
         })?;
         // Display-only copy: the on-disk sessions stay tokenized.
-        let key =
-            crate::pii_display::load_display_key(speedwave_runtime::consts::data_dir(), &project);
-        crate::pii_display::detokenize_summaries(&mut summaries, key.as_ref());
+        let policy = crate::pii_display::load_display_policy(
+            speedwave_runtime::consts::data_dir(),
+            &project,
+        );
+        crate::pii_display::detokenize_summaries(&mut summaries, &policy);
         Ok(summaries)
     })
     .await
@@ -38,9 +40,11 @@ pub(crate) async fn get_conversation(
             e.to_string()
         })?;
         // Detokenize the returned copy only; the tokenized source file stays unchanged.
-        let key =
-            crate::pii_display::load_display_key(speedwave_runtime::consts::data_dir(), &project);
-        crate::pii_display::detokenize_transcript(&mut transcript, key.as_ref());
+        let policy = crate::pii_display::load_display_policy(
+            speedwave_runtime::consts::data_dir(),
+            &project,
+        );
+        crate::pii_display::detokenize_transcript(&mut transcript, &policy);
         Ok(transcript)
     })
     .await

@@ -41,7 +41,7 @@ pub struct CompiledRule {
 }
 
 /// One literal keyword substitution: an exact string and its stand-in alias.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompiledKeyword {
     /// The literal text to mask.
     pub match_text: String,

@@ -1,7 +1,7 @@
 //! Scanning, tokenization, and fail-closed detokenization
 //! (TS counterpart: `mcp-servers/policies/src/tokenizer.ts`).
 
-use crate::policy::CompiledPolicy;
+use crate::policy::{CompiledKeyword, CompiledPolicy};
 use crate::siv::{decode_payload, encode_payload, open, seal, EngineKey};
 use regex::Regex;
 use std::collections::HashMap;
@@ -649,6 +649,59 @@ pub fn unalias_text_preserving_tokens_with(
     }
 }
 
+/// Applies one keyword's masking (match → alias, [`alias_text`]) over every string leaf of a
+/// JSON tree; returns how many leaves changed. Non-string leaves are untouched.
+pub fn alias_json(value: &mut serde_json::Value, keyword: &CompiledKeyword) -> u32 {
+    map_json_strings(value, &|s| {
+        alias_text(
+            s,
+            &keyword.match_text,
+            &keyword.alias,
+            keyword.case_sensitive,
+        )
+    })
+}
+
+/// Applies one keyword's unmasking (alias → match, [`unalias_text_preserving_tokens`], so a
+/// token span's ciphertext is never touched) over every string leaf; returns leaves changed.
+pub fn unalias_json_preserving_tokens(
+    value: &mut serde_json::Value,
+    keyword: &CompiledKeyword,
+) -> u32 {
+    map_json_strings(value, &|s| {
+        unalias_text_preserving_tokens(
+            s,
+            &keyword.match_text,
+            &keyword.alias,
+            keyword.case_sensitive,
+        )
+    })
+}
+
+/// Rewrites every string leaf of a JSON tree with `transform`, counting changed leaves.
+fn map_json_strings(value: &mut serde_json::Value, transform: &dyn Fn(&str) -> String) -> u32 {
+    match value {
+        serde_json::Value::String(s) => {
+            let rewritten = transform(s);
+            if rewritten == *s {
+                0
+            } else {
+                *s = rewritten;
+                1
+            }
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(|item| map_json_strings(item, transform))
+            .sum(),
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .map(|v| map_json_strings(v, transform))
+            .sum(),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -1282,6 +1335,68 @@ mod tests {
         let result =
             unalias_text_preserving_tokens("nothing to see here", "Coca-Cola", "Brandex", false);
         assert_eq!(result, "nothing to see here");
+    }
+
+    // ── alias_json / unalias_json_preserving_tokens: JSON-tree keyword walk ──
+
+    fn test_keyword(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledKeyword {
+        CompiledKeyword {
+            match_text: match_text.to_string(),
+            alias: alias.to_string(),
+            case_sensitive,
+        }
+    }
+
+    #[test]
+    fn alias_json_masks_nested_string_leaves_preserving_case() {
+        let keyword = test_keyword("acme", "brandex", false);
+        let mut value = serde_json::json!({
+            "title": "ACME order",
+            "items": ["from acme", {"note": "Acme signed", "id": 7, "flag": true, "none": null}]
+        });
+
+        let changed = alias_json(&mut value, &keyword);
+        assert_eq!(changed, 3);
+        assert_eq!(value["title"], "BRANDEX order");
+        assert_eq!(value["items"][0], "from brandex");
+        assert_eq!(value["items"][1]["note"], "Brandex signed");
+        assert_eq!(value["items"][1]["id"], 7);
+        assert_eq!(value["items"][1]["flag"], true);
+        assert!(value["items"][1]["none"].is_null());
+    }
+
+    #[test]
+    fn alias_json_and_unalias_json_roundtrip() {
+        let keyword = test_keyword("acme", "brandex", false);
+        let original = serde_json::json!({"a": "acme and ACME", "b": ["no match", "Acme"]});
+        let mut value = original.clone();
+
+        assert_eq!(alias_json(&mut value, &keyword), 2);
+        assert!(!value.to_string().to_lowercase().contains("acme"));
+        assert_eq!(unalias_json_preserving_tokens(&mut value, &keyword), 2);
+        assert_eq!(value, original);
+    }
+
+    #[test]
+    fn unalias_json_never_touches_a_token_spans_ciphertext() {
+        let key = test_key();
+        let ciphertext = siv_seal(&key, "EMAIL", b"x@y.z").expect("seal succeeds");
+        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let keyword = test_keyword("Coca-Cola", "Brandex", true);
+        let mut value = serde_json::json!({"msg": format!("Brandex sent {token}")});
+
+        assert_eq!(unalias_json_preserving_tokens(&mut value, &keyword), 1);
+        assert_eq!(value["msg"], format!("Coca-Cola sent {token}"));
+    }
+
+    #[test]
+    fn alias_json_without_matches_reports_zero_changes() {
+        let keyword = test_keyword("Coca-Cola", "Brandex", true);
+        let mut value = serde_json::json!({"msg": "nothing here", "n": 42});
+
+        assert_eq!(alias_json(&mut value, &keyword), 0);
+        assert_eq!(value["msg"], "nothing here");
+        assert_eq!(value["n"], 42);
     }
 
     // ── incomplete_token_span_start: viable-prefix detection for streaming holdback ──
