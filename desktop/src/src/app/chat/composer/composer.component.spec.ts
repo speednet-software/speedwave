@@ -504,7 +504,7 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── manual resize (SPEED-362) ─────────────────────────────────────────────
+  // ── manual resize ─────────────────────────────────────────────
   describe('manual resize', () => {
     function autosize(): CdkTextareaAutosize {
       return fixture.debugElement
