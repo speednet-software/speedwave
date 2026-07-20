@@ -5,9 +5,10 @@ use std::path::Path;
 
 use rand::RngCore;
 use speedwave_pii_engine::{
-    alias_text, compile_policy_v3, default_policy_json, detokenize_text, scan_json,
-    unalias_text_preserving_tokens, CompiledKeyword, CompiledPolicy, Detection, DetokenizeError,
-    EngineKey, ScanError,
+    alias_text, compile_policy_v3, default_policy_json, detokenize_text, detokenize_text_with,
+    incomplete_token_span_start, scan_json, unalias_text_preserving_tokens,
+    unalias_text_preserving_tokens_with, CompiledKeyword, CompiledPolicy, Detection,
+    DetokenizeError, EngineKey, ScanError,
 };
 
 /// Loaded PII engine state: ready to scan, or a fatal load error. `Failed` is surfaced by
@@ -233,12 +234,91 @@ fn floor_char_boundary(s: &str, at: usize) -> usize {
     idx
 }
 
-/// Rewrites a streamed LLM response as chunks arrive, unmasking keywords and detokenizing
-/// PII spans before the bytes reach the agent environment (design doc §5.1). A token span
-/// can be split across two upstream chunks, so this holds back a tail no shorter than
-/// [`MAX_TOKEN_SPAN_LEN`]: any span starting before the emitted boundary is guaranteed to
-/// have its entire length still available in the buffer. Content that cannot yet contain a
-/// full span's start flows through with no added delay once the buffer exceeds that bound.
+/// Longest prefix of `text` that no potential token span or keyword alias can straddle:
+/// transforming the prefix and the tail (plus any future text) independently equals one
+/// whole-text pass. Typical text has no viable tail, so streaming adds no latency.
+pub fn safe_prefix_len(text: &str, keywords: &[CompiledKeyword]) -> usize {
+    let mut safe = text.len();
+    if let Some(start) = incomplete_token_span_start(text) {
+        // A pseudo-span tail longer than the practical bound is treated as plain text so a
+        // bracket-heavy stream cannot pin the buffer forever.
+        if text.len() - start <= MAX_TOKEN_SPAN_LEN {
+            safe = safe.min(start);
+        }
+    }
+    for keyword in keywords {
+        safe = safe.min(alias_prefix_start(
+            text,
+            &keyword.alias,
+            keyword.case_sensitive,
+        ));
+    }
+    floor_char_boundary(text, safe)
+}
+
+/// Earliest byte offset whose suffix is a PROPER prefix of `alias` (a complete alias is
+/// replaceable now and never held); `text.len()` when no suffix qualifies.
+fn alias_prefix_start(text: &str, alias: &str, case_sensitive: bool) -> usize {
+    let alias_chars: Vec<char> = alias.chars().collect();
+    if alias_chars.len() < 2 {
+        return text.len();
+    }
+    let positions: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+    let window = positions.len().saturating_sub(alias_chars.len() - 1);
+    for &pos in &positions[window..] {
+        if suffix_is_proper_alias_prefix(&text[pos..], &alias_chars, case_sensitive) {
+            return pos;
+        }
+    }
+    text.len()
+}
+
+/// True when `tail` is a non-empty proper prefix of the alias, honoring case sensitivity.
+fn suffix_is_proper_alias_prefix(tail: &str, alias_chars: &[char], case_sensitive: bool) -> bool {
+    let tail_chars: Vec<char> = tail.chars().collect();
+    if tail_chars.is_empty() || tail_chars.len() >= alias_chars.len() {
+        return false;
+    }
+    tail_chars.iter().zip(alias_chars).all(|(&t, &a)| {
+        if case_sensitive {
+            t == a
+        } else {
+            t.to_ascii_lowercase() == a.to_ascii_lowercase()
+        }
+    })
+}
+
+/// Escapes `s` as JSON-string content (no surrounding quotes) for insertion into text that
+/// is itself serialized JSON, e.g. an `input_json_delta.partial_json` fragment.
+fn json_string_escape(s: &str) -> String {
+    let quoted = serde_json::Value::String(s.to_string()).to_string();
+    quoted[1..quoted.len() - 1].to_string()
+}
+
+/// [`unmask_and_detokenize_response`] for serialized-JSON delta content: every inserted
+/// replacement (keyword match text, decrypted plaintext) is JSON-string-escaped so the
+/// reassembled `partial_json` stays parseable.
+pub fn unmask_and_detokenize_json_fragment(
+    text: &str,
+    keywords: &[CompiledKeyword],
+    key: &EngineKey,
+) -> Result<String, DetokenizeError> {
+    let mut result = text.to_string();
+    for keyword in keywords {
+        result = unalias_text_preserving_tokens_with(
+            &result,
+            &keyword.match_text,
+            &keyword.alias,
+            keyword.case_sensitive,
+            &json_string_escape,
+        );
+    }
+    detokenize_text_with(key, &result, &json_string_escape)
+}
+
+/// Accumulates a non-SSE response body and rewrites it once at stream end. SSE responses go
+/// through the event-aware rewriter instead (`rewrite::SseRewriter`); a whole JSON body is
+/// only parseable complete, so buffering it avoids splitting a match at an arbitrary cut.
 #[derive(Default)]
 pub struct ResponseRewriteBuffer {
     buffer: Vec<u8>,
@@ -249,38 +329,14 @@ impl ResponseRewriteBuffer {
         Self::default()
     }
 
-    /// Appends `chunk` and returns the transformed bytes safe to forward now (empty until
-    /// enough has accumulated). A chunk boundary landing mid-UTF-8-character is handled: only
-    /// the longest valid-UTF-8 prefix of the buffer is ever considered for emission.
-    pub fn push_chunk(
-        &mut self,
-        chunk: &[u8],
-        keywords: &[CompiledKeyword],
-        key: &EngineKey,
-    ) -> Result<Vec<u8>, DetokenizeError> {
+    /// Appends `chunk`; all output is deferred to [`Self::finish`]. Callers bound the total
+    /// buffered size (`rewrite::ResponseRewriter` enforces the cap and fails closed).
+    pub fn push_chunk(&mut self, chunk: &[u8]) -> usize {
         self.buffer.extend_from_slice(chunk);
-
-        let valid_len = match std::str::from_utf8(&self.buffer) {
-            Ok(s) => s.len(),
-            Err(e) => e.valid_up_to(),
-        };
-        if valid_len <= MAX_TOKEN_SPAN_LEN {
-            return Ok(Vec::new());
-        }
-        // `valid_len` bytes are a proven-valid UTF-8 prefix (from_utf8/valid_up_to above).
-        let valid_str = std::str::from_utf8(&self.buffer[..valid_len]).unwrap_or_default();
-        let safe_len = floor_char_boundary(valid_str, valid_len - MAX_TOKEN_SPAN_LEN);
-        if safe_len == 0 {
-            return Ok(Vec::new());
-        }
-        let to_emit: Vec<u8> = self.buffer.drain(..safe_len).collect();
-        let text = String::from_utf8_lossy(&to_emit);
-        let transformed = unmask_and_detokenize_response(&text, keywords, key)?;
-        Ok(transformed.into_bytes())
+        self.buffer.len()
     }
 
-    /// Transforms and returns whatever remains buffered at stream end — no tail needs
-    /// holding back once no further chunks are coming.
+    /// Transforms and returns the whole accumulated body (fail-closed on a bad token).
     pub fn finish(
         self,
         keywords: &[CompiledKeyword],
@@ -764,35 +820,134 @@ mod tests {
         assert!(unmask_and_detokenize_response(&corrupted, &[], &key).is_err());
     }
 
-    // ── ResponseRewriteBuffer: streaming rolling buffer ──
+    // ── safe_prefix_len: emit-boundary computation for the streaming rewriter ──
 
-    #[test]
-    fn buffer_accumulates_small_chunks_and_emits_nothing_until_flush() {
-        let mut buffer = ResponseRewriteBuffer::new();
-        let key = EngineKey::from_bytes([9u8; 32]);
-
-        let out1 = buffer.push_chunk(b"Hello ", &[], &key).unwrap();
-        let out2 = buffer.push_chunk(b"world", &[], &key).unwrap();
-        assert!(out1.is_empty());
-        assert!(out2.is_empty());
-
-        let flushed = buffer.finish(&[], &key).unwrap();
-        assert_eq!(flushed, b"Hello world");
+    fn kw(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledKeyword {
+        CompiledKeyword {
+            match_text: match_text.to_string(),
+            alias: alias.to_string(),
+            case_sensitive,
+        }
     }
 
     #[test]
-    fn buffer_emits_a_prefix_once_it_exceeds_the_max_token_span_and_holds_a_tail() {
+    fn safe_prefix_len_full_when_no_candidates() {
+        let text = "plain text with no brackets";
+        assert_eq!(
+            safe_prefix_len(text, &[kw("Coca-Cola", "Brandex", true)]),
+            text.len()
+        );
+    }
+
+    #[test]
+    fn safe_prefix_len_holds_incomplete_token_span_tail() {
+        assert_eq!(safe_prefix_len("abc [EMAIL:TOK", &[]), 4);
+        assert_eq!(safe_prefix_len("abc [", &[]), 4);
+    }
+
+    #[test]
+    fn safe_prefix_len_holds_partial_alias_tail_case_insensitively() {
+        let text = "say bRa";
+        assert_eq!(
+            safe_prefix_len(text, &[kw("Coca-Cola", "Brandex", false)]),
+            4
+        );
+        // Case-sensitive keyword: a wrong-case tail can never grow into the alias.
+        assert_eq!(
+            safe_prefix_len(text, &[kw("Coca-Cola", "Brandex", true)]),
+            text.len()
+        );
+    }
+
+    #[test]
+    fn safe_prefix_len_does_not_hold_complete_alias_unless_prefix_of_longer_alias() {
+        let text = "use Brand";
+        assert_eq!(
+            safe_prefix_len(text, &[kw("Coca-Cola", "Brand", true)]),
+            text.len()
+        );
+        assert_eq!(
+            safe_prefix_len(
+                text,
+                &[
+                    kw("Coca-Cola", "Brand", true),
+                    kw("Sprite", "Brandex", true)
+                ]
+            ),
+            4
+        );
+    }
+
+    #[test]
+    fn safe_prefix_len_gives_up_beyond_max_token_span_len() {
+        let text = format!("[EMAIL:TOKEN_{}", "a".repeat(MAX_TOKEN_SPAN_LEN + 10));
+        assert_eq!(safe_prefix_len(&text, &[]), text.len());
+    }
+
+    // ── unmask_and_detokenize_json_fragment: replacements escaped for serialized JSON ──
+
+    fn policy_with_secret_rule() -> CompiledPolicy {
+        let json = r#"{
+            "version": 3,
+            "source": { "policies": [], "forced": [] },
+            "rules": [
+                { "id": "SECRET", "displayName": "Secret", "patterns": ["(?s)BEGIN.+END"], "caseSensitive": true, "tokenize": true, "log": false }
+            ],
+            "keywords": []
+        }"#;
+        compile_policy_v3(json).expect("secret-rule policy compiles")
+    }
+
+    #[test]
+    fn json_fragment_escapes_quote_backslash_newline_in_detokenized_plaintext() {
+        let policy = policy_with_secret_rule();
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let plaintext = "BEGIN\"x\ny\\zEND";
+        let token = speedwave_pii_engine::scan_text(&policy, &key, plaintext)
+            .expect("scan succeeds")
+            .text;
+        assert!(token.starts_with("[SECRET:TOKEN_"), "got: {token}");
+
+        let fragment = format!("{{\"content\": \"{token}\"}}");
+        let out = unmask_and_detokenize_json_fragment(&fragment, &[], &key).expect("fragment ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("fragment must stay valid JSON");
+        assert_eq!(parsed["content"], plaintext);
+    }
+
+    #[test]
+    fn json_fragment_escapes_keyword_match_replacement() {
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let keywords = vec![kw("Line1\nLine2 \"Q\"", "Brandex", true)];
+
+        let fragment = r#"{"note": "Brandex ships"}"#;
+        let out = unmask_and_detokenize_json_fragment(fragment, &keywords, &key).expect("ok");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["note"], "Line1\nLine2 \"Q\" ships");
+    }
+
+    #[test]
+    fn json_fragment_without_matches_is_identity() {
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let fragment = r#"{"note": "nothing here"}"#;
+        assert_eq!(
+            unmask_and_detokenize_json_fragment(fragment, &[], &key).expect("ok"),
+            fragment
+        );
+    }
+
+    // ── ResponseRewriteBuffer: whole-body buffer for non-SSE responses ──
+
+    #[test]
+    fn buffer_accumulates_chunks_and_emits_only_at_finish() {
         let mut buffer = ResponseRewriteBuffer::new();
         let key = EngineKey::from_bytes([9u8; 32]);
 
-        let large = "x".repeat(MAX_TOKEN_SPAN_LEN + 900);
-        let out = buffer.push_chunk(large.as_bytes(), &[], &key).unwrap();
-        assert!(!out.is_empty());
-        assert!(out.len() < large.len());
-        assert_eq!(out.len(), 900);
+        assert_eq!(buffer.push_chunk(b"Hello "), 6);
+        assert_eq!(buffer.push_chunk(b"world"), 11);
 
         let flushed = buffer.finish(&[], &key).unwrap();
-        assert_eq!(flushed.len(), MAX_TOKEN_SPAN_LEN);
+        assert_eq!(flushed, b"Hello world");
     }
 
     #[test]
@@ -805,98 +960,86 @@ mod tests {
     }
 
     #[test]
-    fn buffer_detokenizes_a_token_split_across_two_push_chunk_calls_at_flush() {
+    fn buffer_detokenizes_a_token_split_across_two_push_chunk_calls_at_finish() {
         let (policy, key) = test_policy_and_key();
-        let token = email_token(&policy, &key, "carol@example.com");
-        let split = token.len() / 2;
-        let (first_half, second_half) = token.split_at(split);
+        let token = email_token(&policy, &key, "split.alice@example.com");
+        let (first_half, second_half) = token.split_at(token.len() / 2);
 
         let mut buffer = ResponseRewriteBuffer::new();
-        // Neither call crosses MAX_TOKEN_SPAN_LEN, so both stay buffered untouched.
-        let out1 = buffer.push_chunk(first_half.as_bytes(), &[], &key).unwrap();
-        let out2 = buffer
-            .push_chunk(second_half.as_bytes(), &[], &key)
-            .unwrap();
-        assert!(out1.is_empty());
-        assert!(out2.is_empty());
+        buffer.push_chunk(first_half.as_bytes());
+        buffer.push_chunk(second_half.as_bytes());
 
         let flushed = buffer.finish(&[], &key).unwrap();
-        assert_eq!(String::from_utf8(flushed).unwrap(), "carol@example.com");
-    }
-
-    #[test]
-    fn buffer_detokenizes_a_token_split_mid_stream_once_trailing_data_pushes_it_past_the_tail() {
-        let (policy, key) = test_policy_and_key();
-        let token = email_token(&policy, &key, "dana@example.com");
-        let split = token.len() / 2;
-        let (first_half, second_half) = token.split_at(split);
-
-        let mut buffer = ResponseRewriteBuffer::new();
-        let prefix = "A".repeat(MAX_TOKEN_SPAN_LEN + 900);
-        let chunk1 = format!("{prefix}{first_half}");
-        let out1 = buffer.push_chunk(chunk1.as_bytes(), &[], &key).unwrap();
-        // The token has not fully arrived yet, so none of it may appear in this output.
-        assert!(out1.iter().all(|b| *b == b'A'));
-
-        let suffix = "B".repeat(50);
-        let chunk2 = format!("{second_half}{suffix}");
-        let out2 = buffer.push_chunk(chunk2.as_bytes(), &[], &key).unwrap();
-        // Buffer crossed the threshold again, but the (now complete) token and suffix are
-        // still within the retained tail: only more leading padding is safe to emit.
-        assert!(out2.iter().all(|b| *b == b'A'));
-
-        // Enough trailing data arrives to push the (now complete) token past the retained tail.
-        let more = "C".repeat(MAX_TOKEN_SPAN_LEN + 900);
-        let out3 = buffer.push_chunk(more.as_bytes(), &[], &key).unwrap();
-        let out3_text = String::from_utf8(out3).unwrap();
-        assert!(
-            out3_text.contains("dana@example.com"),
-            "token split across two push_chunk calls must decrypt once complete: {out3_text}"
-        );
-        assert!(
-            !out3_text.contains("TOKEN_"),
-            "no literal token may leak: {out3_text}"
-        );
-        let email_pos = out3_text.find("dana@example.com").expect("email present");
-        let suffix_pos = out3_text.find(&suffix).expect("suffix present");
-        assert!(
-            suffix_pos > email_pos,
-            "suffix must appear after the decrypted email: {out3_text}"
-        );
-
-        let flushed = buffer.finish(&[], &key).unwrap();
-        assert!(flushed.iter().all(|b| *b == b'C'));
-    }
-
-    #[test]
-    fn buffer_unmasks_keywords_before_detokenizing_at_flush() {
-        let policy = policy_with_email_rule_and_keyword("Coca-Cola", "Brandex", true);
-        let key = EngineKey::from_bytes([9u8; 32]);
-        let mut body = json!({"system": "bob@example.com works at Coca-Cola"});
-        scan_request(&policy, &key, &mut body).unwrap();
-        let upstream_text = body["system"].as_str().unwrap().to_string();
-
-        let mut buffer = ResponseRewriteBuffer::new();
-        buffer
-            .push_chunk(upstream_text.as_bytes(), policy.keywords(), &key)
-            .unwrap();
-        let flushed = buffer.finish(policy.keywords(), &key).unwrap();
         assert_eq!(
             String::from_utf8(flushed).unwrap(),
-            "bob@example.com works at Coca-Cola"
+            "split.alice@example.com"
         );
+    }
+
+    #[test]
+    fn buffer_detokenizes_token_straddling_the_old_rolling_boundary() {
+        // Regression: the retired rolling emit cut the buffer at len-MAX_TOKEN_SPAN_LEN and
+        // transformed only the prefix, splitting a match that crossed the cut.
+        let (policy, key) = test_policy_and_key();
+        let token = email_token(&policy, &key, "straddle.bob@example.com");
+        let (first_half, second_half) = token.split_at(token.len() / 2);
+        let chunk1 = format!("{}{first_half}", "A".repeat(MAX_TOKEN_SPAN_LEN + 900));
+        let chunk2 = format!("{second_half}{}", "B".repeat(50));
+
+        let mut buffer = ResponseRewriteBuffer::new();
+        buffer.push_chunk(chunk1.as_bytes());
+        buffer.push_chunk(chunk2.as_bytes());
+
+        let out = String::from_utf8(buffer.finish(&[], &key).unwrap()).unwrap();
+        assert!(out.contains("straddle.bob@example.com"));
+        assert!(!out.contains("TOKEN_"), "no literal token may leak");
+    }
+
+    #[test]
+    fn buffer_unmasks_alias_straddling_the_old_rolling_boundary() {
+        let policy = policy_with_email_rule_and_keyword("Coca-Cola", "Brandex", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let chunk1 = format!("{}Bran", "A".repeat(MAX_TOKEN_SPAN_LEN + 900));
+
+        let mut buffer = ResponseRewriteBuffer::new();
+        buffer.push_chunk(chunk1.as_bytes());
+        buffer.push_chunk(b"dex done");
+
+        let out = String::from_utf8(buffer.finish(policy.keywords(), &key).unwrap()).unwrap();
+        assert!(
+            out.ends_with("Coca-Cola done"),
+            "got tail: {}",
+            &out[out.len() - 30..]
+        );
+    }
+
+    #[test]
+    fn buffer_unmasks_keywords_before_detokenizing_at_finish() {
+        let policy = policy_with_email_rule_and_keyword("Coca-Cola", "Brandex", true);
+        let key = EngineKey::from_bytes([9u8; 32]);
+        let original = "kw.carol@example.com works at Coca-Cola";
+        let mut body = json!({ "system": original });
+        scan_request(&policy, &key, &mut body).unwrap();
+        let upstream_text = body["system"].as_str().unwrap().to_string();
+        assert!(upstream_text.contains("Brandex"));
+        assert!(upstream_text.contains("[EMAIL:TOKEN_"));
+
+        let mut buffer = ResponseRewriteBuffer::new();
+        buffer.push_chunk(upstream_text.as_bytes());
+        let flushed = buffer.finish(policy.keywords(), &key).unwrap();
+        assert_eq!(String::from_utf8(flushed).unwrap(), original);
     }
 
     #[test]
     fn buffer_propagates_detokenize_failure_and_never_emits_the_literal_token() {
         let (policy, key) = test_policy_and_key();
-        let token = email_token(&policy, &key, "eve@example.com");
+        let token = email_token(&policy, &key, "corrupt.dave@example.com");
         let mut bytes = token.into_bytes();
         let pos = bytes.len() - 5;
         bytes[pos] = if bytes[pos] == b'A' { b'B' } else { b'A' };
 
         let mut buffer = ResponseRewriteBuffer::new();
-        buffer.push_chunk(&bytes, &[], &key).unwrap();
+        buffer.push_chunk(&bytes);
         assert!(buffer.finish(&[], &key).is_err());
     }
 }

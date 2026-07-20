@@ -29,6 +29,19 @@ fn bound_sniff_buffer(buf: &mut String, max: usize) {
     }
 }
 
+/// True when the upstream response body is an SSE stream (`Content-Type:
+/// text/event-stream`, parameters and case tolerated) — selects the rewrite arm.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| {
+            ct.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
+}
+
 /// Drain all complete (`\n`-terminated) lines from `buf`, CRLF-stripped.
 /// Any remaining incomplete line stays in `buf`.
 pub(crate) fn drain_complete_lines(buf: &mut String) -> Vec<String> {
@@ -298,6 +311,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         );
     }
     let response_headers = upstream.headers().clone();
+    let upstream_is_sse = is_event_stream(&response_headers);
 
     // Usage path resolved once at startup and stored in Config — no env read per request.
     let usage_path = cfg.usage_path.clone();
@@ -323,7 +337,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         let mut acc = UsageAcc::default();
         // Buffer for incomplete SSE lines across chunks (usage sniffing only).
         let mut line_buf = String::new();
-        let mut rewrite_buffer = pii::ResponseRewriteBuffer::new();
+        let mut rewrite_buffer = crate::rewrite::ResponseRewriter::new(upstream_is_sse);
         // Stream aborted mid-flight (upstream byte error, or a detokenization failure) →
         // failure, even on a 2xx.
         let mut stream_errored = false;
@@ -355,15 +369,13 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                         // Only sniffing is bounded; the rewrite buffer below is separate.
                         bound_sniff_buffer(&mut line_buf, MAX_SNIFF_BUF);
                     }
-                    // Unmask keywords then detokenize PII spans (§5.1/§7.2/§7.3), holding
-                    // back only what might still be the start of a split token span.
+                    // Unmask keywords then detokenize PII spans (§5.1/§7.2/§7.3) on decoded
+                    // event text — a span split across SSE delta events still matches.
                     let forward_bytes =
                         match rewrite_buffer.push_chunk(&bytes, policy.keywords(), key) {
                             Ok(b) => b,
                             Err(e) => {
-                                log::error!(
-                                    "PII detokenization failed mid-response, aborting stream: {e}"
-                                );
+                                log::error!("response rewrite failed mid-stream, aborting: {e}");
                                 let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                                 stream_errored = true;
                                 break;
@@ -752,5 +764,26 @@ mod tests {
         assert_eq!(resolve_request_status(429, false), RequestStatus::Failure);
         assert_eq!(resolve_request_status(500, false), RequestStatus::Failure);
         assert_eq!(resolve_request_status(503, true), RequestStatus::Failure);
+    }
+
+    #[test]
+    fn is_event_stream_matches_content_type_with_params_and_case() {
+        let mut headers = HeaderMap::new();
+        assert!(
+            !is_event_stream(&headers),
+            "missing content-type is not SSE"
+        );
+
+        headers.insert("content-type", "application/json".parse().unwrap());
+        assert!(!is_event_stream(&headers));
+
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        assert!(is_event_stream(&headers));
+
+        headers.insert(
+            "content-type",
+            "Text/Event-Stream; charset=utf-8".parse().unwrap(),
+        );
+        assert!(is_event_stream(&headers), "params and case are tolerated");
     }
 }

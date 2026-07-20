@@ -122,6 +122,70 @@ fn mask_spans(text: &str) -> Result<Vec<Segment>, ScanError> {
     Ok(segments)
 }
 
+/// Outcome of walking the span grammar from a `[`: complete span, viable prefix, or dead end.
+enum PrefixScan {
+    Viable,
+    Complete(usize),
+    Invalid,
+}
+
+/// Walks the span grammar `\[[A-Z0-9_]+:TOKEN_[A-Za-z0-9_-]+\]` from `bytes[0]` (a `[`).
+fn span_prefix_scan(bytes: &[u8]) -> PrefixScan {
+    const MARKER: &[u8] = b"TOKEN_";
+    let mut i = 1;
+    let category_start = i;
+    while i < bytes.len()
+        && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit() || bytes[i] == b'_')
+    {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return PrefixScan::Viable;
+    }
+    if bytes[i] != b':' || i == category_start {
+        return PrefixScan::Invalid;
+    }
+    i += 1;
+    for &expected in MARKER {
+        if i >= bytes.len() {
+            return PrefixScan::Viable;
+        }
+        if bytes[i] != expected {
+            return PrefixScan::Invalid;
+        }
+        i += 1;
+    }
+    let payload_start = i;
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
+    {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return PrefixScan::Viable;
+    }
+    if bytes[i] == b']' && i > payload_start {
+        return PrefixScan::Complete(i + 1);
+    }
+    PrefixScan::Invalid
+}
+
+/// Byte offset of the earliest suffix of `text` that is a viable, still-incomplete prefix of a
+/// token span ([`TOKEN_SPAN_RE`] shape); `None` when no suffix could grow into one.
+pub fn incomplete_token_span_start(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut pos = 0;
+    while let Some(open_rel) = bytes.get(pos..)?.iter().position(|&b| b == b'[') {
+        let start = pos + open_rel;
+        match span_prefix_scan(&bytes[start..]) {
+            PrefixScan::Viable => return Some(start),
+            PrefixScan::Complete(len) => pos = start + len,
+            PrefixScan::Invalid => pos = start + 1,
+        }
+    }
+    None
+}
+
 /// Builds the verbatim token span for a sealed value in the given category.
 fn build_token(key: &EngineKey, category: &str, value: &str) -> Result<String, ScanError> {
     let ciphertext = seal(key, category, value.as_bytes())
@@ -315,6 +379,16 @@ fn resolve_span(key: &EngineKey, span: &str) -> Option<String> {
 
 /// Replaces EVERY token span with its plaintext; the first failed tag verification aborts with Err.
 pub fn detokenize_text(key: &EngineKey, text: &str) -> Result<String, DetokenizeError> {
+    detokenize_text_with(key, text, &|plaintext| plaintext.to_string())
+}
+
+/// [`detokenize_text`] with `render` applied to each recovered plaintext before insertion
+/// (e.g. JSON-string escaping when the surrounding text is serialized JSON).
+pub fn detokenize_text_with(
+    key: &EngineKey,
+    text: &str,
+    render: &dyn Fn(&str) -> String,
+) -> Result<String, DetokenizeError> {
     let re = token_span_regex().map_err(|_| DetokenizeError::TokenPatternInvalid)?;
     let mut result = String::with_capacity(text.len());
     let mut last = 0;
@@ -326,7 +400,7 @@ pub fn detokenize_text(key: &EngineKey, text: &str) -> Result<String, Detokenize
                 index,
             })?;
         result.push_str(&text[last..m.start()]);
-        result.push_str(&plaintext);
+        result.push_str(&render(&plaintext));
         last = m.end();
     }
     result.push_str(&text[last..]);
@@ -477,17 +551,42 @@ fn substitute_preserving_case(
     replacement: &str,
     case_sensitive: bool,
 ) -> String {
-    if case_sensitive {
-        return text.replace(needle, replacement);
+    substitute_preserving_case_with(text, needle, replacement, case_sensitive, &|shaped| {
+        shaped.to_string()
+    })
+}
+
+/// [`substitute_preserving_case`] with `render` applied to each replacement after the
+/// case-pattern reshaping (so escaping is never distorted by case folding).
+fn substitute_preserving_case_with(
+    text: &str,
+    needle: &str,
+    replacement: &str,
+    case_sensitive: bool,
+    render: &dyn Fn(&str) -> String,
+) -> String {
+    if needle.is_empty() {
+        return text.to_string();
     }
     let mut result = String::with_capacity(text.len());
     let mut pos = 0;
     while pos < text.len() {
-        match find_case_insensitive(text, needle, pos) {
+        let found = if case_sensitive {
+            text[pos..]
+                .find(needle)
+                .map(|rel| (pos + rel, pos + rel + needle.len()))
+        } else {
+            find_case_insensitive(text, needle, pos)
+        };
+        match found {
             Some((start, end)) => {
                 result.push_str(&text[pos..start]);
-                let pattern = detect_case_pattern(&text[start..end]);
-                result.push_str(&apply_case_pattern(replacement, pattern));
+                let shaped = if case_sensitive {
+                    replacement.to_string()
+                } else {
+                    apply_case_pattern(replacement, detect_case_pattern(&text[start..end]))
+                };
+                result.push_str(&render(&shaped));
                 pos = end;
             }
             None => {
@@ -522,11 +621,27 @@ pub fn unalias_text_preserving_tokens(
     alias: &str,
     case_sensitive: bool,
 ) -> String {
+    unalias_text_preserving_tokens_with(text, match_text, alias, case_sensitive, &|shaped| {
+        shaped.to_string()
+    })
+}
+
+/// [`unalias_text_preserving_tokens`] with `render` applied to each substituted replacement
+/// after case-pattern reshaping; token spans stay skipped.
+pub fn unalias_text_preserving_tokens_with(
+    text: &str,
+    match_text: &str,
+    alias: &str,
+    case_sensitive: bool,
+    render: &dyn Fn(&str) -> String,
+) -> String {
     match mask_spans(text) {
         Ok(segments) => segments
             .into_iter()
             .map(|segment| match segment {
-                Segment::Plain(s) => unalias_text(&s, match_text, alias, case_sensitive),
+                Segment::Plain(s) => {
+                    substitute_preserving_case_with(&s, alias, match_text, case_sensitive, render)
+                }
                 Segment::Masked(s) => s,
             })
             .collect(),
@@ -1075,5 +1190,115 @@ mod tests {
         let result =
             unalias_text_preserving_tokens("nothing to see here", "Coca-Cola", "Brandex", false);
         assert_eq!(result, "nothing to see here");
+    }
+
+    // ── incomplete_token_span_start: viable-prefix detection for streaming holdback ──
+
+    #[test]
+    fn incomplete_span_start_finds_viable_prefixes() {
+        for tail in [
+            "[",
+            "[E",
+            "[EMAIL",
+            "[EMAIL:",
+            "[EMAIL:TO",
+            "[EMAIL:TOKEN_",
+            "[EMAIL:TOKEN_ab",
+            "[PHONE_PL:TOKEN_xy-_9",
+        ] {
+            let text = format!("some text {tail}");
+            assert_eq!(
+                incomplete_token_span_start(&text),
+                Some(10),
+                "tail {tail:?} must be held"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_span_start_none_for_complete_invalid_or_empty() {
+        assert_eq!(incomplete_token_span_start(""), None);
+        assert_eq!(incomplete_token_span_start("no brackets at all"), None);
+        assert_eq!(incomplete_token_span_start("[email:lowercase"), None);
+        assert_eq!(incomplete_token_span_start("x] closing only"), None);
+        assert_eq!(incomplete_token_span_start("[EMAIL:TOXIC"), None);
+        assert_eq!(incomplete_token_span_start("[EMAIL:TOKEN_]"), None);
+        // A complete span is replaceable now, never held.
+        assert_eq!(incomplete_token_span_start("[EMAIL:TOKEN_abc123]"), None);
+    }
+
+    #[test]
+    fn incomplete_span_start_empty_category_is_invalid() {
+        assert_eq!(incomplete_token_span_start("[:TOKEN_abc"), None);
+    }
+
+    #[test]
+    fn incomplete_span_start_finds_trailing_prefix_after_complete_span() {
+        let text = "before [EMAIL:TOKEN_abc123] after [CARD:TOKEN_x";
+        assert_eq!(incomplete_token_span_start(text), Some(34));
+    }
+
+    #[test]
+    fn incomplete_span_start_resumes_after_invalid_bracket() {
+        assert_eq!(incomplete_token_span_start("[x [EMAIL:TOK"), Some(3));
+    }
+
+    // ── render-hook variants: detokenize_text_with / unalias_text_preserving_tokens_with ──
+
+    fn json_escape(s: &str) -> String {
+        let quoted = serde_json::Value::String(s.to_string()).to_string();
+        quoted[1..quoted.len() - 1].to_string()
+    }
+
+    #[test]
+    fn detokenize_text_with_renders_plaintext_only() {
+        let key = test_key();
+        let ciphertext = siv_seal(&key, "EMAIL", b"a\"quoted\"@example.com").expect("seal ok");
+        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let text = format!("Email: {token} end");
+
+        let result = detokenize_text_with(&key, &text, &|p| json_escape(p)).expect("detokenizes");
+        assert_eq!(result, "Email: a\\\"quoted\\\"@example.com end");
+    }
+
+    #[test]
+    fn detokenize_text_with_still_fails_closed_on_corrupt_token() {
+        let key = test_key();
+        assert!(detokenize_text_with(&key, "[EMAIL:TOKEN_AAAA]", &|p| p.to_string()).is_err());
+    }
+
+    #[test]
+    fn unalias_with_renders_after_case_pattern() {
+        // Case-insensitive alias hit in Title case: the match text is Title-cased FIRST,
+        // then escaped — a leading escape byte must never be case-folded.
+        let result = unalias_text_preserving_tokens_with(
+            "use brandex here",
+            "new\nline",
+            "Brandex",
+            false,
+            &|shaped| json_escape(shaped),
+        );
+        assert_eq!(result, "use New\\nline here");
+    }
+
+    #[test]
+    fn unalias_with_still_skips_token_spans() {
+        let key = test_key();
+        let ciphertext = siv_seal(&key, "EMAIL", b"x@y.z").expect("seal ok");
+        let token = format!("[EMAIL:TOKEN_{}]", siv_encode_payload(&ciphertext));
+        let text = format!("Brandex {token}");
+
+        let result =
+            unalias_text_preserving_tokens_with(&text, "Coca-Cola", "Brandex", true, &|s| {
+                s.to_string()
+            });
+        assert_eq!(result, format!("Coca-Cola {token}"));
+    }
+
+    #[test]
+    fn substitute_with_empty_needle_is_identity() {
+        let result =
+            unalias_text_preserving_tokens_with("text", "match", "", true, &|s| s.to_string());
+        assert_eq!(result, "text");
     }
 }

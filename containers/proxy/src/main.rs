@@ -18,6 +18,7 @@ mod count_tokens;
 mod forward;
 mod keys;
 mod pii;
+mod rewrite;
 mod router;
 pub(crate) mod usage;
 
@@ -175,6 +176,48 @@ mod tests {
                             "delta": {"type": "text_delta", "text": text}
                         });
                         let sse = format!("data: {delta}\n\ndata: [DONE]\n\n");
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            sse,
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    /// Mock SSE backend that echoes `text` split into tiny `text_delta` events with `event:`
+    /// lines and start/stop framing — the real API's streaming shape, where a token span
+    /// never fits inside one delta fragment.
+    async fn spawn_mock_sse_backend_with_split_text(text: String) -> std::net::SocketAddr {
+        use axum::response::IntoResponse;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/v1/messages",
+                axum::routing::post(move || {
+                    let text = text.clone();
+                    async move {
+                        let mut sse = String::from(
+                            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                        );
+                        let chars: Vec<char> = text.chars().collect();
+                        for piece in chars.chunks(4) {
+                            let delta = serde_json::json!({
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {"type": "text_delta", "text": piece.iter().collect::<String>()}
+                            });
+                            sse.push_str(&format!(
+                                "event: content_block_delta\ndata: {delta}\n\n"
+                            ));
+                        }
+                        sse.push_str("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
+                        sse.push_str("data: [DONE]\n\n");
                         (
                             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
                             sse,
@@ -632,5 +675,89 @@ mod tests {
             !body_text.contains("Brandex"),
             "no keyword alias may reach the agent: {body_text}"
         );
+    }
+
+    /// Concatenated `text_delta` payloads of an SSE body (test-side reassembly).
+    fn collect_text_deltas(body: &str) -> String {
+        let mut text = String::new();
+        for line in body.lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            let Ok(frame) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            if frame["type"] == "content_block_delta" {
+                if let Some(s) = frame["delta"]["text"].as_str() {
+                    text.push_str(s);
+                }
+            }
+        }
+        text
+    }
+
+    /// The production failure shape: a token span split across many tiny delta events must
+    /// still be detokenized and the keyword alias unmasked; framing events pass through.
+    #[tokio::test]
+    async fn v1_messages_detokenizes_span_split_across_streamed_delta_events() {
+        let policy_json = r#"{
+            "version": 3,
+            "source": { "policies": [], "forced": [] },
+            "rules": [
+                { "id": "EMAIL", "displayName": "E-mail", "patterns": ["[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"], "caseSensitive": true, "tokenize": true, "log": false }
+            ],
+            "keywords": [
+                { "match": "Coca-Cola", "alias": "Brandex", "caseSensitive": true }
+            ]
+        }"#;
+        let policy = speedwave_pii_engine::compile_policy_v3(policy_json).unwrap();
+        let key = speedwave_pii_engine::EngineKey::from_bytes([9u8; 32]);
+
+        let original = "Contact user.ee7b972986@example.com at Coca-Cola";
+        let mut body = serde_json::json!({ "system": original });
+        crate::pii::scan_request(&policy, &key, &mut body).unwrap();
+        let upstream_echo = body["system"].as_str().unwrap().to_string();
+        assert!(upstream_echo.contains("[EMAIL:TOKEN_"));
+        assert!(upstream_echo.contains("Brandex"));
+
+        let usage_dir = tempfile::tempdir().unwrap();
+        let addr = spawn_mock_sse_backend_with_split_text(upstream_echo).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut cfg = config_pointing_at(&addr, usage_dir.path().join("usage.jsonl"));
+        cfg.pii = std::sync::Arc::new(crate::pii::PiiEngineState::Ready { policy, key });
+        let app = build_router(Arc::new(cfg));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"local/x","stream":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_text = String::from_utf8_lossy(&body_bytes);
+
+        assert_eq!(
+            collect_text_deltas(&body_text),
+            original,
+            "reassembled delta text must equal the pre-scan original: {body_text}"
+        );
+        assert!(
+            !body_text.contains("TOKEN_"),
+            "no literal PII token may reach the agent: {body_text}"
+        );
+        assert!(
+            !body_text.contains("Brandex"),
+            "no keyword alias may reach the agent: {body_text}"
+        );
+        assert!(body_text.contains("content_block_start"));
+        assert!(body_text.contains("content_block_stop"));
+        assert!(body_text.contains("data: [DONE]"));
     }
 }
