@@ -46,6 +46,8 @@ teardown() {
     [ -d "$DEST/build-context/containers/crates/pii-engine/src" ]
     [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
     [ ! -d "$DEST/build-context/containers/crates/pii-engine/target" ]
+    # policy.rs include_str!s this repo-root-relative; Containerfile.proxy COPYs it.
+    [ -f "$DEST/build-context/containers/mcp-servers/policies/rules.yaml" ]
 }
 
 @test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {

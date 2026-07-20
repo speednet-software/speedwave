@@ -73,6 +73,11 @@ cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
 mkdir -p "$DEST/build-context/containers/crates"
 cp -r "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
 
+# rules.yaml: pii-engine's policy.rs include_str!s it repo-root-relative
+# (`../../../mcp-servers/policies/rules.yaml`) — Containerfile.proxy COPYs it alongside.
+mkdir -p "$DEST/build-context/containers/mcp-servers/policies"
+cp "$REPO_ROOT/mcp-servers/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"
+
 # Host build outputs (e.g. a dirty containers/proxy/target) are never image
 # content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced).
 find "$DEST/build-context/containers" -type d \

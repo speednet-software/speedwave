@@ -13,6 +13,9 @@ WORKDIR /build
 # bundle scripts vendor crates/pii-engine into containers/crates/pii-engine ahead of this COPY.
 COPY proxy /build/containers/proxy
 COPY crates/pii-engine /build/crates/pii-engine
+# pii-engine's policy.rs include_str!s the rule library relative to the repo root
+# (`../../../mcp-servers/policies/rules.yaml`) — vendored by the same bundle scripts.
+COPY mcp-servers/policies/rules.yaml /build/mcp-servers/policies/rules.yaml
 WORKDIR /build/containers/proxy
 
 # Cache the cargo registry/git so a Cargo.toml change re-fetches only new
