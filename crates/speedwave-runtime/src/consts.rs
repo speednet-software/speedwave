@@ -2,10 +2,13 @@
 
 use crate::resources::{ContainerResources, STANDARD_WORKER_RESOURCES};
 
-/// PII engine limits (v3 schema)
+/// Maximum number of rules a resolved PII policy (v3 schema) may carry.
 pub const PII_MAX_RULES: usize = 256;
+/// Maximum total number of patterns across all rules of a resolved PII policy.
 pub const PII_MAX_PATTERNS: usize = 1024;
+/// Maximum number of keyword substitutions a resolved PII policy may carry.
 pub const PII_MAX_KEYWORDS: usize = 256;
+/// Maximum byte length of a single PII rule pattern accepted at load.
 pub const PII_MAX_PATTERN_LENGTH: usize = 512;
 
 /// Env var overriding the data-dir location.
