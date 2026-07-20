@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
+import { By } from '@angular/platform-browser';
+import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { ComposerComponent } from './composer.component';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SlashService } from '../slash/slash.service';
@@ -499,6 +501,145 @@ describe('ComposerComponent', () => {
       expect(emitted[1]).toContain('Plan mode');
       expect(emitted[0]).toContain('first');
       expect(emitted[1]).toContain('second');
+    });
+  });
+
+  // ── manual resize (SPEED-362) ─────────────────────────────────────────────
+  describe('manual resize', () => {
+    function autosize(): CdkTextareaAutosize {
+      return fixture.debugElement
+        .query(By.directive(CdkTextareaAutosize))
+        .injector.get(CdkTextareaAutosize);
+    }
+
+    function handle(): HTMLElement {
+      const el = rootEl.querySelector<HTMLElement>('[data-testid="composer-resize-handle"]');
+      if (!el) throw new Error('resize handle not rendered');
+      return el;
+    }
+
+    it('renders a resize handle', () => {
+      expect(rootEl.querySelector('[data-testid="composer-resize-handle"]')).not.toBeNull();
+    });
+
+    it('disables autosize and applies a taller height when dragged up', () => {
+      component.onResizeStart();
+      expect(autosize().enabled).toBe(false);
+      component.onResizeBy(300);
+      const target = Math.min(Math.round(window.innerHeight * 0.6), Math.max(56, 300));
+      expect(textarea().style.height).toBe(`${target}px`);
+    });
+
+    it('clamps to the 56px floor for small or negative deltas', () => {
+      component.onResizeStart();
+      component.onResizeBy(-500);
+      expect(textarea().style.height).toBe('56px');
+    });
+
+    it('clamps to the viewport-derived ceiling for large deltas', () => {
+      component.onResizeStart();
+      component.onResizeBy(100000);
+      const ceiling = Math.round(window.innerHeight * 0.6);
+      expect(textarea().style.height).toBe(`${ceiling}px`);
+    });
+
+    it('lifts the CDK row cap so the drag can exceed 8 rows', () => {
+      component.onResizeStart();
+      // Inline max-height (cdkAutosizeMaxRows) must be dropped or the field can't grow past 8 rows.
+      expect(textarea().style.maxHeight).toBe('none');
+      component.onResizeBy(100000);
+      const ceiling = Math.round(window.innerHeight * 0.6);
+      expect(textarea().style.height).toBe(`${ceiling}px`);
+    });
+
+    it('reset re-enables autosize, clears inline height and restores the row cap', () => {
+      component.onResizeStart();
+      component.onResizeBy(300);
+      expect(autosize().enabled).toBe(false);
+      expect(textarea().style.maxHeight).toBe('none');
+      component.onResizeReset();
+      expect(autosize().enabled).toBe(true);
+      expect(textarea().style.height).toBe('');
+      expect(textarea().style.maxHeight).toBe('');
+    });
+
+    it('submitting a message restores autosize (does not stay stuck tall)', () => {
+      component.text.setValue('a long message');
+      fixture.detectChanges();
+      component.onResizeStart();
+      component.onResizeBy(300);
+      expect(autosize().enabled).toBe(false);
+      component.submit();
+      expect(autosize().enabled).toBe(true);
+      expect(textarea().style.height).toBe('');
+      expect(textarea().style.maxHeight).toBe('');
+    });
+
+    it('focusInput (new conversation) restores autosize', () => {
+      component.onResizeStart();
+      component.onResizeBy(300);
+      expect(autosize().enabled).toBe(false);
+      component.focusInput();
+      expect(autosize().enabled).toBe(true);
+      expect(textarea().style.maxHeight).toBe('');
+    });
+
+    it('tracks aria value: base on start, target on drag, null after reset', () => {
+      component.onResizeStart();
+      // jsdom has no layout, so the captured base height is 0.
+      expect(component.resizeValueNow()).toBe(0);
+      component.onResizeBy(300);
+      const target = Math.min(Math.round(window.innerHeight * 0.6), Math.max(56, 300));
+      expect(component.resizeValueNow()).toBe(target);
+      expect(component.resizeValueMax()).toBe(Math.round(window.innerHeight * 0.6));
+      component.onResizeReset();
+      expect(component.resizeValueNow()).toBeNull();
+      expect(component.resizeValueMax()).toBe(0);
+    });
+
+    it('renders the full aria value set only while resizing', () => {
+      // Auto mode: no partial value set on the separator.
+      expect(handle().hasAttribute('aria-valuenow')).toBe(false);
+      expect(handle().hasAttribute('aria-valuemin')).toBe(false);
+      expect(handle().hasAttribute('aria-valuemax')).toBe(false);
+      component.onResizeStart();
+      component.onResizeBy(300);
+      fixture.detectChanges();
+      expect(handle().getAttribute('aria-valuemin')).toBe('56');
+      expect(handle().hasAttribute('aria-valuenow')).toBe(true);
+      expect(handle().hasAttribute('aria-valuemax')).toBe(true);
+      component.onResizeReset();
+      fixture.detectChanges();
+      expect(handle().hasAttribute('aria-valuemin')).toBe(false);
+      expect(handle().hasAttribute('aria-valuemax')).toBe(false);
+    });
+
+    it('onResizeEnd is a no-op (no throw) when the slash menu is closed', () => {
+      component.onResizeStart();
+      expect(() => component.onResizeEnd()).not.toThrow();
+    });
+
+    // ── end-to-end wiring through the directive ──────────────────────────────
+    it('ArrowUp on the handle grows the textarea and disables autosize', () => {
+      handle().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      expect(autosize().enabled).toBe(false);
+      // base 0 + 24px step, clamped up to the 56px floor.
+      expect(textarea().style.height).toBe('56px');
+    });
+
+    it('dragging the handle up applies the pointer delta as height', () => {
+      const h = handle();
+      h.dispatchEvent(new PointerEvent('pointerdown', { clientY: 200, button: 0, pointerId: 1 }));
+      h.dispatchEvent(new PointerEvent('pointermove', { clientY: 100, pointerId: 1 }));
+      expect(textarea().style.height).toBe('100px');
+      h.dispatchEvent(new PointerEvent('pointerup', { clientY: 100, pointerId: 1 }));
+    });
+
+    it('does not resize via the handle while disabled', () => {
+      fixture.componentRef.setInput('disabled', true);
+      fixture.detectChanges();
+      handle().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      expect(textarea().style.height).toBe('');
     });
   });
 });
