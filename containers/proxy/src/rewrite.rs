@@ -604,7 +604,7 @@ mod tests {
         let key = EngineKey::from_bytes([9u8; 32]);
         let plaintext = "BEGIN\"x\ny\\zEND";
         let token = token_for(&policy, &key, plaintext);
-        assert!(token.starts_with("[SECRET:TOKEN_"), "got: {token}");
+        assert!(token.starts_with("[SECRET:TOKEN_"));
 
         let tool_input = serde_json::json!({ "content": token }).to_string();
         let stream = format!(
