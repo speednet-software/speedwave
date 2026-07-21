@@ -63,6 +63,16 @@ fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, 
     plugin::token_dir(project, service_id).map_err(|e| e.to_string())
 }
 
+/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
+#[cfg(test)]
+fn token_dir_for_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service_id: &str,
+) -> std::path::PathBuf {
+    plugin::token_dir_in(data_dir, project, service_id)
+}
+
 /// True when a credential file exists on disk with non-zero length.
 /// Metadata-only: never reads the file contents, so it is safe for secret fields.
 fn field_has_stored_value(path: &std::path::Path) -> bool {
@@ -348,7 +358,7 @@ fn is_plugin_configured_in(
 
     // Check that all required integrations are configured
     for integration in requires_integrations {
-        if !crate::integrations_cmd::is_service_configured(project, integration) {
+        if !crate::integrations_cmd::is_service_configured_in(data_dir, project, integration) {
             return false;
         }
     }
@@ -1109,7 +1119,9 @@ mod tests {
             validation: None,
             oauth_flow: false,
         }];
-        assert!(is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_plugin_configured_in(
+            tmp.path(),
             std::path::Path::new("/nonexistent"),
             &fields,
             &[],
@@ -1120,7 +1132,9 @@ mod tests {
 
     #[test]
     fn is_plugin_configured_true_when_no_auth_fields() {
-        assert!(is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_plugin_configured_in(
+            tmp.path(),
             std::path::Path::new("/nonexistent"),
             &[],
             &[],
@@ -1142,7 +1156,9 @@ mod tests {
             validation: None,
             oauth_flow: false,
         }];
-        assert!(!is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_plugin_configured_in(
+            tmp.path(),
             std::path::Path::new("/nonexistent/path"),
             &fields,
             &[],
@@ -1168,7 +1184,9 @@ mod tests {
             validation: None,
             oauth_flow: false,
         }];
-        assert!(is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_plugin_configured_in(
+            tmp.path(),
             dir.path(),
             &fields,
             &[],
@@ -1194,7 +1212,9 @@ mod tests {
             validation: None,
             oauth_flow: false,
         }];
-        assert!(!is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_plugin_configured_in(
+            tmp.path(),
             dir.path(),
             &fields,
             &[],
@@ -1217,7 +1237,9 @@ mod tests {
             validation: None,
             oauth_flow: false,
         }];
-        assert!(is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_plugin_configured_in(
+            tmp.path(),
             dir.path(),
             &fields,
             &[],
@@ -1253,7 +1275,9 @@ mod tests {
                 oauth_flow: false,
             },
         ];
-        assert!(!is_plugin_configured(
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_plugin_configured_in(
+            tmp.path(),
             dir.path(),
             &fields,
             &[],
@@ -1801,17 +1825,18 @@ mod tests {
 
     #[test]
     fn token_dir_for_constructs_correct_path() {
-        let result = token_dir_for("my-project", "my-service");
-        assert!(result.is_ok());
-        let path = result.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = token_dir_for_in(tmp.path(), "my-project", "my-service");
         assert!(path.ends_with("tokens/my-project/my-service"));
     }
 
     #[test]
     fn is_plugin_configured_false_when_required_integration_missing() {
         let dir = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         // No auth fields required (always "configured" for own creds)
-        let configured = is_plugin_configured(
+        let configured = is_plugin_configured_in(
+            tmp.path(),
             dir.path(),
             &[],
             &["sharepoint".to_string()],
@@ -1827,7 +1852,9 @@ mod tests {
     #[test]
     fn is_plugin_configured_true_when_no_required_integrations() {
         let dir = tempfile::tempdir().unwrap();
-        let configured = is_plugin_configured(dir.path(), &[], &[], "any-project", "any-slug");
+        let tmp = tempfile::tempdir().unwrap();
+        let configured =
+            is_plugin_configured_in(tmp.path(), dir.path(), &[], &[], "any-project", "any-slug");
         assert!(
             configured,
             "should be true when no integrations required and no auth fields"
@@ -1847,8 +1874,6 @@ mod tests {
             oauth_flow: true,
         }
     }
-
-    // The tests below use the `_in` variants with a tempdir (data_dir() pins via OnceLock).
 
     // An oauth_flow plugin is NOT configured until an authorized oauth state file exists.
     #[test]

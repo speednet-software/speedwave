@@ -1,0 +1,7 @@
+# Safety net for bare `cargo test`: without it, tests reaching consts::data_dir()
+# transitively write to the real ~/.speedwave (2026-07-17 incident).
+# force=false — Makefile / RUN_CARGO_ISOLATED / e2e exports keep precedence;
+# relative=true — cargo resolves an absolute, per-worktree path (guarded by
+# crates/speedwave-runtime/tests/cargo_env_data_dir_guard.rs).
+[env]
+SPEEDWAVE_DATA_DIR = { value = "target/cargo-test-data-dir/speedwave-test", relative = true, force = false }
