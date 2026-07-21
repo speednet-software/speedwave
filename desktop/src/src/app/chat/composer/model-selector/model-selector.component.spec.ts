@@ -736,6 +736,32 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(badgeText()).toBe('claude-fable-5[1m]');
   });
 
+  it('prefers the live session model over the stored config model (wire switch truth)', async () => {
+    // Field repro (OpenRouter): a session-scoped wire /model diverges from the
+    // config, which is only the next-session default - the badge must follow
+    // the init-reported live model, not the stale stored one.
+    tauriInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_active_provider_summary')
+        return {
+          provider_id: 'openrouter',
+          kind: 'open_router',
+          model: 'x-ai/grok-4.3',
+          base_url: null,
+        };
+      if (cmd === 'list_anthropic_models') return catalog;
+      if (cmd === 'get_effort_pin') return null;
+      if (cmd === 'get_model_hint') return modelHint;
+      if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+    fixture.componentRef.setInput('projectId', 'proj-2');
+    fixture.componentRef.setInput('sessionModel', 'openrouter/ai21/jamba-large-1.7');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(badgeText()).toBe('ai21/jamba-large-1.7');
+  });
+
   it('prefers the live session model over the pre-session hint', async () => {
     modelHint = 'claude-fable-5[1m]';
     fixture.componentRef.setInput('projectId', 'proj-2');

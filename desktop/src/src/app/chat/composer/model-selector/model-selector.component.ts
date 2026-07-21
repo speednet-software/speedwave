@@ -251,17 +251,18 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Badge text, never empty: config model (normalized) -> optimistic live pick ->
-   * observed session model -> CC's own pin / last-transcript model -> 'default'
-   * (only a virgin project, where CC itself resolves the unknowable license default).
+   * Badge text, never empty: optimistic anthropic pick -> observed session model
+   * (the CURRENT-session truth: a wire /model can diverge from the stored config,
+   * which is only the next-session default) -> config model -> CC's own pin /
+   * last-transcript hint -> 'default' (a virgin project, CC resolves its default).
    */
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
-    if (s?.model) return normalizeObserved(s.model, s.provider_id);
     const picked = this.lastPicked();
     if (picked) return picked;
     const live = this.sessionModel();
     if (live) return s ? normalizeObserved(live, s.provider_id) : live;
+    if (s?.model) return normalizeObserved(s.model, s.provider_id);
     const hint = this.modelHint();
     if (hint) return s ? normalizeObserved(hint, s.provider_id) : hint;
     return 'default';
