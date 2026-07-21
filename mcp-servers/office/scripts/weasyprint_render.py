@@ -35,7 +35,8 @@ def _run(argv: list[str]) -> None:
     src, dst, base_url = argv
     from weasyprint import HTML
 
-    atomic_save(dst, lambda p: HTML(filename=src, base_url=base_url, url_fetcher=_local_only_url_fetcher).write_pdf(p))
+    doc = HTML(filename=src, base_url=base_url, url_fetcher=_local_only_url_fetcher)
+    atomic_save(dst, lambda p: doc.write_pdf(p, presentational_hints=False))
     ok(path=dst)
 
 
