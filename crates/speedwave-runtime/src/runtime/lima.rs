@@ -11,6 +11,10 @@ pub struct LimaRuntime {
     /// Deadline for the `Stopping` arm of `ensure_ready_inner`.
     /// `None` means use `LIMA_VM_STOP_TIMEOUT_SECS`.
     vm_stop_timeout: Option<std::time::Duration>,
+    /// `None` means use `consts::data_dir()`. Test-only override so compose-path
+    /// resolution never touches the shared data dir during a test run.
+    #[cfg(test)]
+    data_dir_override: Option<PathBuf>,
 }
 
 /// Returns the Lima-generated `ssh.config` path for the VM.
@@ -37,6 +41,8 @@ impl LimaRuntime {
                 consts::LIMA_VM_STOP_POLL_DELAY_SECS,
             ),
             vm_stop_timeout: None,
+            #[cfg(test)]
+            data_dir_override: None,
         }
     }
 
@@ -51,7 +57,26 @@ impl LimaRuntime {
                 consts::LIMA_VM_STOP_POLL_DELAY_SECS,
             ),
             vm_stop_timeout: None,
+            data_dir_override: None,
         }
+    }
+
+    /// Redirects compose-path resolution to an explicit data dir instead of
+    /// `consts::data_dir()` — keeps disk-writing tests off the shared data dir.
+    #[cfg(test)]
+    fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.data_dir_override = Some(data_dir);
+        self
+    }
+
+    /// Resolves a project's compose path under `data_dir_override` in tests,
+    /// or the real `consts::data_dir()` in production.
+    fn compose_file_path(&self, project: &str) -> anyhow::Result<String> {
+        #[cfg(test)]
+        if let Some(dir) = &self.data_dir_override {
+            return super::compose_file_path_in(dir, project);
+        }
+        super::compose_file_path(project)
     }
 
     /// Sets restart ready delay to zero for tests to avoid sleeping.
@@ -321,7 +346,7 @@ impl ContainerRuntime for LimaRuntime {
             ],
         );
 
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         let up = || {
             self.runner
                 .run(
@@ -350,7 +375,7 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
         let vm = consts::lima_vm_name();
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         // No compose.yml → compose can't run, but labelled leftovers and dead
         // name-store reservations may persist — reap those instead of skipping.
         if super::compose_down_is_noop(&compose_file) {
@@ -397,7 +422,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn compose_ps(&self, project: &str) -> anyhow::Result<Vec<Value>> {
         self.require_running()?;
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         let output = self.runner.run(
             "limactl",
             &[
@@ -623,7 +648,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn compose_logs(&self, project: &str, tail: u32) -> anyhow::Result<String> {
         self.require_running()?;
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         let tail_str = tail.to_string();
         // `--timestamps` prefixes every line with an RFC3339 stamp.
         self.runner.run_with_stderr(
@@ -649,7 +674,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         let up = || {
             self.runner
                 .run(
@@ -679,7 +704,7 @@ impl ContainerRuntime for LimaRuntime {
     fn compose_up_service(&self, project: &str, service: &str) -> anyhow::Result<()> {
         super::validate_builtin_service_name(service)?;
         self.require_running()?;
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         let up = || {
             self.runner
                 .run(
@@ -708,7 +733,7 @@ impl ContainerRuntime for LimaRuntime {
 
     fn compose_validate(&self, project: &str) -> anyhow::Result<()> {
         self.require_running()?;
-        let compose_file = super::compose_file_path(project)?;
+        let compose_file = self.compose_file_path(project)?;
         self.runner.run(
             "limactl",
             &[
@@ -1769,23 +1794,18 @@ mod tests {
     #[test]
     fn test_compose_down_runs_compose_command() {
         // compose_down short-circuits when no compose.yml exists; create one so
-        // this test exercises the real command path (cleaned up after).
-        let compose_file = crate::runtime::compose_file_path("testproject").unwrap();
+        // this test exercises the real command path, isolated under a tempdir
+        // (auto-removed on drop) instead of the shared data dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_file = crate::runtime::compose_file_path_in(tmp.path(), "testproject").unwrap();
         let compose_path = std::path::PathBuf::from(&compose_file);
         if let Some(parent) = compose_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&compose_path, "services: {}").unwrap();
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(compose_path);
 
         let (recorded, runner) = make_recording_runner();
-        let rt = LimaRuntime::with_runner(runner);
+        let rt = LimaRuntime::with_runner(runner).with_data_dir(tmp.path().to_path_buf());
         rt.compose_down("testproject").unwrap();
 
         let commands = recorded.lock().unwrap();
@@ -2119,7 +2139,8 @@ mod tests {
 
     #[test]
     fn test_compose_logs_calls_nerdctl_compose_logs() {
-        let compose_file = crate::runtime::compose_file_path("acme").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_file = crate::runtime::compose_file_path_in(tmp.path(), "acme").unwrap();
         let runner = mock_runner_with_vm_running().with_response(
             &format!(
                 "limactl shell {} -- sudo nerdctl compose -f {} -p acme logs --timestamps --tail 200",
@@ -2128,7 +2149,7 @@ mod tests {
             ),
             "hub | started\nclaude | ready",
         );
-        let rt = LimaRuntime::with_runner(Box::new(runner));
+        let rt = LimaRuntime::with_runner(Box::new(runner)).with_data_dir(tmp.path().to_path_buf());
         let logs = rt.compose_logs("acme", 200).unwrap();
         assert_eq!(logs, "hub | started\nclaude | ready");
     }

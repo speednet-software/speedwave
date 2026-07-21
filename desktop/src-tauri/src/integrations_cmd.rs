@@ -448,10 +448,15 @@ pub fn get_integrations(project: String) -> Result<IntegrationsResponse, String>
 }
 
 pub(crate) fn is_service_configured(project: &str, service: &str) -> bool {
-    is_service_configured_inner(speedwave_runtime::consts::data_dir(), project, service)
+    is_service_configured_in(speedwave_runtime::consts::data_dir(), project, service)
 }
 
-fn is_service_configured_inner(data_dir: &std::path::Path, project: &str, service: &str) -> bool {
+/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in` in `plugin_cmd.rs`).
+pub(crate) fn is_service_configured_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    service: &str,
+) -> bool {
     let svc_desc = match speedwave_runtime::consts::find_mcp_service(service) {
         Some(d) => d,
         None => return false,
@@ -528,7 +533,7 @@ fn get_oauth_field<'a>(
 #[cfg(test)]
 fn is_service_configured_with_home(home: &std::path::Path, project: &str, service: &str) -> bool {
     let data_dir = home.join(speedwave_runtime::consts::DATA_DIR);
-    is_service_configured_inner(&data_dir, project, service)
+    is_service_configured_in(&data_dir, project, service)
 }
 
 #[tauri::command]
@@ -1626,10 +1631,11 @@ mod tests {
 
     #[test]
     fn detect_oauth_action_required_only_acts_on_oauth_refresh_services() {
+        let tmp = tempfile::tempdir().unwrap();
         // Non-OAuth-refresh services never read the oauth.json.
-        assert!(detect_oauth_action_required("any-project", "redmine").is_none());
-        assert!(detect_oauth_action_required("any-project", "gitlab").is_none());
-        assert!(detect_oauth_action_required("any-project", "github").is_none());
+        assert!(detect_oauth_action_required_in(tmp.path(), "any-project", "redmine").is_none());
+        assert!(detect_oauth_action_required_in(tmp.path(), "any-project", "gitlab").is_none());
+        assert!(detect_oauth_action_required_in(tmp.path(), "any-project", "github").is_none());
     }
 
     /// Writes a slack oauth.json for detect tests; scopes/lastRefreshAt knobs.

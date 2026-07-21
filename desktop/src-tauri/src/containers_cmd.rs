@@ -154,13 +154,15 @@ pub(crate) fn spawn_background_teardown(prev: String) {
 
 /// On-disk teardown intents — lets the NEXT launch converge projects whose
 /// background teardown a crash interrupted (never CLI-run projects).
-fn teardown_intents_path() -> std::path::PathBuf {
-    speedwave_runtime::consts::data_dir().join("pending-teardowns")
+/// Tests inject a tempdir; production callers pass `consts::data_dir()`.
+fn teardown_intents_path_in(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("pending-teardowns")
 }
 
-fn record_teardown_intent(project: &str) {
+/// Tests inject a tempdir; production callers pass `consts::data_dir()`.
+fn record_teardown_intent_in(data_dir: &std::path::Path, project: &str) {
     let _guard = pending_teardowns_lock();
-    let path = teardown_intents_path();
+    let path = teardown_intents_path_in(data_dir);
     let mut entries: Vec<String> = std::fs::read_to_string(&path)
         .map(|c| c.lines().map(str::to_string).collect())
         .unwrap_or_default();
@@ -174,9 +176,10 @@ fn record_teardown_intent(project: &str) {
     }
 }
 
-fn clear_teardown_intent(project: &str) {
+/// Tests inject a tempdir; production callers pass `consts::data_dir()`.
+fn clear_teardown_intent_in(data_dir: &std::path::Path, project: &str) {
     let _guard = pending_teardowns_lock();
-    let path = teardown_intents_path();
+    let path = teardown_intents_path_in(data_dir);
     let Ok(content) = std::fs::read_to_string(&path) else {
         return;
     };
@@ -199,11 +202,16 @@ const STALE_ATOMIC_WRITE_TEMP_AGE: std::time::Duration = std::time::Duration::fr
 /// sweeps orphaned atomic-write tempfiles left in the data dir by a crash
 /// between tempfile creation and rename — no other path cleans those up.
 pub(crate) fn crashed_teardown_intents() -> Vec<String> {
+    crashed_teardown_intents_in(speedwave_runtime::consts::data_dir())
+}
+
+/// Env-free core of [`crashed_teardown_intents`]: tests inject a tempdir.
+fn crashed_teardown_intents_in(data_dir: &std::path::Path) -> Vec<String> {
     speedwave_runtime::fs_perms::sweep_stale_atomic_write_temp_files(
-        speedwave_runtime::consts::data_dir(),
+        data_dir,
         STALE_ATOMIC_WRITE_TEMP_AGE,
     );
-    let path = teardown_intents_path();
+    let path = teardown_intents_path_in(data_dir);
     std::fs::read_to_string(&path)
         .map(|c| c.lines().map(str::to_string).collect())
         .unwrap_or_default()
@@ -213,14 +221,23 @@ fn spawn_background_teardown_with(
     prev: String,
     down: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
 ) {
-    record_teardown_intent(&prev);
+    spawn_background_teardown_with_in(speedwave_runtime::consts::data_dir().clone(), prev, down);
+}
+
+/// Env-free core of [`spawn_background_teardown_with`]: tests inject a tempdir.
+fn spawn_background_teardown_with_in(
+    data_dir: std::path::PathBuf,
+    prev: String,
+    down: impl FnOnce(&str) -> Result<(), String> + Send + 'static,
+) {
+    record_teardown_intent_in(&data_dir, &prev);
     let project = prev.clone();
     let handle = std::thread::spawn(move || {
         log::info!("stopping previous project '{project}' in the background");
         match down(&project) {
             Ok(()) => {
                 log::info!("background teardown of '{project}' stopped");
-                clear_teardown_intent(&project);
+                clear_teardown_intent_in(&data_dir, &project);
             }
             Err(e) => log::warn!("background compose_down('{project}') failed: {e}"),
         }
@@ -2841,25 +2858,29 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_recorded_and_cleared_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
         let project = format!("intent-ok-{}", std::process::id());
-        spawn_background_teardown_with(project.clone(), |_p| Ok(()));
+        spawn_background_teardown_with_in(data_dir.clone(), project.clone(), |_p| Ok(()));
         wait_for_pending_teardown(&project);
         // Success path: intent must not survive the completed teardown.
-        assert!(!crashed_teardown_intents().contains(&project));
+        assert!(!crashed_teardown_intents_in(&data_dir).contains(&project));
     }
 
     #[test]
-    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_survives_failed_teardown_for_next_launch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
         let project = format!("intent-fail-{}", std::process::id());
-        spawn_background_teardown_with(project.clone(), |_p| Err("down failed".to_string()));
+        spawn_background_teardown_with_in(data_dir.clone(), project.clone(), |_p| {
+            Err("down failed".to_string())
+        });
         wait_for_pending_teardown(&project);
         // Failure path: the intent stays so the next launch converges it.
-        assert!(crashed_teardown_intents().contains(&project));
-        clear_teardown_intent(&project);
-        assert!(!crashed_teardown_intents().contains(&project));
+        assert!(crashed_teardown_intents_in(&data_dir).contains(&project));
+        clear_teardown_intent_in(&data_dir, &project);
+        assert!(!crashed_teardown_intents_in(&data_dir).contains(&project));
     }
 
     #[test]
@@ -2868,11 +2889,12 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(teardown_intents)]
     fn teardown_intent_write_is_durable_atomic_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
         let project = format!("intent-atomic-{}", std::process::id());
-        record_teardown_intent(&project);
-        let path = teardown_intents_path();
+        record_teardown_intent_in(&data_dir, &project);
+        let path = teardown_intents_path_in(&data_dir);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.lines().any(|l| l == project));
         // No leftover tempfile from the write-then-rename.
@@ -2881,27 +2903,29 @@ mod tests {
             .filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().starts_with("write-"));
         assert!(!stray, "no tempfile should remain after atomic rename");
-        clear_teardown_intent(&project);
+        clear_teardown_intent_in(&data_dir, &project);
     }
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial(teardown_intents)]
     fn teardown_intents_file_is_not_owner_restricted() {
         use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
         let project = format!("intent-perm-{}", std::process::id());
-        record_teardown_intent(&project);
-        let path = teardown_intents_path();
+        record_teardown_intent_in(&data_dir, &project);
+        let path = teardown_intents_path_in(&data_dir);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644, "shared intents file must stay world-readable");
-        clear_teardown_intent(&project);
+        clear_teardown_intent_in(&data_dir, &project);
     }
 
     #[test]
-    #[serial_test::serial(teardown_intents)]
     fn background_teardown_replaces_stale_entry_for_same_project() {
-        spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
-        spawn_background_teardown_with("bg-dup-proj".to_string(), |_p| Ok(()));
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        spawn_background_teardown_with_in(data_dir.clone(), "bg-dup-proj".to_string(), |_p| Ok(()));
+        spawn_background_teardown_with_in(data_dir, "bg-dup-proj".to_string(), |_p| Ok(()));
         wait_for_pending_teardown("bg-dup-proj");
         assert!(!pending_teardowns_lock().contains_key("bg-dup-proj"));
     }
