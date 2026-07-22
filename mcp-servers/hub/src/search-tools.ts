@@ -11,6 +11,7 @@ import {
   getEnabledServices,
   getDisabledOsCategories,
 } from './tool-registry.js';
+import { sandboxGlobalName } from './service-list.js';
 
 /** Valid detail levels for search_tools, ascending verbosity (SSOT for schema and validation). */
 export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
@@ -261,6 +262,11 @@ function buildSearchResult(
     service,
     deferLoading: tool.deferLoading ?? true,
   };
+
+  const global = sandboxGlobalName(service);
+  if (global !== service) {
+    result.sandboxGlobal = global;
+  }
 
   if (tool.userScoped) {
     result.identityHint = buildIdentitySentence(tool);

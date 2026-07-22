@@ -17,10 +17,10 @@ export function getAllServiceNames(): string[] {
 }
 
 /**
- * Sandbox global for a service: dashes camelCased away, because a dashed plugin slug
- * (e.g. `my-plugin`) is an invalid AsyncFunction parameter name and breaks the whole sandbox.
+ * Camel-cases dashes out of a service name: a dashed slug (`my-plugin`) is an invalid
+ * AsyncFunction parameter and breaks the sandbox. Caller (`executor.ts`) validates the result.
  * @param service - Service name as it appears in ENABLED_SERVICES
- * @returns Valid JS identifier used as the execute_code global
+ * @returns The service name with dashes removed and following chars upper-cased
  */
 export function sandboxGlobalName(service: string): string {
   return service.replace(/-+([a-zA-Z0-9])?/g, (_, c: string | undefined) =>

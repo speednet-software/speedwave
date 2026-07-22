@@ -1303,3 +1303,43 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
     expect(desc).not.toContain('No self-reference helper is configured');
   });
 });
+
+describe('searchTools sandboxGlobal', () => {
+  const savedEnabled = process.env.ENABLED_SERVICES;
+
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['my-plugin'] = {
+      searchItems: buildMockToolMetadata('my-plugin', 'searchItems', { deferLoading: false }),
+    };
+    _setServiceNamesForTesting(['redmine', 'my-plugin']);
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'redmine,my-plugin';
+  });
+
+  afterEach(() => {
+    if (savedEnabled === undefined) delete process.env.ENABLED_SERVICES;
+    else process.env.ENABLED_SERVICES = savedEnabled;
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    resetServiceCaches();
+  });
+
+  it('surfaces the camelCase global for a dashed service', async () => {
+    const result = await searchTools({ query: 'searchItems', detailLevel: 'names_only' });
+    const match = result.matches.find((m) => m.service === 'my-plugin');
+
+    expect(match).toBeDefined();
+    expect(match?.sandboxGlobal).toBe('myPlugin');
+  });
+
+  it('omits sandboxGlobal when the global equals the service name', async () => {
+    const result = await searchTools({ query: 'getCurrentUser', detailLevel: 'names_only' });
+    const match = result.matches.find((m) => m.service === 'redmine');
+
+    expect(match).toBeDefined();
+    expect(match?.sandboxGlobal).toBeUndefined();
+  });
+});

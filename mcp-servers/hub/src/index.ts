@@ -141,6 +141,8 @@ Available globals:
   ❌ const data = await batch([...]); data.map(...) // WRONG: data is not array!
 - paginate(): Async generator for large datasets
 
+Plugin services use the same dot syntax. A dashed plugin slug is camelCased into its global (e.g. \`my-plugin\` → \`myPlugin.someTool()\`); search_tools returns this as the \`sandboxGlobal\` field whenever it differs from the service name.
+
 Example - Cross-service workflow:
 \`\`\`javascript
 // Get IDs from multiple services
@@ -163,7 +165,7 @@ return { total: results.length, failed: errors.length };
         code: {
           type: 'string',
           description:
-            'JavaScript code to execute (ES2022+). Do NOT use TypeScript type annotations. Use globals (redmine, slack, gitlab, etc.) directly - no imports needed. Return value is sent to model.',
+            'JavaScript code to execute (ES2022+). Do NOT use TypeScript type annotations. Use globals (redmine, slack, gitlab, etc.) directly - no imports needed; a dashed plugin slug is camelCased (my-plugin -> myPlugin). Return value is sent to model.',
         },
         timeout_ms: {
           type: 'number',

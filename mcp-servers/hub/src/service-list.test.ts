@@ -85,7 +85,14 @@ describe('service-list', () => {
       expect(sandboxGlobalName('crm-2go')).toBe('crm2go');
     });
 
-    it('produces a valid AsyncFunction parameter name for every result', () => {
+    it('is pure camelization: a reserved word or empty result passes through unchanged', () => {
+      // Validation (reserved word / collision) is the executor's job, not this function's.
+      expect(sandboxGlobalName('class')).toBe('class');
+      expect(sandboxGlobalName('await')).toBe('await');
+      expect(sandboxGlobalName('-')).toBe('');
+    });
+
+    it('produces a valid AsyncFunction parameter name for every dashed result', () => {
       for (const name of ['my-plugin', 'a-b-c', 'svc-', 'crm-2go', 'my--plugin']) {
         expect(() => new Function(sandboxGlobalName(name), 'return 1')).not.toThrow();
       }

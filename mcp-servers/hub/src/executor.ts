@@ -29,6 +29,7 @@ import {
   WrapBridgeCallFn,
 } from './tool-registry.js';
 import { sandboxGlobalName } from './service-list.js';
+import { toCamelCase } from './tool-discovery.js';
 
 // ── Global Bridge State ───────────────────────────────────────────────────────────────────────
 
@@ -240,6 +241,21 @@ function logErrorDebug(context: string, error: unknown): void {
 }
 
 /**
+ * True when `name` can serve as an AsyncFunction parameter (valid, non-reserved identifier).
+ * Reserved words (`class`, `await`, …) pass the shape check but throw at construction.
+ * @param name - Candidate sandbox global name.
+ */
+function isValidSandboxGlobal(name: string): boolean {
+  if (!/^[A-Za-z_$][\w$]*$/.test(name)) return false;
+  try {
+    new AsyncFunction(name, '');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Create tool wrappers (PII tokenization, audit logging) for sandbox execution, per service.
  * @param piiContext - PII tokenization context for this execution.
  * @param auditContext - Audit logging context for tracking tool calls.
@@ -327,17 +343,36 @@ function createToolWrappers(
   for (const service of SERVICE_NAMES) {
     if (!enabled.has(service)) continue;
     const bridge = serviceBridges[service];
-    /* c8 ignore next — bridge is always set for enabled services (set at line 336) */
-    if (bridge) {
-      tools[sandboxGlobalName(service)] = buildExecutorWrappers(
-        service,
-        bridge,
-        wrapWithAudit,
-        prepareParams,
-        wrapBridgeCall,
-        service === 'os' ? disabledOs : undefined
+    /* c8 ignore next — bridge is set above in the serviceBridges loop for every enabled service */
+    if (!bridge) continue;
+
+    const globalName = sandboxGlobalName(service);
+    if (!isValidSandboxGlobal(globalName)) {
+      console.error(
+        `${ts()} [executor] Service '${service}' maps to invalid sandbox global '${globalName}' ` +
+          `(reserved word or empty); skipping. Rename the plugin slug.`
       );
+      continue;
     }
+    if (
+      Object.prototype.hasOwnProperty.call(tools, globalName) ||
+      RESERVED_SANDBOX_GLOBALS.has(globalName)
+    ) {
+      console.error(
+        `${ts()} [executor] Service '${service}' sandbox global '${globalName}' collides with an ` +
+          `existing global; skipping. Rename the plugin slug.`
+      );
+      continue;
+    }
+
+    tools[globalName] = buildExecutorWrappers(
+      service,
+      bridge,
+      wrapWithAudit,
+      prepareParams,
+      wrapBridgeCall,
+      service === 'os' ? disabledOs : undefined
+    );
   }
 
   return tools;
@@ -377,6 +412,41 @@ const batch = async <T>(operations: Promise<T>[]): Promise<BatchResult<T>> => {
 
   return { results, errors };
 };
+
+/**
+ * Non-service globals injected into every sandbox. Kept as one object so
+ * RESERVED_SANDBOX_GLOBALS derives its names from it without drift.
+ */
+const STATIC_SANDBOX_GLOBALS = {
+  JSON,
+  Date,
+  Math,
+  Array,
+  Object,
+  String,
+  Number,
+  Boolean,
+  Promise,
+  Map,
+  Set,
+  RegExp,
+  Error,
+  batch,
+  allSettled: Promise.allSettled.bind(Promise),
+  paginate,
+  collectPages,
+  findInPages,
+  countInPages,
+  filterPages,
+  mapPages,
+  takeFromPages,
+};
+
+/** Global names a service must not shadow: the static helpers above plus `console`. */
+const RESERVED_SANDBOX_GLOBALS: ReadonlySet<string> = new Set([
+  ...Object.keys(STATIC_SANDBOX_GLOBALS),
+  'console',
+]);
 
 /**
  * Levenshtein edit distance, capped for speed since candidate lists are short method names.
@@ -463,30 +533,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       warn: (...args: unknown[]) => console.warn(`${ts()} [sandbox]`, ...args),
       error: (...args: unknown[]) => console.error(`${ts()} [sandbox]`, ...args),
     },
-    JSON,
-    Date,
-    Math,
-    Array,
-    Object,
-    String,
-    Number,
-    Boolean,
-    Promise,
-    Map,
-    Set,
-    RegExp,
-    Error,
-    // Parallel Execution Helper (Anthropic Advanced Tool Use pattern)
-    batch, // Promise.allSettled wrapper - partial failure support
-    allSettled: Promise.allSettled.bind(Promise), // Direct access to Promise.allSettled
-    // Pagination Helpers (for large datasets)
-    paginate, // Async generator for paginated APIs
-    collectPages, // Collect all pages into array
-    findInPages, // Find first match across pages
-    countInPages, // Count matches across pages
-    filterPages, // Filter items across pages
-    mapPages, // Map items across pages
-    takeFromPages, // Take first N items across pages
+    ...STATIC_SANDBOX_GLOBALS,
   };
 
   try {
@@ -579,9 +626,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       const serviceTools = sandboxContext[serviceName as keyof typeof sandboxContext];
 
       if (serviceTools && typeof serviceTools === 'object') {
-        // Convert underscore to camelCase; single-underscore names mean methodName has none.
-        /* c8 ignore next — camelCase callback only fires if methodName contains underscores */
-        const camelMethod = methodName.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+        const camelMethod = toCamelCase(methodName);
         const availableMethods = Object.keys(serviceTools).filter(
           (k) => typeof (serviceTools as Record<string, unknown>)[k] === 'function'
         );
@@ -591,6 +636,19 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
         } else {
           sanitizedMessage = `${serviceName}_${methodName} is not defined. Use dot notation: ${serviceName}.method(). Available methods: ${availableMethods.join(', ')}`;
         }
+      }
+    }
+
+    // Dashed slug used verbatim: `my-plugin.foo()` parses as `my - plugin.foo()` → `my is not defined`.
+    const notDefinedMatch = message.match(/^([A-Za-z_$][\w$]*) is not defined$/);
+    if (notDefinedMatch) {
+      const [, name] = notDefinedMatch;
+      const dashed = [...getEnabledServices()].find(
+        (s) => s.includes('-') && s.split('-')[0] === name
+      );
+      if (dashed) {
+        const globalName = sandboxGlobalName(dashed);
+        sanitizedMessage = `${name} is not defined. Service '${dashed}' is exposed as the global '${globalName}' (dashes are camelCased). Call ${globalName}.method(), not ${dashed}.method().`;
       }
     }
 

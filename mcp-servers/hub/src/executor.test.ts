@@ -16,6 +16,7 @@ import {
   populateRegistryWithMockTools,
   _resetRegistryForTesting,
   createMockBridges,
+  buildMockToolMetadata,
 } from './test-helpers.js';
 import type { ToolMetadata } from './hub-types.js';
 
@@ -417,34 +418,28 @@ describe('executor', () => {
     });
   });
 
-  describe('dashed service names (plugin slugs like my-plugin)', () => {
+  describe('plugin services in sandbox', () => {
     const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+    /** Full ToolMetadata registry entry for a plugin service with the given method names. */
+    const pluginRegistry = (service: string, methods: string[]): Record<string, ToolMetadata> =>
+      Object.fromEntries(
+        methods.map((m) => [m, buildMockToolMetadata(service, m, { deferLoading: false })])
+      );
+
+    /** Plant each plugin's registry entry, then point SERVICE_NAMES + ENABLED_SERVICES at them. */
+    const enablePlugins = (registry: Record<string, Record<string, ToolMetadata>>): void => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      for (const [service, tools] of Object.entries(registry)) {
+        mutableRegistry[service] = tools;
+      }
+      const names = Object.keys(registry);
+      _setServiceNamesForTesting(names);
+      process.env.ENABLED_SERVICES = names.join(',');
+    };
 
     beforeEach(() => {
       resetServiceCaches();
-      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
-      mutableRegistry['my-plugin'] = {
-        getCurrentUser: {
-          name: 'getCurrentUser',
-          description: 'Get the current user',
-          keywords: [],
-          inputSchema: {},
-          example: '',
-          service: 'my-plugin',
-          deferLoading: false,
-        },
-        searchItems: {
-          name: 'searchItems',
-          description: 'Search items',
-          keywords: [],
-          inputSchema: {},
-          example: '',
-          service: 'my-plugin',
-          deferLoading: false,
-        },
-      };
-      _setServiceNamesForTesting(['redmine', 'my-plugin']);
-      process.env.ENABLED_SERVICES = 'redmine,my-plugin';
       _setBridgesForTesting(createMockBridges());
     });
 
@@ -460,29 +455,110 @@ describe('executor', () => {
       populateRegistryWithMockTools();
     });
 
+    it('exposes a dashed service under a camelCase global', async () => {
+      enablePlugins({
+        'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser', 'searchItems']),
+      });
+      const result = await executeCode({
+        code: `return Object.keys(myPlugin).sort()`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(['getCurrentUser', 'searchItems']);
+    });
+
     it('does not break the sandbox for unrelated code', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
       const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
       expect(result.data).toBe(4);
     });
 
-    it('exposes the dashed service under a camelCase global', async () => {
-      const code = `return Object.keys(myPlugin).sort()`;
-      const result = await executeCode({ code, timeoutMs: 5000 });
-
-      expect(result.success).toBe(true);
-      expect(result.data).toEqual(['getCurrentUser', 'searchItems']);
-    });
-
     it('names the camelCase global in method-not-found hints', async () => {
-      const code = `await myPlugin.nonExistent()`;
-      const result = await executeCode({ code, timeoutMs: 5000 });
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      const result = await executeCode({ code: `await myPlugin.nonExistent()`, timeoutMs: 5000 });
 
       expect(result.success).toBe(false);
       expect(result.error?.code).toBe('EXECUTION_ERROR');
       expect(result.error?.message).toContain('Available myPlugin methods');
       expect(result.error?.message).toContain('getCurrentUser');
+    });
+
+    it('teaches the camelCase global when a dashed slug is called verbatim', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      // `my-plugin.getCurrentUser()` parses as `my - plugin...` → "my is not defined".
+      const result = await executeCode({
+        code: `return my-plugin.getCurrentUser()`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("Service 'my-plugin'");
+      expect(result.error?.message).toContain('myPlugin');
+      expect(result.error?.message).toContain('is not defined');
+    });
+
+    it('skips a slug that camelCases to a reserved word, keeping the sandbox alive', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({ class: pluginRegistry('class', ['foo']) });
+      const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(4);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'class'"));
+      errSpy.mockRestore();
+    });
+
+    it('skips a slug that camelCases to an empty global, keeping the sandbox alive', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({ '--': pluginRegistry('--', ['foo']) });
+      const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(4);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service '--'"));
+      errSpy.mockRestore();
+    });
+
+    it('skips the loser on a camelCase collision and logs it (no silent misroute)', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({
+        'a-b': pluginRegistry('a-b', ['foo']),
+        'a--b': pluginRegistry('a--b', ['bar']),
+      });
+      const result = await executeCode({ code: `return Object.keys(aB)`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      // 'a-b' precedes 'a--b' in SERVICE_NAMES and wins; 'a--b' is skipped, not merged.
+      expect(result.data).toEqual(['foo']);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a--b'"));
+      errSpy.mockRestore();
+    });
+
+    it('does not let a plugin shadow a built-in sandbox helper', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({ 'collect-pages': pluginRegistry('collect-pages', ['foo']) });
+      const result = await executeCode({ code: `return typeof collectPages`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('function');
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'collect-pages'"));
+      errSpy.mockRestore();
+    });
+
+    it('does not expose a service enabled but absent from the discovered registry set', async () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['example-plugin'] = pluginRegistry('example-plugin', ['searchCustomers']);
+      // SERVICE_NAMES is the discovered set the sandbox iterates; it deliberately omits the plugin.
+      _setServiceNamesForTesting(['slack']);
+      process.env.ENABLED_SERVICES = 'slack,example-plugin';
+
+      const result = await executeCode({ code: `typeof examplePlugin`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('undefined');
     });
   });
 
@@ -679,61 +755,6 @@ describe('executor', () => {
       expect(errors).toHaveLength(1);
       expect(errors[0].index).toBe(1);
       expect(errors[0].error).toContain('Second failed');
-    });
-  });
-
-  describe('plugin service in sandbox', () => {
-    const savedEnabledServices = process.env.ENABLED_SERVICES;
-
-    beforeEach(() => {
-      resetServiceCaches();
-      process.env.ENABLED_SERVICES = 'slack,example-plugin';
-    });
-
-    afterEach(() => {
-      if (savedEnabledServices === undefined) {
-        delete process.env.ENABLED_SERVICES;
-      } else {
-        process.env.ENABLED_SERVICES = savedEnabledServices;
-      }
-      resetServiceCaches();
-    });
-
-    it('should include plugin service tools in sandbox context', async () => {
-      // Register a plugin service in the registry
-      const { TOOL_REGISTRY, SERVICE_NAMES } = await import('./tool-registry.js');
-      const mutableRegistry = TOOL_REGISTRY as Record<
-        string,
-        Record<string, Record<string, unknown>>
-      >;
-      mutableRegistry['example-plugin'] = {
-        searchCustomers: {
-          name: 'searchCustomers',
-          service: 'example-plugin',
-          description: 'Search CRM customers',
-          inputSchema: { type: 'object', properties: {} },
-          keywords: [],
-          example: '',
-          deferLoading: false,
-        },
-      };
-
-      // Set up mock bridges
-      const mockBridges = createMockBridges();
-      mockBridges['example-plugin'] = null;
-      mockBridges['os'] = null;
-      _setBridgesForTesting(mockBridges);
-
-      // Code that accesses the sandbox to check what's available
-      const code = `typeof examplePlugin`;
-      const result = await executeCode({ code, timeoutMs: 5000 });
-      // example-plugin is in sandbox but has no bridge, so it's undefined
-      expect(result.success).toBe(true);
-      expect(result.data).toBe('undefined');
-
-      // Cleanup
-      delete mutableRegistry['example-plugin'];
-      _setBridgesForTesting(null);
     });
   });
 
