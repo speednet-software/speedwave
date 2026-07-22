@@ -15,3 +15,15 @@ export function getAllServiceNames(): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+/**
+ * Sandbox global for a service: dashes camelCased away, because a dashed plugin slug
+ * (e.g. `my-plugin`) is an invalid AsyncFunction parameter name and breaks the whole sandbox.
+ * @param service - Service name as it appears in ENABLED_SERVICES
+ * @returns Valid JS identifier used as the execute_code global
+ */
+export function sandboxGlobalName(service: string): string {
+  return service.replace(/-+([a-zA-Z0-9])?/g, (_, c: string | undefined) =>
+    c ? c.toUpperCase() : ''
+  );
+}

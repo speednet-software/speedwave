@@ -28,6 +28,7 @@ import {
   PrepareParamsFn,
   WrapBridgeCallFn,
 } from './tool-registry.js';
+import { sandboxGlobalName } from './service-list.js';
 
 // ── Global Bridge State ───────────────────────────────────────────────────────────────────────
 
@@ -328,7 +329,7 @@ function createToolWrappers(
     const bridge = serviceBridges[service];
     /* c8 ignore next — bridge is always set for enabled services (set at line 336) */
     if (bridge) {
-      tools[service] = buildExecutorWrappers(
+      tools[sandboxGlobalName(service)] = buildExecutorWrappers(
         service,
         bridge,
         wrapWithAudit,

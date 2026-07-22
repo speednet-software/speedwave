@@ -17,6 +17,7 @@ import {
   _resetRegistryForTesting,
   createMockBridges,
 } from './test-helpers.js';
+import type { ToolMetadata } from './hub-types.js';
 
 // ── Tests for Code Executor (sandbox security and basic validation) ──────────────────────────
 
@@ -413,6 +414,75 @@ describe('executor', () => {
       expect(result.error?.message).toContain('slack_nonExistentMethod is not defined');
       expect(result.error?.message).toContain('Use dot notation');
       expect(result.error?.message).toContain('Available methods');
+    });
+  });
+
+  describe('dashed service names (plugin slugs like my-plugin)', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+    beforeEach(() => {
+      resetServiceCaches();
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['my-plugin'] = {
+        getCurrentUser: {
+          name: 'getCurrentUser',
+          description: 'Get the current user',
+          keywords: [],
+          inputSchema: {},
+          example: '',
+          service: 'my-plugin',
+          deferLoading: false,
+        },
+        searchItems: {
+          name: 'searchItems',
+          description: 'Search items',
+          keywords: [],
+          inputSchema: {},
+          example: '',
+          service: 'my-plugin',
+          deferLoading: false,
+        },
+      };
+      _setServiceNamesForTesting(['redmine', 'my-plugin']);
+      process.env.ENABLED_SERVICES = 'redmine,my-plugin';
+      _setBridgesForTesting(createMockBridges());
+    });
+
+    afterEach(() => {
+      _setBridgesForTesting(null);
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      resetServiceCaches();
+      _resetRegistryForTesting();
+      populateRegistryWithMockTools();
+    });
+
+    it('does not break the sandbox for unrelated code', async () => {
+      const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(4);
+    });
+
+    it('exposes the dashed service under a camelCase global', async () => {
+      const code = `return Object.keys(myPlugin).sort()`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(['getCurrentUser', 'searchItems']);
+    });
+
+    it('names the camelCase global in method-not-found hints', async () => {
+      const code = `await myPlugin.nonExistent()`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).toContain('Available myPlugin methods');
+      expect(result.error?.message).toContain('getCurrentUser');
     });
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { getAllServiceNames } from './service-list.js';
+import { getAllServiceNames, sandboxGlobalName } from './service-list.js';
 
 describe('service-list', () => {
   const originalEnv = process.env.ENABLED_SERVICES;
@@ -62,6 +62,33 @@ describe('service-list', () => {
       process.env.ENABLED_SERVICES = 'gitlab,slack,os';
       const names = getAllServiceNames();
       expect(names).toEqual(['gitlab', 'slack', 'os']);
+    });
+  });
+
+  describe('sandboxGlobalName', () => {
+    it('camelCases a dashed service name into a valid JS identifier', () => {
+      expect(sandboxGlobalName('my-plugin')).toBe('myPlugin');
+    });
+
+    it('leaves an already-valid identifier unchanged', () => {
+      expect(sandboxGlobalName('slack')).toBe('slack');
+      expect(sandboxGlobalName('host_exec')).toBe('host_exec');
+    });
+
+    it('collapses multiple and consecutive dashes', () => {
+      expect(sandboxGlobalName('a-b-c')).toBe('aBC');
+      expect(sandboxGlobalName('my--plugin')).toBe('myPlugin');
+    });
+
+    it('drops a trailing dash and keeps digits after a dash', () => {
+      expect(sandboxGlobalName('svc-')).toBe('svc');
+      expect(sandboxGlobalName('crm-2go')).toBe('crm2go');
+    });
+
+    it('produces a valid AsyncFunction parameter name for every result', () => {
+      for (const name of ['my-plugin', 'a-b-c', 'svc-', 'crm-2go', 'my--plugin']) {
+        expect(() => new Function(sandboxGlobalName(name), 'return 1')).not.toThrow();
+      }
     });
   });
 });
