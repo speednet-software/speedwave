@@ -640,15 +640,16 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     }
 
     // Dashed slug used verbatim: `my-plugin.foo()` parses as `my - plugin.foo()` → `my is not defined`.
+    // The undefined name is only the first dash-segment, so list every service sharing it.
     const notDefinedMatch = message.match(/^([A-Za-z_$][\w$]*) is not defined$/);
     if (notDefinedMatch) {
       const [, name] = notDefinedMatch;
-      const dashed = [...getEnabledServices()].find(
+      const dashed = [...getEnabledServices()].filter(
         (s) => s.includes('-') && s.split('-')[0] === name
       );
-      if (dashed) {
-        const globalName = sandboxGlobalName(dashed);
-        sanitizedMessage = `${name} is not defined. Service '${dashed}' is exposed as the global '${globalName}' (dashes are camelCased). Call ${globalName}.method(), not ${dashed}.method().`;
+      if (dashed.length > 0) {
+        const mapping = dashed.map((s) => `'${s}' → ${sandboxGlobalName(s)}`).join(', ');
+        sanitizedMessage = `${name} is not defined. A dashed service slug is camelCased into its sandbox global (${mapping}). Call e.g. ${sandboxGlobalName(dashed[0])}.method(), not ${name}-…().`;
       }
     }
 

@@ -495,9 +495,22 @@ describe('executor', () => {
       });
 
       expect(result.success).toBe(false);
-      expect(result.error?.message).toContain("Service 'my-plugin'");
-      expect(result.error?.message).toContain('myPlugin');
       expect(result.error?.message).toContain('is not defined');
+      expect(result.error?.message).toContain("'my-plugin' → myPlugin");
+      expect(result.error?.message).toContain('myPlugin.method()');
+    });
+
+    it('lists every dashed service sharing the undefined first segment', async () => {
+      enablePlugins({
+        'acme-crm': pluginRegistry('acme-crm', ['foo']),
+        'acme-docs': pluginRegistry('acme-docs', ['bar']),
+      });
+      // `acme-crm.foo()` → "acme is not defined"; the segment maps to both enabled services.
+      const result = await executeCode({ code: `return acme-crm.foo()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("'acme-crm' → acmeCrm");
+      expect(result.error?.message).toContain("'acme-docs' → acmeDocs");
     });
 
     it('skips a slug that camelCases to a reserved word, keeping the sandbox alive', async () => {
