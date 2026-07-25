@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { getAllServiceNames, sandboxGlobalName } from './service-list.js';
+import { getAllServiceNames, sandboxGlobalName, resolveSandboxGlobals } from './service-list.js';
 
 describe('service-list', () => {
   const originalEnv = process.env.ENABLED_SERVICES;
@@ -93,9 +93,66 @@ describe('service-list', () => {
     });
 
     it('produces a valid AsyncFunction parameter name for every dashed result', () => {
+      // Probe with the same constructor production uses; `Function` accepts a wider grammar.
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
       for (const name of ['my-plugin', 'a-b-c', 'svc-', 'crm-2go', 'my--plugin']) {
-        expect(() => new Function(sandboxGlobalName(name), 'return 1')).not.toThrow();
+        expect(() => new AsyncFunction(sandboxGlobalName(name), 'return 1')).not.toThrow();
       }
+    });
+  });
+
+  describe('resolveSandboxGlobals', () => {
+    const RESERVED = new Set(['batch', 'collectPages', 'console']);
+
+    it('maps plain and dashed services to their globals', () => {
+      const { usable, skipped } = resolveSandboxGlobals(['slack', 'my-plugin'], RESERVED);
+
+      expect(Object.fromEntries(usable)).toEqual({ slack: 'slack', 'my-plugin': 'myPlugin' });
+      expect(skipped.size).toBe(0);
+    });
+
+    it('skips reserved-word and empty globals', () => {
+      const { usable, skipped } = resolveSandboxGlobals(['class', '--'], RESERVED);
+
+      expect(usable.size).toBe(0);
+      expect(skipped.get('class')).toContain('invalid sandbox global');
+      expect(skipped.get('--')).toContain('invalid sandbox global');
+    });
+
+    it('skips a service shadowing a sandbox helper or a JS value global', () => {
+      const { usable, skipped } = resolveSandboxGlobals(
+        ['collect-pages', 'undefined', 'nan', 'let'],
+        RESERVED
+      );
+
+      for (const service of ['collect-pages', 'undefined', 'let']) {
+        expect(skipped.get(service)).toContain('built-in or unsafe JS global');
+      }
+      // `nan` is a distinct identifier from `NaN`; only the exact global name is unsafe.
+      expect(Object.fromEntries(usable)).toEqual({ nan: 'nan' });
+    });
+
+    it('lets an exact name win a collision against a camelCased one', () => {
+      const { usable, skipped } = resolveSandboxGlobals(['redmine-', 'redmine'], RESERVED);
+
+      expect(usable.get('redmine')).toBe('redmine');
+      expect(usable.has('redmine-')).toBe(false);
+      expect(skipped.get('redmine-')).toContain('collides with redmine');
+    });
+
+    it('skips all candidates when a collision has no exact-name winner', () => {
+      const { usable, skipped } = resolveSandboxGlobals(['a-b', 'a--b'], RESERVED);
+
+      expect(usable.size).toBe(0);
+      expect(skipped.get('a-b')).toContain('collides with');
+      expect(skipped.get('a--b')).toContain('collides with');
+    });
+
+    it('resolves independently of input order', () => {
+      const forward = resolveSandboxGlobals(['redmine-', 'redmine'], RESERVED);
+      const reverse = resolveSandboxGlobals(['redmine', 'redmine-'], RESERVED);
+
+      expect(Object.fromEntries(forward.usable)).toEqual(Object.fromEntries(reverse.usable));
     });
   });
 });

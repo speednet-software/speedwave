@@ -1342,4 +1342,22 @@ describe('searchTools sandboxGlobal', () => {
     expect(match).toBeDefined();
     expect(match?.sandboxGlobal).toBeUndefined();
   });
+
+  it('hides tools of a service the sandbox refuses to expose', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    // `class` camelCases to a reserved word, so execute_code cannot expose it — advertising
+    // its tools would hand the model a tool it can never call.
+    mutableRegistry['class'] = {
+      searchItems: buildMockToolMetadata('class', 'searchItems', { deferLoading: false }),
+    };
+    _setServiceNamesForTesting(['redmine', 'class']);
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'redmine,class';
+
+    const result = await searchTools({ query: 'searchItems', detailLevel: 'names_only' });
+
+    expect(result.matches.some((m) => m.service === 'class')).toBe(false);
+    errSpy.mockRestore();
+  });
 });

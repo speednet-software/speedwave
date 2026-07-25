@@ -513,6 +513,22 @@ describe('executor', () => {
       expect(result.error?.message).toContain("'acme-docs' → acmeDocs");
     });
 
+    it('teaches the global when the slug is spelled without its dash', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      const result = await executeCode({ code: `return myplugin.foo()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("'my-plugin' → myPlugin");
+    });
+
+    it('teaches the global when a non-first dash segment is used alone', async () => {
+      enablePlugins({ 'acme-crm': pluginRegistry('acme-crm', ['foo']) });
+      const result = await executeCode({ code: `return crm.foo()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("'acme-crm' → acmeCrm");
+    });
+
     it('skips a slug that camelCases to a reserved word, keeping the sandbox alive', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       enablePlugins({ class: pluginRegistry('class', ['foo']) });
@@ -535,18 +551,51 @@ describe('executor', () => {
       errSpy.mockRestore();
     });
 
-    it('skips the loser on a camelCase collision and logs it (no silent misroute)', async () => {
+    it('skips every service in an unresolvable camelCase collision, not just the loser', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       enablePlugins({
         'a-b': pluginRegistry('a-b', ['foo']),
         'a--b': pluginRegistry('a--b', ['bar']),
       });
-      const result = await executeCode({ code: `return Object.keys(aB)`, timeoutMs: 5000 });
+      const result = await executeCode({ code: `return typeof aB`, timeoutMs: 5000 });
+
+      // Neither may win: picking one by SERVICE_NAMES order makes the outcome config-dependent.
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('undefined');
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a-b'"));
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a--b'"));
+      errSpy.mockRestore();
+    });
+
+    it('lets an exact service name beat a camelCased one, so a plugin cannot shadow a built-in', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // `redmine-` is a valid plugin slug and camelCases to `redmine`; ordered first it would
+      // otherwise take over the built-in global and route redmine.* to the plugin's bridge.
+      enablePlugins({
+        'redmine-': pluginRegistry('redmine-', ['pluginOwnedTool']),
+        redmine: pluginRegistry('redmine', ['listIssueIds']),
+      });
+      const result = await executeCode({ code: `return Object.keys(redmine)`, timeoutMs: 5000 });
 
       expect(result.success).toBe(true);
-      // 'a-b' precedes 'a--b' in SERVICE_NAMES and wins; 'a--b' is skipped, not merged.
-      expect(result.data).toEqual(['foo']);
-      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a--b'"));
+      expect(result.data).toEqual(['listIssueIds']);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'redmine-'"));
+      errSpy.mockRestore();
+    });
+
+    it('skips a slug shadowing a JS value global, keeping `x === undefined` honest', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // `undefined` is a legal parameter name, so it passes the identifier probe: shadowing it
+      // would silently invert every undefined-check in model-generated code.
+      enablePlugins({ undefined: pluginRegistry('undefined', ['foo']) });
+      const result = await executeCode({
+        code: 'let x; return [typeof undefined, x === undefined]',
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(['undefined', true]);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'undefined'"));
       errSpy.mockRestore();
     });
 
