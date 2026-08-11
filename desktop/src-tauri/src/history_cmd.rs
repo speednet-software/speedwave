@@ -11,10 +11,17 @@ pub(crate) async fn list_conversations(
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("listing conversations for project={project}");
-        history::list_conversations(&project).map_err(|e| {
+        let mut summaries = history::list_conversations(&project).map_err(|e| {
             log::error!("failed to list conversations for project={project}: {e}");
             e.to_string()
-        })
+        })?;
+        // Display-only copy: the on-disk sessions stay tokenized.
+        let policy = crate::pii_display::load_display_policy(
+            speedwave_runtime::consts::data_dir(),
+            &project,
+        );
+        crate::pii_display::detokenize_summaries(&mut summaries, &policy);
+        Ok(summaries)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -28,10 +35,17 @@ pub(crate) async fn get_conversation(
     tokio::task::spawn_blocking(move || {
         check_project(&project)?;
         log::info!("getting conversation for project={project}");
-        history::get_conversation(&project, &session_id).map_err(|e| {
+        let mut transcript = history::get_conversation(&project, &session_id).map_err(|e| {
             log::error!("failed to get conversation for project={project}: {e}");
             e.to_string()
-        })
+        })?;
+        // Detokenize the returned copy only; the tokenized source file stays unchanged.
+        let policy = crate::pii_display::load_display_policy(
+            speedwave_runtime::consts::data_dir(),
+            &project,
+        );
+        crate::pii_display::detokenize_transcript(&mut transcript, &policy);
+        Ok(transcript)
     })
     .await
     .map_err(|e| e.to_string())?

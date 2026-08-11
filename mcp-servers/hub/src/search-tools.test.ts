@@ -590,7 +590,7 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
     populateRegistryWithMockTools();
-    // Isolate from the host environment: a real DISABLED_OS_SERVICES would filter os tools.
+    // Ambient DISABLED_OS_SERVICES (set inside Speedwave containers) would filter the mock os tools
     delete process.env.DISABLED_OS_SERVICES;
     resetServiceCaches();
   });

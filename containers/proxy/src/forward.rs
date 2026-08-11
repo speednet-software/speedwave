@@ -12,6 +12,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::audit;
+use crate::pii::{self, PiiEngineState};
 use crate::router::{resolve, Auth, BareAuth, Config, Scheme};
 use crate::usage::{append_usage, sniff, RequestStatus, UsageAcc};
 
@@ -25,6 +27,19 @@ fn bound_sniff_buffer(buf: &mut String, max: usize) {
     if buf.len() > max {
         buf.clear();
     }
+}
+
+/// True when the upstream response body is an SSE stream (`Content-Type:
+/// text/event-stream`, parameters and case tolerated) — selects the rewrite arm.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| {
+            ct.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
 }
 
 /// Drain all complete (`\n`-terminated) lines from `buf`, CRLF-stripped.
@@ -176,8 +191,8 @@ fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStat
 /// stream unbuffered while sniffing usage, and append one usage line on end.
 pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: Bytes) -> Response {
     // Parse the body once: the model selects the backend route, the same
-    // parsed value is reused to strip the route prefix before forwarding.
-    let parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
+    // parsed value is reused (now PII-scanned) to strip the route prefix before forwarding.
+    let mut parsed = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
         Err(_) => {
             return (
@@ -187,6 +202,45 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                 .into_response();
         }
     };
+
+    // Fail-closed (ADR-073 F4): a broken PII engine must never let cleartext forward.
+    let (policy, key) = match cfg.pii.as_ref() {
+        PiiEngineState::Ready { policy, key } => (policy, key),
+        PiiEngineState::Failed(reason) => {
+            log::error!("PII engine unavailable, rejecting /v1/messages: {reason}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "PII policy engine unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    let detections = match pii::scan_request(policy, key, &mut parsed) {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("PII scan failed, rejecting /v1/messages: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "PII scan failed"})),
+            )
+                .into_response();
+        }
+    };
+    audit::write_pii_audit(cfg.audit_dir.as_deref(), &detections);
+
+    // Re-serialize the scanned value: this, not the original raw bytes, is what forwards.
+    let scanned_body = match serde_json::to_vec(&parsed) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("failed to serialize scanned request body: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "failed to serialize scanned request"})),
+            )
+                .into_response();
+        }
+    };
+
     let model = parsed
         .get("model")
         .and_then(|m| m.as_str())
@@ -219,7 +273,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
     let upstream_url = format!("{}/v1/messages", route.base_url);
     // Strip the route prefix so the backend sees its own model name (the
     // anthropic passthrough has no prefix and is untouched).
-    let outbound_body = strip_model_prefix(&body, &parsed, &model);
+    let outbound_body = strip_model_prefix(&scanned_body, &parsed, &model);
     // Owned copies for the spawned relay task (outlives the `cfg` borrow).
     let provider_kind = route.provider_kind.clone();
     let provider_id = route.provider_id.clone();
@@ -257,29 +311,45 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         );
     }
     let response_headers = upstream.headers().clone();
+    let upstream_is_sse = is_event_stream(&response_headers);
 
     // Usage path resolved once at startup and stored in Config — no env read per request.
     let usage_path = cfg.usage_path.clone();
     let model_owned = model.clone();
     let status_code = status.as_u16();
+    // Cheap Arc clone: the spawned task outlives this handler and needs its own handle to
+    // unmask keywords and detokenize PII spans before the response reaches the agent (§5.1).
+    let pii_state = cfg.pii.clone();
 
-    // Channel-based unbuffered relay: each upstream chunk is forwarded immediately.
-    // The spawned task sniffs SSE frames while forwarding — RAM stays flat.
+    // Channel-based relay: each upstream chunk is rewritten (keywords unmasked, PII spans
+    // detokenized) then forwarded as soon as the rolling buffer judges it safe.
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     tokio::spawn(async move {
+        let PiiEngineState::Ready { policy, key } = pii_state.as_ref() else {
+            // Unreachable: `messages` already required `Ready` before ever calling upstream,
+            // and the engine state never changes after startup. Fail closed rather than
+            // forward a response nobody has rewritten.
+            log::error!("PII engine unavailable for response rewrite; dropping stream");
+            return;
+        };
         let mut byte_stream = upstream.bytes_stream();
         let mut acc = UsageAcc::default();
-        // Buffer for incomplete SSE lines across chunks.
+        // Buffer for incomplete SSE lines across chunks (usage sniffing only).
         let mut line_buf = String::new();
-        // Stream aborted mid-flight (upstream byte error) → failure, even on a 2xx.
+        let mut rewrite_buffer = crate::rewrite::ResponseRewriter::new(upstream_is_sse);
+        // Stream aborted mid-flight (upstream byte error, or a detokenization failure) →
+        // failure, even on a 2xx.
         let mut stream_errored = false;
+        // The client dropped the connection — stop pushing, and skip the final flush send.
+        let mut client_disconnected = false;
 
         use futures_util::StreamExt;
         while let Some(chunk) = byte_stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    // Sniff SSE frames from the chunk before forwarding.
+                    // Sniff SSE frames from the original chunk — unaffected by the rewrite
+                    // below, since usage numbers reflect what the upstream actually billed.
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         line_buf.push_str(text);
                         for line in drain_complete_lines(&mut line_buf) {
@@ -296,11 +366,25 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                                 }
                             }
                         }
-                        // Only sniffing is bounded; the byte relay below stays verbatim.
+                        // Only sniffing is bounded; the rewrite buffer below is separate.
                         bound_sniff_buffer(&mut line_buf, MAX_SNIFF_BUF);
                     }
-                    // Forward chunk immediately — no buffering.
-                    if tx.send(Ok(bytes)).await.is_err() {
+                    // Unmask keywords then detokenize PII spans (§5.1/§7.2/§7.3) on decoded
+                    // event text — a span split across SSE delta events still matches.
+                    let forward_bytes =
+                        match rewrite_buffer.push_chunk(&bytes, policy.keywords(), key) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                log::error!("response rewrite failed mid-stream, aborting: {e}");
+                                let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                                stream_errored = true;
+                                break;
+                            }
+                        };
+                    if !forward_bytes.is_empty()
+                        && tx.send(Ok(Bytes::from(forward_bytes))).await.is_err()
+                    {
+                        client_disconnected = true;
                         break; // Client disconnected.
                     }
                 }
@@ -308,6 +392,19 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     stream_errored = true;
                     break;
+                }
+            }
+        }
+
+        if !stream_errored && !client_disconnected {
+            match rewrite_buffer.finish(policy.keywords(), key) {
+                Ok(remaining) if !remaining.is_empty() => {
+                    let _ = tx.send(Ok(Bytes::from(remaining))).await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    log::error!("PII detokenization failed flushing response tail: {e}");
+                    stream_errored = true;
                 }
             }
         }
@@ -667,5 +764,26 @@ mod tests {
         assert_eq!(resolve_request_status(429, false), RequestStatus::Failure);
         assert_eq!(resolve_request_status(500, false), RequestStatus::Failure);
         assert_eq!(resolve_request_status(503, true), RequestStatus::Failure);
+    }
+
+    #[test]
+    fn is_event_stream_matches_content_type_with_params_and_case() {
+        let mut headers = HeaderMap::new();
+        assert!(
+            !is_event_stream(&headers),
+            "missing content-type is not SSE"
+        );
+
+        headers.insert("content-type", "application/json".parse().unwrap());
+        assert!(!is_event_stream(&headers));
+
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        assert!(is_event_stream(&headers));
+
+        headers.insert(
+            "content-type",
+            "Text/Event-Stream; charset=utf-8".parse().unwrap(),
+        );
+        assert!(is_event_stream(&headers), "params and case are tolerated");
     }
 }

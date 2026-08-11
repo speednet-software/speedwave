@@ -1,4 +1,4 @@
-/** Hub-specific types (executor, PII tokens, skills); base types from \@speedwave/mcp-shared */
+/** Hub-specific types (executor, skills); PII types live in \@speedwave/policy-engine; base types from \@speedwave/mcp-shared */
 
 // ── Code Executor Types ───────────────────────────────────────────────────────────────────────
 
@@ -162,39 +162,4 @@ export interface ToolSearchResult {
    * (a dashed slug like `my-plugin` is exposed as `myPlugin`). Use `service` for search filtering.
    */
   sandboxGlobal?: string;
-}
-
-// ── PII Tokenization Types ────────────────────────────────────────────────────────────────────
-
-/**
- * PII Token entry
- */
-export interface PIITokenEntry {
-  /** Token string (e.g., "[EMAIL:TOKEN_A1B2C3]") */
-  token: string;
-  /** Type of PII */
-  type: PIIType;
-  /** Original sensitive value */
-  value: string;
-  /** When this token was created */
-  createdAt: Date;
-  /** Number of times this token has been accessed */
-  accessCount: number;
-  /** Last time this token was accessed */
-  lastAccessed?: Date;
-}
-
-/**
- * PII Types supported for tokenization
- */
-export enum PIIType {
-  EMAIL = 'EMAIL',
-  PHONE_PL = 'PHONE_PL',
-  PESEL = 'PESEL',
-  NIP = 'NIP',
-  IBAN = 'IBAN',
-  CARD = 'CARD',
-  API_KEY = 'API_KEY',
-  /** Sensitive field detected by key name (password, token, secret, etc.) */
-  SENSITIVE_FIELD = 'SENSITIVE_FIELD',
 }
