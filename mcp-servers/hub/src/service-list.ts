@@ -43,9 +43,11 @@ const UNSAFE_SANDBOX_GLOBALS: ReadonlySet<string> = new Set([
   'eval',
 ]);
 
+/* c8 ignore start — the throwaway async fn is never called, it only yields the constructor */
 const AsyncFunction: new (...args: string[]) => unknown = Object.getPrototypeOf(
   async function () {}
 ).constructor;
+/* c8 ignore stop */
 
 /**
  * True when `name` works as an AsyncFunction parameter; reserved words throw at construction.
