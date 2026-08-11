@@ -71,18 +71,30 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.proxy",
         build_args: &[],
-        // Everything the Containerfile COPYies lives under containers/proxy.
-        hash_inputs: &["containers/Containerfile.proxy", "containers/proxy"],
+        // Everything the Containerfile COPYies lives under containers/proxy, plus the
+        // vendored crates/pii-engine and mcp-servers/policies/rules.yaml (staged into the build
+        // context by the bundle scripts so pii-engine's repo-relative paths resolve in-container).
+        hash_inputs: &[
+            "containers/Containerfile.proxy",
+            "containers/proxy",
+            "crates/pii-engine",
+            "mcp-servers/policies/rules.yaml",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
+        // pii-engine(-wasm): the wasm-pkg artifact ships prebuilt (not a COPY source hashed
+        // above), so a source change must still retag the image that carries it.
         hash_inputs: &[
             "mcp-servers/hub",
             "mcp-servers/shared",
+            "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
+            "crates/pii-engine",
+            "crates/pii-engine-wasm",
         ],
     },
     ImageDef {
@@ -1451,7 +1463,16 @@ mod tests {
                 }
                 for src in &args[..args.len() - 1] {
                     let src = src.trim_start_matches("./");
-                    sources.push(format!("{}/{src}", img.context_dir));
+                    // `crates/...` and `mcp-servers/...` sources in a `containers/`-context
+                    // image are vendored by the bundle scripts from the repo root, so they map
+                    // to a repo-root-relative hash input rather than a context_dir-prefixed one.
+                    if src.starts_with("crates/")
+                        || (img.context_dir == "containers" && src.starts_with("mcp-servers/"))
+                    {
+                        sources.push(src.to_string());
+                    } else {
+                        sources.push(format!("{}/{src}", img.context_dir));
+                    }
                 }
             }
             for src in sources {

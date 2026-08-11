@@ -21,6 +21,9 @@ dirs = "6"
 fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
+# The PII policy engine: policy.json v2 shape + default sensitive-key list,
+# so the host's rendered contract can never drift from what it compiles against.
+speedwave-pii-engine = { path = "../pii-engine" }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.11"

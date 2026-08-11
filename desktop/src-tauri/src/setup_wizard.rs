@@ -1136,6 +1136,7 @@ mod tests {
             }),
             integrations: None,
             plugin_settings: None,
+            policy: None,
         }
     }
 
@@ -1190,6 +1191,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             ..Default::default()
         };
@@ -1205,6 +1207,7 @@ mod tests {
                 claude: Some(ClaudeOverrides::default()),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             ..Default::default()
         };
@@ -1265,6 +1268,7 @@ mod tests {
             }),
             integrations: None,
             plugin_settings: None,
+            policy: None,
         }
     }
 
@@ -1351,6 +1355,7 @@ mod tests {
             claude: None,
             integrations: None,
             plugin_settings: None,
+            policy: None,
         };
         let cfg = SpeedwaveUserConfig {
             projects: vec![entry],
