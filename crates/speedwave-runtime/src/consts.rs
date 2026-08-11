@@ -2,6 +2,15 @@
 
 use crate::resources::{ContainerResources, STANDARD_WORKER_RESOURCES};
 
+/// Maximum number of rules a resolved PII policy (v3 schema) may carry.
+pub const PII_MAX_RULES: usize = 256;
+/// Maximum total number of patterns across all rules of a resolved PII policy.
+pub const PII_MAX_PATTERNS: usize = 1024;
+/// Maximum number of keyword substitutions a resolved PII policy may carry.
+pub const PII_MAX_KEYWORDS: usize = 256;
+/// Maximum byte length of a single PII rule pattern accepted at load.
+pub const PII_MAX_PATTERN_LENGTH: usize = 512;
+
 /// Env var overriding the data-dir location.
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
 /// Subdirectory under the data dir holding the Lima VM state.
@@ -73,6 +82,12 @@ pub const OAUTH_BEARER_MAP_FILE: &str = ".bearer-map.json";
 pub const OAUTH_LOG_FILE: &str = "audit.log";
 /// Mode for the per-project oauth state directory (owner-only).
 pub const OAUTH_PROJECT_DIR_MODE: u32 = 0o700;
+
+/// PII audit JSONL filenames under `audit::audit_dir_in()` — SSOT for the
+/// proxy/hub writers (F3/F4) and the diagnostics registry.
+pub const AUDIT_PROXY_FILE: &str = "audit-proxy.jsonl";
+/// PII audit JSONL filename for the mcp-hub writer. See [`AUDIT_PROXY_FILE`].
+pub const AUDIT_HUB_FILE: &str = "audit-hub.jsonl";
 
 /// Log filename for the Claude session output.
 pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
@@ -1427,6 +1442,13 @@ mod tests {
     }
 
     #[test]
+    fn test_audit_file_names_are_non_empty_and_distinct() {
+        assert!(!AUDIT_PROXY_FILE.is_empty());
+        assert!(!AUDIT_HUB_FILE.is_empty());
+        assert_ne!(AUDIT_PROXY_FILE, AUDIT_HUB_FILE);
+    }
+
+    #[test]
     fn test_container_path_includes_local_bin() {
         assert!(
             CONTAINER_PATH.contains("/home/speedwave/.local/bin"),
@@ -2642,8 +2664,10 @@ mod tests {
         );
     }
 
-    // desktop/proxy are standalone workspaces (cannot inherit root `[workspace.lints]`); their
-    // `[lints]` tables must stay byte-equal (mod. whitespace) or one binary runs weaker lints.
+    // desktop/proxy are standalone workspaces, and pii-engine is vendored standalone into the
+    // proxy image's isolated build context (cannot inherit root `[workspace.lints]` in any of
+    // the three cases); their `[lints]` tables must stay byte-equal (mod. whitespace) or one
+    // binary runs weaker lints.
     #[test]
     fn lint_tables_are_aligned() {
         fn lint_table(src: &str, header: &str) -> Vec<String> {
@@ -2666,6 +2690,7 @@ mod tests {
         let root = include_str!("../../../Cargo.toml");
         let desktop = include_str!("../../../desktop/src-tauri/Cargo.toml");
         let proxy = include_str!("../../../containers/proxy/Cargo.toml");
+        let pii_engine = include_str!("../../pii-engine/Cargo.toml");
 
         let root_clippy = lint_table(root, "[workspace.lints.clippy]");
         assert!(
@@ -2691,6 +2716,16 @@ mod tests {
             lint_table(root, "[workspace.lints.rust]"),
             lint_table(proxy, "[lints.rust]"),
             "root [workspace.lints.rust] must equal proxy [lints.rust]"
+        );
+        assert_eq!(
+            root_clippy,
+            lint_table(pii_engine, "[lints.clippy]"),
+            "root [workspace.lints.clippy] must equal pii-engine [lints.clippy]"
+        );
+        assert_eq!(
+            lint_table(root, "[workspace.lints.rust]"),
+            lint_table(pii_engine, "[lints.rust]"),
+            "root [workspace.lints.rust] must equal pii-engine [lints.rust]"
         );
     }
 
