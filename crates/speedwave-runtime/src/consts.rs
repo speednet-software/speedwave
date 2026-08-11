@@ -1054,6 +1054,7 @@ pub const RESERVED_ENV_KEYS: &[&str] = &[
     "PORT",
     "SPW_CREDENTIALS_DIGEST",
     "SPW_PLUGIN_DIGESTS",
+    "SPEEDWAVE_VERSION",
     // Bundled-plugin install list/marketplace — a repo must not redirect which
     // plugins the container installs (defaults::BUNDLED_PLUGINS is the SSOT).
     "SPEEDWAVE_BUNDLED_PLUGINS",
@@ -1326,9 +1327,9 @@ mod tests {
 
     #[test]
     fn test_reserved_env_keys_complete_and_uppercase() {
-        // Bumping this count is deliberate — signals a new hijack vector (grow
-        // the plugin.rs test too). Catches accidental deletions.
-        assert_eq!(RESERVED_ENV_KEYS.len(), 20);
+        // Bumping this count is deliberate — a new Speedwave-injected key or a new
+        // hijack vector (grow the plugin.rs test too). Catches accidental deletions.
+        assert_eq!(RESERVED_ENV_KEYS.len(), 21);
         for &k in RESERVED_ENV_KEYS {
             assert_eq!(
                 k,
@@ -1341,6 +1342,7 @@ mod tests {
             "PORT",
             "SPW_CREDENTIALS_DIGEST",
             "SPW_PLUGIN_DIGESTS",
+            "SPEEDWAVE_VERSION",
             "LD_PRELOAD",
             "DYLD_INSERT_LIBRARIES",
             "NODE_OPTIONS",
