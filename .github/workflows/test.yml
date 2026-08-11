@@ -60,6 +60,13 @@ jobs:
           npm ci --ignore-scripts
           cd mcp-servers && npm ci
 
+      # policies/src/engine.ts imports the wasm-pkg artifact directly, so the `tsc` build below
+      # needs it staged first (build-wasm.sh — matches the desktop job's toolchain install).
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
       - name: Rust clippy
         run: cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
 
@@ -77,8 +84,11 @@ jobs:
         working-directory: mcp-servers
         run: |
           (cd shared && npx tsc)
+          # hub resolves @speedwave/policy-engine types from policies/dist, so build (not noEmit).
+          (cd policies && npm run build:wasm)
+          (cd policies && npx tsc)
           # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
-          for ws in hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
+          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done
@@ -129,6 +139,14 @@ jobs:
       # for the audio-transcription feature tests below. ADR-056.
       - name: Install cmake
         run: brew install cmake
+
+      # policies/src/engine.ts imports the wasm-pkg artifact; `build-mcp` (coverage-mcp's and
+      # test-mcp-os-bundle's prerequisite) runs policies' `build:wasm` script, so it needs this
+      # toolchain present (matches the desktop job).
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
 
       - name: Rust tests (incl. transcription)
         run: make test-rust
@@ -189,6 +207,14 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: desktop/src/package-lock.json
+
+      # This job (not the prepare-desktop-bundle composite action) is what runs
+      # bundle-build-context.bats against the real script — `make test-desktop-build` below
+      # invokes it ~20 times, each rebuilding the PII engine wasm artifact.
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
 
       - name: Install dependencies
         working-directory: desktop/src-tauri

@@ -11,6 +11,10 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 # Serialize concurrent runs on DEST (mirrors the .sh mkdir-mutex): non-atomic body can bake a
 # 0-byte package.json into a worker image otherwise; a lock whose holder PID is dead is reclaimed.
 $lockDir = "$dest\.bundle.lock"
+# mcp-servers/policies/wasm-pkg is a single shared source-tree location (not under $dest) — a
+# second lock guards it from concurrent writers across different $env:BUNDLE_DEST invocations.
+$wasmPkgDir = 'mcp-servers/policies/wasm-pkg'
+$wasmLockDir = 'mcp-servers/policies/.wasm-build.lock'
 
 # Is the PID in a lock dir a live process? Returns $true only when Get-Process proves the holder
 # is gone; any other error or a missing/blank PID is treated as ALIVE to never reclaim a live lock.
@@ -28,31 +32,67 @@ function Test-LockHolderDead {
     }
 }
 
-while ($true) {
-    try {
-        New-Item -ItemType Directory -Path $lockDir -ErrorAction Stop | Out-Null
-        break
-    } catch {
-        if (Test-LockHolderDead $lockDir) {
-            Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
-            continue
+# Acquire-Lock <dir>: mkdir-based mutex (mirrors the .sh acquire_lock); reclaims a lock whose
+# holder PID is dead. Returns $true when acquired (caller arranges finally release).
+function Acquire-Lock {
+    param([string]$dir)
+    while ($true) {
+        try {
+            New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null
+            break
+        } catch {
+            if (Test-LockHolderDead $dir) {
+                Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+                continue
+            }
+            Start-Sleep -Milliseconds 300
         }
-        Start-Sleep -Milliseconds 300
     }
+    "$PID" | Out-File -FilePath "$dir\pid" -Encoding ascii
+    return $true
 }
 
-# From here the lock is held; the finally releases it on ANY exit. Writing the PID
-# is inside the try so a failed write still releases the lock (no deadlock).
+# Acquire both locks, then wrap main script in try/finally to release them both.
+Acquire-Lock $lockDir | Out-Null
+Acquire-Lock $wasmLockDir | Out-Null
+
+# From here both locks are held; the finally releases them on any exit.
 try {
-    "$PID" | Out-File -FilePath "$lockDir\pid" -Encoding ascii
 
 # Clean destination
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
+
+# -- PII engine wasm artifact (crates/pii-engine-wasm) ------------------------
+# Built fresh on every run that stages policies — no prebuilt/placeholder fallback (mirrors
+# the .sh). Local Windows dev builds need Git Bash on PATH (already required elsewhere in this
+# repo's tooling); Windows CI never reaches this file — it runs bundle-build-context.sh instead.
+bash 'crates/pii-engine-wasm/build-wasm.sh' $wasmPkgDir
+if ($LASTEXITCODE -ne 0) {
+    [Console]::Error.WriteLine('ERROR: failed to build the PII engine wasm artifact (crates/pii-engine-wasm).')
+    [Console]::Error.WriteLine("Install the toolchain with 'make setup-dev' (rustup target wasm32-unknown-unknown + wasm-pack) and retry.")
+    exit 1
+}
+$wasmArtifacts = Get-ChildItem -Path $wasmPkgDir -Filter '*_bg.wasm' -File -ErrorAction SilentlyContinue
+if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 })) {
+    [Console]::Error.WriteLine("ERROR: PII engine wasm artifact missing or empty in $wasmPkgDir after build (expected *_bg.wasm).")
+    exit 1
+}
 
 # -- Build context (containers + MCP server sources) --------------------------
 
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
 Copy-Item -Recurse containers "$dest\build-context\containers"
+
+# Vendor crates/pii-engine into the context (mirrors the .sh): Containerfile.proxy COPYs it to
+# recreate the repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4)
+# since the proxy image builds from the `containers/` context alone.
+New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
+Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
+
+# rules.yaml (mirrors the .sh): pii-engine's policy.rs include_str!s it repo-root-relative
+# (`../../../mcp-servers/policies/rules.yaml`) — Containerfile.proxy COPYs it alongside.
+New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
+Copy-Item mcp-servers\policies\rules.yaml "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
 
 # Host build outputs are never image content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS
 # (alignment test-enforced). Recursion stops at a match, mirroring the .sh `find -prune`.
@@ -84,7 +124,7 @@ Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
-$services = @('shared','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
+$services = @('shared','policies','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
 
 foreach ($svc in $services) {
     $svcDest = "$dest\build-context\mcp-servers\$svc"
@@ -99,6 +139,16 @@ foreach ($svc in $services) {
     }
     if (Test-Path "mcp-servers\$svc\tsconfig.json") {
         Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
+    }
+    # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
+    if (Test-Path "mcp-servers\$svc\templates") {
+        Copy-Item -Recurse "mcp-servers\$svc\templates" "$svcDest\templates"
+    }
+    # policies: wasm-pkg was just built fresh above — stage it as a real artifact, never a
+    # placeholder (the hub Containerfile's COPY policies/wasm-pkg expects real content).
+    if ($svc -eq 'policies') {
+        New-Item -ItemType Directory -Path "$svcDest\wasm-pkg" -Force | Out-Null
+        Copy-Item -Recurse "mcp-servers\$svc\wasm-pkg\*" "$svcDest\wasm-pkg\" -Force
     }
     # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
     # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
@@ -142,6 +192,6 @@ Stage-Host-Worker -worker oauth -bundle oauth
 Write-Host "Build context bundled into $dest"
 
 } finally {
-    # Release the mutex on any exit (mirrors the .sh trap).
-    Remove-Item -Recurse -Force $lockDir -ErrorAction SilentlyContinue
+    # Release both mutexes on any exit (mirrors the .sh trap).
+    Remove-Item -Recurse -Force $lockDir,$wasmLockDir -ErrorAction SilentlyContinue
 }
