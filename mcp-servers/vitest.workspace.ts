@@ -2,6 +2,7 @@ import { defineWorkspace } from 'vitest/config';
 
 const workspaces = [
   'shared',
+  'policies',
   'hub',
   'slack',
   'gitlab',

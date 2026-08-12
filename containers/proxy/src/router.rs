@@ -72,6 +72,17 @@ pub struct Config {
     /// once with no-redirect (SSRF, ADR-041) and connection reuse.
     #[serde(skip, default = "build_forward_client")]
     pub client: reqwest::Client,
+    /// PII engine (policy + key), resolved once at startup — fail-closed (ADR-073 F4).
+    #[serde(skip, default = "crate::pii::load_engine_state")]
+    pub pii: std::sync::Arc<crate::pii::PiiEngineState>,
+    /// Resolved once at startup from `AUDIT_DIR`, like `usage_path` — no env read per request.
+    #[serde(skip, default = "resolve_audit_dir")]
+    pub audit_dir: Option<PathBuf>,
+}
+
+/// Reads `AUDIT_DIR` once; `None` when unset (audit writer becomes a no-op).
+fn resolve_audit_dir() -> Option<PathBuf> {
+    std::env::var("AUDIT_DIR").ok().map(PathBuf::from)
 }
 
 // Manual Debug: `caller_token` is a per-project secret and must never reach logs.
@@ -115,6 +126,8 @@ impl Default for Config {
                     .unwrap_or_else(|_| "/usage/usage.jsonl".to_string()),
             ),
             client: build_forward_client(),
+            pii: crate::pii::load_engine_state(),
+            audit_dir: resolve_audit_dir(),
         }
     }
 }

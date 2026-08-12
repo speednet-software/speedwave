@@ -2674,7 +2674,12 @@ pub fn generate_plugin_service(
         .unwrap_or(consts::PLUGIN_DEFAULT_CPU);
     let user = container_user();
 
-    let mut env_lines = format!("  - PORT={port}");
+    // SPEEDWAVE_VERSION lets plugin tools record which app version produced their
+    // output; the runtime crate version is the release-please-managed app version.
+    let mut env_lines = format!(
+        "  - PORT={port}\n  - SPEEDWAVE_VERSION={}",
+        env!("CARGO_PKG_VERSION")
+    );
     if let Some(ref extra) = manifest.extra_env {
         for (k, v) in extra {
             let entry = format!("{}={}", k, v);
@@ -3321,6 +3326,10 @@ mod tests {
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         // ADR-038: every worker — including plugins — uses PORT_WORKER (3000).
         assert!(yaml.contains("PORT=3000"), "PORT env: {yaml}");
+        assert!(
+            yaml.contains(&format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"))),
+            "SPEEDWAVE_VERSION env: {yaml}"
+        );
         assert!(
             yaml.contains("speedwave_myproject_network"),
             "network: {yaml}"
@@ -7060,6 +7069,8 @@ mod tests {
             "BASH_ENV",
             "ENV",
             "PORT",
+            "SPEEDWAVE_VERSION",
+            "speedwave_version",
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut env = HashMap::new();

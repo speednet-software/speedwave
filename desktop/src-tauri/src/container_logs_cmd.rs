@@ -158,6 +158,10 @@ pub(crate) struct LogSources {
     /// Lima VM serial log (macOS only; empty elsewhere).
     pub lima: String,
     pub entrypoint: String,
+    /// PII audit JSONL written by the proxy's scanner (F4).
+    pub audit_proxy: String,
+    /// PII audit JSONL written by the hub's scanner (F3).
+    pub audit_hub: String,
 }
 
 /// Concatenates the per-source log buffers into one newline-separated string in deterministic
@@ -169,10 +173,12 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let claude = prefix_lines("claude", &sources.claude, None);
     let lima = prefix_lines("lima", &sources.lima, None);
     let entrypoint = prefix_lines("entrypoint", &sources.entrypoint, None);
+    let audit_proxy = prefix_lines("audit-proxy", &sources.audit_proxy, None);
+    let audit_hub = prefix_lines("audit-hub", &sources.audit_hub, None);
 
     // Defence-in-depth sanitizer pass over the merged buffer (idempotent).
     speedwave_runtime::log_sanitizer::sanitize(&format!(
-        "{compose}{desktop}{mcp_os}{claude}{lima}{entrypoint}"
+        "{compose}{desktop}{mcp_os}{claude}{lima}{entrypoint}{audit_proxy}{audit_hub}"
     ))
 }
 
@@ -263,6 +269,8 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
                 claude: read_source("claude"),
                 lima: read_source("lima"),
                 entrypoint: read_source("entrypoint"),
+                audit_proxy: read_source("audit-proxy"),
+                audit_hub: read_source("audit-hub"),
             },
             &project,
         ))
@@ -594,6 +602,8 @@ mod tests {
                 claude: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -611,6 +621,8 @@ mod tests {
                 lima: String::new(),
                 entrypoint: "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n"
                     .to_string(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "proj",
         );
@@ -629,6 +641,8 @@ mod tests {
                 claude: "session started\n".to_string(),
                 lima: String::new(),
                 entrypoint: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -654,6 +668,8 @@ mod tests {
                 claude: "MARKER_claude\n".to_string(),
                 lima: "MARKER_lima\n".to_string(),
                 entrypoint: "MARKER_entrypoint\n".to_string(),
+                audit_proxy: "MARKER_audit_proxy\n".to_string(),
+                audit_hub: "MARKER_audit_hub\n".to_string(),
             },
             "proj",
         );
@@ -685,6 +701,8 @@ mod tests {
                 claude: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -706,6 +724,8 @@ mod tests {
                 claude: String::new(),
                 lima: String::new(),
                 entrypoint: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
@@ -724,6 +744,8 @@ mod tests {
                 claude: "claude_line\n".to_string(),
                 lima: String::new(),
                 entrypoint: String::new(),
+                audit_proxy: String::new(),
+                audit_hub: String::new(),
             },
             "testproj",
         );
