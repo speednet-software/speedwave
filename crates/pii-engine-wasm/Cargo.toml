@@ -1,0 +1,25 @@
+[package]
+name = "speedwave-pii-engine-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "wasm-bindgen binding over speedwave-pii-engine for the Node-hosted hub"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+speedwave-pii-engine = { path = "../pii-engine" }
+wasm-bindgen = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory"]

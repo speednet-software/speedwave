@@ -1884,6 +1884,56 @@ mod tests {
         assert_eq!(result.messages[1].content, "answer");
     }
 
+    /// INVARIANT: detokenization happens only on the copy returned to the webview;
+    /// the source JSONL on disk stays tokenized and unchanged.
+    #[test]
+    fn get_conversation_detokenizes_returned_copy_but_leaves_source_file_tokenized() {
+        use speedwave_pii_engine::{compile_policy_v3, default_policy_json, scan_text, EngineKey};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
+        let key_bytes =
+            speedwave_runtime::pii_key::read_project_key_in(tmp.path(), "proj").unwrap();
+        let key = EngineKey::from_bytes(key_bytes);
+        let policy = compile_policy_v3(&default_policy_json()).unwrap();
+        let tokenized = scan_text(&policy, &key, "contact jan@example.com")
+            .unwrap()
+            .text;
+        assert!(
+            tokenized.contains("TOKEN_"),
+            "fixture must actually tokenize"
+        );
+
+        let line =
+            format!(r#"{{"type":"user","message":{{"role":"user","content":"{tokenized}"}}}}"#);
+        write_session(&dir, id, &[&line]);
+
+        // history.rs's own read path: must yield the tokenized source, never a
+        // detokenized value — this is also what resume/compute_resume_snapshot reads.
+        let mut transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert!(
+            transcript.messages[0].content.contains("TOKEN_"),
+            "history.rs must read the tokenized source as-is"
+        );
+
+        // Detokenization happens only on this owned, in-memory copy.
+        crate::pii_display::detokenize_transcript(
+            &mut transcript,
+            &crate::pii_display::DisplayPolicy::new(Some(key), Vec::new()),
+        );
+        assert_eq!(transcript.messages[0].content, "contact jan@example.com");
+
+        // The source file on disk must remain byte-for-byte tokenized.
+        let raw = fs::read_to_string(dir.join(format!("{id}.jsonl"))).unwrap();
+        assert!(
+            raw.contains("TOKEN_"),
+            "source JSONL must never be rewritten with a detokenized value"
+        );
+    }
+
     #[test]
     fn get_conversation_rejects_invalid_session_id() {
         let tmp = tempfile::tempdir().unwrap();

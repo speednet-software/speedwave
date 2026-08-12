@@ -1444,6 +1444,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
@@ -1491,6 +1492,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
@@ -1518,6 +1520,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: Some(HashMap::new()),
+                policy: None,
             }],
             active_project: Some("test-project".into()),
             selected_ide: None,
@@ -1562,6 +1565,7 @@ mod tests {
                         ("my-plugin".into(), serde_json::json!({"key": "val"})),
                         ("other-plugin".into(), serde_json::json!({"x": 1})),
                     ])),
+                    policy: None,
                 },
                 config::ProjectUserEntry {
                     name: "proj-b".into(),
@@ -1572,6 +1576,7 @@ mod tests {
                         "my-plugin".into(),
                         serde_json::json!({"k": "v"}),
                     )])),
+                    policy: None,
                 },
             ],
             active_project: None,
@@ -1616,6 +1621,7 @@ mod tests {
                         ..Default::default()
                     }),
                     plugin_settings: None,
+                    policy: None,
                 },
                 config::ProjectUserEntry {
                     name: "proj-b".into(),
@@ -1639,6 +1645,7 @@ mod tests {
                         ..Default::default()
                     }),
                     plugin_settings: None,
+                    policy: None,
                 },
             ],
             active_project: None,
@@ -2161,6 +2168,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("my-project".into()),
             selected_ide: None,

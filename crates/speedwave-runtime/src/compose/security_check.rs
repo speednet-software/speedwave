@@ -91,6 +91,84 @@ pub(crate) fn extract_volume_for_target(
     (parsed_target == target).then(|| (host.to_string(), mode.map(str::to_string)))
 }
 
+/// Normalizes a compose mount path (container target or host source):
+/// collapses `//` and trailing `/`, drops `.` and resolves `..` segments.
+fn normalize_mount_target(target: &str) -> String {
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            s => segs.push(s),
+        }
+    }
+    format!("/{}", segs.join("/"))
+}
+
+/// Extracts a volume entry's host source from either compose form: short-form
+/// `host:target[:mode]` (host is everything before the first `:`) or
+/// map/long-form `{type: bind, source, target}`. A map-form entry whose
+/// `type` is present and not `bind` (e.g. a named volume) has no host
+/// filesystem path, so it is skipped rather than compared.
+fn mount_source(vol: &serde_yaml_ng::Value) -> Option<String> {
+    if let Some(s) = vol.as_str() {
+        return Some(s.split(':').next().unwrap_or("").to_string());
+    }
+    match vol.get("type").and_then(|t| t.as_str()) {
+        None | Some("bind") => vol
+            .get("source")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+        Some(_) => None,
+    }
+}
+
+/// True when a normalized mount target equals `area` or is nested below it
+/// (e.g. `area = "/policy"` matches `/policy` and `/policy/x`).
+fn is_mount_area_target(normalized: &str, area: &str) -> bool {
+    normalized == area || normalized.starts_with(&format!("{area}/"))
+}
+
+/// True when a short-form volume entry's container target resolves into
+/// `area`; with >3 `:` fields every field is checked (conservative).
+fn short_form_targets_area(entry: &str, area: &str) -> bool {
+    let fields: Vec<&str> = entry.split(':').collect();
+    let candidates: &[&str] = match fields.len() {
+        0 => &[],
+        1 => &fields[..1],
+        2 | 3 => &fields[1..2],
+        _ => &fields[..],
+    };
+    candidates
+        .iter()
+        .any(|t| is_mount_area_target(&normalize_mount_target(t), area))
+}
+
+/// Collects a service's env values for `key`, from sequence and map env forms.
+fn service_env_values(service: &serde_yaml_ng::Value, key: &str) -> Vec<String> {
+    let Some(env) = service.get("environment") else {
+        return Vec::new();
+    };
+    if let Some(seq) = env.as_sequence() {
+        return seq
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|s| s.strip_prefix(key).and_then(|rest| rest.strip_prefix('=')))
+            .map(str::to_string)
+            .collect();
+    }
+    if env.as_mapping().is_some() {
+        return env
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default();
+    }
+    Vec::new()
+}
+
 /// Validates a rendered compose file against Speedwave's security invariants.
 pub struct SecurityCheck;
 
@@ -308,6 +386,36 @@ pub enum SecurityRule {
     ))]
     ManagedSettingsMount,
 
+    /// The resolved PII policy mount on mcp-hub is present, `:ro`, sourced from
+    /// `<data_dir>/policies/<project>/`, and not shadowed or repointed.
+    #[strum(to_string = "HUB_POLICY_MOUNT")]
+    #[strum(props(
+        description = "mcp-hub policy.json mount is present, :ro, and sourced from the policy dir"
+    ))]
+    HubPolicyMount,
+
+    /// Mirrors `HubPolicyMount` for the proxy service — same source, target,
+    /// mode, env pin, and hardening against nested/map-form/normalization dodges.
+    #[strum(to_string = "PROXY_POLICY_MOUNT")]
+    #[strum(props(
+        description = "proxy policy.json mount is present, :ro, and sourced from the policy dir"
+    ))]
+    ProxyPolicyMount,
+
+    /// The PII audit directory mount on proxy/mcp-hub is present, `:rw`, sourced
+    /// from `<data_dir>/audit/<project>/`, and not shadowed or repointed.
+    #[strum(to_string = "AUDIT_MOUNT")]
+    #[strum(props(
+        description = "proxy/mcp-hub audit directory mount is present, :rw, and sourced from the audit dir"
+    ))]
+    AuditMount,
+
+    /// claude must never receive the PII policy or audit directories as a
+    /// mount source, at any target (unlike proxy/mcp-hub, which scan with them).
+    #[strum(to_string = "NO_POLICY_OR_AUDIT_MOUNT_CLAUDE")]
+    #[strum(props(description = "claude has no PII policy or audit directory mount"))]
+    NoPolicyOrAuditMountClaude,
+
     /// Every claude volume is an allowlisted renderer target with the expected
     /// source and mode (/workspace = exactly the project dir; plugin claude-resources :ro).
     #[strum(to_string = "CLAUDE_WORKSPACE_MOUNT")]
@@ -485,6 +593,14 @@ impl SecurityCheck {
                 project,
                 expected_paths.telemetry_locked,
             ),
+            // Resolved PII policy mount profile on mcp-hub + proxy (mirrors)
+            Self::check_hub_policy_mount(&doc, data_dir, project),
+            Self::check_proxy_policy_mount(&doc, data_dir, project),
+            // PII audit directory :rw mount profile on proxy + mcp-hub
+            Self::check_audit_mount(&doc, data_dir, project, "proxy"),
+            Self::check_audit_mount(&doc, data_dir, project, "mcp-hub"),
+            // claude must never receive the policy or audit directories
+            Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
             // claude volumes: renderer target allowlist + per-target source/mode
             Self::check_claude_workspace_mount(&doc, expected_paths, data_dir, project),
             // Host filesystem checks (I/O — unlike pure YAML checks above)
@@ -1004,8 +1120,8 @@ impl SecurityCheck {
         violations
     }
 
-    /// ADR-073: proxy mounts exactly `/config:ro`, `<tokens>/llm:/tokens:ro`,
-    /// `/usage:rw` — nothing else — and must not use host networking.
+    /// ADR-073: proxy mounts exactly `/config:ro`, `<tokens>/llm:/tokens:ro`, `/usage:rw`
+    /// (policy/audit mounts are validated by `check_proxy_policy_mount`/`check_audit_mount`).
     fn check_proxy_volumes(
         doc: &serde_yaml_ng::Value,
         expected_paths: &SecurityExpectedPaths,
@@ -1080,16 +1196,21 @@ impl SecurityCheck {
                         container: name.clone(),
                         rule: SecurityRule::SpeedwaveProxyVolumes,
                         message: format!("proxy /usage mount must be rw: {vol}"),
-                        remediation: "Mount the usage sink ':rw' — it is the only writable mount.",
+                        remediation: "Mount the usage sink ':rw'.",
                     });
                 }
                 matched += 1;
+            } else if extract_volume_for_target(vol, "/policy").is_some() {
+                // Full correctness (source/mode/env pin) is ProxyPolicyMount's job.
+            } else if extract_volume_for_target(vol, "/audit").is_some() {
+                // Full correctness (source/mode) is AuditMount's job.
             } else {
                 violations.push(SecurityViolation {
                     container: name.clone(),
                     rule: SecurityRule::SpeedwaveProxyVolumes,
                     message: format!("proxy has an unexpected volume: {vol}"),
-                    remediation: "proxy mounts exactly /config:ro, /tokens:ro and /usage:rw.",
+                    remediation:
+                        "proxy mounts exactly /config:ro, /tokens:ro, /usage:rw, /policy:ro and /audit:rw.",
                 });
             }
         }
@@ -1180,6 +1301,248 @@ impl SecurityCheck {
                         .into(),
                 remediation: "Re-render compose so the managed-settings.json mount is applied.",
             });
+        }
+        violations
+    }
+
+    /// Presence-mandatory mount profile shared by Hub/ProxyPolicyMount and AuditMount: exactly
+    /// `<expected_source>:<area>:<mode>` on `service`, no nested/map-form/wrong-mode variant either.
+    fn check_mount_area_profile(
+        doc: &serde_yaml_ng::Value,
+        service: &str,
+        area: &str,
+        mode: &str,
+        rule: SecurityRule,
+        expected_source: anyhow::Result<String>,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, svc)) = services.iter().find(|(n, _)| n == service) else {
+            return violations;
+        };
+        let expected_source = match expected_source {
+            Ok(p) => p,
+            Err(e) => {
+                // Presence-mandatory rule: an unverifiable expectation fails closed.
+                violations.push(SecurityViolation {
+                    container: service.into(),
+                    rule,
+                    message: format!("cannot resolve the expected {area} mount source: {e}"),
+                    remediation: "Fix the data directory path and re-render the compose file.",
+                });
+                return violations;
+            }
+        };
+        let canonical = format!("{expected_source}:{area}:{mode}");
+        let vols = svc.get("volumes").and_then(|v| v.as_sequence());
+        let mut found = false;
+        for vol in vols.into_iter().flatten() {
+            match vol.as_str() {
+                Some(s) if s == canonical => found = true,
+                Some(s) if short_form_targets_area(s, area) => {
+                    violations.push(SecurityViolation {
+                        container: service.into(),
+                        rule,
+                        message: format!("non-canonical volume targets the {area} area: {s}"),
+                        remediation: "Only the canonical mount may target this area.",
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    // Map/long-form volumes are never render output; reject any
+                    // that target the area instead of silently skipping.
+                    let target = vol.get("target").and_then(|t| t.as_str()).unwrap_or("");
+                    if is_mount_area_target(&normalize_mount_target(target), area) {
+                        violations.push(SecurityViolation {
+                            container: service.into(),
+                            rule,
+                            message: format!("map-form volume targets the {area} area: {target}"),
+                            remediation: "Use only the canonical short-form mount.",
+                        });
+                    }
+                }
+            }
+        }
+        if !found {
+            violations.push(SecurityViolation {
+                container: service.into(),
+                rule,
+                message: format!("{service} is missing the canonical {area} mount"),
+                remediation: "Render compose again; the mount is unconditional.",
+            });
+        }
+        violations
+    }
+
+    /// Pins `POLICY_FILE=/policy/policy.json` on `service` — env repoint or
+    /// absence is a `rule` violation (shared by hub and proxy).
+    fn check_policy_file_env_pin(
+        doc: &serde_yaml_ng::Value,
+        service: &str,
+        rule: SecurityRule,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, svc)) = services.iter().find(|(n, _)| n == service) else {
+            return violations;
+        };
+        let policy_files = service_env_values(svc, "POLICY_FILE");
+        if policy_files.is_empty() {
+            violations.push(SecurityViolation {
+                container: service.into(),
+                rule,
+                message: format!("{service} env is missing POLICY_FILE"),
+                remediation: "Set POLICY_FILE=/policy/policy.json.",
+            });
+        }
+        for value in policy_files {
+            if value != "/policy/policy.json" {
+                violations.push(SecurityViolation {
+                    container: service.into(),
+                    rule,
+                    message: format!("POLICY_FILE repointed to '{value}'"),
+                    remediation: "POLICY_FILE must be exactly /policy/policy.json.",
+                });
+            }
+        }
+        violations
+    }
+
+    /// The resolved PII policy mount on mcp-hub is presence-mandatory: exactly the
+    /// canonical `<policies dir>:/policy:ro`, no other `/policy*` target, env pinned.
+    fn check_hub_policy_mount(
+        doc: &serde_yaml_ng::Value,
+        data_dir: &std::path::Path,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        let expected_source =
+            to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project));
+        let mut violations = Self::check_mount_area_profile(
+            doc,
+            "mcp-hub",
+            "/policy",
+            "ro",
+            SecurityRule::HubPolicyMount,
+            expected_source,
+        );
+        violations.extend(Self::check_policy_file_env_pin(
+            doc,
+            "mcp-hub",
+            SecurityRule::HubPolicyMount,
+        ));
+        violations
+    }
+
+    /// Mirrors [`Self::check_hub_policy_mount`] for the proxy service (same
+    /// source, target, mode, and env pin — reuses the identical helpers).
+    fn check_proxy_policy_mount(
+        doc: &serde_yaml_ng::Value,
+        data_dir: &std::path::Path,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        let expected_source =
+            to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project));
+        let mut violations = Self::check_mount_area_profile(
+            doc,
+            "proxy",
+            "/policy",
+            "ro",
+            SecurityRule::ProxyPolicyMount,
+            expected_source,
+        );
+        violations.extend(Self::check_policy_file_env_pin(
+            doc,
+            "proxy",
+            SecurityRule::ProxyPolicyMount,
+        ));
+        violations
+    }
+
+    /// The PII audit directory mount on `service` (proxy or mcp-hub) is
+    /// presence-mandatory: exactly `<data_dir>/audit/<project>/:/audit:rw`.
+    fn check_audit_mount(
+        doc: &serde_yaml_ng::Value,
+        data_dir: &std::path::Path,
+        project: &str,
+        service: &str,
+    ) -> Vec<SecurityViolation> {
+        let expected_source = to_engine_path(&crate::audit::audit_dir_in(data_dir, project));
+        Self::check_mount_area_profile(
+            doc,
+            service,
+            "/audit",
+            "rw",
+            SecurityRule::AuditMount,
+            expected_source,
+        )
+    }
+
+    /// claude must never receive the PII policy or audit directories as a mount
+    /// source, at any target — unlike proxy/hub, which need them to scan and log.
+    /// Covers both volume forms (string and map/long-form, via [`mount_source`])
+    /// and normalizes the host source (via [`normalize_mount_target`]) before
+    /// comparing, so a trailing slash / `.` / `..` cannot mask a match. A mount
+    /// is a violation when its normalized source is the project's policy/audit
+    /// directory, a subdirectory of it, OR their shared parent directories
+    /// (`<data_dir>/policies`, `<data_dir>/audit`) or anything below those —
+    /// which is what mounting the parent directly (exposing every project's
+    /// keys) would otherwise dodge. Reuses [`is_mount_area_target`]'s
+    /// equal-or-nested-prefix check, which is boundary-agnostic despite its name.
+    fn check_no_policy_or_audit_mount_on_claude(
+        doc: &serde_yaml_ng::Value,
+        data_dir: &std::path::Path,
+        project: &str,
+    ) -> Vec<SecurityViolation> {
+        let mut violations = Vec::new();
+        let Some(services) = get_services(doc) else {
+            return violations;
+        };
+        let Some((_n, claude)) = services.iter().find(|(n, _)| n == "claude") else {
+            return violations;
+        };
+        let Some(vols) = claude.get("volumes").and_then(|v| v.as_sequence()) else {
+            return violations;
+        };
+        let forbidden: [(&str, anyhow::Result<String>); 4] = [
+            (
+                "policy",
+                to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project)),
+            ),
+            (
+                "policies parent (exposes every project's keys)",
+                to_engine_path(&data_dir.join("policies")),
+            ),
+            (
+                "audit",
+                to_engine_path(&crate::audit::audit_dir_in(data_dir, project)),
+            ),
+            (
+                "audit parent (exposes every project's data)",
+                to_engine_path(&data_dir.join("audit")),
+            ),
+        ];
+        for vol in vols {
+            let Some(host) = mount_source(vol) else {
+                continue;
+            };
+            let normalized_host = normalize_mount_target(&host);
+            for (label, expected) in &forbidden {
+                let Ok(expected) = expected else { continue };
+                let normalized_expected = normalize_mount_target(expected);
+                if is_mount_area_target(&normalized_host, &normalized_expected) {
+                    violations.push(SecurityViolation {
+                        container: "claude".into(),
+                        rule: SecurityRule::NoPolicyOrAuditMountClaude,
+                        message: format!("claude mounts the {label} directory: {host}"),
+                        remediation:
+                            "Claude must never receive the PII policy or audit directories.",
+                    });
+                }
+            }
         }
         violations
     }
@@ -2370,5 +2733,528 @@ mod tests {
                 .any(|x| x.rule == SecurityRule::ManagedSettingsMount),
             "an unresolvable expected source must fail closed, got: {v:?}"
         );
+    }
+
+    #[test]
+    fn hub_policy_mount_variant_renders_expected_code() {
+        assert_eq!(SecurityRule::HubPolicyMount.to_string(), "HUB_POLICY_MOUNT",);
+    }
+
+    const PINNED_POLICY_ENV: &str = "POLICY_FILE=/policy/policy.json";
+
+    /// Builds a single-service compose doc from short-form volume and env line lists.
+    fn service_doc(service: &str, volumes: &[&str], env: &[&str]) -> serde_yaml_ng::Value {
+        let mut yaml = format!("services:\n  {service}:\n    image: x\n");
+        if !volumes.is_empty() {
+            yaml.push_str("    volumes:\n");
+            for v in volumes {
+                yaml.push_str(&format!("      - {v}\n"));
+            }
+        }
+        if !env.is_empty() {
+            yaml.push_str("    environment:\n");
+            for e in env {
+                yaml.push_str(&format!("      - {e}\n"));
+            }
+        }
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    /// Builds an mcp-hub compose doc from short-form volume and env line lists.
+    fn hub_doc(volumes: &[&str], env: &[&str]) -> serde_yaml_ng::Value {
+        service_doc("mcp-hub", volumes, env)
+    }
+
+    fn policy_source(data_dir: &std::path::Path, project: &str) -> String {
+        to_engine_path(&crate::pii_policy::policy_config_dir_in(data_dir, project)).unwrap()
+    }
+
+    fn audit_source(data_dir: &std::path::Path, project: &str) -> String {
+        to_engine_path(&crate::audit::audit_dir_in(data_dir, project)).unwrap()
+    }
+
+    #[test]
+    fn hub_policy_mount_canonical_with_pinned_env_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = hub_doc(&[&mount], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(v.is_empty(), "correct mount + env must pass, got: {v:?}");
+    }
+
+    #[test]
+    fn hub_policy_mount_rw_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:rw", policy_source(data_dir, "p"));
+        let doc = hub_doc(&[&mount], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            ":rw policy mount must fail"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_wrong_source_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let bad = to_engine_path(&data_dir.join("proxy").join("p")).unwrap();
+        let mount = format!("{bad}:/policy:ro");
+        let doc = hub_doc(&[&mount], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "source outside policies/<project>/ must fail"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_missing_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = hub_doc(&[], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "missing policy mount must fail (unconditional, unlike managed-settings)"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_nested_target_overlay_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let canonical = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        for overlay in ["/evil:/policy/policy.json:ro", "/evil:/policy/policy.json"] {
+            let doc = hub_doc(&[&canonical, overlay], &[PINNED_POLICY_ENV]);
+            let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+            assert!(
+                v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+                "nested-target overlay '{overlay}' must fail even beside the canonical mount"
+            );
+        }
+    }
+
+    #[test]
+    fn hub_policy_mount_map_form_policy_target_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let yaml = format!(
+            "services:\n  mcp-hub:\n    volumes:\n      - {}:/policy:ro\n      \
+             - type: bind\n        source: /evil\n        target: /policy/policy.json\n        \
+             read_only: true\n    environment:\n      - {PINNED_POLICY_ENV}\n",
+            policy_source(data_dir, "p")
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "map-form volume targeting the policy area must fail, not be skipped"
+        );
+    }
+
+    #[test]
+    fn normalize_mount_target_collapses_dot_and_slash_noise() {
+        assert_eq!(normalize_mount_target("/policy"), "/policy");
+        assert_eq!(normalize_mount_target("//policy"), "/policy");
+        assert_eq!(normalize_mount_target("/./policy"), "/policy");
+        assert_eq!(normalize_mount_target("/policy/."), "/policy");
+        assert_eq!(normalize_mount_target("/policy//sub"), "/policy/sub");
+        assert_eq!(normalize_mount_target("/foo/../policy"), "/policy");
+        assert_eq!(normalize_mount_target("/policyx"), "/policyx");
+        assert_eq!(normalize_mount_target(""), "/");
+    }
+
+    #[test]
+    fn hub_policy_mount_normalization_dodges_fail() {
+        let data_dir = std::path::Path::new("/data");
+        let canonical = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        for dodge in ["evil://policy:ro", "evil:/./policy:ro", "evil://policy"] {
+            let doc = hub_doc(&[&canonical, dodge], &[PINNED_POLICY_ENV]);
+            let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+            assert!(
+                v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+                "normalization dodge '{dodge}' must fail even beside the canonical mount"
+            );
+        }
+        // Accept sanity: the canonical entry alone still passes after normalization.
+        let doc = hub_doc(&[&canonical], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(v.is_empty(), "canonical mount must still pass, got: {v:?}");
+    }
+
+    #[test]
+    fn hub_policy_mount_map_form_normalized_target_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let yaml = format!(
+            "services:\n  mcp-hub:\n    volumes:\n      - {}:/policy:ro\n      \
+             - type: bind\n        source: /evil\n        target: /policy/.\n        \
+             read_only: true\n    environment:\n      - {PINNED_POLICY_ENV}\n",
+            policy_source(data_dir, "p")
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "map-form 'target: /policy/.' must fail after normalization"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_repointed_policy_file_env_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = hub_doc(&[&mount], &["POLICY_FILE=/pol2/policy.json"]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "repointed POLICY_FILE must fail"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_missing_policy_file_env_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = hub_doc(&[&mount], &[]);
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "missing POLICY_FILE env must fail"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_map_form_env_repoint_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let yaml = format!(
+            "services:\n  mcp-hub:\n    volumes:\n      - {}:/policy:ro\n    \
+             environment:\n      POLICY_FILE: /pol2/policy.json\n",
+            policy_source(data_dir, "p")
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::HubPolicyMount),
+            "map-form env repoint must fail"
+        );
+    }
+
+    #[test]
+    fn hub_policy_mount_absent_hub_service_is_ok() {
+        let data_dir = std::path::Path::new("/data");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  claude:\n").unwrap();
+        let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
+        assert!(v.is_empty(), "no mcp-hub service = no violation");
+    }
+
+    // ---- ProxyPolicyMount (mirrors HubPolicyMount on the proxy service) ----
+
+    #[test]
+    fn proxy_policy_mount_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::ProxyPolicyMount.to_string(),
+            "PROXY_POLICY_MOUNT",
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_canonical_with_pinned_env_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = service_doc("proxy", &[&mount], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(v.is_empty(), "correct mount + env must pass, got: {v:?}");
+    }
+
+    #[test]
+    fn proxy_policy_mount_rw_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:rw", policy_source(data_dir, "p"));
+        let doc = service_doc("proxy", &[&mount], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
+            ":rw policy mount on proxy must fail"
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_wrong_source_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let bad = to_engine_path(&data_dir.join("audit").join("p")).unwrap();
+        let mount = format!("{bad}:/policy:ro");
+        let doc = service_doc("proxy", &[&mount], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
+            "source outside policies/<project>/ must fail"
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_missing_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = service_doc("proxy", &[], &[PINNED_POLICY_ENV]);
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
+            "missing policy mount on proxy must fail (unconditional)"
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_nested_target_overlay_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let canonical = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = service_doc(
+            "proxy",
+            &[&canonical, "/evil:/policy/policy.json:ro"],
+            &[PINNED_POLICY_ENV],
+        );
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
+            "nested-target overlay must fail even beside the canonical mount"
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_repointed_policy_file_env_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = service_doc("proxy", &[&mount], &["POLICY_FILE=/pol2/policy.json"]);
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
+            "repointed POLICY_FILE on proxy must fail"
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_missing_policy_file_env_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/policy:ro", policy_source(data_dir, "p"));
+        let doc = service_doc("proxy", &[&mount], &[]);
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::ProxyPolicyMount),
+            "missing POLICY_FILE env on proxy must fail"
+        );
+    }
+
+    #[test]
+    fn proxy_policy_mount_absent_proxy_service_is_ok() {
+        let data_dir = std::path::Path::new("/data");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  claude:\n").unwrap();
+        let v = SecurityCheck::check_proxy_policy_mount(&doc, data_dir, "p");
+        assert!(v.is_empty(), "no proxy service = no violation");
+    }
+
+    // ---- AuditMount (proxy + mcp-hub, :rw, no env pin) ----
+
+    #[test]
+    fn audit_mount_variant_renders_expected_code() {
+        assert_eq!(SecurityRule::AuditMount.to_string(), "AUDIT_MOUNT");
+    }
+
+    #[test]
+    fn audit_mount_canonical_passes_on_proxy_and_hub() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/audit:rw", audit_source(data_dir, "p"));
+        for service in ["proxy", "mcp-hub"] {
+            let doc = service_doc(service, &[&mount], &[]);
+            let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", service);
+            assert!(
+                v.is_empty(),
+                "{service}: correct mount must pass, got: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_mount_ro_fails_on_proxy_and_hub() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/audit:ro", audit_source(data_dir, "p"));
+        for service in ["proxy", "mcp-hub"] {
+            let doc = service_doc(service, &[&mount], &[]);
+            let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", service);
+            assert!(
+                v.iter().any(|x| x.rule == SecurityRule::AuditMount),
+                "{service}: :ro audit mount must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_mount_wrong_source_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let bad = to_engine_path(&data_dir.join("policies").join("p")).unwrap();
+        let mount = format!("{bad}:/audit:rw");
+        let doc = service_doc("proxy", &[&mount], &[]);
+        let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", "proxy");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::AuditMount),
+            "source outside audit/<project>/ must fail"
+        );
+    }
+
+    #[test]
+    fn audit_mount_missing_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = service_doc("mcp-hub", &[], &[]);
+        let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", "mcp-hub");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::AuditMount),
+            "missing audit mount must fail (unconditional)"
+        );
+    }
+
+    #[test]
+    fn audit_mount_nested_target_overlay_fails() {
+        let data_dir = std::path::Path::new("/data");
+        let canonical = format!("{}:/audit:rw", audit_source(data_dir, "p"));
+        let doc = service_doc(
+            "mcp-hub",
+            &[&canonical, "/evil:/audit/audit-hub.jsonl:rw"],
+            &[],
+        );
+        let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", "mcp-hub");
+        assert!(
+            v.iter().any(|x| x.rule == SecurityRule::AuditMount),
+            "nested-target overlay must fail even beside the canonical mount"
+        );
+    }
+
+    #[test]
+    fn audit_mount_absent_service_is_ok() {
+        let data_dir = std::path::Path::new("/data");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  claude:\n").unwrap();
+        let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", "proxy");
+        assert!(v.is_empty(), "no proxy service = no violation");
+    }
+
+    // ---- NoPolicyOrAuditMountClaude ----
+
+    #[test]
+    fn no_policy_or_audit_mount_claude_variant_renders_expected_code() {
+        assert_eq!(
+            SecurityRule::NoPolicyOrAuditMountClaude.to_string(),
+            "NO_POLICY_OR_AUDIT_MOUNT_CLAUDE",
+        );
+    }
+
+    #[test]
+    fn claude_rejects_policy_dir_mount() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/whatever:ro", policy_source(data_dir, "p"));
+        let doc = service_doc("claude", &[&mount], &[]);
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "claude must never mount the policy directory, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_audit_dir_mount() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}:/whatever:rw", audit_source(data_dir, "p"));
+        let doc = service_doc("claude", &[&mount], &[]);
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "claude must never mount the audit directory, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_map_form_policy_dir_mount() {
+        let data_dir = std::path::Path::new("/data");
+        let yaml = format!(
+            "services:\n  claude:\n    volumes:\n      - type: bind\n        source: {}\n        \
+             target: /whatever\n",
+            policy_source(data_dir, "p")
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "map-form policy dir mount on claude must not be skipped, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_map_form_audit_dir_mount() {
+        let data_dir = std::path::Path::new("/data");
+        let yaml = format!(
+            "services:\n  claude:\n    volumes:\n      - type: bind\n        source: {}\n        \
+             target: /whatever\n",
+            audit_source(data_dir, "p")
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "map-form audit dir mount on claude must not be skipped, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_policy_dir_mount_with_trailing_slash() {
+        let data_dir = std::path::Path::new("/data");
+        let mount = format!("{}/:/whatever:ro", policy_source(data_dir, "p"));
+        let doc = service_doc("claude", &[&mount], &[]);
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "a trailing slash on the policy source must not dodge the check, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_policy_dir_mount_with_dot_segment() {
+        let data_dir = std::path::Path::new("/data");
+        let policies_dir = to_engine_path(&data_dir.join("policies")).unwrap();
+        // Normalizes to exactly policy_source(data_dir, "p"): "policies/./p" -> "policies/p".
+        let mount = format!("{policies_dir}/./p:/whatever:ro");
+        let doc = service_doc("claude", &[&mount], &[]);
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "a '/./' segment in the policy source must not dodge the check, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_rejects_policies_parent_dir_mount() {
+        let data_dir = std::path::Path::new("/data");
+        let parent = to_engine_path(&data_dir.join("policies")).unwrap();
+        let mount = format!("{parent}:/whatever:ro");
+        let doc = service_doc("claude", &[&mount], &[]);
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(
+            v.iter()
+                .any(|x| x.rule == SecurityRule::NoPolicyOrAuditMountClaude),
+            "mounting the policies parent dir (all projects' keys) must be a violation, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn claude_unrelated_mount_passes() {
+        let data_dir = std::path::Path::new("/data");
+        let doc = service_doc("claude", &["/home/user/project:/workspace:rw"], &[]);
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(v.is_empty(), "unrelated mount must pass, got: {v:?}");
+    }
+
+    #[test]
+    fn claude_policy_or_audit_mount_absent_claude_service_is_ok() {
+        let data_dir = std::path::Path::new("/data");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str("services:\n  mcp-hub:\n").unwrap();
+        let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");
+        assert!(v.is_empty(), "no claude service = no violation");
     }
 }

@@ -156,6 +156,21 @@ setup-dev:
 	fi; \
 	\
 	echo ""; \
+	echo "── PII engine (WASM) ──"; \
+	if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then \
+		echo "  ✅ rustup target wasm32-unknown-unknown"; \
+	else \
+		echo "  📦 wasm32-unknown-unknown target not found, installing..."; \
+		rustup target add wasm32-unknown-unknown && echo "  ✅ wasm32-unknown-unknown installed" || { echo "  ❌ target install failed"; FAIL=1; }; \
+	fi; \
+	if command -v wasm-pack >/dev/null 2>&1; then \
+		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
+	else \
+		echo "  📦 wasm-pack not found, installing..."; \
+		npm install -g wasm-pack && echo "  ✅ wasm-pack installed" || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
+	fi; \
+	\
+	echo ""; \
 	echo "── macOS system deps (Tauri) ──"; \
 	if [ "$$(uname)" = "Darwin" ]; then \
 		if xcode-select -p >/dev/null 2>&1; then \
@@ -756,7 +771,11 @@ check-proxy-clippy:
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
-	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
+	@echo "  Building PII engine wasm artifact (policies/src/engine.ts imports it)..."
+	@cd mcp-servers/policies && $(NPM) run build:wasm
+	@echo "  Building mcp-servers/policies (required by hub)..."
+	@cd mcp-servers/policies && $(NPX) tsc
+	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done

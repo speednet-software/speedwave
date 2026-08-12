@@ -351,6 +351,27 @@ pub fn render_compose_in(
         &proxy::proxy_state_digest_in(data_dir, project_name),
     );
 
+    // Resolved PII policy: always written + mounted :ro into mcp-hub and proxy —
+    // absence would silently degrade both to unfiltered passthrough.
+    let pii_policy = resolved_config
+        .pii_policy
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
+    crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
+    crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
+    let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
+    yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
+    yaml = yaml.replace(
+        "${POLICY_CONFIG_DIGEST}",
+        &crate::pii_policy::policy_state_digest_in(data_dir, project_name),
+    );
+
+    // PII audit directory: mounted :rw into proxy and mcp-hub. Writers land in
+    // F3/F4 — this render only owns the directory and the mount.
+    let audit_dir = crate::audit::audit_dir_in(data_dir, project_name);
+    crate::fs_perms::ensure_owner_only_dir(&audit_dir)?;
+    yaml = yaml.replace("${AUDIT_DIR}", &to_engine_path(&audit_dir)?);
+
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
@@ -1220,7 +1241,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 48;
+    const SECURITY_RULE_COUNT: usize = 52;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1290,6 +1311,7 @@ mod tests {
             flags: default_flags(),
             llm,
             telemetry,
+            ..Default::default()
         }
     }
 
@@ -1545,6 +1567,40 @@ mod tests {
             "render_compose must pre-create the proxy token mount source"
         );
         assert!(data_dir.path().join("claude-resources").is_dir());
+    }
+
+    /// A per-project PII policy resolution error must hard-fail `render_compose`
+    /// itself (`?`) — unlike telemetry (global, boot-check-only), the active
+    /// project's boot check does not cover every project that could later render.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_fails_when_pii_policy_is_unresolvable() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-bad-pii-policy-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+            pii_policy: Err("unknown PII policy id \"bogus\"".to_string()),
+            ..Default::default()
+        };
+        let err = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect_err("render must fail closed on an unresolvable PII policy");
+        assert!(err.to_string().contains("bogus"));
     }
 
     #[test]
@@ -1947,6 +2003,26 @@ mod tests {
         )
     }
 
+    /// Adds the mcp-hub policy mount + pinned POLICY_FILE env + audit mount that
+    /// `check_hub_policy_mount`/`check_audit_mount` require unconditionally; fixtures predate them.
+    fn with_hub_policy_and_audit_mounts(yaml: &str, data_dir: &Path, project: &str) -> String {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let policy_dir = crate::pii_policy::policy_config_dir_in(data_dir, project);
+        add_hub_volume(
+            &mut doc,
+            &format!("{}:/policy:ro", to_engine_path(&policy_dir).unwrap()),
+        )
+        .unwrap();
+        inject_env_into(&mut doc, "mcp-hub", "POLICY_FILE", "/policy/policy.json");
+        let audit_dir = crate::audit::audit_dir_in(data_dir, project);
+        add_hub_volume(
+            &mut doc,
+            &format!("{}:/audit:rw", to_engine_path(&audit_dir).unwrap()),
+        )
+        .unwrap();
+        serde_yaml_ng::to_string(&doc).unwrap()
+    }
+
     const VALID_COMPOSE: &str = r#"
 version: "3"
 services:
@@ -2080,7 +2156,7 @@ networks:
     #[test]
     fn test_security_check_valid_compose() {
         let tmp = tempfile::tempdir().unwrap();
-        let yaml = valid_compose_yaml();
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -3551,15 +3627,16 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         // Expected paths must derive from the render's data_dir; compute() reads the production singleton.
         let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        // The mount-source checks (policy, managed-settings) compare the rendered
+        // volume against `data_dir` — must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
             &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
-            tmp.path(),
+            data_dir.path(),
         );
         assert!(
             violations.is_empty(),
@@ -3593,14 +3670,15 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        // The mount-source checks (policy, audit, managed-settings) compare the
+        // rendered volume against `data_dir`: must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
             &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
-            tmp.path(),
+            data_dir.path(),
         );
         assert!(
             violations.is_empty(),
@@ -3609,6 +3687,62 @@ services:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The rendered compose contains the mcp-hub policy mount + both envs, with
+    /// real substituted values (not raw placeholders).
+    #[test]
+    fn test_rendered_compose_contains_policy_mount_and_envs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let volumes = get_hub_volumes(&doc);
+        let expected_source = to_engine_path(&crate::pii_policy::policy_config_dir_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v == &format!("{expected_source}:/policy:ro")),
+            "hub must mount the rendered policy dir at /policy:ro, volumes: {volumes:?}"
+        );
+
+        let env = get_hub_env_seq(&doc);
+        assert!(
+            env.iter().any(|e| e == "POLICY_FILE=/policy/policy.json"),
+            "hub env must carry POLICY_FILE, env: {env:?}"
+        );
+        let digest =
+            find_env_value(&env, "POLICY_DIGEST=").expect("hub env must carry POLICY_DIGEST");
+        assert_eq!(digest.len(), 64, "digest must be a sha256 hex string");
+        assert!(
+            !digest.contains("${"),
+            "digest placeholder must be substituted"
+        );
+
+        let key_path = crate::pii_key::project_key_path_in(data_dir.path(), "test-project");
+        assert!(
+            key_path.is_file(),
+            "render_compose must ensure the per-project tokenization key next to policy.json"
         );
     }
 
@@ -4994,6 +5128,44 @@ services:
         assert!(
             pw_block.lines().any(|l| l.trim() == expected),
             "mcp-playwright section in compose.template.yml must declare extra_hosts '{expected}' (ADR-062)"
+        );
+    }
+
+    /// Cross-read: the hub (mcp-servers/hub/src/policy.ts) reads `POLICY_FILE`;
+    /// `POLICY_DIGEST` only forces recreate on change (PROXY_CONFIG_DIGEST pattern).
+    #[test]
+    fn spw_policy_env_names_appear_in_compose_template() {
+        for expected in [
+            "- POLICY_FILE=/policy/policy.json",
+            "- POLICY_DIGEST=${POLICY_CONFIG_DIGEST}",
+        ] {
+            assert!(
+                COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
+                "compose.template.yml must contain '{expected}' in mcp-hub's environment"
+            );
+        }
+        // Run the REAL hub env denylist against the template, not a re-typed copy.
+        let yaml =
+            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let violations = SecurityCheck::check_no_tokens_in_hub(&doc);
+        assert!(
+            violations.is_empty(),
+            "template hub env (incl. POLICY_FILE/POLICY_DIGEST) must pass \
+             check_no_tokens_in_hub, got: {:?}",
+            violations.iter().map(|v| &v.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// The mcp-hub service must declare the `/policy:ro` mount in the template
+    /// (unconditional, unlike the MDM managed-settings mount).
+    #[test]
+    fn hub_policy_volume_appears_in_compose_template() {
+        assert!(
+            COMPOSE_TEMPLATE
+                .lines()
+                .any(|l| l.trim() == "- ${POLICY_CONFIG_DIR}:/policy:ro"),
+            "compose.template.yml must mount ${{POLICY_CONFIG_DIR}} at /policy:ro on mcp-hub"
         );
     }
 
@@ -7902,10 +8074,10 @@ services:
     #[test]
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
-        let yaml = valid_compose_yaml();
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let filtered =
             apply_integrations_filter(&yaml, &integrations, "speedwave_test_network", &[]).unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
             "test",
@@ -10240,6 +10412,7 @@ networks:
             apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
 
         let data_tmp = tempfile::tempdir().unwrap();
+        let result = with_hub_policy_and_audit_mounts(&result, data_tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &result,
             "test",
@@ -10890,7 +11063,7 @@ services:
         std::fs::create_dir_all(&secrets_dir).unwrap();
         std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let yaml = valid_compose_yaml();
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
         let violations =
             SecurityCheck::run_with_data_dir(&yaml, "test", &[], &test_expected_paths(), data_dir);
         assert!(
@@ -11755,6 +11928,85 @@ services:
     }
 
     #[test]
+    fn plugin_service_env_carries_speedwave_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("verplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("verplug", Some("verplug"), &plugin_dir, None);
+        let integrations = fixture_integrations_with_enabled("verplug");
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let env = get_service_env_seq(&doc, &plugin::derive_compose_name("verplug"));
+        let expected = format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            env.iter().any(|v| v == &expected),
+            "plugin service must receive the app version. Got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_with_reserved_speedwave_version_extra_env_fails_render() {
+        // Render-time re-validation (ADR-051) rejects a manifest installed before the
+        // key became reserved — the injected value is never shadowed by a stale duplicate.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("staleplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "staleplug".into(),
+            service_id: Some("staleplug".into()),
+            slug: "staleplug".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(std::collections::HashMap::from([(
+                "SPEEDWAVE_VERSION".to_string(),
+                "9.9.9".to_string(),
+            )])),
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let vp = plugin::VerifiedPlugin::new(
+            manifest,
+            plugin_dir,
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let integrations = fixture_integrations_with_enabled("staleplug");
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let err = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp])
+            .expect_err("reserved extra_env key must fail the render");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn credentials_digest_pass_sits_between_filter_and_env_hardening() {
         let source = include_str!("mod.rs");
         let filter_pos = source
@@ -12224,7 +12476,8 @@ services:
             tokens_dir: Path::new("/test/.speedwave/tokens/test"),
             bridges: &HostBridgesInfo::default(),
         };
-        let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
+        let base = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
+        let yaml = apply_plugins_from_verified(&base, &ctx, &[plugin]).unwrap();
         (yaml, manifest)
     }
 

@@ -26,6 +26,12 @@ runs:
         platform: ${{ contains(inputs.platform, 'macos') && 'darwin' || 'win' }}
         arch: ${{ (contains(inputs.platform, 'macos') && contains(inputs.args, 'aarch64')) && 'arm64' || 'x64' }}
 
+    - name: Install wasm toolchain (PII engine)
+      shell: bash
+      run: |
+        rustup target add wasm32-unknown-unknown
+        npm install -g wasm-pack
+
     - name: Bundle build context and mcp-os
       shell: bash
       run: scripts/bundle-build-context.sh --ci

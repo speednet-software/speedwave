@@ -629,6 +629,9 @@ pub struct ProjectUserEntry {
     /// Per-plugin settings values keyed by slug.
     #[serde(default)]
     pub plugin_settings: Option<HashMap<String, serde_json::Value>>,
+    /// PII policy selection for this project (`None` = compiled-in default).
+    #[serde(default)]
+    pub policy: Option<PiiPolicyUserConfig>,
 }
 
 /// The IDE selected for the IDE bridge.
@@ -807,6 +810,200 @@ impl std::fmt::Debug for ManagedTelemetryConfig {
             .field("metric_export_interval_ms", metric_export_interval_ms)
             .field("logs_export_interval_ms", logs_export_interval_ms)
             .finish()
+    }
+}
+
+/// User-layer PII policy selection: the set of enabled policies plus user-defined
+/// definitions. Deserialization migrates the v1 shape; see [`PiiPolicyUserConfigShape`].
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(try_from = "PiiPolicyUserConfigShape")]
+pub struct PiiPolicyUserConfig {
+    /// Enabled policy ids: builtin template ids and/or ids from `custom_policies`.
+    pub policies: Vec<String>,
+    /// User-defined policy definitions (selectable via `policies`).
+    pub custom_policies: Vec<PiiPolicyDefinition>,
+}
+
+/// A user-defined policy: same shape as a builtin template, defined in config.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PiiPolicyDefinition {
+    /// Policy id, same charset rules as template ids; must not collide with a builtin id.
+    pub id: String,
+    /// Human-readable name shown in UI.
+    pub name: String,
+    /// Per-library-rule-id `{tokenize, log}` overrides; a rule id absent here is disabled.
+    #[serde(default)]
+    pub categories: HashMap<String, crate::pii_policy::RuleFlags>,
+    /// Additive custom detection rules, each with its own flag pair.
+    #[serde(default)]
+    pub rules: Vec<crate::pii_policy::OwnRuleV3>,
+    /// Literal keyword substitutions.
+    #[serde(default)]
+    pub keywords: Vec<crate::pii_policy::KeywordV3>,
+}
+
+/// MDM-layer PII policy: the set of policy ids forced on (presence-is-lock).
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedPiiPolicyConfig {
+    /// Policy ids forced on regardless of the user's own selection.
+    #[serde(default)]
+    pub forced_policies: Vec<String>,
+}
+
+/// v1 flat per-category bool shape (the pre-v2 wire format); kept solely to
+/// parse an old on-disk config during migration, never used elsewhere.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct LegacyCategoryFlags {
+    #[serde(rename = "EMAIL")]
+    email: bool,
+    #[serde(rename = "PHONE_PL")]
+    phone_pl: bool,
+    #[serde(rename = "PESEL")]
+    pesel: bool,
+    #[serde(rename = "NIP")]
+    nip: bool,
+    #[serde(rename = "IBAN")]
+    iban: bool,
+    #[serde(rename = "CARD")]
+    card: bool,
+    #[serde(rename = "API_KEY")]
+    api_key: bool,
+    // v1 also carried SENSITIVE_FIELD; key-name-based detection was removed
+    // entirely from the engine (no v3 rule counterpart), so the value is
+    // accepted here (deny_unknown_fields would otherwise reject old configs
+    // that set it) and dropped, not mapped, during migration.
+    #[serde(rename = "SENSITIVE_FIELD")]
+    _sensitive_field: bool,
+}
+
+/// Maps a v1 flat bool-per-category shape onto the v3 `categories` map, using
+/// the 7 built-in library rule ids (`SENSITIVE_FIELD` has no v3 counterpart).
+fn legacy_categories_to_v3(
+    c: LegacyCategoryFlags,
+) -> HashMap<String, crate::pii_policy::RuleFlags> {
+    [
+        ("EMAIL", c.email),
+        ("PHONE_PL", c.phone_pl),
+        ("PESEL", c.pesel),
+        ("NIP", c.nip),
+        ("IBAN", c.iban),
+        ("CARD", c.card),
+        ("API_KEY", c.api_key),
+    ]
+    .into_iter()
+    .map(|(id, tokenize)| {
+        (
+            id.to_string(),
+            crate::pii_policy::RuleFlags {
+                tokenize,
+                log: false,
+            },
+        )
+    })
+    .collect()
+}
+
+/// v1 pattern shape (`forced` instead of `{tokenize, log}`); `forced` was dead
+/// weight even in v1 and is dropped, not mapped, during migration (ADR-084).
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyCustomPiiPattern {
+    id: String,
+    display_name: String,
+    pattern: String,
+    case_insensitive: bool,
+    #[serde(default, rename = "forced")]
+    _forced: bool,
+}
+
+/// Raw shape for [`PiiPolicyUserConfig`] deserialization: every v1/v2 field,
+/// all optional so shape detection can run before migration. `sensitive_keys`
+/// no longer maps to anything (the feature was removed) but is still accepted
+/// structurally so an old config carrying it does not hard-fail to load.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+struct PiiPolicyUserConfigShape {
+    policies: Option<Vec<String>>,
+    custom_policies: Option<Vec<PiiPolicyDefinition>>,
+    template_id: Option<String>,
+    categories: Option<LegacyCategoryFlags>,
+    custom_patterns: Option<Vec<LegacyCustomPiiPattern>>,
+    sensitive_keys: Option<serde_json::Value>,
+    // v1's token-lifecycle overrides; the mapped tokenizer never existed, the
+    // field is accepted so an old config on disk still loads, then dropped.
+    limits: Option<serde_json::Value>,
+}
+
+impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
+    type Error = String;
+
+    fn try_from(raw: PiiPolicyUserConfigShape) -> Result<Self, String> {
+        let is_v2 = raw.policies.is_some() || raw.custom_policies.is_some();
+        let has_v1_custom = raw.categories.is_some()
+            || raw.custom_patterns.is_some()
+            || raw.sensitive_keys.is_some();
+        let is_v1 = raw.template_id.is_some() || has_v1_custom;
+
+        if is_v2 && is_v1 {
+            return Err(
+                "PII policy config mixes v1 fields (template_id/categories/custom_patterns/\
+                 sensitive_keys) with v2 fields (policies/custom_policies)"
+                    .to_string(),
+            );
+        }
+
+        if is_v2 {
+            return Ok(Self {
+                policies: raw.policies.unwrap_or_default(),
+                custom_policies: raw.custom_policies.unwrap_or_default(),
+            });
+        }
+
+        // v1 custom mode (categories/custom_patterns/sensitive_keys present):
+        // fold into a single synthesized "custom" policy definition.
+        if has_v1_custom {
+            let categories = legacy_categories_to_v3(raw.categories.unwrap_or_default());
+            let rules = raw
+                .custom_patterns
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| crate::pii_policy::OwnRuleV3 {
+                    id: p.id,
+                    display_name: p.display_name,
+                    patterns: vec![p.pattern],
+                    validator: None,
+                    case_sensitive: !p.case_insensitive,
+                    tokenize: true,
+                    log: false,
+                })
+                .collect();
+            // v1's sensitive-keys concept has no v3 counterpart (key-name-based
+            // detection was removed entirely); intentionally dropped.
+
+            return Ok(Self {
+                policies: vec!["custom".to_string()],
+                custom_policies: vec![PiiPolicyDefinition {
+                    id: "custom".to_string(),
+                    name: "Custom".to_string(),
+                    categories,
+                    rules,
+                    keywords: Vec::new(),
+                }],
+            });
+        }
+
+        // Pure `template_id`, nothing else: a straight policy-id selection.
+        if let Some(id) = raw.template_id {
+            return Ok(Self {
+                policies: vec![id],
+                custom_policies: Vec::new(),
+            });
+        }
+
+        Ok(Self::default())
     }
 }
 
@@ -1258,7 +1455,7 @@ impl SpeedwaveUserConfig {
 }
 
 /// Fully resolved Claude container config after the layered merge.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResolvedClaudeConfig {
     /// Environment variables for the Claude container.
     pub env: HashMap<String, String>,
@@ -1269,6 +1466,23 @@ pub struct ResolvedClaudeConfig {
     /// Merged telemetry the renderer reads for the managed-settings mount.
     /// An unresolvable policy degrades to `disabled()`; it is hard-stopped at boot.
     pub telemetry: ResolvedTelemetry,
+    /// Resolved PII policy the host writes to `policy.json` for the hub. Unlike
+    /// telemetry this does NOT degrade silently: a per-project policy error is
+    /// per-project (unlike the global telemetry policy), so `render_compose`
+    /// propagates the error via `?` in addition to the global boot check.
+    pub pii_policy: Result<crate::pii_policy::ResolvedPiiPolicy, String>,
+}
+
+impl Default for ResolvedClaudeConfig {
+    fn default() -> Self {
+        Self {
+            env: HashMap::new(),
+            flags: Vec::new(),
+            llm: LlmConfig::default(),
+            telemetry: ResolvedTelemetry::default(),
+            pii_policy: Ok(crate::pii_policy::ResolvedPiiPolicy::default()),
+        }
+    }
 }
 
 /// Resolves both Claude config and integrations in a single pass,
@@ -1314,21 +1528,26 @@ pub(crate) fn resolve_project_config_in_with_load(
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     match managed_load {
         Ok(managed) => {
-            let managed_telemetry = managed.and_then(|m| m.telemetry);
+            let (managed_telemetry, managed_pii_policy) = match managed {
+                Some(m) => (m.telemetry, m.pii_policy),
+                None => (None, None),
+            };
             resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
                 user_config,
                 project_name,
                 managed_telemetry.as_ref(),
+                managed_pii_policy.as_ref(),
             )
         }
-        Err(_) => {
+        Err(e) => {
             let (mut claude, integrations) = resolve_project_config_in_with_managed(
                 data_dir,
                 project_dir,
                 user_config,
                 project_name,
+                None,
                 None,
             );
             // Fail closed: drop any telemetry env the user layer added, force off.
@@ -1342,6 +1561,11 @@ pub(crate) fn resolve_project_config_in_with_load(
                 .env
                 .extend(crate::telemetry_env::telemetry_env_map(&disabled));
             claude.telemetry = disabled;
+            // Opposite fail-closed direction: an unreadable managed-config might
+            // hide a forced PII policy — never silently resolve as if none applies.
+            claude.pii_policy = Err(format!(
+                "cannot resolve PII policy: organization policy configuration is unreadable: {e}"
+            ));
             (claude, integrations)
         }
     }
@@ -1355,6 +1579,7 @@ pub(crate) fn resolve_project_config_in_with_managed(
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
     managed_telemetry: Option<&ManagedTelemetryConfig>,
+    managed_pii_policy: Option<&ManagedPiiPolicyConfig>,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
     let repo = load_repo_config_logged(project_dir);
 
@@ -1463,11 +1688,27 @@ pub(crate) fn resolve_project_config_in_with_managed(
     // failures hard-stop at boot; a user-layer bad endpoint only logs there.
     let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
+    // Stored as a Result (not degraded here): `render_compose` hard-fails via `?`
+    // on an invalid per-project policy. Beta-gated (ADR-058): with beta off and
+    // no MDM-forced policies the engines get the inert all-off policy.
+    let pii_policy =
+        if crate::pii_policy::pii_feature_enabled(user_config.beta_enabled(), managed_pii_policy) {
+            crate::pii_policy::resolve_pii_policy(
+                user_config
+                    .find_project(project_name)
+                    .and_then(|p| p.policy.as_ref()),
+                managed_pii_policy,
+            )
+        } else {
+            Ok(crate::pii_policy::disabled_policy())
+        };
+
     let claude = ResolvedClaudeConfig {
         env,
         flags,
         llm,
         telemetry,
+        pii_policy,
     };
     (claude, integrations)
 }
@@ -1816,7 +2057,14 @@ fn resolve_project_config_in_for_test(
     user_config: &SpeedwaveUserConfig,
     project_name: &str,
 ) -> (ResolvedClaudeConfig, ResolvedIntegrationsConfig) {
-    resolve_project_config_in_with_managed(data_dir, project_dir, user_config, project_name, None)
+    resolve_project_config_in_with_managed(
+        data_dir,
+        project_dir,
+        user_config,
+        project_name,
+        None,
+        None,
+    )
 }
 
 /// Test-only seam: reuses the caller's tempdir as `data_dir` too — every call
@@ -2446,6 +2694,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2979,6 +3228,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -2997,6 +3247,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
         )
         .0;
         assert_eq!(
@@ -3027,6 +3278,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3043,6 +3295,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
         )
         .0;
         assert_eq!(
@@ -3074,6 +3327,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3091,6 +3345,7 @@ mod tests {
             &user_config,
             "p",
             Some(&managed),
+            None,
         )
         .0;
         assert_eq!(
@@ -3115,6 +3370,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3126,9 +3382,15 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let resolved =
-            resolve_project_config_in_with_managed(tmp.path(), tmp.path(), &user_config, "p", None)
-                .0;
+        let resolved = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+        )
+        .0;
         assert_eq!(
             resolved.env.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
             Some(&"https://mine.example.com:4318".to_string())
@@ -3146,6 +3408,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3173,6 +3436,38 @@ mod tests {
     }
 
     #[test]
+    fn mdm_load_error_fails_closed_pii_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let resolved = resolve_project_config_in_with_load(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            Err(anyhow::anyhow!("managed config /x is invalid: boom")),
+        )
+        .0;
+        assert!(
+            resolved.pii_policy.is_err(),
+            "an unreadable managed-config must fail closed the PII policy, not silently \
+             resolve as if no organization policy applies"
+        );
+    }
+
+    #[test]
     fn mdm_load_ok_none_leaves_user_telemetry_intact() {
         let tmp = tempfile::tempdir().unwrap();
         let user_config = SpeedwaveUserConfig {
@@ -3182,6 +3477,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3245,6 +3541,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3658,6 +3955,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             ..Default::default()
         };
@@ -3795,6 +4093,7 @@ mod tests {
             claude: None,
             integrations: None,
             plugin_settings: None,
+            policy: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
@@ -3918,6 +4217,7 @@ mod tests {
             }),
             integrations: None,
             plugin_settings: None,
+            policy: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![
@@ -4209,6 +4509,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4317,6 +4618,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -4342,6 +4644,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -4387,6 +4690,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -4447,6 +4751,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
@@ -4478,6 +4783,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -4494,6 +4800,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -4537,6 +4844,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4740,6 +5048,7 @@ mod tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4969,6 +5278,7 @@ mod tests {
                     plugins: None,
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5042,6 +5352,7 @@ mod tests {
                     plugins: None,
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5080,6 +5391,7 @@ mod tests {
                     plugins: None,
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5214,6 +5526,325 @@ mod tests {
         );
         assert!(integrations.slack);
         assert!(!integrations.gitlab);
+    }
+
+    // ---- PII policy wiring (WP4) --------------------------------------------
+
+    #[test]
+    fn project_user_entry_without_policy_field_loads_as_none() {
+        let json = r#"{"name":"p","dir":"/tmp/p"}"#;
+        let entry: ProjectUserEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.policy.is_none());
+    }
+
+    // ---- v1 -> v2 PII policy config migration -------------------------------
+
+    #[test]
+    fn migrates_v1_template_id_only_to_a_single_policy_id() {
+        let cfg: PiiPolicyUserConfig =
+            serde_json::from_str(r#"{"template_id": "gdpr-art32"}"#).unwrap();
+        assert_eq!(cfg.policies, vec!["gdpr-art32".to_string()]);
+        assert!(cfg.custom_policies.is_empty());
+    }
+
+    #[test]
+    fn migrates_v1_custom_mode_to_a_synthesized_custom_policy() {
+        let json = r#"{
+            "categories": {
+                "EMAIL": false, "PHONE_PL": true, "PESEL": true, "NIP": true,
+                "IBAN": true, "CARD": true, "API_KEY": true, "SENSITIVE_FIELD": true
+            },
+            "custom_patterns": [{
+                "id": "EMPLOYEE_ID", "displayName": "Employee ID",
+                "pattern": "\\bEMP-\\d{4,8}\\b", "caseInsensitive": false, "forced": true
+            }],
+            "sensitive_keys": {"add": ["salary"], "remove": []}
+        }"#;
+        let cfg: PiiPolicyUserConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.policies, vec!["custom".to_string()]);
+        assert_eq!(cfg.custom_policies.len(), 1);
+        let def = &cfg.custom_policies[0];
+        assert_eq!(def.id, "custom");
+        assert!(!def.categories["EMAIL"].tokenize);
+        assert!(def.categories["PHONE_PL"].tokenize);
+        assert!(!def.categories.contains_key("SENSITIVE_FIELD"));
+        assert_eq!(def.rules.len(), 1);
+        assert_eq!(def.rules[0].id, "EMPLOYEE_ID");
+        assert_eq!(def.rules[0].patterns, vec![r"\bEMP-\d{4,8}\b".to_string()]);
+        // Old `forced: true` carries no effect post-migration — always {tokenize:true, log:false}.
+        assert!(def.rules[0].tokenize);
+        assert!(!def.rules[0].log);
+        // v1's sensitive_keys concept has no v3 counterpart — dropped, not migrated.
+        assert!(def.keywords.is_empty());
+    }
+
+    #[test]
+    fn migrates_v1_empty_config_to_default() {
+        let cfg: PiiPolicyUserConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg, PiiPolicyUserConfig::default());
+        assert!(cfg.policies.is_empty());
+        assert!(cfg.custom_policies.is_empty());
+    }
+
+    #[test]
+    fn migration_ignores_old_limits_field() {
+        let cfg: PiiPolicyUserConfig = serde_json::from_str(
+            r#"{"template_id": "strict", "limits": {"maxTokens": 5, "ttlMs": 10}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.policies, vec!["strict".to_string()]);
+    }
+
+    #[test]
+    fn v2_shape_parses_directly() {
+        let json = r#"{"policies": ["strict", "custom"], "custom_policies": [{
+            "id": "custom", "name": "Custom",
+            "categories": {
+                "EMAIL": {"tokenize": true, "log": false}, "PHONE_PL": {"tokenize": true, "log": false}
+            },
+            "rules": [],
+            "keywords": []
+        }]}"#;
+        let cfg: PiiPolicyUserConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.policies,
+            vec!["strict".to_string(), "custom".to_string()]
+        );
+        assert_eq!(cfg.custom_policies.len(), 1);
+        assert_eq!(cfg.custom_policies[0].id, "custom");
+    }
+
+    #[test]
+    fn mixed_v1_and_v2_keys_is_a_hard_error() {
+        let json = r#"{"policies": ["strict"], "template_id": "gdpr-art32"}"#;
+        assert!(serde_json::from_str::<PiiPolicyUserConfig>(json).is_err());
+    }
+
+    #[test]
+    fn user_policy_selection_reaches_resolved_pii_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: Some(PiiPolicyUserConfig {
+                    policies: vec!["gdpr-art32".to_string()],
+                    ..Default::default()
+                }),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            telemetry: None,
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+        );
+        let resolved = claude.pii_policy.unwrap();
+        assert!(!resolved.rules.iter().any(|r| r.id == "API_KEY"));
+        assert_eq!(
+            resolved.source,
+            crate::pii_policy::ResolvedPiiPolicySource {
+                policies: vec!["gdpr-art32".to_string()],
+                forced: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn beta_off_resolves_inert_pii_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: Some(PiiPolicyUserConfig {
+                    policies: vec!["gdpr-art32".to_string()],
+                    ..Default::default()
+                }),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+        );
+        let resolved = claude.pii_policy.unwrap();
+        assert_eq!(
+            resolved,
+            crate::pii_policy::disabled_policy(),
+            "with beta off and no MDM-forced policies, even a configured user \
+             policy must resolve to the inert all-off document"
+        );
+    }
+
+    #[test]
+    fn beta_off_ignores_invalid_user_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: Some(PiiPolicyUserConfig {
+                    policies: vec!["no-such-policy".to_string()],
+                    ..Default::default()
+                }),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            None,
+        );
+        assert_eq!(
+            claude.pii_policy,
+            Ok(crate::pii_policy::disabled_policy()),
+            "an invalid policy id must not error while the feature is beta-gated off"
+        );
+    }
+
+    // Also the beta-off + MDM case: ui is None, so MDM-forced ids alone activate the feature.
+    #[test]
+    fn managed_forced_pii_policy_reaches_resolved_project_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let managed = ManagedPiiPolicyConfig {
+            forced_policies: vec!["gdpr-art32".to_string()],
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            Some(&managed),
+        );
+        let resolved = claude.pii_policy.unwrap();
+        assert_eq!(
+            resolved.source,
+            crate::pii_policy::ResolvedPiiPolicySource {
+                policies: vec!["gdpr-art32".to_string()],
+                forced: vec!["gdpr-art32".to_string()],
+            },
+            "an MDM-forced policy id must appear as both a selected and a forced policy"
+        );
+        assert!(
+            resolved.rules.iter().any(|r| r.id == "EMAIL" && r.tokenize),
+            "gdpr-art32's categories must be enabled in the resolved project policy"
+        );
+    }
+
+    #[test]
+    fn managed_unknown_forced_pii_policy_id_is_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".into(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let managed = ManagedPiiPolicyConfig {
+            forced_policies: vec!["not-a-real-policy".to_string()],
+        };
+        let (claude, _) = resolve_project_config_in_with_managed(
+            tmp.path(),
+            tmp.path(),
+            &user_config,
+            "p",
+            None,
+            Some(&managed),
+        );
+        assert!(
+            claude.pii_policy.is_err(),
+            "an unresolvable MDM-forced policy id must not silently render without enforcement"
+        );
+    }
+
+    #[test]
+    fn repo_speedwave_json_cannot_set_pii_policy() {
+        // A repo `.speedwave.json` is a restricted subset (ProjectRepoConfig) that
+        // never gains a `policy` field; an extra "policy" key must be a no-op.
+        let with_policy_key = tempfile::tempdir().unwrap();
+        std::fs::write(
+            with_policy_key.path().join(".speedwave.json"),
+            r#"{"policy": {"templateId": "gdpr-art32", "categories": {"EMAIL": false}}}"#,
+        )
+        .unwrap();
+        let without_policy_key = tempfile::tempdir().unwrap();
+
+        // Beta on so the policy actually resolves (off would mask the repo key anyway).
+        let user_config = SpeedwaveUserConfig {
+            ui: Some(UiPrefsConfig {
+                beta_enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let (claude_with, _) = resolve_project_config(with_policy_key.path(), &user_config, "p");
+        let (claude_without, _) =
+            resolve_project_config(without_policy_key.path(), &user_config, "p");
+
+        let resolved_with = claude_with.pii_policy.unwrap();
+        let resolved_without = claude_without.pii_policy.unwrap();
+        assert_eq!(
+            serde_json::to_string(&resolved_with).unwrap(),
+            serde_json::to_string(&resolved_without).unwrap(),
+            "repo .speedwave.json must never influence the resolved PII policy"
+        );
+        assert_eq!(
+            resolved_with,
+            crate::pii_policy::ResolvedPiiPolicy::default()
+        );
     }
 
     #[test]
@@ -5376,6 +6007,7 @@ mod tests {
                     )])),
                 }),
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5403,6 +6035,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -5410,6 +6043,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
             ],
             active_project: None,
@@ -5478,6 +6112,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -5485,6 +6120,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -5512,6 +6148,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
@@ -5807,6 +6444,7 @@ mod plugin_order_tests {
                 }),
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
