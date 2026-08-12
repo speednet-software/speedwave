@@ -1,7 +1,7 @@
 //! PKCE (RFC 7636) + CSRF `state` generation for the authorization_code flow.
 
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 /// A PKCE code verifier + its S256 challenge.
@@ -12,10 +12,11 @@ pub struct PkcePair {
     pub challenge: String,
 }
 
-/// 32 random bytes, base64url-no-pad (RFC 7636 §4.1 allows 43–128 chars).
+/// 32 random bytes from the thread-local CSPRNG, base64url-no-pad
+/// (RFC 7636 §4.1 allows 43–128 chars).
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
