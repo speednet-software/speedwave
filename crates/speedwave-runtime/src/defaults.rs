@@ -42,7 +42,7 @@ pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
     /// `ANTHROPIC_MODEL`.
     pub id: &'static str,
-    /// Display label shown in the dropdown ("Opus 4.8", "Sonnet 5", …).
+    /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,
     /// Context window in tokens (1_000_000 for 1M-context models).
     pub context_tokens: u32,
@@ -102,8 +102,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing_1m: Some(FABLE_PRICING),
     },
     AnthropicModelInfo {
-        id: "claude-opus-4-8",
-        family: "Opus 4.8",
+        id: "claude-opus-5",
+        family: "Opus 5",
         context_tokens: 1_000_000,
         latest: true,
         premium: true,
@@ -127,6 +127,15 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
+    },
+    AnthropicModelInfo {
+        id: "claude-opus-4-8",
+        family: "Opus 4.8",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
@@ -485,6 +494,41 @@ mod tests {
         assert_eq!(fable.context_tokens, 1_000_000);
         assert_eq!(fable.pricing.input, 10.0);
         assert_eq!(fable.pricing.output, 50.0);
+    }
+
+    #[test]
+    fn opus_5_is_the_latest_opus_entry() {
+        // The OPUS alias pin resolves to the first `latest: true` Opus, so a new
+        // Opus release must demote its predecessor rather than sit beside it.
+        let opus_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-opus-5")
+            .expect("claude-opus-5 must be in the catalog");
+        assert!(opus_5.latest, "Opus 5 must be in the Latest group");
+        assert!(opus_5.premium);
+        assert_eq!(opus_5.context_tokens, 1_000_000);
+        assert_eq!(opus_5.pricing.input, 5.0);
+        assert_eq!(opus_5.pricing.output, 25.0);
+        assert_eq!(
+            anthropic_default_models_env().get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(&"claude-opus-5[1m]".to_string())
+        );
+    }
+
+    #[test]
+    fn at_most_one_latest_entry_per_family_tier() {
+        // Two `latest: true` entries in one tier make the alias pin order-dependent.
+        for prefix in ["Fable", "Opus", "Sonnet", "Haiku"] {
+            let latest: Vec<&str> = ANTHROPIC_MODELS
+                .iter()
+                .filter(|m| m.family.starts_with(prefix) && m.latest)
+                .map(|m| m.id)
+                .collect();
+            assert!(
+                latest.len() <= 1,
+                "{prefix} tier must expose at most one Latest entry, got {latest:?}"
+            );
+        }
     }
 
     #[test]

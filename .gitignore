@@ -5,6 +5,9 @@ target/
 # cargo merges user-level config; the committed .cargo/config.toml is repo policy.
 .cargo/config.local.toml
 
+# Generated pii-engine-wasm artifact (built by crates/pii-engine-wasm/build-wasm.sh)
+mcp-servers/policies/wasm-pkg/
+
 # Node.js (root-level lockfiles if any)
 node_modules/
 

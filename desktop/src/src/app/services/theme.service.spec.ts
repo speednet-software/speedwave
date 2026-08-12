@@ -4,6 +4,7 @@ import {
   THEME_MODES,
   THEME_STORAGE_KEY,
   MODE_STORAGE_KEY,
+  applyPersistedThemeOnStartup,
   type ThemeId,
   type ThemeMode,
 } from './theme.service';
@@ -407,6 +408,42 @@ describe('ThemeService', () => {
       } finally {
         if (original) Object.defineProperty(window, 'matchMedia', original);
       }
+    });
+  });
+  // Runs the provideAppInitializer hook in isolation to prove the persisted
+  // accent theme reaches <html> at bootstrap, without any component (Settings)
+  // injecting ThemeService first.
+  describe('applyPersistedThemeOnStartup', () => {
+    function runInitializer(): void {
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({});
+      TestBed.runInInjectionContext(() => applyPersistedThemeOnStartup());
+    }
+
+    // Happy path — the exact scenario from the ticket (iris survives cold start).
+    it('applies the persisted accent theme to <html> at boot without opening Settings', () => {
+      localStorage.setItem(THEME_STORAGE_KEY, 'iris');
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+      runInitializer();
+      expect(document.documentElement.getAttribute('data-theme')).toBe('iris');
+    });
+
+    // Edge case — the ember default writes no attribute even via the boot hook.
+    it('leaves data-theme unset when the persisted theme is the ember default', () => {
+      localStorage.setItem(THEME_STORAGE_KEY, 'ember');
+      runInitializer();
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    });
+
+    // State transition — a later injection sees the same hydrated root singleton.
+    it('hydrates the root singleton so a later injection reflects the boot theme', () => {
+      localStorage.setItem(THEME_STORAGE_KEY, 'cyan');
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({});
+      TestBed.runInInjectionContext(() => applyPersistedThemeOnStartup());
+      const svc = TestBed.inject(ThemeService);
+      expect(svc.theme()).toBe<ThemeId>('cyan');
+      expect(document.documentElement.getAttribute('data-theme')).toBe('cyan');
     });
   });
 });
