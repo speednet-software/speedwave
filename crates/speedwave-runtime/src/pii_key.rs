@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use rand::RngCore;
+use rand::TryRng;
 
 /// Path of the per-project tokenization key inside the policy dir.
 pub fn project_key_path_in(data_dir: &Path, project: &str) -> PathBuf {
@@ -49,7 +49,9 @@ fn write_and_sync_key(file: &mut std::fs::File, path: &std::path::Path) -> anyho
     })?;
 
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("failed to read OS entropy for the PII key: {e}"))?;
     let hex = crate::bundle::bytes_to_hex(&bytes);
 
     file.write_all(hex.as_bytes())?;
