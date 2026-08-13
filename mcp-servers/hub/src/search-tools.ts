@@ -11,6 +11,8 @@ import {
   getEnabledServices,
   getDisabledOsCategories,
 } from './tool-registry.js';
+import { sandboxGlobalName } from './service-list.js';
+import { enabledSandboxGlobals } from './executor.js';
 
 /** Valid detail levels for search_tools, ascending verbosity (SSOT for schema and validation). */
 export const DETAIL_LEVELS = ['names_only', 'with_descriptions', 'full_schema'] as const;
@@ -193,7 +195,11 @@ export async function searchTools(params: SearchToolsParams): Promise<SearchTool
 
   const enabled = getEnabledServices();
   const disabledOs = getDisabledOsCategories();
-  const servicesToSearch = (service ? [service] : [...SERVICE_NAMES]).filter((s) => enabled.has(s));
+  // A service the sandbox refuses to expose is uncallable, so never advertise its tools.
+  const { skipped } = enabledSandboxGlobals();
+  const servicesToSearch = (service ? [service] : [...SERVICE_NAMES]).filter(
+    (s) => enabled.has(s) && !skipped.has(s)
+  );
 
   const serviceFilterInvalid = Boolean(service) && !SERVICE_NAMES.includes(service as string);
   const serviceDisabled =
@@ -261,6 +267,11 @@ function buildSearchResult(
     service,
     deferLoading: tool.deferLoading ?? true,
   };
+
+  const global = sandboxGlobalName(service);
+  if (global !== service) {
+    result.sandboxGlobal = global;
+  }
 
   if (tool.userScoped) {
     result.identityHint = buildIdentitySentence(tool);

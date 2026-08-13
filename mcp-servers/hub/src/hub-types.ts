@@ -157,4 +157,9 @@ export interface ToolSearchResult {
   deferLoading?: boolean;
   /** Self-reference sentence for userScoped tools; present at every detail level. */
   identityHint?: string;
+  /**
+   * execute_code global to call this service under, set only when it differs from `service`
+   * (a dashed slug like `my-plugin` is exposed as `myPlugin`). Use `service` for search filtering.
+   */
+  sandboxGlobal?: string;
 }

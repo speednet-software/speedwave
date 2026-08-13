@@ -75,7 +75,7 @@ Always get `full_schema` before calling a tool for the first time.
 
 ### execute_code: run JavaScript to call service tools
 
-Service globals are injected automatically based on enabled integrations (no imports needed). Use `search_tools` to discover available services, their tools, and exact parameter schemas.
+Service globals are injected automatically based on enabled integrations (no imports needed). Use `search_tools` to discover available services, their tools, and exact parameter schemas. A dashed plugin slug is camelCased into its global (`my-plugin` → `myPlugin.someTool()`); `search_tools` surfaces this in the `sandboxGlobal` field when it differs from the service name.
 
 ### Recommended workflow
 
