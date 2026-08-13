@@ -30,6 +30,8 @@ import {
   PrepareParamsFn,
   WrapBridgeCallFn,
 } from './tool-registry.js';
+import { resolveSandboxGlobals, type SandboxGlobalResolution } from './service-list.js';
+import { toCamelCase } from './tool-discovery.js';
 
 // ── Global Bridge State ───────────────────────────────────────────────────────────────────────
 
@@ -363,20 +365,19 @@ function createToolWrappers(
 
   const tools: Record<string, ServiceTools> = {};
 
-  for (const service of SERVICE_NAMES) {
-    if (!enabled.has(service)) continue;
+  for (const [service, globalName] of enabledSandboxGlobals().usable) {
     const bridge = serviceBridges[service];
-    /* c8 ignore next — bridge is always set for enabled services (set at line 336) */
-    if (bridge) {
-      tools[service] = buildExecutorWrappers(
-        service,
-        bridge,
-        wrapWithAudit,
-        prepareParams,
-        wrapBridgeCall,
-        service === 'os' ? disabledOs : undefined
-      );
-    }
+    /* c8 ignore next — bridge is set above in the serviceBridges loop for every enabled service */
+    if (!bridge) continue;
+
+    tools[globalName] = buildExecutorWrappers(
+      service,
+      bridge,
+      wrapWithAudit,
+      prepareParams,
+      wrapBridgeCall,
+      service === 'os' ? disabledOs : undefined
+    );
   }
 
   return { tools, detectionBatches };
@@ -416,6 +417,66 @@ const batch = async <T>(operations: Promise<T>[]): Promise<BatchResult<T>> => {
 
   return { results, errors };
 };
+
+/**
+ * Non-service globals injected into every sandbox. Kept as one object so
+ * RESERVED_SANDBOX_GLOBALS derives its names from it without drift.
+ */
+const STATIC_SANDBOX_GLOBALS = {
+  JSON,
+  Date,
+  Math,
+  Array,
+  Object,
+  String,
+  Number,
+  Boolean,
+  Promise,
+  Map,
+  Set,
+  RegExp,
+  Error,
+  batch,
+  allSettled: Promise.allSettled.bind(Promise),
+  paginate,
+  collectPages,
+  findInPages,
+  countInPages,
+  filterPages,
+  mapPages,
+  takeFromPages,
+};
+
+/** Global names a service must not shadow: the static helpers above plus `console`. */
+const RESERVED_SANDBOX_GLOBALS: ReadonlySet<string> = new Set([
+  ...Object.keys(STATIC_SANDBOX_GLOBALS),
+  'console',
+]);
+
+let cachedGlobalsKey: string | null = null;
+let cachedGlobals: SandboxGlobalResolution | null = null;
+
+/**
+ * Enabled services mapped to their sandbox globals. Memoized on the service set, so the
+ * identifier probing and the skip logging happen once per set rather than per execution.
+ */
+export function enabledSandboxGlobals(): SandboxGlobalResolution {
+  const enabled = getEnabledServices();
+  const services = SERVICE_NAMES.filter((s) => enabled.has(s));
+  const key = services.join(',');
+  if (key !== cachedGlobalsKey || !cachedGlobals) {
+    const resolved = resolveSandboxGlobals(services, RESERVED_SANDBOX_GLOBALS);
+    for (const [service, reason] of resolved.skipped) {
+      console.error(
+        `${ts()} [executor] Service '${service}' ${reason}; not exposed to execute_code. ` +
+          `Rename the plugin slug.`
+      );
+    }
+    cachedGlobalsKey = key;
+    cachedGlobals = resolved;
+  }
+  return cachedGlobals;
+}
 
 /**
  * Levenshtein edit distance, capped for speed since candidate lists are short method names.
@@ -500,30 +561,7 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       warn: (...args: unknown[]) => console.warn(`${ts()} [sandbox]`, ...args),
       error: (...args: unknown[]) => console.error(`${ts()} [sandbox]`, ...args),
     },
-    JSON,
-    Date,
-    Math,
-    Array,
-    Object,
-    String,
-    Number,
-    Boolean,
-    Promise,
-    Map,
-    Set,
-    RegExp,
-    Error,
-    // Parallel Execution Helper (Anthropic Advanced Tool Use pattern)
-    batch, // Promise.allSettled wrapper - partial failure support
-    allSettled: Promise.allSettled.bind(Promise), // Direct access to Promise.allSettled
-    // Pagination Helpers (for large datasets)
-    paginate, // Async generator for paginated APIs
-    collectPages, // Collect all pages into array
-    findInPages, // Find first match across pages
-    countInPages, // Count matches across pages
-    filterPages, // Filter items across pages
-    mapPages, // Map items across pages
-    takeFromPages, // Take first N items across pages
+    ...STATIC_SANDBOX_GLOBALS,
   };
 
   try {
@@ -599,8 +637,11 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       .replace(/(\/[^\s:'"]+):\d+:\d+/g, '$1')
       .substring(0, 500);
 
-    // Smart error enhancement: if "X.Y is not a function", show available methods
+    // Smart error enhancement: at most one hint wins, so the branches stay mutually exclusive.
     const notFunctionMatch = message.match(/(\w+)\.(\w+) is not a function/);
+    const underscoreMatch = message.match(/^([\w]+)_([\w_]+) is not defined$/);
+    const notDefinedMatch = message.match(/^([A-Za-z_$][\w$]*) is not defined$/);
+
     if (notFunctionMatch) {
       const [, serviceName, attemptedMethod] = notFunctionMatch;
       const serviceTools = sandboxContext[serviceName as keyof typeof sandboxContext];
@@ -620,16 +661,13 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
     }
 
     // Detect underscore notation: "service_method is not defined"
-    const underscoreMatch = message.match(/^([\w]+)_([\w_]+) is not defined$/);
-    if (underscoreMatch) {
+    else if (underscoreMatch) {
       const [, serviceName, methodName] = underscoreMatch;
 
       const serviceTools = sandboxContext[serviceName as keyof typeof sandboxContext];
 
       if (serviceTools && typeof serviceTools === 'object') {
-        // Convert underscore to camelCase; single-underscore names mean methodName has none.
-        /* c8 ignore next — camelCase callback only fires if methodName contains underscores */
-        const camelMethod = methodName.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+        const camelMethod = toCamelCase(methodName);
         const availableMethods = Object.keys(serviceTools).filter(
           (k) => typeof (serviceTools as Record<string, unknown>)[k] === 'function'
         );
@@ -642,8 +680,25 @@ export async function executeCode(params: ExecuteCodeParams): Promise<IToolResul
       }
     }
 
+    // Dashed slug used verbatim: `my-plugin.foo()` parses as `my - plugin.foo()` → `my is not defined`.
+    // The leftover name is a dash segment or the dash-free spelling, so match both, case-insensitively.
+    else if (notDefinedMatch) {
+      const [, name] = notDefinedMatch;
+      const wanted = name.toLowerCase();
+      const dashed = [...enabledSandboxGlobals().usable].filter(
+        ([service, global]) =>
+          service.includes('-') &&
+          (global.toLowerCase() === wanted || service.toLowerCase().split('-').includes(wanted))
+      );
+      if (dashed.length > 0) {
+        const mapping = dashed.map(([service, global]) => `'${service}' → ${global}`).join(', ');
+        sanitizedMessage = `${name} is not defined. A dashed service slug is camelCased into its sandbox global (${mapping}). Call e.g. ${dashed[0][1]}.method().`;
+      }
+    }
+
     // Last defensive tokenization layer before the message reaches the model: covers any error
-    // path that bypassed wrapBridgeCall's own tokenization (idempotent when it did not).
+    // path that bypassed wrapBridgeCall's own tokenization (idempotent when it did not). Runs
+    // after the hint branches so a hint can never reintroduce untokenized text.
     const { value: tokenizedMessage, detections: finalDetections } =
       tokenizeErrorText(sanitizedMessage);
     if (finalDetections.length > 0) {
