@@ -59,6 +59,11 @@ services:
       # Not read by the proxy — forces container recreation on config-up
       # when the rendered config or a provider key changed.
       - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
+      - POLICY_FILE=/policy/policy.json
+      - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
+      # Mirrors the /audit:rw mount below; the proxy's audit writer reads this to place
+      # audit-proxy.jsonl (mcp-hub already carries the equivalent AUDIT_DIR).
+      - AUDIT_DIR=/audit
     read_only: true
     user: "${CONTAINER_USER}"
     cap_drop:
@@ -73,6 +78,8 @@ services:
       - ${PROXY_CONFIG_DIR}:/config:ro
       - ${TOKENS_DIR}/llm:/tokens:ro
       - ${PROXY_USAGE_DIR}:/usage:rw
+      - ${POLICY_CONFIG_DIR}:/policy:ro
+      - ${AUDIT_DIR}:/audit:rw
     networks:
       - ${NETWORK_NAME}
     deploy:
@@ -93,8 +100,17 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
+    # Resolved PII policy: always rendered + mounted read-only; the hub
+    # fail-closes on an invalid file. Audit dir is the hub's only :rw mount.
+    volumes:
+      - ${POLICY_CONFIG_DIR}:/policy:ro
+      - ${AUDIT_DIR}:/audit:rw
     environment:
       - PORT=${PORT_HUB}
+      - POLICY_FILE=/policy/policy.json
+      - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
+      # Mirrors the /audit:rw mount above; hub/src/audit-pii.ts reads this to place audit-hub.jsonl.
+      - AUDIT_DIR=/audit
       - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
       - WORKER_REDMINE_URL=http://mcp-redmine:${PORT_WORKER}
