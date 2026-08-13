@@ -35,7 +35,7 @@ tauri-plugin-updater = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 url = "2"
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 http = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
