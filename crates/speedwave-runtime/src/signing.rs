@@ -273,9 +273,11 @@ fn collect_files_recursive(
 #[cfg(test)]
 pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
+    use rand::Rng;
 
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let mut key_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut key_bytes);
+    let signing_key = SigningKey::from_bytes(&key_bytes);
     let verifying_key = signing_key.verifying_key();
     (
         signing_key.to_bytes().to_vec(),

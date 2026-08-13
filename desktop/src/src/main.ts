@@ -1,9 +1,15 @@
 import { bootstrapApplication } from '@angular/platform-browser';
-import { CSP_NONCE, ErrorHandler, provideZonelessChangeDetection } from '@angular/core';
+import {
+  CSP_NONCE,
+  ErrorHandler,
+  provideAppInitializer,
+  provideZonelessChangeDetection,
+} from '@angular/core';
 import { provideRouter, withInMemoryScrolling } from '@angular/router';
 import { AppComponent } from './app/app.component';
 import { routes } from './app/app.routes';
 import { GlobalErrorHandler } from './app/error-handler';
+import { applyPersistedThemeOnStartup } from './app/services/theme.service';
 
 /**
  * Read the nonce Tauri injected into the boot-overlay <style> tag in index.html.
@@ -14,6 +20,7 @@ const tauriNonce = document.getElementById('boot-overlay-style')?.nonce || '';
 bootstrapApplication(AppComponent, {
   providers: [
     provideZonelessChangeDetection(),
+    provideAppInitializer(applyPersistedThemeOnStartup),
     // `anchorScrolling: enabled` scrolls an `id="..."` element into view on a `fragment="..."`
     // navigation — required for the System health → IDE Bridge `connect →` deep link.
     provideRouter(
