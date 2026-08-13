@@ -1,7 +1,7 @@
 //! MDM-deployed managed policy (read-only, fail-closed): a malformed
 //! `managed-config.json` is a hard error so a policy never silently vanishes.
 
-use crate::config::ManagedTelemetryConfig;
+use crate::config::{ManagedPiiPolicyConfig, ManagedTelemetryConfig};
 use std::path::{Path, PathBuf};
 
 /// Root policy object read from the system-level managed-config file. Rejects
@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub struct ManagedConfig {
     /// MDM-forced OTLP telemetry policy (absent = user fully self-service).
     pub telemetry: Option<ManagedTelemetryConfig>,
+    /// MDM-forced PII policy ids (absent = user fully self-service).
+    pub pii_policy: Option<ManagedPiiPolicyConfig>,
 }
 
 /// System-level managed-config path (macOS/Windows); `Ok(None)` on other platforms,
@@ -149,6 +151,29 @@ mod tests {
         assert!(
             load_managed_config_from(&p).is_err(),
             "an unknown telemetry key must fail-closed, not leave the field user-editable"
+        );
+    }
+
+    #[test]
+    fn valid_file_parses_forced_pii_policies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"pii_policy":{"forced_policies":["gdpr-art32"]}}"#).unwrap();
+        let c = load_managed_config_from(&p).unwrap().unwrap();
+        assert_eq!(
+            c.pii_policy.unwrap().forced_policies,
+            vec!["gdpr-art32".to_string()]
+        );
+    }
+
+    #[test]
+    fn unknown_pii_policy_key_is_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("managed-config.json");
+        std::fs::write(&p, r#"{"pii_policy":{"forcedPolicie":["x"]}}"#).unwrap();
+        assert!(
+            load_managed_config_from(&p).is_err(),
+            "an unknown pii_policy key must fail-closed, not leave the field user-editable"
         );
     }
 }

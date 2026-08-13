@@ -25,6 +25,7 @@
         "desktop/src/package-lock.json",
         "mcp-servers/hub/package.json",
         "mcp-servers/shared/package.json",
+        "mcp-servers/policies/package.json",
         "mcp-servers/slack/package.json",
         "mcp-servers/sharepoint/package.json",
         "mcp-servers/redmine/package.json",

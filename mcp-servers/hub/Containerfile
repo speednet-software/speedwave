@@ -23,7 +23,26 @@ COPY shared/tsconfig.json ./shared/
 RUN cd shared && npm run build
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 2: Build hub (imports from ../shared/dist)
+# Stage 2: Build policies (imports from ../shared/dist; hub imports from ../policies/dist)
+# ─────────────────────────────────────────────────────────────────────────────
+COPY policies/package*.json ./policies/
+RUN --mount=type=cache,target=/root/.npm cd policies && npm install
+
+# Prebuilt on the host (build-wasm.sh, now mandatory in bundle-build-context) and staged by
+# bundle-build-context; alpine has no Rust/wasm-pack, so it is only copied here, never built.
+# Must land before the tsc build below: policies/src/engine.ts imports it directly, and tsc
+# needs the real .d.ts on disk to type-check the import, not just at container runtime.
+COPY policies/wasm-pkg ./policies/wasm-pkg
+
+COPY policies/src ./policies/src
+COPY policies/tsconfig.json ./policies/
+COPY policies/templates ./policies/templates
+# Direct tsc, not `npm run build`: that script also runs `build:wasm` (wasm-pack), unavailable
+# in this alpine builder — the real artifact was already staged above by bundle-build-context.
+RUN cd policies && npx tsc
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: Build hub (imports from ../shared/dist and ../policies/dist)
 # ─────────────────────────────────────────────────────────────────────────────
 COPY hub/package*.json ./hub/
 RUN --mount=type=cache,target=/root/.npm cd hub && npm install
@@ -48,13 +67,21 @@ COPY --from=builder /build/shared/dist ../shared/dist
 COPY --from=builder /build/shared/package.json ../shared/
 COPY --from=builder /build/shared/node_modules ../shared/node_modules
 
+# Copy built policies library (required at runtime for relative imports + template loading)
+COPY --from=builder /build/policies/dist ../policies/dist
+COPY --from=builder /build/policies/templates ../policies/templates
+# policies/dist/engine.js requires this at runtime (../wasm-pkg/speedwave_pii_engine_wasm.js).
+COPY --from=builder /build/policies/wasm-pkg ../policies/wasm-pkg
+COPY --from=builder /build/policies/package.json ../policies/
+COPY --from=builder /build/policies/node_modules ../policies/node_modules
+
 # Copy built hub application
 COPY --from=builder /build/hub/package*.json ./
 COPY --from=builder /build/hub/dist ./dist
 COPY --from=builder /build/hub/node_modules ./node_modules
 
 # Create directories
-RUN mkdir -p /context && chown -R node:node /context /app /app/../shared
+RUN mkdir -p /context && chown -R node:node /context /app /app/../shared /app/../policies
 
 # Security: non-root user
 USER node
