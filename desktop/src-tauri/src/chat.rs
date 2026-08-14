@@ -1,4 +1,5 @@
 use crate::history;
+use crate::pii_display::DisplayPolicy;
 use speedwave_runtime::stream::{
     AskUserOption, AskUserQuestionItem, MAX_ASK_USER_QUESTIONS, MAX_ASK_USER_WIRE_BYTES,
 };
@@ -180,9 +181,86 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     }
 }
 
-/// The ONE way to emit a `chat_stream` event: sanitizes first so no site leaks.
-/// Enforced by `chat_stream_emits_go_through_helper`.
-fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk) {
+/// Detokenizes a chunk's free-text fields for display (same fields as `sanitize_chunk`).
+/// Runs before `sanitize_chunk` so redaction sees the real display text, not a token placeholder.
+fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
+    if policy.is_noop() {
+        return chunk;
+    }
+    use crate::pii_display::detokenize_for_display as detok;
+    match chunk {
+        StreamChunk::Text { content } => StreamChunk::Text {
+            content: detok(policy, &content),
+        },
+        StreamChunk::Thinking { content } => StreamChunk::Thinking {
+            content: detok(policy, &content),
+        },
+        StreamChunk::ToolResult {
+            tool_id,
+            content,
+            is_error,
+        } => StreamChunk::ToolResult {
+            tool_id,
+            content: detok(policy, &content),
+            is_error,
+        },
+        StreamChunk::Error { content } => StreamChunk::Error {
+            content: detok(policy, &content),
+        },
+        StreamChunk::Result {
+            result_text: Some(text),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+            context_usage,
+        } => StreamChunk::Result {
+            result_text: Some(detok(policy, &text)),
+            session_id,
+            total_cost,
+            usage,
+            context_window_size,
+            assistant_uuid,
+            turn_usage,
+            turn_cost,
+            model,
+            context_usage,
+        },
+        StreamChunk::QueueDrained { session_id, text } => StreamChunk::QueueDrained {
+            session_id,
+            text: detok(policy, &text),
+        },
+        StreamChunk::AskUserQuestion {
+            tool_id,
+            mut questions,
+            current_index,
+        } => {
+            for q in &mut questions {
+                q.question = detok(policy, &q.question);
+                q.header = detok(policy, &q.header);
+                for opt in &mut q.options {
+                    opt.label = detok(policy, &opt.label);
+                    opt.value = detok(policy, &opt.value);
+                }
+            }
+            StreamChunk::AskUserQuestion {
+                tool_id,
+                questions,
+                current_index,
+            }
+        }
+        other => other,
+    }
+}
+
+/// The ONE way to emit a `chat_stream` event: detokenizes for display, then sanitizes
+/// so no site leaks a secret. Enforced by `chat_stream_emits_go_through_helper`.
+fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, policy: &DisplayPolicy) {
+    let chunk = detokenize_chunk(chunk, policy);
     if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
         log::warn!("failed to emit chat_stream event: {e}");
     }
@@ -1506,7 +1584,7 @@ impl ChatSession {
     /// Build the argv + container name for a spawn; `resume_session_id` adds
     /// `--resume`, `resume_at_uuid` adds `--resume-session-at` (ADR-046).
     /// `model_override` adds `--model` so a pre-session pick governs the FIRST
-    /// turn (a wire `/model` can only apply from the next turn; ADR-082 amendment).
+    /// turn (a wire `/model` can only apply from the next turn; ADR-085 amendment).
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
@@ -1533,7 +1611,7 @@ impl ChatSession {
 
         let mut flags = resolved.flags.clone();
         // Explicit --effort releases CC's premium launch-effort hold, making the
-        // wire `/effort` live for the session (empirical; ADR-082 amendment).
+        // wire `/effort` live for the session (empirical; ADR-085 amendment).
         flags.push("--effort".to_string());
         flags.push(launch_effort_level(project_name));
         if let Some(model) = model_override {
@@ -1680,6 +1758,11 @@ impl ChatSession {
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
 
+        // Loaded once per turn/session (never per-chunk); `None` when the project has
+        // no PII policy/key, making every detokenize call downstream a no-op.
+        let display_policy =
+            crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
+
         // On resume: seed cumulative session state from the transcript so the
         // first turn reports a real delta. Non-fatal — log and use a zero baseline.
         let resume_seed = resume_session_id.and_then(|id| {
@@ -1772,6 +1855,7 @@ impl ChatSession {
                                         content: "Internal error: pending_requests lock poisoned"
                                             .to_string(),
                                     },
+                                    &display_policy,
                                 );
                                 break;
                             }
@@ -1783,6 +1867,7 @@ impl ChatSession {
                                 questions,
                                 current_index: 0,
                             },
+                            &display_policy,
                         );
                     } else {
                         // Auto-approve non-AskUserQuestion tools
@@ -1800,6 +1885,7 @@ impl ChatSession {
                                                 "Failed to write auto-approve to stdin: {e}"
                                             ),
                                         },
+                                        &display_policy,
                                     );
                                     break;
                                 }
@@ -1814,6 +1900,7 @@ impl ChatSession {
                                                 "Failed to flush auto-approve to stdin: {e}"
                                             ),
                                         },
+                                        &display_policy,
                                     );
                                     break;
                                 }
@@ -1825,6 +1912,7 @@ impl ChatSession {
                                     StreamChunk::Error {
                                         content: "Internal error: stdin lock poisoned".to_string(),
                                     },
+                                    &display_policy,
                                 );
                                 break;
                             }
@@ -1901,11 +1989,16 @@ impl ChatSession {
                     parser.reset();
                 }
                 for chunk in chunks {
-                    emit_sanitized_chunk(&app_handle, chunk);
+                    emit_sanitized_chunk(&app_handle, chunk, &display_policy);
                 }
                 // ADR-045 drain: after Result chunks emit, write any queued message to stdin.
                 if let Some(session_id) = result_session_id {
-                    drain_queued_message(&app_handle, &session_id, &stdin_for_reader);
+                    drain_queued_message(
+                        &app_handle,
+                        &session_id,
+                        &stdin_for_reader,
+                        &display_policy,
+                    );
                 }
             }
 
@@ -1923,7 +2016,7 @@ impl ChatSession {
                         "Claude session ended unexpectedly. Check the session log for details."
                             .to_string(),
                 };
-                emit_sanitized_chunk(&app_handle, chunk);
+                emit_sanitized_chunk(&app_handle, chunk, &display_policy);
             }
         });
         self.drain_handles.push(h);
@@ -1939,7 +2032,11 @@ impl ChatSession {
         app_handle: &tauri::AppHandle,
         blocks: &[WireContentBlock],
     ) -> anyhow::Result<()> {
-        self.send_message_with_emit(blocks, |chunk| emit_sanitized_chunk(app_handle, chunk))
+        let display_policy =
+            crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
+        self.send_message_with_emit(blocks, |chunk| {
+            emit_sanitized_chunk(app_handle, chunk, &display_policy)
+        })
     }
 
     fn send_message_with_emit(
@@ -2278,6 +2375,7 @@ fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    policy: &DisplayPolicy,
 ) {
     let queue = app_handle.state::<speedwave_runtime::session::QueuedMessageService>();
     let drained = match queue.take(session_id) {
@@ -2285,7 +2383,7 @@ fn drain_queued_message(
         None => return,
     };
     write_and_emit_drained_message(session_id, &drained.text, stdin, |chunk| {
-        emit_sanitized_chunk(app_handle, chunk)
+        emit_sanitized_chunk(app_handle, chunk, policy)
     });
 }
 
@@ -2514,6 +2612,219 @@ mod tests {
             StreamChunk::ToolInputDelta { partial_json, .. } => {
                 assert_eq!(partial_json, raw, "partial_json must be byte-identical");
             }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    // -- detokenize_chunk: PII display detokenization at the emit chokepoint --
+
+    fn detok_test_key(tmp: &std::path::Path, project: &str) -> speedwave_pii_engine::EngineKey {
+        speedwave_runtime::pii_key::ensure_project_key_in(tmp, project)
+            .expect("ensure_project_key_in");
+        crate::pii_display::load_display_key(tmp, project).expect("key must load")
+    }
+
+    fn tokenize_for_test(key: &speedwave_pii_engine::EngineKey, plain: &str) -> String {
+        use speedwave_pii_engine::{compile_policy_v3, default_policy_json, scan_text};
+        let policy = compile_policy_v3(&default_policy_json()).expect("policy compiles");
+        scan_text(&policy, key, plain).expect("scan succeeds").text
+    }
+
+    fn key_policy(key: speedwave_pii_engine::EngineKey) -> DisplayPolicy {
+        DisplayPolicy::new(Some(key), Vec::new())
+    }
+
+    #[test]
+    fn detokenize_chunk_without_key_is_a_noop() {
+        let tokenized = "[EMAIL:TOKEN_whatever]";
+        let chunk = StreamChunk::Text {
+            content: tokenized.to_string(),
+        };
+        match detokenize_chunk(chunk, &DisplayPolicy::default()) {
+            StreamChunk::Text { content } => assert_eq!(content, tokenized),
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_text_content_with_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "email me at jan@example.com");
+        assert!(tokenized.contains("TOKEN_"), "fixture must tokenize");
+
+        let chunk = StreamChunk::Text { content: tokenized };
+        match detokenize_chunk(chunk, &key_policy(key)) {
+            StreamChunk::Text { content } => {
+                assert_eq!(content, "email me at jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_thinking_and_tool_result_and_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "secret@example.com");
+
+        let policy = key_policy(key);
+
+        match detokenize_chunk(
+            StreamChunk::Thinking {
+                content: tokenized.clone(),
+            },
+            &policy,
+        ) {
+            StreamChunk::Thinking { content } => assert_eq!(content, "secret@example.com"),
+            other => panic!("variant changed: {other:?}"),
+        }
+
+        match detokenize_chunk(
+            StreamChunk::ToolResult {
+                tool_id: "t1".into(),
+                content: tokenized.clone(),
+                is_error: false,
+            },
+            &policy,
+        ) {
+            StreamChunk::ToolResult { content, .. } => {
+                assert_eq!(content, "secret@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+
+        match detokenize_chunk(
+            StreamChunk::Error {
+                content: tokenized.clone(),
+            },
+            &policy,
+        ) {
+            StreamChunk::Error { content } => assert_eq!(content, "secret@example.com"),
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_result_text_and_queue_drained() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "reach me at jan@example.com");
+
+        let policy = key_policy(key);
+
+        let result_chunk = StreamChunk::Result {
+            session_id: "s".into(),
+            total_cost: None,
+            usage: None,
+            result_text: Some(tokenized.clone()),
+            context_window_size: None,
+            assistant_uuid: None,
+            turn_usage: None,
+            turn_cost: None,
+            model: None,
+            context_usage: None,
+        };
+        match detokenize_chunk(result_chunk, &policy) {
+            StreamChunk::Result { result_text, .. } => {
+                assert_eq!(result_text.as_deref(), Some("reach me at jan@example.com"));
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+
+        let queue_chunk = StreamChunk::QueueDrained {
+            session_id: "s".into(),
+            text: tokenized,
+        };
+        match detokenize_chunk(queue_chunk, &policy) {
+            StreamChunk::QueueDrained { text, .. } => {
+                assert_eq!(text, "reach me at jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_resolves_ask_user_question_fields() {
+        use speedwave_runtime::stream::{AskUserOption, AskUserQuestionItem};
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let tokenized = tokenize_for_test(&key, "jan@example.com");
+
+        let chunk = StreamChunk::AskUserQuestion {
+            tool_id: "t1".into(),
+            questions: vec![AskUserQuestionItem {
+                question: format!("confirm {tokenized}?"),
+                header: tokenized.clone(),
+                multi_select: false,
+                options: vec![AskUserOption {
+                    label: tokenized.clone(),
+                    value: tokenized.clone(),
+                }],
+            }],
+            current_index: 0,
+        };
+        match detokenize_chunk(chunk, &key_policy(key)) {
+            StreamChunk::AskUserQuestion { questions, .. } => {
+                assert_eq!(questions[0].question, "confirm jan@example.com?");
+                assert_eq!(questions[0].header, "jan@example.com");
+                assert_eq!(questions[0].options[0].label, "jan@example.com");
+                assert_eq!(questions[0].options[0].value, "jan@example.com");
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_wrong_project_key_falls_back_to_tokenized_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_a = detok_test_key(tmp.path(), "proj-a");
+        let key_b = detok_test_key(tmp.path(), "proj-b");
+        let tokenized = tokenize_for_test(&key_a, "secret@example.com");
+
+        let chunk = StreamChunk::Text {
+            content: tokenized.clone(),
+        };
+        match detokenize_chunk(chunk, &key_policy(key_b)) {
+            StreamChunk::Text { content } => assert_eq!(content, tokenized),
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_leaves_tool_input_delta_and_tool_start_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = detok_test_key(tmp.path(), "proj");
+        let raw = r#"{"path":"/x","token":"abc"#;
+        let chunk = StreamChunk::ToolInputDelta {
+            tool_id: "t1".into(),
+            partial_json: raw.into(),
+        };
+        match detokenize_chunk(chunk, &key_policy(key)) {
+            StreamChunk::ToolInputDelta { partial_json, .. } => {
+                assert_eq!(partial_json, raw);
+            }
+            other => panic!("variant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detokenize_chunk_unmasks_keyword_aliases_in_tool_results() {
+        let policy = DisplayPolicy::new(
+            None,
+            vec![speedwave_pii_engine::CompiledKeyword {
+                match_text: "coca-cola".to_string(),
+                alias: "Brandex".to_string(),
+                case_sensitive: false,
+            }],
+        );
+        let chunk = StreamChunk::ToolResult {
+            tool_id: "t1".into(),
+            content: "brandex shipped".into(),
+            is_error: false,
+        };
+        match detokenize_chunk(chunk, &policy) {
+            StreamChunk::ToolResult { content, .. } => assert_eq!(content, "coca-cola shipped"),
             other => panic!("variant changed: {other:?}"),
         }
     }
@@ -5331,6 +5642,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5357,6 +5669,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5383,6 +5696,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5408,6 +5722,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5444,6 +5759,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5474,6 +5790,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,

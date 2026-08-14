@@ -1,6 +1,7 @@
 //! Speedwave runtime — SSOT for all Lima/WSL2/nerdctl container orchestration, compose rendering,
 //! resource budgeting, and host-side process management. The CLI and Desktop depend on this crate.
 
+pub mod audit;
 pub mod binary;
 pub mod build;
 pub mod bundle;
@@ -29,6 +30,8 @@ pub mod oauth_persist;
 pub mod oauth_process;
 pub mod oauth_state_migration;
 pub mod os_prereqs;
+pub mod pii_key;
+pub mod pii_policy;
 pub mod pkce;
 pub mod plugin;
 pub mod project;

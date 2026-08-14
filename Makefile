@@ -49,7 +49,9 @@ LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 # user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
 # applies when it is unset). A data dir whose basename is exactly `.speedwave` is
 # production — matched both with a path separator (`*/.speedwave`) and bare
-# (`.speedwave`). Portable: pure shell `case`, no installed tool.
+# (`.speedwave`). An empty or whitespace-only value is ALSO production: it
+# resolves to ~/.speedwave in consts::data_dir_from. Portable: pure shell
+# `case`/`test`, no installed tool.
 guard-not-prod-data-dir:
 	@case "$(SPEEDWAVE_DATA_DIR)" in \
 	  */.speedwave | .speedwave) \
@@ -57,6 +59,11 @@ guard-not-prod-data-dir:
 	    echo "   Use ~/.speedwave-dev (the default) or another non-production dir." >&2; \
 	    exit 1;; \
 	esac
+	@if [ -z "$$(printf '%s' '$(SPEEDWAVE_DATA_DIR)' | tr -d '[:space:]')" ]; then \
+	    echo "❌ Refusing: SPEEDWAVE_DATA_DIR is empty/whitespace, which resolves to the production data dir." >&2; \
+	    echo "   Use ~/.speedwave-dev (the default) or another non-production dir." >&2; \
+	    exit 1; \
+	fi
 
 .PHONY: all build test check clean dev install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
@@ -146,6 +153,21 @@ setup-dev:
 	else \
 		echo "  ⬚  bats not found (needed for: make test-e2e)"; \
 		echo "     Install: brew install bats-core"; \
+	fi; \
+	\
+	echo ""; \
+	echo "── PII engine (WASM) ──"; \
+	if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then \
+		echo "  ✅ rustup target wasm32-unknown-unknown"; \
+	else \
+		echo "  📦 wasm32-unknown-unknown target not found, installing..."; \
+		rustup target add wasm32-unknown-unknown && echo "  ✅ wasm32-unknown-unknown installed" || { echo "  ❌ target install failed"; FAIL=1; }; \
+	fi; \
+	if command -v wasm-pack >/dev/null 2>&1; then \
+		echo "  ✅ wasm-pack $$(wasm-pack --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo 'installed')"; \
+	else \
+		echo "  📦 wasm-pack not found, installing..."; \
+		npm install -g wasm-pack && echo "  ✅ wasm-pack installed" || { echo "  ❌ wasm-pack install failed"; FAIL=1; }; \
 	fi; \
 	\
 	echo ""; \
@@ -394,7 +416,7 @@ endif
 	@echo "✅ Build phase complete"
 
 # Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
-test-rust-run:
+test-rust-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
@@ -414,7 +436,7 @@ test-desktop-build-run:
 	  _tests/desktop/bundle-native-assets.bats
 	@echo "✅ Desktop build tests passed"
 
-test-desktop-run:
+test-desktop-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
@@ -435,11 +457,11 @@ test-desktop-group-run:
 test-run-lanes: test-rust-run test-angular-run test-entrypoint \
                 test-desktop-config test-ci test-desktop-group-run test-proxy
 
-test-proxy:
+test-proxy: guard-not-prod-data-dir
 	cd containers/proxy && cargo test --locked
 	@echo "✅ proxy tests passed"
 
-test-rust:
+test-rust: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
@@ -447,7 +469,7 @@ test-rust:
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
-test-transcription:
+test-transcription: guard-not-prod-data-dir
 	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
 	@# Only the `transcription` module is gated behind this feature (see
 	@# `src/lib.rs` — `#[cfg(feature = "audio-transcription")] pub mod transcription;`).
@@ -464,19 +486,19 @@ test-transcription:
 # `bundle-build-context.sh` stages them into desktop/src-tauri/mcp-os/ with the
 # @speedwave/mcp-shared tree the worker resolves at runtime; then we run only
 # that one test under the feature.
-test-mcp-os-bundle: build-mcp
+test-mcp-os-bundle: build-mcp guard-not-prod-data-dir
 	@echo "🧪 Staging the real mcp-os worker bundle..."
 	@bash scripts/bundle-build-context.sh
 	@echo "🧪 Running the mcp-os upgrade-path test against the bundled worker..."
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features mcp-os-bundle-e2e upgrade_path_with_real_bundled_mcp_os)
 	@echo "✅ mcp-os bundle upgrade-path test passed"
 
-test-cli:
+test-cli: guard-not-prod-data-dir
 	@echo "🧪 Testing CLI..."
-	@cargo test -p speedwave-cli
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-cli)
 	@echo "✅ CLI tests passed"
 
-test-desktop: build-cli build-angular build-mcp build-os-cli generate-installer-nsh
+test-desktop: build-cli build-angular build-mcp build-os-cli generate-installer-nsh guard-not-prod-data-dir
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
 	@if [ ! -s desktop/src-tauri/nodejs/bin/node ] && [ ! -s desktop/src-tauri/nodejs/node.exe ]; then "$(MAKE)" download-nodejs; fi
@@ -749,7 +771,11 @@ check-proxy-clippy:
 check-mcp:
 	@echo "  Building mcp-servers/shared (required by other workspaces)..."
 	@cd mcp-servers/shared && $(NPX) tsc
-	@for ws in shared hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
+	@echo "  Building PII engine wasm artifact (policies/src/engine.ts imports it)..."
+	@cd mcp-servers/policies && $(NPM) run build:wasm
+	@echo "  Building mcp-servers/policies (required by hub)..."
+	@cd mcp-servers/policies && $(NPX) tsc
+	@for ws in shared policies hub slack sharepoint redmine gitlab github atlassian office os oauth; do \
 		echo "  tsc --noEmit mcp-servers/$$ws"; \
 		(cd mcp-servers/$$ws && $(NPX) tsc --noEmit) || exit 1; \
 	done
@@ -978,9 +1004,9 @@ endif
 
 # ── Quick status ─────────────────────────────────────────────────────────────
 
-status:
+status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@cargo test -p speedwave-runtime -p speedwave-cli 2>&1 | grep "test result" || true
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
 	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="

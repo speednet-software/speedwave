@@ -241,7 +241,7 @@ pub(crate) fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
 /// Best-effort fsync of a directory so a contained rename is itself durable. Unix-only: opening a
 /// directory as a file and fsync-ing it commits the entry; Windows has no directory-fsync concept.
 #[cfg(unix)]
-fn fsync_parent_dir(dir: &Path) {
+pub(crate) fn fsync_parent_dir(dir: &Path) {
     if let Ok(handle) = std::fs::File::open(dir) {
         // Best-effort: a dir-fsync failure is non-fatal.
         let _ = rustix::fs::fsync(&handle);
@@ -249,7 +249,7 @@ fn fsync_parent_dir(dir: &Path) {
 }
 
 #[cfg(not(unix))]
-fn fsync_parent_dir(_dir: &Path) {}
+pub(crate) fn fsync_parent_dir(_dir: &Path) {}
 
 /// Writes `content` to `path` via write-then-atomic-rename, owner-only perms; destination never
 /// appears world-readable. Windows DACL failure returns `Err` (ADR-009); pre-existing dirs removed.

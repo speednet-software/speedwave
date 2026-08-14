@@ -36,8 +36,15 @@ run_guard() {
     [ "$status" -eq 0 ]
 }
 
-@test "guard allows an empty SPEEDWAVE_DATA_DIR" {
-    # Empty value does not match the `*/.speedwave` production pattern.
+@test "guard refuses an empty SPEEDWAVE_DATA_DIR" {
+    # Empty resolves to the production ~/.speedwave in consts::data_dir_from.
     run run_guard ""
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"production data dir"* ]]
+}
+
+@test "guard refuses a whitespace-only SPEEDWAVE_DATA_DIR" {
+    run run_guard "   "
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"production data dir"* ]]
 }

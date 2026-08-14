@@ -59,6 +59,7 @@ fn desktop_llm_save_smoke_does_not_touch_prod_data_dir() {
     // Calling it first in this fresh process proves it respects the env var
     // rather than a `Path`-parameterized twin the leak could route around.
     let cfg = config::SpeedwaveUserConfig::default();
+    // SSOT-allow: deliberate bare call — the point of this test is proving it respects SPEEDWAVE_DATA_DIR in a fresh process.
     config::save_user_config(&cfg).expect("save_user_config");
 
     let saved_path = tmp_data_dir.join("config.json");

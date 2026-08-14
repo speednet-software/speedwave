@@ -95,7 +95,7 @@ struct SpOAuthState<'a> {
     expires_in: u64,
 }
 
-/// `data_dir`-parameterised variant; production reaches this via `save_tokens`.
+/// `data_dir`-parameterised variant; production reaches this via `save_tokens_in`.
 fn save_oauth_state_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -178,21 +178,6 @@ fn classify_sharepoint_response(status: u16, bytes: &[u8]) -> Result<(), oauth_f
     )))
 }
 
-fn save_tokens(
-    project: &str,
-    client_id: &str,
-    tenant_id: &str,
-    tokens: &MsTokenResponse,
-) -> Result<(), String> {
-    save_tokens_in(
-        speedwave_runtime::consts::data_dir(),
-        project,
-        client_id,
-        tenant_id,
-        tokens,
-    )
-}
-
 /// `data_dir`-parameterised variant (see `save_oauth_state_in`).
 fn save_tokens_in(
     data_dir: &std::path::Path,
@@ -227,6 +212,7 @@ struct SharepointProvider {
     tenant_id: String,
     device_code: String,
     token_url: String,
+    data_dir: std::path::PathBuf,
 }
 
 impl DeviceCodeProvider for SharepointProvider {
@@ -253,9 +239,13 @@ impl DeviceCodeProvider for SharepointProvider {
                     Ok(t) => t,
                     Err(e) => return emit_error(format!("Failed to parse token response: {e}")),
                 };
-                if let Err(e) =
-                    save_tokens(&self.project, &self.client_id, &self.tenant_id, &tokens)
-                {
+                if let Err(e) = save_tokens_in(
+                    &self.data_dir,
+                    &self.project,
+                    &self.client_id,
+                    &self.tenant_id,
+                    &tokens,
+                ) {
                     return emit_error(format!("Failed to save tokens: {e}"));
                 }
                 PollStep::Emit {
@@ -353,6 +343,7 @@ pub async fn start_sharepoint_oauth(
         tenant_id: tenant_id.clone(),
         device_code: dc_resp.device_code.clone(),
         token_url,
+        data_dir: speedwave_runtime::consts::data_dir().to_path_buf(),
     };
     tokio::spawn(oauth_flow::run_device_code_poll(
         oauth_flow::DeviceCodePoll {
@@ -379,7 +370,6 @@ pub fn cancel_sharepoint_oauth() {
 #[expect(clippy::unwrap_used, reason = "unwrap is fine in test assertions")]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
     // -- Tenant ID validation --
 
@@ -817,12 +807,17 @@ mod tests {
     // -- SharepointProvider::handle_token_response classification --
 
     fn provider() -> SharepointProvider {
+        provider_in(std::env::temp_dir())
+    }
+
+    fn provider_in(data_dir: std::path::PathBuf) -> SharepointProvider {
         SharepointProvider {
             project: "test-project".to_string(),
             client_id: "11111111-1111-1111-1111-111111111111".to_string(),
             tenant_id: "common".to_string(),
             device_code: "dc".to_string(),
             token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
+            data_dir,
         }
     }
 
@@ -899,25 +894,17 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn provider_success_saves_tokens_and_emits_success() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
 
         let body = br#"{"access_token":"at-secret","refresh_token":"rt-secret","token_type":"Bearer","expires_in":3600}"#;
-        match provider().handle_token_response(ok_status(), body) {
+        match provider_in(tmp.path().to_path_buf()).handle_token_response(ok_status(), body) {
             PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
             PollStep::KeepPolling { .. } => panic!("success must terminate"),
         }
-        let at_path = speedwave_runtime::plugin::token_dir("test-project", "sharepoint")
-            .unwrap()
-            .join("access_token");
+        let at_path =
+            speedwave_runtime::plugin::token_dir_in(tmp.path(), "test-project", "sharepoint")
+                .join("access_token");
         assert_eq!(std::fs::read_to_string(&at_path).unwrap(), "at-secret");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 }

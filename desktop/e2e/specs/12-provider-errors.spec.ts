@@ -7,7 +7,7 @@
  *   - a bad api key / unreachable base_url surfaces settings-llm-discovery-error;
  *   - an offline server times out into the same failure surface;
  *   - a routable base_url alone makes the card saveable (model auto-defaults
- *     at save, ADR-082 §8 — Settings has no model control).
+ *     at save, ADR-085 §8 — Settings has no model control).
  *
  * Runs after spec 11 and before spec 07 (factory reset, always last).
  * All assertions use data-testid attributes, never UX-volatile text.
@@ -43,7 +43,7 @@ describe('Provider Error Paths', function () {
     await (await $('[data-testid="settings-llm-refresh"]')).click();
 
     await $('[data-testid="settings-llm-discovery-error"]').waitForExist({ timeout: 30_000 });
-    // A failed discovery no longer blocks Save (ADR-082 §8): validation happens
+    // A failed discovery no longer blocks Save (ADR-085 §8): validation happens
     // at save time, where the backend auto-default probe fails with a clear error.
     expect(await $('[data-testid="settings-llm-save"]').isEnabled()).toBe(true);
   });
@@ -70,7 +70,7 @@ describe('Provider Error Paths', function () {
       { timeout: 40_000, timeoutMsg: 'discovery never settled' }
     );
     expect(await $('[data-testid="settings-llm-discovery-error"]').isExisting()).toBe(false);
-    // Settings carries no model selector (ADR-082): the base_url + key form is
+    // Settings carries no model selector (ADR-085): the base_url + key form is
     // saveable as-is; the model auto-defaults at save via the discovery probe.
     await browser.waitUntil(async () => await $('[data-testid="settings-llm-save"]').isEnabled(), {
       timeout: 15_000,

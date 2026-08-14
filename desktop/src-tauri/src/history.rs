@@ -567,7 +567,7 @@ fn list_conversations_impl(
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
                 // Tag-only match is safe: SYNTHETIC_MODEL is Claude Code's own wire
                 // value, emitted only as the confirmation reply to a control command
-                // (ADR-082) — never reused for other assistant turns.
+                // (ADR-085) — never reused for other assistant turns.
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
                 if is_control_chip_user || is_synthetic_chip_reply {
@@ -1988,7 +1988,7 @@ mod tests {
         // Pins the SYNTHETIC_MODEL tag-match invariant (see comment at the
         // `is_synthetic_chip_reply` site): Claude Code only ever emits
         // `model == "<synthetic>"` as the immediate confirmation reply to a
-        // `/model` or `/effort` control-chip user line (ADR-082), so a bare
+        // `/model` or `/effort` control-chip user line (ADR-085), so a bare
         // tag match is safe without an adjacency check. Two chip exchanges
         // back-to-back — both immediately preceded by their own control
         // line — are excluded; the surrounding real turns are counted.
@@ -2361,6 +2361,56 @@ mod tests {
         assert_eq!(result.messages[0].content, "question");
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].content, "answer");
+    }
+
+    /// INVARIANT: detokenization happens only on the copy returned to the webview;
+    /// the source JSONL on disk stays tokenized and unchanged.
+    #[test]
+    fn get_conversation_detokenizes_returned_copy_but_leaves_source_file_tokenized() {
+        use speedwave_pii_engine::{compile_policy_v3, default_policy_json, scan_text, EngineKey};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        speedwave_runtime::pii_key::ensure_project_key_in(tmp.path(), "proj").unwrap();
+        let key_bytes =
+            speedwave_runtime::pii_key::read_project_key_in(tmp.path(), "proj").unwrap();
+        let key = EngineKey::from_bytes(key_bytes);
+        let policy = compile_policy_v3(&default_policy_json()).unwrap();
+        let tokenized = scan_text(&policy, &key, "contact jan@example.com")
+            .unwrap()
+            .text;
+        assert!(
+            tokenized.contains("TOKEN_"),
+            "fixture must actually tokenize"
+        );
+
+        let line =
+            format!(r#"{{"type":"user","message":{{"role":"user","content":"{tokenized}"}}}}"#);
+        write_session(&dir, id, &[&line]);
+
+        // history.rs's own read path: must yield the tokenized source, never a
+        // detokenized value — this is also what resume/compute_resume_snapshot reads.
+        let mut transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert!(
+            transcript.messages[0].content.contains("TOKEN_"),
+            "history.rs must read the tokenized source as-is"
+        );
+
+        // Detokenization happens only on this owned, in-memory copy.
+        crate::pii_display::detokenize_transcript(
+            &mut transcript,
+            &crate::pii_display::DisplayPolicy::new(Some(key), Vec::new()),
+        );
+        assert_eq!(transcript.messages[0].content, "contact jan@example.com");
+
+        // The source file on disk must remain byte-for-byte tokenized.
+        let raw = fs::read_to_string(dir.join(format!("{id}.jsonl"))).unwrap();
+        assert!(
+            raw.contains("TOKEN_"),
+            "source JSONL must never be rewritten with a detokenized value"
+        );
     }
 
     #[test]

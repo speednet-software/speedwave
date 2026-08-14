@@ -37,7 +37,7 @@ export async function openSettings(): Promise<void> {
 }
 
 /** Selects OpenRouter, enters the key, validates it via a catalog discovery, saves.
- *  Model choice moved to the composer (ADR-082); a fresh save auto-defaults it. */
+ *  Model choice moved to the composer (ADR-085); a fresh save auto-defaults it. */
 export async function configureOpenRouter(apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
@@ -71,7 +71,7 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
 }
 
 /** Selects the local provider, enters base_url + key, validates via discovery, saves.
- *  Model choice moved to the composer (ADR-082); a fresh save auto-defaults it. */
+ *  Model choice moved to the composer (ADR-085); a fresh save auto-defaults it. */
 export async function configureLocalProvider(baseUrl: string, apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-provider-local"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
@@ -99,7 +99,7 @@ export async function configureLocalProvider(baseUrl: string, apiKey: string): P
 }
 
 /** Picks `catalogId` in the composer model selector — the single model control
- *  (ADR-082); non-anthropic picks write through to the project config. */
+ *  (ADR-085); non-anthropic picks write through to the project config. */
 export async function pickComposerModel(catalogId: string): Promise<void> {
   // A just-flushed control turn briefly streams, and the badge click is a
   // deliberate no-op then (openCombobox streaming guard) — retry until open.

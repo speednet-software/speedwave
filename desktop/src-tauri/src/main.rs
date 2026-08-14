@@ -39,6 +39,7 @@ mod oauth_login_cmd;
 mod oauth_loopback;
 mod oauth_providers;
 mod paste_cmd;
+mod pii_display;
 mod plugin_oauth_cmd;
 mod slack_oauth_cmd;
 // `path_util` is consumed only by the Windows-only `oauth_login_cmd::open_terminal_with_command`.
@@ -985,6 +986,17 @@ fn main() {
                 show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
             }
 
+            // Fail-closed on an invalid (or MDM-broken) PII policy — same
+            // detection point and dialog as telemetry above.
+            if let Err(e) = speedwave_runtime::pii_policy::check_pii_policy_at_boot() {
+                let body = format!(
+                    "Speedwave could not apply the organization PII policy.\n\n{e}\n\n\
+                     Contact your administrator to correct the managed configuration."
+                );
+                log::error!("PII policy check failed: {}", e);
+                show_audit_failure_dialog_and_exit(app.handle(), "Organization policy error", body);
+            }
+
             // Rotated-log cleanup is owned by `RotationStrategy::KeepSome(10)` (pruned on rotation).
 
             if setup_started {
@@ -1299,6 +1311,10 @@ fn main() {
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,
+            containers_cmd::get_security_policy,
+            containers_cmd::list_security_policy_templates,
+            containers_cmd::list_pii_rules,
+            containers_cmd::update_security_policy,
             llm_cmd::discover_llm_models,
             llm_cmd::get_llm_usage,
             llm_cmd::get_usage_for_response,

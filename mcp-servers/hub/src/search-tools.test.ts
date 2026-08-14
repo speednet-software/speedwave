@@ -590,6 +590,8 @@ describe('searchTools ENABLED_SERVICES filtering', () => {
   beforeEach(() => {
     _resetRegistryForTesting();
     populateRegistryWithMockTools();
+    // Ambient DISABLED_OS_SERVICES (set inside Speedwave containers) would filter the mock os tools
+    delete process.env.DISABLED_OS_SERVICES;
     resetServiceCaches();
   });
 
@@ -1299,5 +1301,63 @@ describe('renderDescriptionWithIdentity (via searchTools with_descriptions/full_
 
     const desc = result.matches[0].description ?? '';
     expect(desc).not.toContain('No self-reference helper is configured');
+  });
+});
+
+describe('searchTools sandboxGlobal', () => {
+  const savedEnabled = process.env.ENABLED_SERVICES;
+
+  beforeEach(() => {
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    mutableRegistry['my-plugin'] = {
+      searchItems: buildMockToolMetadata('my-plugin', 'searchItems', { deferLoading: false }),
+    };
+    _setServiceNamesForTesting(['redmine', 'my-plugin']);
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'redmine,my-plugin';
+  });
+
+  afterEach(() => {
+    if (savedEnabled === undefined) delete process.env.ENABLED_SERVICES;
+    else process.env.ENABLED_SERVICES = savedEnabled;
+    _resetRegistryForTesting();
+    populateRegistryWithMockTools();
+    resetServiceCaches();
+  });
+
+  it('surfaces the camelCase global for a dashed service', async () => {
+    const result = await searchTools({ query: 'searchItems', detailLevel: 'names_only' });
+    const match = result.matches.find((m) => m.service === 'my-plugin');
+
+    expect(match).toBeDefined();
+    expect(match?.sandboxGlobal).toBe('myPlugin');
+  });
+
+  it('omits sandboxGlobal when the global equals the service name', async () => {
+    const result = await searchTools({ query: 'getCurrentUser', detailLevel: 'names_only' });
+    const match = result.matches.find((m) => m.service === 'redmine');
+
+    expect(match).toBeDefined();
+    expect(match?.sandboxGlobal).toBeUndefined();
+  });
+
+  it('hides tools of a service the sandbox refuses to expose', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+    // `class` camelCases to a reserved word, so execute_code cannot expose it — advertising
+    // its tools would hand the model a tool it can never call.
+    mutableRegistry['class'] = {
+      searchItems: buildMockToolMetadata('class', 'searchItems', { deferLoading: false }),
+    };
+    _setServiceNamesForTesting(['redmine', 'class']);
+    resetServiceCaches();
+    process.env.ENABLED_SERVICES = 'redmine,class';
+
+    const result = await searchTools({ query: 'searchItems', detailLevel: 'names_only' });
+
+    expect(result.matches.some((m) => m.service === 'class')).toBe(false);
+    errSpy.mockRestore();
   });
 });

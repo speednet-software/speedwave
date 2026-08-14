@@ -32,11 +32,14 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
-        # Keep the action inputs 1:1 with the /install-github-app template: adding
-        # track_progress forces tag mode and the slash command is never executed.
-        uses: anthropics/claude-code-action@1298632ce7736903d02a1435002705aa2a594a6c # v1.0.175
+        # Do not add track_progress: it forces tag mode and the plugin slash command is never executed.
+        uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1.0.190
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # Without --comment the plugin prints the review to the hidden terminal and posts nothing to the PR.
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          # The action registers the inline-comment MCP server only if its tool is allow-listed here.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"

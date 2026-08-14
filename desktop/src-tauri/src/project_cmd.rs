@@ -299,6 +299,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -306,6 +307,7 @@ mod tests {
                     claude: None,
                     integrations: None,
                     plugin_settings: None,
+                    policy: None,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -484,6 +486,7 @@ mod tests {
                 claude: None,
                 integrations: None,
                 plugin_settings: None,
+                policy: None,
             }],
             active_project: None,
             selected_ide: None,

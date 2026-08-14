@@ -449,7 +449,13 @@ pub fn parse_version(version_output: &str) -> Option<(u32, u32, u32)> {
 /// Path to a project's compose file: `~/.speedwave/compose/<project>/compose.yml`.
 /// Delegates to the validating compose-path SSOT — invalid names are an error.
 pub fn compose_file_path(project: &str) -> anyhow::Result<String> {
-    let path = crate::compose::compose_output_path_in(consts::data_dir(), project)?;
+    compose_file_path_in(consts::data_dir(), project)
+}
+
+/// `compose_file_path` resolved under an explicit data directory — the env-free
+/// core used by tests to avoid resolving the production `consts::data_dir()`.
+pub fn compose_file_path_in(data_dir: &std::path::Path, project: &str) -> anyhow::Result<String> {
+    let path = crate::compose::compose_output_path_in(data_dir, project)?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -482,7 +488,15 @@ fn project_has_compose_file_in(data_dir: &std::path::Path, project: &str) -> boo
 }
 
 pub(crate) fn configured_project_container_names(project: &str) -> Vec<String> {
-    let compose_file = match compose_file_path(project) {
+    configured_project_container_names_in(consts::data_dir(), project)
+}
+
+/// Env-free core of `configured_project_container_names` — tests inject a tempdir.
+pub(crate) fn configured_project_container_names_in(
+    data_dir: &std::path::Path,
+    project: &str,
+) -> Vec<String> {
+    let compose_file = match compose_file_path_in(data_dir, project) {
         Ok(path) => path,
         Err(e) => {
             log::debug!("compose path unavailable for project {project}: {e}");
@@ -1052,6 +1066,28 @@ pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
 ) where
     RmFn: Fn(&[String]) -> anyhow::Result<()>,
 {
+    force_remove_project_containers_with_run_fn_in(
+        consts::data_dir(),
+        runner,
+        cmd,
+        project,
+        nerdctl_prefix,
+        rm,
+    );
+}
+
+/// Env-free core of `force_remove_project_containers_with_run_fn` — the compose
+/// read behind `configured_project_container_names` resolves under `data_dir`.
+pub(crate) fn force_remove_project_containers_with_run_fn_in<RmFn>(
+    data_dir: &std::path::Path,
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+    rm: RmFn,
+) where
+    RmFn: Fn(&[String]) -> anyhow::Result<()>,
+{
     let filter = format!("label=com.docker.compose.project={project}");
     let mut ps_args: Vec<&str> = nerdctl_prefix.to_vec();
     ps_args.extend_from_slice(&["ps", "-a", "--filter", &filter, "-q"]);
@@ -1063,7 +1099,7 @@ pub(crate) fn force_remove_project_containers_with_run_fn<RmFn>(
             Vec::new()
         }
     };
-    let name_targets = configured_project_container_names(project);
+    let name_targets = configured_project_container_names_in(data_dir, project);
 
     if id_targets.is_empty() && name_targets.is_empty() {
         return;
@@ -1101,9 +1137,26 @@ pub(crate) fn force_remove_project_containers(
     project: &str,
     nerdctl_prefix: &[&str],
 ) {
-    force_remove_project_containers_with_run_fn(runner, cmd, project, nerdctl_prefix, |targets| {
-        run_rm_force(runner, cmd, nerdctl_prefix, targets, false)
-    });
+    force_remove_project_containers_in(consts::data_dir(), runner, cmd, project, nerdctl_prefix);
+}
+
+/// Env-free core of `force_remove_project_containers` — tests inject a tempdir.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn force_remove_project_containers_in(
+    data_dir: &std::path::Path,
+    runner: &dyn CommandRunner,
+    cmd: &str,
+    project: &str,
+    nerdctl_prefix: &[&str],
+) {
+    force_remove_project_containers_with_run_fn_in(
+        data_dir,
+        runner,
+        cmd,
+        project,
+        nerdctl_prefix,
+        |targets| run_rm_force(runner, cmd, nerdctl_prefix, targets, false),
+    );
 }
 
 /// Shared `force_remove_project_networks` (Lima wraps with retry, WSL/tests call
@@ -2075,30 +2128,10 @@ services:
             }
         }
 
-        // Use a unique project name to avoid collisions with parallel tests.
-        let project = format!(
-            "cleanup-names-test-{}",
-            std::time::SystemTime::UNIX_EPOCH
-                .elapsed()
-                .unwrap()
-                .subsec_nanos()
-        );
-
-        // Write and read must agree on the same OnceLock `data_dir()`; resolve it
-        // deliberately (RAII guard below cleans the uniquely-named subdir).
-
-        // SSOT-allow: production read path is keyed on the OnceLock data_dir().
-        let compose_dir = crate::consts::data_dir().join("compose").join(&project);
+        let project = "cleanup-names-test".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_dir = tmp.path().join("compose").join(&project);
         std::fs::create_dir_all(&compose_dir).unwrap();
-
-        // RAII guard: clean up the compose dir even on panic
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(compose_dir.clone());
 
         std::fs::write(
             compose_dir.join("compose.yml"),
@@ -2136,7 +2169,7 @@ services:
             ]),
         };
 
-        force_remove_project_containers(&runner, "nerdctl", &project, &[]);
+        force_remove_project_containers_in(tmp.path(), &runner, "nerdctl", &project, &[]);
 
         assert_eq!(
             commands.lock().unwrap().as_slice(),
@@ -2168,23 +2201,10 @@ services:
     fn force_remove_containers_run_fn_receives_id_batch_then_each_name() {
         // The shared algorithm must hand the rm closure: first the id batch
         // (all ids at once), then one single-element batch per configured name.
-        let project = format!(
-            "run-fn-batches-{}",
-            std::time::SystemTime::UNIX_EPOCH
-                .elapsed()
-                .unwrap()
-                .subsec_nanos()
-        );
-        // SSOT-allow: production read path is keyed on the OnceLock data_dir().
-        let compose_dir = crate::consts::data_dir().join("compose").join(&project);
+        let project = "run-fn-batches".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_dir = tmp.path().join("compose").join(&project);
         std::fs::create_dir_all(&compose_dir).unwrap();
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(compose_dir.clone());
         std::fs::write(
             compose_dir.join("compose.yml"),
             "services:\n  claude:\n    container_name: speedwave_tmp_claude\n",
@@ -2197,10 +2217,17 @@ services:
 
         let batches: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches);
-        force_remove_project_containers_with_run_fn(&runner, "nerdctl", &project, &[], |targets| {
-            batches_clone.lock().unwrap().push(targets.to_vec());
-            Ok(())
-        });
+        force_remove_project_containers_with_run_fn_in(
+            tmp.path(),
+            &runner,
+            "nerdctl",
+            &project,
+            &[],
+            |targets| {
+                batches_clone.lock().unwrap().push(targets.to_vec());
+                Ok(())
+            },
+        );
 
         assert_eq!(
             batches.lock().unwrap().as_slice(),

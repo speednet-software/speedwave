@@ -97,6 +97,7 @@ fn map_github_error(code: &str) -> Option<&'static str> {
 struct GithubProvider {
     project: String,
     device_code: String,
+    data_dir: std::path::PathBuf,
 }
 
 impl DeviceCodeProvider for GithubProvider {
@@ -126,10 +127,11 @@ impl DeviceCodeProvider for GithubProvider {
                     Ok(t) => t,
                     Err(e) => return emit_error(format!("Failed to parse token response: {e}")),
                 };
-                let svc_dir = match speedwave_runtime::plugin::token_dir(&self.project, "github") {
-                    Ok(d) => d,
-                    Err(e) => return emit_error(format!("Failed to resolve token dir: {e}")),
-                };
+                let svc_dir = speedwave_runtime::plugin::token_dir_in(
+                    &self.data_dir,
+                    &self.project,
+                    "github",
+                );
                 if let Err(e) = save_credential_file(&svc_dir, "token", &tokens.access_token) {
                     return emit_error(format!("Failed to save token: {e}"));
                 }
@@ -213,6 +215,7 @@ pub async fn start_github_oauth(
     let provider = GithubProvider {
         project: project.clone(),
         device_code: dc_resp.device_code.clone(),
+        data_dir: speedwave_runtime::consts::data_dir().to_path_buf(),
     };
     tokio::spawn(oauth_flow::run_device_code_poll(
         oauth_flow::DeviceCodePoll {
@@ -354,9 +357,14 @@ mod tests {
     // -- GithubProvider::handle_token_response classification --
 
     fn provider() -> GithubProvider {
+        provider_in(std::env::temp_dir())
+    }
+
+    fn provider_in(data_dir: std::path::PathBuf) -> GithubProvider {
         GithubProvider {
             project: "p".to_string(),
             device_code: "dc".to_string(),
+            data_dir,
         }
     }
 
@@ -416,27 +424,18 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn provider_success_saves_token_and_emits_success() {
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("SPEEDWAVE_DATA_DIR").ok();
-        std::env::set_var("SPEEDWAVE_DATA_DIR", tmp.path());
 
         let body = br#"{"access_token":"gho_secret","token_type":"bearer"}"#;
-        let step = provider().handle_token_response(ok_status(), body);
+        let step = provider_in(tmp.path().to_path_buf()).handle_token_response(ok_status(), body);
         match step {
             PollStep::Emit { status, .. } => assert_eq!(status, ProgressStatus::Success),
             PollStep::KeepPolling { .. } => panic!("success must terminate"),
         }
-        let token_path = speedwave_runtime::plugin::token_dir("p", "github")
-            .unwrap()
-            .join("token");
+        let token_path =
+            speedwave_runtime::plugin::token_dir_in(tmp.path(), "p", "github").join("token");
         assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "gho_secret");
-
-        match prev {
-            Some(v) => std::env::set_var("SPEEDWAVE_DATA_DIR", v),
-            None => std::env::remove_var("SPEEDWAVE_DATA_DIR"),
-        }
     }
 
     // -- classify_github_response: poll-loop mechanics --

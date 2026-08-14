@@ -1,10 +1,12 @@
 # Rust / Cargo
 target/
 **/*.rs.bk
-# Per-machine cargo overrides (linker path, etc.). `config.local.toml` is not
-# a cargo convention but listed for users who keep one anyway.
-.cargo/config.toml
+# Machine-local cargo overrides (linker path, etc.) belong in ~/.cargo/config.toml —
+# cargo merges user-level config; the committed .cargo/config.toml is repo policy.
 .cargo/config.local.toml
+
+# Generated pii-engine-wasm artifact (built by crates/pii-engine-wasm/build-wasm.sh)
+mcp-servers/policies/wasm-pkg/
 
 # Node.js (root-level lockfiles if any)
 node_modules/

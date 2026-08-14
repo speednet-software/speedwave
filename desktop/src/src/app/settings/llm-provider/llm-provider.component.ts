@@ -1171,7 +1171,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
     // A keyed remote row saves without a model — the backend auto-defaults it
-    // at save time (ADR-082 §8), so the key is the real requirement.
+    // at save time (ADR-085 §8), so the key is the real requirement.
     if (extra) return !!extra.model.trim() || extra.hasKey || !!extra.keyInput.trim();
     return this.localModelSatisfied();
   });
@@ -1279,7 +1279,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       return;
     }
     const activeExtra = this.extraProviders().find((p) => p.id === this.effectiveTarget());
-    // A model-less remote row is fine (backend auto-defaults, ADR-082 §8) but a
+    // A model-less remote row is fine (backend auto-defaults, ADR-085 §8) but a
     // keyless one can never route — reject with the actionable requirement.
     if (
       activeExtra &&

@@ -4,6 +4,8 @@
 
 **Date:** 2026-07-05
 
+> **Amendment (2026-07-17):** The decision assumed `claude plugin install <name>@claude-plugins-official` works in a fresh home. It does not: Claude Code seeds the official-marketplace registration only during interactive first launch — never from headless sessions or `claude plugin` CLI calls — so in a fresh per-project home every bundled install fails with "Plugin not found in marketplace", and the error's suggested remedy (`marketplace update`) fails on the same missing registration.[^9] Verified live on Claude Code 2.1.206: only projects where the user happened to run the interactive CLI ever acquired the marketplace. The entrypoint now bootstraps it — an idempotent `claude plugin marketplace add anthropics/claude-plugins-official` immediately before the first actual install, skipped entirely when `known_marketplaces.json` already lists the marketplace (so restarts pay no network call), attempted at most once per start, non-fatal and diagnostics-logged on failure. A custom `SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE` is not bootstrapped: its source repo is unknown to the entrypoint.
+
 ## Context
 
 Claude Code supports a plugin system whose components (skills, commands, agents, hooks, LSP servers) install from marketplaces.[^1] Anthropic publishes a first-party marketplace, `claude-plugins-official`, from which plugins install via `claude plugin install <name>@<marketplace>`.[^2] We want a curated set of these official plugins available and enabled by default the moment a user launches Speedwave, while leaving the user free to disable any (or add their own).
@@ -56,3 +58,5 @@ The official `php-lsp` plugin's language server is Intelephense, which is propri
 [^7]: TypeScript (Apache-2.0) - https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt
 
 [^8]: Intelephense end-user licence (personal, non-transferable; no redistribution) - https://intelephense.com/
+
+[^9]: claude-code issue #66750 — official marketplace auto-seeded only on interactive first launch, no autoheal - https://github.com/anthropics/claude-code/issues/66750

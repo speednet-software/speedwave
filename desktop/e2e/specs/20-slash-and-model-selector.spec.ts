@@ -172,7 +172,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
     await pickComposerModel(requireOpenrouterModel());
     await sendMessageAndWait('Say goodbye in one word.');
     expect(await assistantMessageCount()).toBeGreaterThan(beforeCount);
-    // Non-anthropic badge truth is init-driven, never optimistic (ADR-082 §3):
+    // Non-anthropic badge truth is init-driven, never optimistic (ADR-085 §3):
     // assert it only now, after the reply's SystemInit reported the model.
     await browser.waitUntil(
       async () =>
@@ -200,7 +200,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
     await confirmRestartAndWait();
     await openChat();
 
-    // The composer pick is the write-through terrain under test (ADR-082 §3).
+    // The composer pick is the write-through terrain under test (ADR-085 §3).
     await pickComposerModel(local.model);
     // Badge shows exactly the normalized id - never the `<entry_id>/` routing
     // prefix (4.3.1 id-triad rule; equality covers both requirements at once).
@@ -216,7 +216,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
 
   it('OpenRouter: a provider save leaves a routable model before the first message', async function () {
     this.timeout(240_000);
-    // The truly-fresh auto-default path (ADR-082 §8) is covered by spec 02 on
+    // The truly-fresh auto-default path (ADR-085 §8) is covered by spec 02 on
     // the clean system; at this suite point the entry re-saves with its model.
     await openSettings();
     await configureOpenRouter(requireOpenrouterKey());
@@ -284,7 +284,7 @@ describe('Slash Popover + Model/Effort Selector', function () {
     await sendMessageAndWait('Say hi in one word.');
     await (await $(`[data-testid="effort-option-${targetLevel}"]`)).click();
 
-    // Live semantics (ADR-082 amendment): the pick is current at once - the pin
+    // Live semantics (ADR-085 amendment): the pick is current at once - the pin
     // span reflects it immediately and no pending badge exists.
     await browser.waitUntil(
       async () => {

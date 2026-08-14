@@ -1,6 +1,14 @@
 /**
- * Static guardrail — fails CI if a comment-style TODO/FIXME/HACK/XXX marker reappears in mcp-servers
- * source. Matches only comment contents, not string literals; `*.test.ts` excluded.
+ * Static guardrail — fails CI if a comment-style TODO/FIXME/HACK/XXX marker
+ * reappears anywhere in mcp-servers source.
+ *
+ * The desktop guard (`forbidden-patterns.spec.ts`) only covers `desktop/src`;
+ * a real TODO once slipped into the hub's now-removed inline PII tokenizer module
+ * through that gap. This scans every worker's `src/` tree. It matches ONLY markers inside a
+ * line- or block-comment — string literals such as the `query: 'TODO'` tool-arg
+ * examples in the github/gitlab tool files are data, not markers, and must not
+ * trip it. Test files (`*.test.ts`) are excluded: they legitimately carry the
+ * words as fixtures (and this very file embeds them in its exemptions).
  */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';

@@ -1,6 +1,6 @@
 //! Launch-effort pin IO for a project's claude-home `settings.json`
 //! (`effortLevel` key). The pin feeds the spawn's `--effort`, which releases
-//! CC's premium launch hold so the wire `/effort` applies live (ADR-082 am.).
+//! CC's premium launch hold so the wire `/effort` applies live (ADR-085 am.).
 
 use std::path::Path;
 
