@@ -1979,10 +1979,7 @@ export function toChatMessages(transcript: ConversationTranscript): ChatMessage[
     const rawBlocks =
       msg.blocks && msg.blocks.length > 0
         ? (msg.blocks as unknown as (
-            | MessageBlock
-            | HistoryToolUseBlock
-            | HistoryToolResultBlock
-            | HistoryControlChipBlock
+            MessageBlock | HistoryToolUseBlock | HistoryToolResultBlock | HistoryControlChipBlock
           )[])
         : ([{ type: 'text' as const, content: msg.content }] as MessageBlock[]);
     const blocks = normalizeHistoryBlocks(rawBlocks);

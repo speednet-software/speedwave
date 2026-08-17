@@ -270,8 +270,7 @@ describe('ChatMessageComponent', () => {
 
   it('emits permissionDecided when child emits decided', () => {
     let emitted:
-      | { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' }
-      | undefined;
+      { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' } | undefined;
     component.permissionDecided.subscribe(
       (evt: { blockIndex: number; decision: 'allow_once' | 'allow_always' | 'deny' }) => {
         emitted = evt;

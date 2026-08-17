@@ -45,9 +45,10 @@ describe('withResultValidation (Family A)', () => {
   });
 
   it('formats an explicit failure result as an error', async () => {
-    const wrapped = withResultValidation<unknown>(
-      (): ToolResult => ({ success: false, error: { code: 'NOPE', message: 'bad' } })
-    );
+    const wrapped = withResultValidation<unknown>((): ToolResult => ({
+      success: false,
+      error: { code: 'NOPE', message: 'bad' },
+    }));
     const res = await wrapped({});
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain('NOPE');

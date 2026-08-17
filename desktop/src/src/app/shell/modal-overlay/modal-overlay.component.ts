@@ -52,8 +52,7 @@ export type ModalBorderColor = 'default' | 'red';
           <pre
             class="mono mt-3 overflow-x-auto rounded border border-red-500/20 bg-red-500/5 p-3 text-[11px] text-red-200"
             data-testid="modal-code"
-            >{{ code() }}</pre
-          >
+            >{{ code() }}</pre>
         }
         @if (note()) {
           <div
