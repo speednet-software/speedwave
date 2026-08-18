@@ -78,10 +78,7 @@ export interface TranscriptSession {
 
 /** Non-fatal capture-health warnings — mirrors Rust `CaptureWarning`. */
 export type CaptureWarning =
-  | 'system_audio_silent'
-  | 'microphone_stalled'
-  | 'system_audio_stalled'
-  | 'recording_part_missing';
+  'system_audio_silent' | 'microphone_stalled' | 'system_audio_stalled' | 'recording_part_missing';
 
 /** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
 export type MicPermission = 'granted' | 'denied' | 'previously_denied';

@@ -39,8 +39,7 @@ export interface RefreshError {
 
 /** Discriminated union returned by every provider. */
 export type RefreshResult =
-  | { ok: true; value: RefreshResponse }
-  | { ok: false; error: RefreshError };
+  { ok: true; value: RefreshResponse } | { ok: false; error: RefreshError };
 
 /** One IdP implementation registered in the provider registry. */
 export interface OAuthProvider {

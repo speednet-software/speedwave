@@ -73,8 +73,7 @@ export function normalizeNumericId(
 
 /** Result of {@link normalizeNumericIdParams}: the coerced params, or teaching-error data. */
 export type NumericIdParamsResult =
-  | { ok: true; value: Record<string, unknown> }
-  | { ok: false; error: NumericIdError };
+  { ok: true; value: Record<string, unknown> } | { ok: false; error: NumericIdError };
 
 /**
  * Normalize the named numeric-id params of a params object in place (on a copy). Params absent or

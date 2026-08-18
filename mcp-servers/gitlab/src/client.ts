@@ -246,8 +246,7 @@ export class GitLabClient {
       has_conflicts: pick(mr, 'hasConflicts', 'has_conflicts') as boolean | undefined,
       merge_status: pick(mr, 'mergeStatus', 'merge_status') as string | undefined,
       detailed_merge_status: pick(mr, 'detailedMergeStatus', 'detailed_merge_status') as
-        | string
-        | undefined,
+        string | undefined,
     };
   }
 

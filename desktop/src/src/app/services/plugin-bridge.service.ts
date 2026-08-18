@@ -7,12 +7,7 @@ import type { PluginBridgeCredentials, PluginBridgeStatus } from '../models/plug
 interface BridgeEventPayload {
   slug: string;
   kind:
-    | 'slot_occupied'
-    | 'paired'
-    | 'disconnected'
-    | 'pair_busy'
-    | 'evicted_older'
-    | 'pending_timeout';
+    'slot_occupied' | 'paired' | 'disconnected' | 'pair_busy' | 'evicted_older' | 'pending_timeout';
 }
 
 /** Tracks host-bridge plugin status via snapshot plus live `plugin_bridge_event` updates. */

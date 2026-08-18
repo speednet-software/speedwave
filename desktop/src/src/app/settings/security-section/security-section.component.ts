@@ -815,20 +815,16 @@ export class SecuritySectionComponent implements OnInit, OnDestroy {
       name: row.name.trim(),
       enabled: row.enabled && !this.isForced(row.id),
       categories: row.categories,
-      custom_patterns: row.patterns.map(
-        (p): SecurityPolicyCustomPatternInput => ({
-          display_name: p.displayName.trim(),
-          pattern: p.pattern,
-          case_insensitive: p.caseInsensitive,
-        })
-      ),
-      keywords: row.keywords.map(
-        (k): KeywordV3 => ({
-          match: k.match,
-          alias: k.alias,
-          caseSensitive: k.caseSensitive,
-        })
-      ),
+      custom_patterns: row.patterns.map((p): SecurityPolicyCustomPatternInput => ({
+        display_name: p.displayName.trim(),
+        pattern: p.pattern,
+        case_insensitive: p.caseInsensitive,
+      })),
+      keywords: row.keywords.map((k): KeywordV3 => ({
+        match: k.match,
+        alias: k.alias,
+        caseSensitive: k.caseSensitive,
+      })),
     }));
     return { policies, custom_policies };
   }
