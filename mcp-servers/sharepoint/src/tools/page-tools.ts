@@ -851,8 +851,7 @@ async function handleGenerateTableOfContents(
       };
     }
     const created = (await pagesApi.addTextWebPart(params.pageId, section.id, column.id, html)) as
-      | WebPart
-      | undefined;
+      WebPart | undefined;
     return {
       success: true,
       data: {

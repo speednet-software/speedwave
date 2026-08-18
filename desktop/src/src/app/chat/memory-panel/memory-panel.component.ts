@@ -79,8 +79,7 @@ import { IconComponent } from '../../shared/icon.component';
             <pre
               class="mono whitespace-pre-wrap break-words text-[11.5px] text-[var(--ink-dim)]"
               data-testid="memory-panel-fallback"
-              >{{ fallbackText() }}</pre
-            >
+              >{{ fallbackText() }}</pre>
           } @else {
             <p class="mono text-[11.5px] text-[var(--ink-mute)]" data-testid="memory-panel-empty">
               no memory yet

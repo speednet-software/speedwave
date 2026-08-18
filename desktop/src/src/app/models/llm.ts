@@ -152,13 +152,7 @@ export interface UsageSummary {
  * (snake_case serde). Kept in sync by `cost_source_ts_union_matches_rust`.
  */
 export type CostSourceKind =
-  | 'catalog'
-  | 'subscription'
-  | 'free'
-  | 'actual'
-  | 'unknown'
-  | 'deferred'
-  | 'failed';
+  'catalog' | 'subscription' | 'free' | 'actual' | 'unknown' | 'deferred' | 'failed';
 
 /**
  * Cost source that won't change on re-enrichment (mirror of Rust `CostSource::is_terminal`);
