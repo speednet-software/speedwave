@@ -12,7 +12,7 @@ repository = "https://github.com/speednet-software/speedwave"
 homepage = "https://github.com/speednet-software/speedwave"
 
 [dependencies]
-aes-siv = { version = "0.8.0", default-features = false, features = ["alloc"] }
+aes-siv = { version = "0.8.0", default-features = false, features = ["alloc", "zeroize"] }
 base64 = "0.22"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

@@ -42,6 +42,7 @@ dependencies = [
  "ctr",
  "dbl",
  "digest 0.11.3",
+ "zeroize",
 ]
 
 [[package]]
