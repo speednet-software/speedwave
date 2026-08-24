@@ -57,6 +57,8 @@ describe('RecordingControlsComponent', () => {
   let recordingLanguage: ReturnType<typeof signal<Language | null>>;
   let svc: {
     getCapabilities: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
     startRecording: ReturnType<typeof vi.fn>;
@@ -75,6 +77,7 @@ describe('RecordingControlsComponent', () => {
       note: 'Requires macOS 14.4+',
     },
     backends: ['cpu', 'metal'],
+    gpu_class: 'discrete' as const,
   };
   /** A model list with at least one downloaded Whisper model. */
   const modelsWithSmall = {
@@ -93,6 +96,8 @@ describe('RecordingControlsComponent', () => {
     recordingLanguage = signal<Language | null>(null);
     svc = {
       getCapabilities: vi.fn(async () => caps),
+      liveTranscriptPreferred: vi.fn(() => true),
+      setLiveTranscriptPreferred: vi.fn(),
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
       // Mirror the real service: start/stop drive the shared recording signal.
@@ -132,6 +137,37 @@ describe('RecordingControlsComponent', () => {
     expect(component.sources().length).toBe(2);
     expect(component.sourceIndex()).toBe(0); // system_wide
     expect(component.accel()).toBe('Acceleration: Metal');
+  });
+
+  it('live toggle: defaults from the service preference, persists a change, and gates start()', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(false);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).not.toBeNull();
+
+    component.onLiveToggle(true);
+    fixture.detectChanges();
+    expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).toBeNull();
+
+    await component.start();
+    const call = svc.startRecording.mock.calls.at(-1);
+    expect(call?.[2]).toBe(true);
+
+    component.onLiveToggle(false);
+    await component.start();
+    expect(svc.startRecording.mock.calls.at(-1)?.[2]).toBe(false);
+  });
+
+  it('labels a Vulkan build and a CPU-only build correctly', async () => {
+    svc.getCapabilities.mockResolvedValueOnce({ ...caps, backends: ['cpu', 'vulkan'] });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: Vulkan');
+
+    svc.getCapabilities.mockResolvedValueOnce({ ...caps, backends: ['cpu'] });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: CPU only');
   });
 
   it('defaults to the "Whole meeting" mixed source when the backend offers it', async () => {
@@ -180,7 +216,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl', true);
   });
 
   it('derives named mics from the source list and strips the "Microphone:" prefix', async () => {
@@ -214,7 +250,8 @@ describe('RecordingControlsComponent', () => {
         kind: 'mixed',
         mic: 'AppleUSBAudioEngine:USB MIC:1',
       },
-      'pl'
+      'pl',
+      true
     );
   });
 
@@ -226,7 +263,8 @@ describe('RecordingControlsComponent', () => {
     await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(
       { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
-      'pl'
+      'pl',
+      true
     );
   });
 
@@ -234,7 +272,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl', true);
   });
 
   it('shows the acceleration badge and language toggle', async () => {
@@ -253,7 +291,7 @@ describe('RecordingControlsComponent', () => {
     const spy = vi.fn();
     component.started.subscribe(spy);
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en');
+    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en', true);
     expect(component.recording()).toBe(true);
     expect(spy).toHaveBeenCalledWith('sess-1');
   });

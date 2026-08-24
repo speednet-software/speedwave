@@ -54,7 +54,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
 # submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
 # is added on macOS only via the target-specific block below; CPU elsewhere.
-whisper-rs = { version = "0.16", optional = true }
+# `log_backend` routes whisper.cpp/ggml internals (backend picked, GPU init failures) into the
+# `log` facade — without it a GPU fallback is invisible.
+whisper-rs = { version = "0.16", optional = true, features = ["log_backend"] }
+# Physical-core count for the whisper thread budget (`accel::decode_threads`): std exposes only
+# logical CPUs, and SMT siblings add no whisper throughput.
+num_cpus = { version = "1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # On macOS, build whisper.cpp with the Metal backend (the Metal shader library
@@ -70,6 +75,14 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 # `audio-transcription` so the CLI build stays lean.
 cpal = { version = "0.18", optional = true }
 wasapi = { version = "0.23", optional = true }
+# Windows whisper builds carry the Vulkan backend (ADR-085), mirroring the macOS `metal` block
+# below — a target-specific feature union, deliberately NOT a cargo feature (features are not
+# target-conditional; a `whisper-rs/vulkan` feature would force the Vulkan SDK onto macOS builds).
+# Building this requires the Vulkan SDK (`VULKAN_SDK` env; scripts/install-vulkan-sdk.ps1).
+whisper-rs = { version = "0.16", optional = true, features = ["vulkan"] }
+# Runtime GPU probe (`transcription/gpu_probe.rs`): enumerates Vulkan devices via the dynamically
+# loaded vulkan-1.dll, so hosts without it degrade cleanly instead of failing a link-time import.
+ash = { version = "0.38", optional = true, default-features = false, features = ["loaded"] }
 # Job Object kill-on-parent-close for host MCP workers
 # (`host_mcp_process::job_object`). `Win32_Security` is required to gate
 # `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in
@@ -105,11 +118,11 @@ rustix = { version = "1", features = ["fs"] }
 # Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
 # transcriber (+ wasapi/cpal on Windows for capture). Speaker diarization was
 # removed — ADR-075 — so sherpa-onnx and the tar/bzip2 archive deps are gone.
-audio-transcription = ["dep:hound", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
+audio-transcription = ["dep:hound", "dep:num_cpus", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
 # Internal: pulls in the Windows capture deps (wasapi for system loopback, cpal
 # for the microphone). Only meaningful on Windows (the target-specific dep
 # block above), but listing it unconditionally keeps `--features` simple.
-windows-capture = ["dep:cpal", "dep:wasapi"]
+windows-capture = ["dep:ash", "dep:cpal", "dep:wasapi"]
 # Re-exports `runtime::test_support` with mock builders, so downstream test
 # code can construct `LockedRuntime` without seeing the (pub(crate)) trait.
 test-support = []

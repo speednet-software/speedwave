@@ -11,12 +11,25 @@ import {
 
 import { TauriService } from '../../services/tauri.service';
 import { TranscriptionService } from '../../services/transcription.service';
-import type { MicPermissionStatus, RecommendedModelAck } from '../../models/transcript';
+import type {
+  MicPermissionStatus,
+  RecommendedModelAck,
+  RecommendedModelEntry,
+} from '../../models/transcript';
 import { formatBytes } from '../../shared/format-bytes';
 
+/** One row of the model card: a model this host needs, with the copy that explains why. */
+interface ModelRow {
+  entry: RecommendedModelEntry;
+  title: string;
+  hint: string;
+  /** Test-id suffix; empty for the live row so the existing ids keep resolving. */
+  idSuffix: string;
+}
+
 /**
- * Settings → Meeting transcription (ADR-056): one auto-selected model for this hardware
- * (large-v3 GPU / large-v3-turbo CPU), single download/remove control, no model list.
+ * Settings → Meeting transcription (ADR-056): models auto-selected for this hardware — one for the
+ * live pass and, where they differ, one for the offline pass. Download/remove only, no model list.
  */
 @Component({
   selector: 'app-transcription-section',
@@ -45,42 +58,50 @@ import { formatBytes } from '../../shared/format-bytes';
             Acceleration: {{ m.accel_label }}
           </div>
 
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <div class="text-[12px] text-[var(--ink)]">Speech recognition model</div>
-              @if (m.downloaded) {
-                <div class="text-[11px] text-[var(--ink-mute)]" data-testid="model-state">
-                  Downloaded ({{ m.display_name }}) · best quality for your hardware
-                </div>
+          @for (row of modelRows(); track row.entry.key) {
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <div class="text-[12px] text-[var(--ink)]">{{ row.title }}</div>
+                @if (row.entry.downloaded) {
+                  <div
+                    class="text-[11px] text-[var(--ink-mute)]"
+                    [attr.data-testid]="'model-state' + row.idSuffix"
+                  >
+                    Downloaded ({{ row.entry.display_name }}) · {{ row.hint }}
+                  </div>
+                } @else {
+                  <div
+                    class="text-[11px] text-[var(--ink-mute)]"
+                    [attr.data-testid]="'model-state' + row.idSuffix"
+                  >
+                    Not downloaded · {{ size(row.entry) }} · {{ row.hint }}
+                  </div>
+                }
+              </div>
+
+              @if (row.entry.downloaded) {
+                <button
+                  type="button"
+                  class="mono rounded border border-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                  [attr.data-testid]="'remove-model' + row.idSuffix"
+                  [disabled]="busy()"
+                  (click)="remove(row.entry.key)"
+                >
+                  remove
+                </button>
               } @else {
-                <div class="text-[11px] text-[var(--ink-mute)]" data-testid="model-state">
-                  Not downloaded · {{ size(m) }} · best quality for your hardware
-                </div>
+                <button
+                  type="button"
+                  class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  [attr.data-testid]="'download-model' + row.idSuffix"
+                  [disabled]="busy()"
+                  (click)="download(row.entry.key)"
+                >
+                  {{ downloadLabel(row.entry) }}
+                </button>
               }
             </div>
-
-            @if (m.downloaded) {
-              <button
-                type="button"
-                class="mono rounded border border-red-500/40 px-3 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="remove-model"
-                [disabled]="busy()"
-                (click)="remove(m.key)"
-              >
-                remove
-              </button>
-            } @else {
-              <button
-                type="button"
-                class="mono rounded border border-[var(--line-strong)] bg-[var(--bg-2)] px-3 py-1 text-[11px] text-[var(--ink)] hover:bg-[var(--bg-3)] disabled:opacity-40 disabled:cursor-not-allowed"
-                data-testid="download-model"
-                [disabled]="busy()"
-                (click)="download(m.key)"
-              >
-                {{ downloading() ? progressLabel() : 'download model' }}
-              </button>
-            }
-          </div>
+          }
         </div>
       }
 
@@ -144,8 +165,47 @@ export class TranscriptionSectionComponent implements OnInit {
   /** Forwards errors to the Settings shell banner. */
   readonly errorOccurred = output<string>();
 
-  /** The recommended model + its state; `null` while loading. */
+  /** The recommended models + their state; `null` while loading. */
   readonly model = signal<RecommendedModelAck | null>(null);
+
+  /** Rows the card renders: the live model, plus the offline one when it is a different model. */
+  readonly modelRows = computed<ModelRow[]>(() => {
+    const m = this.model();
+    if (!m) {
+      return [];
+    }
+    const live: RecommendedModelEntry = {
+      key: m.key,
+      display_name: m.display_name,
+      size_bytes: m.size_bytes,
+      downloaded: m.downloaded,
+      downloading: m.downloading,
+    };
+    if (!m.finalize) {
+      return [
+        {
+          entry: live,
+          title: 'Speech recognition model',
+          hint: 'best quality for your hardware',
+          idSuffix: '',
+        },
+      ];
+    }
+    return [
+      {
+        entry: live,
+        title: 'Live transcription model',
+        hint: 'fast enough to keep up while you record',
+        idSuffix: '',
+      },
+      {
+        entry: m.finalize,
+        title: 'Final transcript model',
+        hint: 'higher quality, runs after you stop recording',
+        idSuffix: '-finalize',
+      },
+    ];
+  });
   /** Local error string. */
   readonly error = signal('');
 
@@ -237,10 +297,12 @@ export class TranscriptionSectionComponent implements OnInit {
     try {
       const ack = await this.transcription.recommendedModel();
       this.model.set(ack);
-      if (ack.downloading && this.transcription.downloadingModelKey() !== ack.key) {
+      const inFlight = this.modelRows().find((r) => r.entry.downloading);
+      const tracked = this.transcription.downloadingModelKey();
+      if (inFlight && tracked !== inFlight.entry.key) {
         // Backend download survived a webview reload — reattach progress.
-        await this.transcription.resumeDownloadTracking(ack.key);
-      } else if (!ack.downloading && this.transcription.downloadingModelKey() === ack.key) {
+        await this.transcription.resumeDownloadTracking(inFlight.entry.key);
+      } else if (!inFlight && tracked !== null) {
         // Stale tracking for a download the backend already finished.
         this.transcription.clearDownloadTracking();
       }
@@ -288,10 +350,20 @@ export class TranscriptionSectionComponent implements OnInit {
   }
 
   /**
-   * Human-readable download size for a model.
-   * @param m - the recommended-model ack.
+   * Button copy for one row: progress only on the model actually downloading.
+   * @param entry - the model this row renders.
    */
-  size(m: RecommendedModelAck): string {
+  downloadLabel(entry: RecommendedModelEntry): string {
+    return this.transcription.downloadingModelKey() === entry.key
+      ? this.progressLabel()
+      : 'download model';
+  }
+
+  /**
+   * Human-readable download size for a model.
+   * @param m - the model entry.
+   */
+  size(m: RecommendedModelEntry): string {
     return formatBytes(m.size_bytes);
   }
 }

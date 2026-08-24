@@ -40,6 +40,7 @@ function micName(label: string): string {
  */
 function accelLabel(backends: Backend[]): string {
   if (backends.includes('metal')) return 'Acceleration: Metal';
+  if (backends.includes('vulkan')) return 'Acceleration: Vulkan';
   return 'Acceleration: CPU only';
 }
 
@@ -107,10 +108,28 @@ function accelLabel(backends: Backend[]): string {
           </label>
         }
 
+        <label class="mono flex items-center gap-1 text-[10px] text-[var(--ink-mute)]">
+          <input
+            type="checkbox"
+            data-testid="live-transcript-toggle"
+            [checked]="liveTranscript()"
+            [disabled]="recording()"
+            (change)="onLiveToggle($any($event.target).checked)"
+          />
+          live transcript
+        </label>
+
         <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
           {{ accel() }}
         </span>
       </div>
+
+      @if (!liveTranscript()) {
+        <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="record-only-note">
+          Live transcript is off — recording only. The transcript is produced after you stop, which
+          keeps the CPU free during the meeting.
+        </p>
+      }
 
       @if (mixedSourceSelected()) {
         <p class="mono mt-1 text-[10px] text-[var(--ink-mute)]" data-testid="mixed-source-note">
@@ -170,6 +189,8 @@ export class RecordingControlsComponent implements OnInit {
   readonly backends = signal<Backend[]>([]);
   /** Derived acceleration label. */
   readonly accel = computed(() => accelLabel(this.backends()));
+  /** Whether the next recording runs the live pass (persisted; default from the GPU class). */
+  readonly liveTranscript = signal(true);
   /** Disables Start/Stop while a transition is in flight. */
   readonly busy = signal(false);
   /** Local error string. */
@@ -210,6 +231,7 @@ export class RecordingControlsComponent implements OnInit {
     try {
       const caps = await this.transcription.getCapabilities();
       this.backends.set(caps.backends);
+      this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
       const inProgressSource = this.transcription.recordingSource();
@@ -298,6 +320,15 @@ export class RecordingControlsComponent implements OnInit {
     return src;
   }
 
+  /**
+   * Persists and applies the live-transcript choice.
+   * @param live - the checkbox state.
+   */
+  onLiveToggle(live: boolean): void {
+    this.liveTranscript.set(live);
+    this.transcription.setLiveTranscriptPreferred(live);
+  }
+
   /** Starts recording the chosen source in the chosen language. */
   async start(): Promise<void> {
     const picked: AudioSource | undefined = this.sources()[this.sourceIndex()]?.source;
@@ -312,7 +343,11 @@ export class RecordingControlsComponent implements OnInit {
       if (src.kind !== 'system_wide' && !(await this.ensureMicConsent())) {
         return;
       }
-      const ack = await this.transcription.startRecording(src, this.language());
+      const ack = await this.transcription.startRecording(
+        src,
+        this.language(),
+        this.liveTranscript()
+      );
       this.started.emit(ack.session_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

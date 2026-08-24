@@ -302,6 +302,8 @@ build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nod
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@bash scripts/check-vulkan-path-budget.sh
+	@bash scripts/stage-vulkan-runtime.sh
 else
 	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
@@ -408,6 +410,8 @@ test-build-phase: generate-installer-nsh build-cli build-angular build-mcp build
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@bash scripts/check-vulkan-path-budget.sh
+	@bash scripts/stage-vulkan-runtime.sh
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
@@ -986,6 +990,8 @@ dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-ins
 	@bash scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@bash scripts/check-vulkan-path-budget.sh
+	@bash scripts/stage-vulkan-runtime.sh
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else

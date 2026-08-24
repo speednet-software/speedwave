@@ -23,6 +23,8 @@ describe('MeetingTranscriptionComponent', () => {
     // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
@@ -70,8 +72,11 @@ describe('MeetingTranscriptionComponent', () => {
           note: null,
         },
         backends: ['cpu'],
+        gpu_class: 'none' as const,
       })),
       listAudioSources: vi.fn(async () => []),
+      liveTranscriptPreferred: vi.fn(() => true),
+      setLiveTranscriptPreferred: vi.fn(),
       // Gate predicate matches recording-controls hasModel — any downloaded model lifts it.
       listModels: vi.fn(async () => models(true)),
       list: vi.fn(async () => []),

@@ -40,12 +40,14 @@ describe('LiveTranscriptComponent', () => {
   let svc: {
     sendToChat: ReturnType<typeof vi.fn>;
     liveDraft: WritableSignal<string>;
+    audioLevels: WritableSignal<number[] | null>;
   };
 
   beforeEach(async () => {
     svc = {
       sendToChat: vi.fn(async () => undefined),
       liveDraft: signal(''),
+      audioLevels: signal<number[] | null>(null),
     };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
@@ -337,6 +339,56 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
       expect(btn.disabled).toBe(false);
+    });
+  });
+  describe('audio level meter + record-only hint', () => {
+    it('renders labeled bars for a paired capture, on a dB scale', () => {
+      fixture.componentRef.setInput('session', session());
+      svc.audioLevels.set([0.1, 0.001]);
+      fixture.detectChanges();
+      const meter = fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]');
+      expect(meter).not.toBeNull();
+      expect(meter.textContent).toContain('Meeting');
+      expect(meter.textContent).toContain('You');
+      const bars = component.meterBars();
+      // -20 dBFS ≈ 67%, -60 dBFS floor = 0% — a linear meter would show 10% and 0.1%.
+      expect(bars[0].pct).toBeGreaterThan(60);
+      expect(bars[0].pct).toBeLessThan(75);
+      expect(bars[1].pct).toBe(0);
+    });
+
+    it('labels a mono capture from the session source and hides the meter without levels', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' } })
+      );
+      svc.audioLevels.set([0.05]);
+      fixture.detectChanges();
+      expect(component.meterBars()).toEqual([{ label: 'You', pct: expect.any(Number) }]);
+
+      svc.audioLevels.set(null);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')).toBeNull();
+    });
+
+    it('shows the record-only hint only while recording without a live model', () => {
+      // Default fixture: recording, models_used.live = null → record-only.
+      fixture.componentRef.setInput('session', session());
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')
+      ).not.toBeNull();
+      // A live session (live model recorded) shows no hint.
+      fixture.componentRef.setInput(
+        'session',
+        session({ models_used: { live: 'small', finalize: null } })
+      );
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
+      // Neither does a finished record-only session.
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
     });
   });
 });

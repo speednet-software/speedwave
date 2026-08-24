@@ -58,6 +58,8 @@ pub struct CapabilitiesAck {
     pub capabilities: CaptureCapabilities,
     /// Which whisper.cpp backends were compiled in.
     pub backends: Vec<Backend>,
+    /// Probed host GPU class (ADR-085) — drives the live-transcript default in the UI.
+    pub gpu_class: transcription::GpuClass,
 }
 
 #[tauri::command]
@@ -67,6 +69,7 @@ pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
     Ok(CapabilitiesAck {
         capabilities,
         backends,
+        gpu_class: transcription::gpu_class(),
     })
 }
 
@@ -96,6 +99,15 @@ pub struct StartAck {
 pub struct StartParams {
     pub source: serde_json::Value,
     pub language: String,
+    /// `false` = record-only: skip the live pass entirely; the transcript comes from the
+    /// offline pass after stop (ADR-056 Am. 13). Defaults on for older frontends.
+    #[serde(default = "default_live")]
+    pub live: bool,
+}
+
+/// Serde default for [`StartParams::live`].
+fn default_live() -> bool {
+    true
 }
 
 #[tauri::command]
@@ -107,7 +119,11 @@ pub async fn start_transcription(
     forwarders: tauri::State<'_, ForwardersHandle>,
     app: AppHandle,
 ) -> Result<StartAck, String> {
-    let StartParams { source, language } = params;
+    let StartParams {
+        source,
+        language,
+        live,
+    } = params;
     // Force-language is enum-validated at the Rust boundary.
     let lang = match language.as_str() {
         "pl" => Language::Pl,
@@ -123,7 +139,19 @@ pub async fn start_transcription(
     validate_source_against_caps(&audio_source, &caps)?;
 
     let store_arc = store.inner().clone();
-    let (live_key, transcriber) = load_live_transcriber(models.inner()).await?;
+    // Record-only sessions load no live model, but the offline pass still needs one — fail at
+    // Start (actionable) rather than at Stop (recording already made, nothing to show).
+    let live_transcriber = if live {
+        Some(load_live_transcriber(models.inner()).await?)
+    } else {
+        if pick_offline_model(models.inner()).is_none() {
+            let recommended = transcription::finalize_model_for_this_build().key;
+            return Err(format!(
+                "no Whisper model is downloaded — the final pass needs one (e.g. '{recommended}')"
+            ));
+        }
+        None
+    };
 
     // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
     // path is then correct from the first persisted write (no fragile post-create patch).
@@ -140,7 +168,7 @@ pub async fn start_transcription(
         },
         audio_wav.clone(),
     );
-    session.models_used.live = Some(live_key.clone());
+    session.models_used.live = live_transcriber.as_ref().map(|(key, _)| key.clone());
     // Register the driver entry before creating the session so the delete guard
     // covers the whole start window (delete refuses while an entry is live).
     let stop = StopSignal::new();
@@ -178,7 +206,7 @@ pub async fn start_transcription(
             id: session_id,
             store: store_arc.clone(),
             audio: stream,
-            transcriber: Box::new(transcriber),
+            transcriber: live_transcriber.map(|(_, t)| Box::new(t) as _),
             transcribe_opts: TranscribeOptions::for_language(lang),
             stop,
             time_base: std::time::Duration::ZERO,
@@ -268,6 +296,7 @@ fn resume_time_base(parts: &[std::path::PathBuf]) -> Result<std::time::Duration,
 #[tauri::command]
 pub async fn resume_transcription(
     session_id: String,
+    live: Option<bool>,
     store: tauri::State<'_, TranscriptStoreHandle>,
     models: tauri::State<'_, ModelStoreHandle>,
     drivers: tauri::State<'_, DriversHandle>,
@@ -286,7 +315,18 @@ pub async fn resume_transcription(
     validate_source_against_caps(&audio_source, &capture.capabilities())?;
 
     let store_arc = store.inner().clone();
-    let (_live_key, transcriber) = load_live_transcriber(models.inner()).await?;
+    // Same record-only contract as start (ADR-056 Am. 13); absent = live, for older frontends.
+    let live_transcriber = if live.unwrap_or(true) {
+        Some(load_live_transcriber(models.inner()).await?)
+    } else {
+        if pick_offline_model(models.inner()).is_none() {
+            let recommended = transcription::finalize_model_for_this_build().key;
+            return Err(format!(
+                "no Whisper model is downloaded — the final pass needs one (e.g. '{recommended}')"
+            ));
+        }
+        None
+    };
 
     // The new part records past the earlier ones on the session timeline.
     let time_base = resume_time_base(&session.all_audio_parts())?;
@@ -329,7 +369,7 @@ pub async fn resume_transcription(
             id,
             store: store_arc,
             audio: stream,
-            transcriber: Box::new(transcriber),
+            transcriber: live_transcriber.map(|(_, t)| Box::new(t) as _),
             transcribe_opts: TranscribeOptions::for_language(lang),
             stop,
             time_base,
@@ -510,7 +550,7 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
 /// Picks the model for the offline pass: this build's model if downloaded, else the first
 /// downloaded Whisper model (the live one is guaranteed present); `None` if none is downloaded.
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
-    let best = transcription::best_model_for_this_build().key;
+    let best = transcription::finalize_model_for_this_build().key;
     if models.whisper_is_present_by_key(best) {
         return Some(best.to_string());
     }
@@ -527,7 +567,7 @@ async fn load_live_transcriber(
     models: &ModelStoreHandle,
 ) -> Result<(String, WhisperCppTranscriber), String> {
     let m = models.clone();
-    let recommended = transcription::best_model_for_this_build().key.to_string();
+    let recommended = transcription::live_model_for_this_build().key.to_string();
     tokio::task::spawn_blocking(move || -> Result<(String, WhisperCppTranscriber), String> {
         let key = pick_live_model(&m, &recommended)?;
         let path = m
@@ -747,10 +787,9 @@ pub struct ModelsAck {
     pub total_bytes_used: u64,
 }
 
-/// The single model Speedwave recommends for this hardware (the only one the UI
-/// offers): `large-v3` on GPU builds, `large-v3-turbo` on CPU-only.
+/// One model the pipeline needs, with its on-disk state.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
-pub struct RecommendedModelAck {
+pub struct RecommendedModelEntry {
     /// Catalogue key to download.
     pub key: String,
     /// Human-readable model name.
@@ -761,17 +800,39 @@ pub struct RecommendedModelAck {
     pub downloaded: bool,
     /// `true` while a download is in flight (a remounted UI re-syncs on this).
     pub downloading: bool,
+}
+
+/// The models Speedwave needs on this hardware: one for the live pass and, when they differ,
+/// one for the higher-quality offline pass. The UI offers exactly these, with no picker.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct RecommendedModelAck {
+    /// The live-pass model, flattened so the wire shape stays what the UI card already reads.
+    #[serde(flatten)]
+    pub live: RecommendedModelEntry,
+    /// The offline-pass model, or `None` when the live model serves both passes.
+    pub finalize: Option<RecommendedModelEntry>,
     /// Acceleration label for the UI (e.g. `"Metal (GPU)"`, `"CPU"`).
     pub accel_label: String,
 }
 
-/// Short acceleration label from the compiled backends (a GPU backend wins).
-fn accel_label() -> String {
-    let backends = transcription::compiled_backends();
-    match backends.iter().find(|b| b.is_gpu()) {
-        Some(gpu) => format!("{} (GPU)", gpu.label()),
-        None => "CPU".to_string(),
-    }
+/// Resolves one catalogue model to its UI entry (on-disk state plus any in-flight download).
+fn model_entry(
+    info: &transcription::WhisperModelInfo,
+    models: &ModelStore,
+    downloads: &DownloadsHandle,
+) -> Result<RecommendedModelEntry, String> {
+    let status = models
+        .whisper_status()
+        .into_iter()
+        .find(|m| m.key == info.key)
+        .ok_or_else(|| format!("model '{}' missing from catalogue", info.key))?;
+    Ok(RecommendedModelEntry {
+        key: info.key.to_string(),
+        display_name: info.display_name.to_string(),
+        size_bytes: status.size_bytes,
+        downloaded: status.downloaded,
+        downloading: is_downloading(downloads, info.key),
+    })
 }
 
 #[tauri::command]
@@ -779,19 +840,24 @@ pub async fn recommended_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
     downloads: tauri::State<'_, DownloadsHandle>,
 ) -> Result<RecommendedModelAck, String> {
-    let best = transcription::best_model_for_this_build();
-    let status = models
-        .whisper_status()
-        .into_iter()
-        .find(|m| m.key == best.key)
-        .ok_or_else(|| format!("recommended model '{}' missing from catalogue", best.key))?;
+    let live_info = transcription::live_model_for_this_build();
+    let finalize_info = transcription::finalize_model_for_this_build();
+    let live = model_entry(live_info, models.inner(), downloads.inner())?;
+    // One model can serve both passes (nothing to show twice); on CPU-only hosts they differ,
+    // because a model fast enough to keep up live is not the one that reads Polish best.
+    let finalize = if finalize_info.key == live_info.key {
+        None
+    } else {
+        Some(model_entry(
+            finalize_info,
+            models.inner(),
+            downloads.inner(),
+        )?)
+    };
     Ok(RecommendedModelAck {
-        key: best.key.to_string(),
-        display_name: best.display_name.to_string(),
-        size_bytes: status.size_bytes,
-        downloaded: status.downloaded,
-        downloading: is_downloading(downloads.inner(), best.key),
-        accel_label: accel_label(),
+        live,
+        finalize,
+        accel_label: transcription::accel_label(),
     })
 }
 
@@ -1063,35 +1129,45 @@ mod tests {
     }
 
     #[test]
-    fn accel_label_matches_the_compiled_backend_tier() {
-        let label = accel_label();
-        let expected = if transcription::has_gpu_backend() {
-            "(GPU)"
-        } else {
-            "CPU"
-        };
-        assert!(
-            label.contains(expected),
-            "label '{label}' should reflect the build's backend"
-        );
+    fn accel_label_matches_the_probed_gpu_class() {
+        // The label is runtime truth (ADR-085): a Vulkan build with no usable device says CPU.
+        let label = transcription::accel_label();
+        match transcription::gpu_class() {
+            transcription::GpuClass::None => assert_eq!(label, "CPU"),
+            transcription::GpuClass::Integrated => {
+                assert!(label.contains("(integrated GPU)"), "got {label}")
+            }
+            transcription::GpuClass::Discrete => assert!(label.ends_with("(GPU)"), "got {label}"),
+        }
     }
 
     #[test]
-    fn recommended_model_status_is_present_in_the_catalogue() {
-        // The recommended key must resolve to a whisper_status entry — the same
-        // lookup the command does, minus the Tauri State wrapper.
+    fn both_recommended_models_resolve_in_the_catalogue() {
+        // Both keys must resolve to a whisper_status entry — the same lookup `model_entry` does,
+        // minus the Tauri State wrapper.
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        let best = transcription::best_model_for_this_build();
-        let found = store
-            .whisper_status()
-            .into_iter()
-            .find(|m| m.key == best.key);
-        assert!(found.is_some(), "best model '{}' missing", best.key);
-        assert!(
-            !found.unwrap().downloaded,
-            "nothing downloaded in a tmp dir"
-        );
+        for info in [
+            transcription::live_model_for_this_build(),
+            transcription::finalize_model_for_this_build(),
+        ] {
+            let found = store
+                .whisper_status()
+                .into_iter()
+                .find(|m| m.key == info.key);
+            assert!(found.is_some(), "model '{}' missing", info.key);
+            assert!(
+                !found.unwrap().downloaded,
+                "nothing downloaded in a tmp dir"
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_pass_never_asks_for_the_offline_only_model() {
+        // The regression this split fixes: a CPU-only host was handed the GPU-class live model,
+        // and a GPU host was handed the one the catalogue flags as offline-only.
+        assert!(transcription::live_model_for_this_build().live_capable);
     }
 
     /// Driving Tauri commands fully needs a `tauri::State` wrapper, not trivial to fabricate in
@@ -1257,5 +1333,19 @@ mod tests {
             validate_source_against_caps(&AudioSource::Microphone { device: None }, &no_sys)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn start_params_live_defaults_on_for_older_frontends() {
+        // The live flag arrived in ADR-056 Am. 13 — a payload without it must keep the old
+        // always-live behavior, and an explicit false must survive the trip.
+        let old: StartParams =
+            serde_json::from_str(r#"{"source":{"kind":"system_wide"},"language":"pl"}"#).unwrap();
+        assert!(old.live);
+        let off: StartParams = serde_json::from_str(
+            r#"{"source":{"kind":"system_wide"},"language":"pl","live":false}"#,
+        )
+        .unwrap();
+        assert!(!off.live);
     }
 }

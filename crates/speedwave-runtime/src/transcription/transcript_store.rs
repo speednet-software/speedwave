@@ -77,6 +77,14 @@ pub enum TranscriptEvent {
         /// What recovered.
         warning: crate::transcription::CaptureWarning,
     },
+    /// Throttled capture loudness (replace-only display state, never persisted): RMS 0..1 per
+    /// channel, `[system, mic]` on paired captures, one entry on mono ones (ADR-056 Am. 13).
+    AudioLevel {
+        /// Monotonic seq.
+        seq: u64,
+        /// Latest per-channel RMS.
+        levels: Vec<f32>,
+    },
 }
 
 impl TranscriptEvent {
@@ -90,7 +98,8 @@ impl TranscriptEvent {
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
             | TranscriptEvent::Finished { seq, .. }
             | TranscriptEvent::CaptureWarning { seq, .. }
-            | TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
+            | TranscriptEvent::CaptureWarningCleared { seq, .. }
+            | TranscriptEvent::AudioLevel { seq, .. } => *seq,
         }
     }
 }
@@ -369,6 +378,20 @@ impl TranscriptStore {
             seq_out = seq;
             s.live_draft = text.clone();
             TranscriptEvent::LiveDraft { seq, text }
+        })?;
+        Ok(seq_out)
+    }
+
+    /// Broadcasts the latest capture loudness (fires several times a second while recording, so
+    /// it never hits disk and mutates no session field — pure display state).
+    pub fn audio_level(&self, id: Uuid, levels: Vec<f32>) -> Result<u64, StoreError> {
+        let mut seq_out = 0;
+        self.with_session_no_save(id, |_s, seq| {
+            seq_out = seq;
+            TranscriptEvent::AudioLevel {
+                seq,
+                levels: levels.clone(),
+            }
         })?;
         Ok(seq_out)
     }
@@ -923,6 +946,10 @@ mod tests {
                 seq: 12,
                 warning: crate::transcription::CaptureWarning::SystemAudioSilent,
             },
+            TranscriptEvent::AudioLevel {
+                seq: 13,
+                levels: vec![0.1, 0.02],
+            },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
@@ -933,6 +960,7 @@ mod tests {
                 TranscriptEvent::Finished { seq } => *seq,
                 TranscriptEvent::CaptureWarning { seq, .. } => *seq,
                 TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
+                TranscriptEvent::AudioLevel { seq, .. } => *seq,
             };
             assert_eq!(ev.seq(), expected);
         }
@@ -1266,6 +1294,47 @@ mod tests {
         assert!(
             src.contains("kind: 'live_draft'"),
             "TS TranscriptEvent union must carry the live_draft kind"
+        );
+    }
+
+    #[test]
+    fn audio_level_broadcasts_without_persisting_or_touching_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        let json_path = store.session_dir(id).join("transcript.json");
+        let before = std::fs::read_to_string(&json_path).unwrap();
+
+        let seq = store.audio_level(id, vec![0.12, 0.03]).unwrap();
+        assert_eq!(seq, 1, "level events share the monotonic seq space");
+
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::AudioLevel { levels, .. } => assert_eq!(levels, vec![0.12, 0.03]),
+            other => panic!("expected AudioLevel, got {other:?}"),
+        }
+        // Pure display state: the durable transcript.json is untouched and a
+        // fresh store reloads with the pre-level last_seq.
+        assert_eq!(std::fs::read_to_string(&json_path).unwrap(), before);
+        let store2 = TranscriptStore::with_root(dir.path());
+        assert_eq!(store2.get(id).unwrap().last_seq, 0);
+        // Unknown session errors instead of broadcasting into the void.
+        assert!(store.audio_level(Uuid::new_v4(), vec![0.5]).is_err());
+    }
+
+    #[test]
+    fn audio_level_serde_round_trip_and_ts_mirror() {
+        let ev = TranscriptEvent::AudioLevel {
+            seq: 3,
+            levels: vec![0.5],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"kind\":\"audio_level\""));
+        assert_eq!(serde_json::from_str::<TranscriptEvent>(&json).unwrap(), ev);
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("kind: 'audio_level'"),
+            "TS TranscriptEvent union must carry the audio_level kind"
         );
     }
 }

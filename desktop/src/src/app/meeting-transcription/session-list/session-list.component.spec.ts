@@ -30,6 +30,7 @@ describe('SessionListComponent', () => {
     list: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
     resumeRecording: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     recordingSessionId: WritableSignal<string | null>;
   };
 
@@ -41,6 +42,7 @@ describe('SessionListComponent', () => {
       ]),
       delete: vi.fn(async () => undefined),
       resumeRecording: vi.fn(async () => undefined),
+      liveTranscriptPreferred: vi.fn(() => true),
       recordingSessionId: signal<string | null>(null),
     };
     await TestBed.configureTestingModule({
@@ -81,7 +83,7 @@ describe('SessionListComponent', () => {
     component.opened.subscribe(spy);
     const s = component.sessions()[0];
     await component.resume(s);
-    expect(svc.resumeRecording).toHaveBeenCalledWith(s.id);
+    expect(svc.resumeRecording).toHaveBeenCalledWith(s.id, true);
     expect(component.selectedId()).toBe(s.id);
     // The service already activated the snapshot + listener — no opened round trip.
     expect(spy).not.toHaveBeenCalled();

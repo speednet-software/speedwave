@@ -38,6 +38,7 @@ describe('TranscriptionSectionComponent', () => {
     downloaded: false,
     downloading: false,
     accel_label: 'Metal (GPU)',
+    finalize: null,
   };
   const downloaded: RecommendedModelAck = { ...notDownloaded, downloaded: true };
 
@@ -75,6 +76,76 @@ describe('TranscriptionSectionComponent', () => {
     component = fixture.componentInstance;
   });
 
+  describe('model rows', () => {
+    it('renders a single row when one model serves both passes', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(component.modelRows().length).toBe(1);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-state-finalize"]')
+      ).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-state"]').textContent
+      ).toContain('best quality for your hardware');
+    });
+
+    it('renders live and final rows when the host needs two different models', async () => {
+      svc.recommendedModel.mockResolvedValue({
+        ...notDownloaded,
+        key: 'small',
+        display_name: 'Small (multilingual)',
+        size_bytes: 487_601_967,
+        accel_label: 'CPU',
+        finalize: {
+          key: 'large-v3-turbo',
+          display_name: 'Large v3 Turbo',
+          size_bytes: 1_624_555_275,
+          downloaded: true,
+          downloading: false,
+        },
+      });
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(component.modelRows().map((r) => r.entry.key)).toEqual(['small', 'large-v3-turbo']);
+      // The live row is still the one the original test ids point at.
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-state"]').textContent
+      ).toContain('Not downloaded');
+      expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).not.toBeNull();
+      // The offline model is already on disk, so its row offers removal, not download.
+      const finalizeState = fixture.nativeElement.querySelector(
+        '[data-testid="model-state-finalize"]'
+      );
+      expect(finalizeState.textContent).toContain('Large v3 Turbo');
+      expect(finalizeState.textContent).toContain('runs after you stop recording');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="remove-model-finalize"]')
+      ).not.toBeNull();
+    });
+
+    it('shows progress only on the model actually downloading', async () => {
+      const finalize = {
+        key: 'large-v3-turbo',
+        display_name: 'Large v3 Turbo',
+        size_bytes: 1_624_555_275,
+        downloaded: false,
+        downloading: true,
+      };
+      svc.recommendedModel.mockResolvedValue({ ...notDownloaded, key: 'small', finalize });
+      downloadingModelKey.set('large-v3-turbo');
+      downloadProgress.set({
+        model_key: 'large-v3-turbo',
+        downloaded_bytes: 50,
+        total_bytes: 100,
+      });
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(component.downloadLabel({ ...notDownloaded, key: 'small' })).toBe('download model');
+      expect(component.downloadLabel(finalize)).toBe('downloading 50%');
+    });
+  });
   describe('permissions block', () => {
     it('shows a granted mic state on macOS', async () => {
       await component.ngOnInit();

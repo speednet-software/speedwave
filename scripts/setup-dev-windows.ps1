@@ -171,6 +171,21 @@ if ((Test-Path $vcvars) -and $msvcVer) {
     Write-Warning "vcvars64.bat/MSVC not found -- skipped ~/msvc-env.sh (re-run after VS Build Tools finishes/reboot)."
 }
 
+
+Write-Host "== Vulkan SDK (Windows whisper Vulkan backend, ADR-085) =="
+& (Join-Path $repoRoot 'scripts\install-vulkan-sdk.ps1')
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Vulkan SDK install failed with exit code $LASTEXITCODE"
+    exit 1
+}
+
+# The ggml-vulkan shader ExternalProject nests deep enough to cross MAX_PATH on typical repo
+# paths (observed: TryCompile scratch dirs past 260 chars) — enable NTFS long paths.
+Write-Host "== Enabling Windows long paths (whisper.cpp Vulkan build exceeds MAX_PATH) =="
+Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+    -Name 'LongPathsEnabled' -Value 1 -Type DWord
+git config --system core.longpaths true 2>$null
+
 Write-Host ""
 Write-Host "== Done. Next steps =="
 Write-Host "  1. Open a NEW Git Bash window (to pick up PATH + ~/.bashrc)."

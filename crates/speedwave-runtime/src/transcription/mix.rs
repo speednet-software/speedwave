@@ -126,6 +126,8 @@ pub struct MixBuffer {
     mic_level: LevelBalancer,
     /// One-shot all-zeros detection for the system side (shared mechanism).
     zero: ZeroStreakDetector,
+    /// One-shot latch for the over-cap drop warning below.
+    dropped_reported: bool,
     /// Health transitions not yet drained by `take_health`.
     pending_health: Vec<CaptureHealth>,
 }
@@ -158,6 +160,7 @@ impl MixBuffer {
             sys_level: LevelBalancer::default(),
             mic_level: LevelBalancer::default(),
             zero: ZeroStreakDetector::default(),
+            dropped_reported: false,
             pending_health: Vec::new(),
         }
     }
@@ -191,6 +194,11 @@ impl MixBuffer {
                 target: "transcription::mix",
                 "{source:?} push at offset {offset_ns}ns would buffer {needed} samples (cap {MAX_BUFFERED_SAMPLES}) — dropped"
             );
+            if !self.dropped_reported {
+                self.dropped_reported = true;
+                self.pending_health
+                    .push(CaptureHealth::Raised(CaptureWarning::AudioDropped));
+            }
             self.bump_filled(source, end);
             return;
         }
@@ -885,5 +893,21 @@ mod tests {
         .join();
         let err = poll_paired_chunk(&buf).unwrap_err();
         assert!(matches!(err, CaptureError::Failed(_)));
+    }
+
+    #[test]
+    fn an_over_cap_push_is_dropped_with_a_health_warning_not_in_silence() {
+        let mut b = MixBuffer::new();
+        // An offset past the per-side cap cannot be buffered. The payload goes, but the user has
+        // to learn the recording has a hole instead of wondering where the words went.
+        let far_ns = (MAX_BUFFERED_SAMPLES as u64 + 1) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+        b.push(MixSource::Mic, far_ns, &[0.5; 16]);
+        assert_eq!(
+            b.take_health(),
+            vec![CaptureHealth::Raised(CaptureWarning::AudioDropped)]
+        );
+        // One-shot, like every other health latch: a second over-cap push stays quiet.
+        b.push(MixSource::Mic, far_ns, &[0.5; 16]);
+        assert!(b.take_health().is_empty());
     }
 }

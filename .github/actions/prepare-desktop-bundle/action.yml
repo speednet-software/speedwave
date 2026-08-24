@@ -20,6 +20,23 @@ runs:
       if: inputs.platform == 'windows-latest'
       uses: ./.github/actions/download-wsl-resources
 
+    - name: Install Vulkan SDK and runtime loader
+      # The Windows whisper build carries the Vulkan backend (ADR-085): the SDK provides
+      # headers/vulkan-1.lib/glslc for the build, and the redistributable loader gets bundled
+      # next to the exe. The runner is elevated, so the pinned installer runs silently. The
+      # version pin lives only in the script; its final VULKAN_SDK=... line feeds later steps.
+      if: inputs.platform == 'windows-latest'
+      shell: pwsh
+      run: |
+        $out = scripts/install-vulkan-sdk.ps1
+        $out | Write-Output
+        ($out | Select-String -Pattern '^VULKAN_SDK=').Line | Add-Content $env:GITHUB_ENV
+
+    - name: Stage Vulkan runtime loader for bundling
+      if: inputs.platform == 'windows-latest'
+      shell: bash
+      run: scripts/stage-vulkan-runtime.sh
+
     - name: Download Node.js for bundling
       uses: ./.github/actions/download-nodejs
       with:

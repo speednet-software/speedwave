@@ -91,6 +91,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-082](ADR-082-policy-engine-pii-tokenization.md)                   | Policy engine: PII tokenization via a resolved, host-rendered policy mounted read-only into mcp-hub                         | Superseded by ADR-083                                   |
 | [ADR-083](ADR-083-vaultless-pii-tokenization.md)                       | Vaultless PII tokenization via a shared Rust engine (AES-SIV, policy v2, proxy + hub enforcement)                           | Accepted (policy.json wire contract revised by ADR-084) |
 | [ADR-084](ADR-084-policy-v3-open-rule-id-set.md)                       | Policy.json v3 — open rule-ID set replacing the fixed category enum, amending ADR-083                                       | Accepted                                                |
+| [ADR-085](ADR-085-windows-vulkan-transcription.md)                     | Windows Vulkan backend for whisper transcription: runtime GPU-class probe, bundled loader, pinned SDK                       | Accepted                                                |
 
 ## Creating a New ADR
 

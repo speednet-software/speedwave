@@ -116,6 +116,9 @@ pub enum CaptureWarning {
     MicrophoneStalled,
     /// System audio stopped delivering; recording continues with the mic only.
     SystemAudioStalled,
+    /// Captured audio was dropped before it reached the recording — that span is missing from
+    /// both the WAV and the transcript.
+    AudioDropped,
     /// A registered audio part contributed nothing to the offline pass — the
     /// finalized transcript is missing that span (resumed parts, ADR-056 Am. 10).
     RecordingPartMissing,
@@ -494,6 +497,7 @@ mod tests {
             (CaptureWarning::SystemAudioSilent, "system_audio_silent"),
             (CaptureWarning::MicrophoneStalled, "microphone_stalled"),
             (CaptureWarning::SystemAudioStalled, "system_audio_stalled"),
+            (CaptureWarning::AudioDropped, "audio_dropped"),
             (
                 CaptureWarning::RecordingPartMissing,
                 "recording_part_missing",

@@ -159,6 +159,12 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "cli/speedwave.exe",
         kind: BundledAssetKind::File,
     },
+    // The Vulkan loader must sit next to the exe: the whisper Vulkan backend is a load-time
+    // import and ggml touches it on every whisper init (ADR-085). Same path staged + installed.
+    BundledAssetSpec {
+        path: "vulkan-1.dll",
+        kind: BundledAssetKind::File,
+    },
 ];
 
 /// Manifest of the currently shipped app bundle.

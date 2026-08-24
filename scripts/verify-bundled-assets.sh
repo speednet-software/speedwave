@@ -89,6 +89,7 @@ case "$platform" in
     require_file "$root/cli/speedwave.exe"
     require_file "$root/windows/sweep.ps1"
     require_file "$root/windows/firewall.ps1"
+    require_file "$root/vulkan-1.dll"
     ;;
 esac
 

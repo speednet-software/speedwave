@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { TranscriptionService } from './transcription.service';
+import { LIVE_TRANSCRIPT_STORAGE_KEY, TranscriptionService } from './transcription.service';
 import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
@@ -93,6 +93,7 @@ describe('TranscriptionService', () => {
         params: {
           source: mixed,
           language: 'pl',
+          live: true,
         },
       });
       // The recording id is tracked at service level so it survives a remount.
@@ -411,6 +412,68 @@ describe('TranscriptionService', () => {
       // live_segments untouched (the offline pass doesn't rewrite them).
       expect(s.live_segments[0].text).toBe('live-text');
     });
+
+    it('applies audio_level and clears it when the status leaves recording', () => {
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 1,
+        levels: [0.12, 0.03],
+      });
+      expect(svc.audioLevels()).toEqual([0.12, 0.03]);
+      // Replayed/out-of-order level is dropped like any other event.
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 1,
+        levels: [0.9],
+      });
+      expect(svc.audioLevels()).toEqual([0.12, 0.03]);
+      // The meter is meaningless outside recording — status change clears it.
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 2,
+        status: { state: 'finalizing', progress: 0 },
+      });
+      expect(svc.audioLevels()).toBeNull();
+    });
+  });
+
+  describe('live-transcript preference', () => {
+    beforeEach(() => {
+      localStorage.removeItem(LIVE_TRANSCRIPT_STORAGE_KEY);
+    });
+
+    it('defaults from the probed GPU class when nothing is stored', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'transcription_capabilities'
+          ? { capabilities: {}, backends: ['cpu', 'vulkan'], gpu_class: 'integrated' }
+          : undefined;
+      await svc.getCapabilities();
+      expect(svc.liveTranscriptPreferred()).toBe(false);
+
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'transcription_capabilities'
+          ? { capabilities: {}, backends: ['cpu', 'metal'], gpu_class: 'discrete' }
+          : undefined;
+      await svc.getCapabilities();
+      expect(svc.liveTranscriptPreferred()).toBe(true);
+    });
+
+    it('a stored choice beats the hardware default and round-trips', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'transcription_capabilities'
+          ? { capabilities: {}, backends: ['cpu'], gpu_class: 'none' }
+          : undefined;
+      await svc.getCapabilities();
+      svc.setLiveTranscriptPreferred(true);
+      expect(svc.liveTranscriptPreferred()).toBe(true);
+      expect(localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY)).toBe('on');
+      svc.setLiveTranscriptPreferred(false);
+      expect(svc.liveTranscriptPreferred()).toBe(false);
+    });
+
+    it('assumes live before any capabilities read (discrete-like default)', () => {
+      expect(svc.liveTranscriptPreferred()).toBe(true);
+    });
   });
 
   describe('sendToChat', () => {
@@ -682,6 +745,35 @@ describe('TranscriptionService', () => {
         await svc.resumeDownloadTracking('large-v3');
         await vi.advanceTimersByTimeAsync(2000);
         expect(svc.downloadingModelKey()).toBe('large-v3');
+      });
+
+      it('tracks a download of the offline-pass model, which is a separate ack entry', async () => {
+        // Keying only off the live entry would poll forever while the other model downloads.
+        let downloading = true;
+        mockTauri.invokeHandler = async (cmd) =>
+          cmd === 'recommended_transcription_model'
+            ? {
+                key: 'small',
+                display_name: 'Small',
+                size_bytes: 487_601_967,
+                downloaded: true,
+                downloading: false,
+                accel_label: 'CPU',
+                finalize: {
+                  key: 'large-v3-turbo',
+                  display_name: 'Large v3 Turbo',
+                  size_bytes: 1_624_555_275,
+                  downloaded: !downloading,
+                  downloading,
+                },
+              }
+            : undefined;
+        await svc.resumeDownloadTracking('large-v3-turbo');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBe('large-v3-turbo');
+        downloading = false;
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBeNull();
       });
 
       it('stops polling once tracking is cleared by another path', async () => {

@@ -153,6 +153,8 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
         return 'The microphone stopped delivering audio — recording continues with system audio only.';
       case 'system_audio_stalled':
         return 'System audio stopped delivering — recording continues with the microphone only.';
+      case 'audio_dropped':
+        return 'Some captured audio was dropped because the transcriber could not keep up — that span is missing from the recording.';
       case 'recording_part_missing':
         return 'A resumed part of this recording contributed no audio — the transcript may be missing that span.';
       default:

@@ -434,6 +434,18 @@ jobs:
           key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
 
+      - name: Install Vulkan SDK
+        # The Windows whisper build carries the Vulkan backend (ADR-085); the runtime loader
+        # dir goes on PATH so `cargo test --bins` binaries (load-time vulkan-1.dll import)
+        # start on a GPU-less runner — no device is a clean CPU fallback, no loader is not.
+        shell: pwsh
+        run: |
+          $out = scripts/install-vulkan-sdk.ps1
+          $out | Write-Output
+          $root = (($out | Select-String -Pattern '^VULKAN_SDK=').Line) -replace '^VULKAN_SDK=', ''
+          "VULKAN_SDK=$root" | Add-Content $env:GITHUB_ENV
+          Join-Path $root 'runtime\x64' | Add-Content $env:GITHUB_PATH
+
       - name: Create resource stubs for Tauri build script
         run: scripts/create-desktop-stubs.sh
 
