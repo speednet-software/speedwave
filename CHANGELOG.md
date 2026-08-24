@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.18.0](https://github.com/speednet-software/speedwave/compare/v0.17.0...v0.18.0) (2026-08-24)
+
+
+### Features
+
+* **security:** PII tokenization, Claude Opus 5, and container start reliability fixes ([#1023](https://github.com/speednet-software/speedwave/issues/1023)) ([011844b](https://github.com/speednet-software/speedwave/commit/011844bcc13620ddb42b5d9702c5fa47bc805d38))
+
 ## [0.17.0](https://github.com/speednet-software/speedwave/compare/v0.16.0...v0.17.0) (2026-07-16)
 
 
