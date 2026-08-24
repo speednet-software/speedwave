@@ -81,7 +81,7 @@ e2e = ["dep:tauri-plugin-webdriver"]
 
 [dev-dependencies]
 mockito = "1"
-serial_test = "3"
+serial_test = "4"
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription", "test-support"] }
 
 [build-dependencies]
