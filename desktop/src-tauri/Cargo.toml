@@ -11,6 +11,7 @@ homepage = "https://github.com/speednet-software/speedwave"
 
 [dependencies]
 speedwave-runtime = { path = "../../crates/speedwave-runtime", features = ["audio-transcription"] }
+speedwave-pii-engine = { path = "../../crates/pii-engine" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Provides `serde_with::rust::double_option` for tri-state credential fields
@@ -34,7 +35,7 @@ tauri-plugin-updater = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 tauri-plugin-webdriver = { version = "0.2", optional = true }
 url = "2"
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 http = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -46,7 +47,7 @@ ctrlc = { version = "3", features = ["termination"] }
 # JSON Schema validation for `plugin_save_settings` — refuses payloads
 # that don't match the plugin's manifest-declared `settings_schema`.
 # MIT-licensed; transitive deps already in the tree (regex, url, fancy-regex).
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.49", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # In-process AVCaptureDevice mic-consent prompt (mic_permission_cmd.rs); the

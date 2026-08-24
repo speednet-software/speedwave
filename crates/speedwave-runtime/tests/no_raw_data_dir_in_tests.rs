@@ -39,10 +39,28 @@ fn manifest_root() -> PathBuf {
 
 /// The bare-`data_dir()` resolutions forbidden inside test regions, ordered
 /// longest-first so a qualified form is reported once, not as a substring.
+/// Beyond the literal calls, this lists every bare production wrapper that
+/// resolves `data_dir()` transitively — tests must use its `_in` twin.
 const PATTERNS: &[&str] = &[
     "speedwave_runtime::consts::data_dir()",
     "crate::consts::data_dir()",
     "consts::data_dir()",
+    "force_remove_project_containers_with_run_fn(",
+    "configured_project_container_names(",
+    "force_remove_project_containers(",
+    "detect_oauth_action_required(",
+    "crashed_teardown_intents(",
+    "record_teardown_intent(",
+    "teardown_intents_path(",
+    "clear_teardown_intent(",
+    "is_plugin_configured(",
+    "is_service_configured(",
+    "ensure_token_dir(",
+    "compose_file_path(",
+    "save_user_config(",
+    "load_user_config(",
+    "save_tokens(",
+    "token_dir(",
 ];
 
 /// True when `#[cfg(test)]` / `#[cfg(any(test...` guards a test *module*
@@ -84,6 +102,47 @@ fn is_in_test_module(lines: &[&str], idx: usize) -> bool {
 /// whole file is test code, so every line is treated as a test region.
 fn is_integration_test_file(rel_str: &str) -> bool {
     rel_str.contains("/tests/")
+}
+
+/// True when byte `pos` sits inside a `"..."` literal — structural tests assert
+/// on source-as-string (`source.contains("save_user_config(")`) and must not flag.
+fn in_string_literal(line: &str, pos: usize) -> bool {
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if i >= pos {
+            break;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '"' => in_str = !in_str,
+            _ => {}
+        }
+    }
+    in_str
+}
+
+/// True when `pat` occurs as a real call: word boundary before it (`token_dir(`
+/// must not match `removes_empty_token_dir()` or an `_in(` twin), outside strings.
+fn matches_bare_call(line: &str, pat: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(pat) {
+        let abs = start + pos;
+        let boundary = abs == 0
+            || !line[..abs]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        if boundary && !in_string_literal(line, abs) {
+            return true;
+        }
+        start = abs + pat.len();
+    }
+    false
 }
 
 fn has_allow_marker(line: &str, prev: Option<&&str>) -> bool {
@@ -133,7 +192,7 @@ fn no_raw_data_dir_in_test_regions() {
             if has_allow_marker(line, prev) {
                 continue;
             }
-            if let Some(pat) = PATTERNS.iter().find(|p| line.contains(**p)) {
+            if let Some(pat) = PATTERNS.iter().find(|p| matches_bare_call(line, p)) {
                 // Whole-file test binaries; in `src/` only genuine test regions.
                 if whole_file_is_test || is_in_test_module(&lines, idx) {
                     violations.push(format!(

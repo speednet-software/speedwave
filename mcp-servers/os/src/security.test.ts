@@ -138,8 +138,7 @@ describe('Security', () => {
         for (const field of required) {
           // Use correct types so handlers don't short-circuit on validation
           const prop = tool.inputSchema.properties?.[field] as
-            | { type?: string; description?: string }
-            | undefined;
+            { type?: string; description?: string } | undefined;
           const isDateField =
             prop?.description?.toLowerCase().includes('iso8601') ||
             field === 'start' ||

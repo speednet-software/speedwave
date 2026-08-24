@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
   executeCode,
   _setBridgesForTesting,
@@ -16,7 +19,9 @@ import {
   populateRegistryWithMockTools,
   _resetRegistryForTesting,
   createMockBridges,
+  buildMockToolMetadata,
 } from './test-helpers.js';
+import type { ToolMetadata } from './hub-types.js';
 
 // ── Tests for Code Executor (sandbox security and basic validation) ──────────────────────────
 
@@ -416,6 +421,212 @@ describe('executor', () => {
     });
   });
 
+  describe('plugin services in sandbox', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+
+    /** Full ToolMetadata registry entry for a plugin service with the given method names. */
+    const pluginRegistry = (service: string, methods: string[]): Record<string, ToolMetadata> =>
+      Object.fromEntries(
+        methods.map((m) => [m, buildMockToolMetadata(service, m, { deferLoading: false })])
+      );
+
+    /** Plant each plugin's registry entry, then point SERVICE_NAMES + ENABLED_SERVICES at them. */
+    const enablePlugins = (registry: Record<string, Record<string, ToolMetadata>>): void => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      for (const [service, tools] of Object.entries(registry)) {
+        mutableRegistry[service] = tools;
+      }
+      const names = Object.keys(registry);
+      _setServiceNamesForTesting(names);
+      process.env.ENABLED_SERVICES = names.join(',');
+    };
+
+    beforeEach(() => {
+      resetServiceCaches();
+      _setBridgesForTesting(createMockBridges());
+    });
+
+    afterEach(() => {
+      _setBridgesForTesting(null);
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      resetServiceCaches();
+      _resetRegistryForTesting();
+      populateRegistryWithMockTools();
+    });
+
+    it('exposes a dashed service under a camelCase global', async () => {
+      enablePlugins({
+        'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser', 'searchItems']),
+      });
+      const result = await executeCode({
+        code: `return Object.keys(myPlugin).sort()`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(['getCurrentUser', 'searchItems']);
+    });
+
+    it('does not break the sandbox for unrelated code', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(4);
+    });
+
+    it('names the camelCase global in method-not-found hints', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      const result = await executeCode({ code: `await myPlugin.nonExistent()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).toContain('Available myPlugin methods');
+      expect(result.error?.message).toContain('getCurrentUser');
+    });
+
+    it('teaches the camelCase global when a dashed slug is called verbatim', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      // `my-plugin.getCurrentUser()` parses as `my - plugin...` → "my is not defined".
+      const result = await executeCode({
+        code: `return my-plugin.getCurrentUser()`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('is not defined');
+      expect(result.error?.message).toContain("'my-plugin' → myPlugin");
+      expect(result.error?.message).toContain('myPlugin.method()');
+    });
+
+    it('lists every dashed service sharing the undefined first segment', async () => {
+      enablePlugins({
+        'acme-crm': pluginRegistry('acme-crm', ['foo']),
+        'acme-docs': pluginRegistry('acme-docs', ['bar']),
+      });
+      // `acme-crm.foo()` → "acme is not defined"; the segment maps to both enabled services.
+      const result = await executeCode({ code: `return acme-crm.foo()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("'acme-crm' → acmeCrm");
+      expect(result.error?.message).toContain("'acme-docs' → acmeDocs");
+    });
+
+    it('teaches the global when the slug is spelled without its dash', async () => {
+      enablePlugins({ 'my-plugin': pluginRegistry('my-plugin', ['getCurrentUser']) });
+      const result = await executeCode({ code: `return myplugin.foo()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("'my-plugin' → myPlugin");
+    });
+
+    it('teaches the global when a non-first dash segment is used alone', async () => {
+      enablePlugins({ 'acme-crm': pluginRegistry('acme-crm', ['foo']) });
+      const result = await executeCode({ code: `return crm.foo()`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain("'acme-crm' → acmeCrm");
+    });
+
+    it('skips a slug that camelCases to a reserved word, keeping the sandbox alive', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({ class: pluginRegistry('class', ['foo']) });
+      const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(4);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'class'"));
+      errSpy.mockRestore();
+    });
+
+    it('skips a slug that camelCases to an empty global, keeping the sandbox alive', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({ '--': pluginRegistry('--', ['foo']) });
+      const result = await executeCode({ code: 'return 2 + 2', timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe(4);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service '--'"));
+      errSpy.mockRestore();
+    });
+
+    it('skips every service in an unresolvable camelCase collision, not just the loser', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({
+        'a-b': pluginRegistry('a-b', ['foo']),
+        'a--b': pluginRegistry('a--b', ['bar']),
+      });
+      const result = await executeCode({ code: `return typeof aB`, timeoutMs: 5000 });
+
+      // Neither may win: picking one by SERVICE_NAMES order makes the outcome config-dependent.
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('undefined');
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a-b'"));
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'a--b'"));
+      errSpy.mockRestore();
+    });
+
+    it('lets an exact service name beat a camelCased one, so a plugin cannot shadow a built-in', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // `redmine-` is a valid plugin slug and camelCases to `redmine`; ordered first it would
+      // otherwise take over the built-in global and route redmine.* to the plugin's bridge.
+      enablePlugins({
+        'redmine-': pluginRegistry('redmine-', ['pluginOwnedTool']),
+        redmine: pluginRegistry('redmine', ['listIssueIds']),
+      });
+      const result = await executeCode({ code: `return Object.keys(redmine)`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(['listIssueIds']);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'redmine-'"));
+      errSpy.mockRestore();
+    });
+
+    it('skips a slug shadowing a JS value global, keeping `x === undefined` honest', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // `undefined` is a legal parameter name, so it passes the identifier probe: shadowing it
+      // would silently invert every undefined-check in model-generated code.
+      enablePlugins({ undefined: pluginRegistry('undefined', ['foo']) });
+      const result = await executeCode({
+        code: 'let x; return [typeof undefined, x === undefined]',
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(['undefined', true]);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'undefined'"));
+      errSpy.mockRestore();
+    });
+
+    it('does not let a plugin shadow a built-in sandbox helper', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      enablePlugins({ 'collect-pages': pluginRegistry('collect-pages', ['foo']) });
+      const result = await executeCode({ code: `return typeof collectPages`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('function');
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Service 'collect-pages'"));
+      errSpy.mockRestore();
+    });
+
+    it('does not expose a service enabled but absent from the discovered registry set', async () => {
+      const mutableRegistry = TOOL_REGISTRY as Record<string, Record<string, ToolMetadata>>;
+      mutableRegistry['example-plugin'] = pluginRegistry('example-plugin', ['searchCustomers']);
+      // SERVICE_NAMES is the discovered set the sandbox iterates; it deliberately omits the plugin.
+      _setServiceNamesForTesting(['slack']);
+      process.env.ENABLED_SERVICES = 'slack,example-plugin';
+
+      const result = await executeCode({ code: `typeof examplePlugin`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(result.data).toBe('undefined');
+    });
+  });
+
   describe('closestMatches', () => {
     it('ranks candidates by ascending edit distance', () => {
       const result = closestMatches('listProjects', ['listProjectIds', 'listIssueIds', 'getFile']);
@@ -549,7 +760,7 @@ describe('executor', () => {
     });
   });
 
-  // sanitizeParamsForLogging tests moved to pii-tokenizer.ts
+  // Sensitive-key-detection tests live in the policy-engine package's tokenizer test suite
 
   describe('batch helper (through executeCode)', () => {
     beforeEach(() => {
@@ -609,61 +820,6 @@ describe('executor', () => {
       expect(errors).toHaveLength(1);
       expect(errors[0].index).toBe(1);
       expect(errors[0].error).toContain('Second failed');
-    });
-  });
-
-  describe('plugin service in sandbox', () => {
-    const savedEnabledServices = process.env.ENABLED_SERVICES;
-
-    beforeEach(() => {
-      resetServiceCaches();
-      process.env.ENABLED_SERVICES = 'slack,example-plugin';
-    });
-
-    afterEach(() => {
-      if (savedEnabledServices === undefined) {
-        delete process.env.ENABLED_SERVICES;
-      } else {
-        process.env.ENABLED_SERVICES = savedEnabledServices;
-      }
-      resetServiceCaches();
-    });
-
-    it('should include plugin service tools in sandbox context', async () => {
-      // Register a plugin service in the registry
-      const { TOOL_REGISTRY, SERVICE_NAMES } = await import('./tool-registry.js');
-      const mutableRegistry = TOOL_REGISTRY as Record<
-        string,
-        Record<string, Record<string, unknown>>
-      >;
-      mutableRegistry['example-plugin'] = {
-        searchCustomers: {
-          name: 'searchCustomers',
-          service: 'example-plugin',
-          description: 'Search CRM customers',
-          inputSchema: { type: 'object', properties: {} },
-          keywords: [],
-          example: '',
-          deferLoading: false,
-        },
-      };
-
-      // Set up mock bridges
-      const mockBridges = createMockBridges();
-      mockBridges['example-plugin'] = null;
-      mockBridges['os'] = null;
-      _setBridgesForTesting(mockBridges);
-
-      // Code that accesses the sandbox to check what's available
-      const code = `typeof examplePlugin`;
-      const result = await executeCode({ code, timeoutMs: 5000 });
-      // example-plugin is in sandbox but has no bridge, so it's undefined
-      expect(result.success).toBe(true);
-      expect(result.data).toBe('undefined');
-
-      // Cleanup
-      delete mutableRegistry['example-plugin'];
-      _setBridgesForTesting(null);
     });
   });
 
@@ -1490,6 +1646,410 @@ describe('executor', () => {
       expect(result.error?.message).toContain('my_service.doThing');
 
       delete mutableRegistry['my_service'];
+    });
+  });
+
+  describe('PII tokenization end-to-end (wasm engine wiring)', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+    const workerUrls: Record<string, string | undefined> = {};
+    let originalFetch: typeof globalThis.fetch;
+
+    beforeEach(() => {
+      const services = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+      for (let i = 0; i < services.length; i++) {
+        const key = `WORKER_${services[i].toUpperCase()}_URL`;
+        workerUrls[key] = process.env[key];
+        process.env[key] = `http://mcp-${services[i]}:${3001 + i}`;
+      }
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      _setBridgesForTesting(createMockBridges());
+      originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      _setBridgesForTesting(null);
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      for (const [key, val] of Object.entries(workerUrls)) {
+        if (val === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = val;
+        }
+      }
+      resetServiceCaches();
+    });
+
+    /** Mock a single successful MCP tools/call response carrying `body` as its JSON text. */
+    function mockWorkerJsonResponse(body: unknown): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          result: { content: [{ type: 'text', text: JSON.stringify(body) }] },
+        }),
+        text: async () => '',
+      }) as unknown as typeof fetch;
+    }
+
+    it('tokenizes PII found in a bridge call result before it reaches the sandbox', async () => {
+      mockWorkerJsonResponse({ email: 'alice@example.com' });
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      const email = (result.data as { email: string }).email;
+      expect(email).not.toBe('alice@example.com');
+      expect(email).toMatch(/^\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]$/);
+    });
+
+    it('detokenizes a token in params before the value reaches the bridge call', async () => {
+      // Obtain a real token from this process's engine by round-tripping an email through a call
+      // whose mocked worker response echoes the same text back (so the result gets tokenized).
+      mockWorkerJsonResponse({ text: 'reach me at alice@example.com' });
+      const tokenizeCode = `return await slack.sendChannel({ channel: 'general', text: 'reach me at alice@example.com' });`;
+      const first = await executeCode({ code: tokenizeCode, timeoutMs: 5000 });
+      const token = (first.data as { text: string }).text.match(
+        /\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/
+      )?.[0];
+      expect(token).toBeTruthy();
+
+      let capturedBody = '';
+      globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+        capturedBody = String((init as { body?: string } | undefined)?.body ?? '');
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({
+            jsonrpc: '2.0',
+            id: 'test',
+            result: { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] },
+          }),
+          text: async () => '',
+        };
+      }) as unknown as typeof fetch;
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: ${JSON.stringify(token)} });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      expect(capturedBody).toContain('alice@example.com');
+      expect(capturedBody).not.toContain(token);
+    });
+
+    it('fails closed (EXECUTION_ERROR) when a tampered token is passed as a param', async () => {
+      mockWorkerJsonResponse({ text: 'reach me at alice@example.com' });
+
+      const tokenizeCode = `return await slack.sendChannel({ channel: 'general', text: 'reach me at alice@example.com' });`;
+      const first = await executeCode({ code: tokenizeCode, timeoutMs: 5000 });
+      const token = (first.data as { text: string }).text.match(
+        /\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/
+      )?.[0];
+      expect(token).toBeTruthy();
+      const tampered = (token as string).replace('TOKEN_', 'TOKEN_X');
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: ${JSON.stringify(tampered)} });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+    });
+
+    /** Mock a JSON-RPC error response (worker rejected the call) carrying `message` verbatim. */
+    function mockWorkerJsonRpcError(message: string): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          error: { code: -32000, message },
+        }),
+        text: async () => '',
+      }) as unknown as typeof fetch;
+    }
+
+    it('tokenizes PII carried in a bridge error message before it reaches the model', async () => {
+      mockWorkerJsonRpcError('invalid recipient: alice@example.com');
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).not.toContain('alice@example.com');
+      expect(result.error?.message).toMatch(/\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/);
+    });
+
+    it('tokenizes PII in a bridge error collected through batch() into a returned result', async () => {
+      mockWorkerJsonRpcError('invalid recipient: bob@example.com');
+
+      const code = `
+        const outcome = await batch([
+          slack.sendChannel({ channel: 'general', text: 'hi' }),
+        ]);
+        return outcome;
+      `;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      const errors = (result.data as { errors: Array<{ error: string }> }).errors;
+      expect(errors).toHaveLength(1);
+      expect(errors[0].error).not.toContain('bob@example.com');
+      expect(errors[0].error).toMatch(/\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/);
+    });
+
+    it('leaves a bridge error message without PII readable and unchanged', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({}),
+        text: async () => 'Internal Server Error',
+      }) as unknown as typeof fetch;
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).toBe('slack: Worker slack returned 500: Internal Server Error');
+    });
+
+    it('degrades to a generic message when the PII engine itself fails to tokenize an error', async () => {
+      const policyModule = await import('./policy.js');
+      const spy = vi.spyOn(policyModule, 'getEngine').mockReturnValue({
+        tokenize: () => {
+          throw new Error('engine boom');
+        },
+        detokenize: (v: unknown) => v,
+      });
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({}),
+        text: async () => 'Internal Server Error',
+      }) as unknown as typeof fetch;
+
+      const code = `return await slack.sendChannel({ channel: 'general', text: 'hi' });`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      // Never the raw, un-tokenized bridge message — a fixed generic string instead.
+      // (The outer catch's own tokenize attempt also fails and degrades again, dropping the
+      // service-name prefix wrapBridgeCall's degrade had added.)
+      expect(result.error?.message).toBe('tool call failed');
+
+      spy.mockRestore();
+    });
+
+    it('tokenizes PII in an error thrown directly by sandbox code (no bridge call involved)', async () => {
+      const code = `throw new Error('reach me at alice@example.com');`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('EXECUTION_ERROR');
+      expect(result.error?.message).not.toContain('alice@example.com');
+      expect(result.error?.message).toMatch(/\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]/);
+    });
+  });
+
+  describe('sandbox-return scan + PII audit writer (F3.4)', () => {
+    let auditDir: string | undefined;
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      if (auditDir) {
+        rmSync(auditDir, { recursive: true, force: true });
+        auditDir = undefined;
+      }
+    });
+
+    it('tokenizes a literal PII value the sandbox code returns directly (no bridge call)', async () => {
+      const code = `return { email: 'alice@example.com' };`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+      const email = (result.data as { email: string }).email;
+      expect(email).not.toBe('alice@example.com');
+      expect(email).toMatch(/^\[EMAIL:TOKEN_[A-Za-z0-9_-]+\]$/);
+    });
+
+    it('executes successfully without touching disk when AUDIT_DIR is unset', async () => {
+      vi.stubEnv('AUDIT_DIR', undefined);
+
+      const result = await executeCode({ code: `return { ok: true };`, timeoutMs: 5000 });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('writes tool-result and sandbox-return audit events when AUDIT_DIR is set', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      vi.stubEnv('AUDIT_DIR', auditDir);
+
+      const code = `return { email: 'bob@example.com' };`;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      expect(result.success).toBe(true);
+
+      const content = readFileSync(join(auditDir, 'audit-hub.jsonl'), 'utf-8');
+      const rows = content
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      expect(rows.length).toBeGreaterThan(0);
+      const sandboxRow = rows.find((r) => r.layer === 'sandbox-return' && r.category === 'EMAIL');
+      expect(sandboxRow).toMatchObject({ action: 'tokenized', count: 1, tool: null });
+      // Never carries the scanned value itself.
+      expect(content).not.toContain('bob@example.com');
+    });
+
+    it('does not fail execution when AUDIT_DIR points at a file instead of a directory', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      const notADir = join(auditDir, 'not-a-dir');
+      writeFileSync(notADir, 'x');
+      vi.stubEnv('AUDIT_DIR', notADir);
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      const result = await executeCode({
+        code: `return { email: 'carol@example.com' };`,
+        timeoutMs: 5000,
+      });
+
+      expect(result.success).toBe(true);
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('tool-result audit aggregation across repeated calls within one executeCode (F3.4 fix)', () => {
+    const savedEnabledServices = process.env.ENABLED_SERVICES;
+    const workerUrls: Record<string, string | undefined> = {};
+    let originalFetch: typeof globalThis.fetch;
+    let auditDir: string | undefined;
+
+    beforeEach(() => {
+      const services = ['slack', 'sharepoint', 'redmine', 'gitlab', 'os'];
+      for (let i = 0; i < services.length; i++) {
+        const key = `WORKER_${services[i].toUpperCase()}_URL`;
+        workerUrls[key] = process.env[key];
+        process.env[key] = `http://mcp-${services[i]}:${3001 + i}`;
+      }
+      resetServiceCaches();
+      process.env.ENABLED_SERVICES = 'slack,sharepoint,redmine,gitlab,os';
+      _setBridgesForTesting(createMockBridges());
+      originalFetch = globalThis.fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      _setBridgesForTesting(null);
+      if (savedEnabledServices === undefined) {
+        delete process.env.ENABLED_SERVICES;
+      } else {
+        process.env.ENABLED_SERVICES = savedEnabledServices;
+      }
+      for (const [key, val] of Object.entries(workerUrls)) {
+        if (val === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = val;
+        }
+      }
+      resetServiceCaches();
+      vi.unstubAllEnvs();
+      if (auditDir) {
+        rmSync(auditDir, { recursive: true, force: true });
+        auditDir = undefined;
+      }
+    });
+
+    /** Mock every worker call with a JSON body carrying an email, regardless of which tool is invoked. */
+    function mockWorkerJsonResponseWithEmail(): void {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({
+          jsonrpc: '2.0',
+          id: 'test',
+          result: {
+            content: [{ type: 'text', text: JSON.stringify({ email: 'alice@example.com' }) }],
+          },
+        }),
+        text: async () => '',
+      }) as unknown as typeof fetch;
+    }
+
+    it('collapses two calls to the SAME tool into one tool-result row with a summed count', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      vi.stubEnv('AUDIT_DIR', auditDir);
+      mockWorkerJsonResponseWithEmail();
+
+      const code = `
+        await slack.sendChannel({ channel: 'general', text: 'hi 1' });
+        await slack.sendChannel({ channel: 'general', text: 'hi 2' });
+        return { ok: true };
+      `;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      expect(result.success).toBe(true);
+
+      const content = readFileSync(join(auditDir, 'audit-hub.jsonl'), 'utf-8');
+      const rows = content
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      const toolResultEmailRows = rows.filter(
+        (r) => r.layer === 'tool-result' && r.category === 'EMAIL' && r.tool === 'slack.sendChannel'
+      );
+      expect(toolResultEmailRows).toHaveLength(1);
+      expect(toolResultEmailRows[0]).toMatchObject({ action: 'tokenized', count: 2 });
+    });
+
+    it('keeps two DIFFERENT tools reporting the same category as two separate tool-result rows', async () => {
+      auditDir = mkdtempSync(join(tmpdir(), 'audit-hub-'));
+      vi.stubEnv('AUDIT_DIR', auditDir);
+      mockWorkerJsonResponseWithEmail();
+
+      const code = `
+        await slack.sendChannel({ channel: 'general', text: 'hi' });
+        await sharepoint.uploadFile({ path: '/doc.txt', content: 'hi' });
+        return { ok: true };
+      `;
+      const result = await executeCode({ code, timeoutMs: 5000 });
+      expect(result.success).toBe(true);
+
+      const content = readFileSync(join(auditDir, 'audit-hub.jsonl'), 'utf-8');
+      const rows = content
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      const toolResultEmailRows = rows.filter(
+        (r) => r.layer === 'tool-result' && r.category === 'EMAIL'
+      );
+      const tools = toolResultEmailRows.map((r) => r.tool).sort();
+      expect(tools).toEqual(['sharepoint.uploadFile', 'slack.sendChannel']);
+      for (const row of toolResultEmailRows) {
+        expect(row).toMatchObject({ action: 'tokenized', count: 1 });
+      }
     });
   });
 });

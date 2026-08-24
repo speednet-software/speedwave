@@ -227,6 +227,81 @@ pub(crate) struct TelemetryConfigUpdate {
     pub(crate) logs_export_interval_ms: Option<Option<u64>>,
 }
 
+/// A built-in PII rule from the library (`mcp-servers/policies/rules.yaml`), for
+/// the Settings category checklist. PII categories are an open rule-id set, not
+/// a fixed enum — the frontend fetches this list instead of hard-coding one.
+#[derive(Serialize, Clone)]
+pub(crate) struct PiiRuleInfo {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+}
+
+/// A built-in PII policy template's Settings-picker metadata. `categories` keys
+/// are rule ids from the library; an id absent from the map is off in this template.
+#[derive(Serialize, Clone)]
+pub(crate) struct SecurityPolicyTemplateInfo {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) categories:
+        std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
+}
+
+/// A user-defined policy's Settings-picker metadata (editable); mirrors
+/// `PiiPolicyDefinition` (the v1 `sensitive_keys` concept has no v3 counterpart).
+#[derive(Serialize, Clone)]
+pub(crate) struct CustomPolicyDto {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) categories:
+        std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
+    pub(crate) rules: Vec<speedwave_runtime::pii_policy::OwnRuleV3>,
+    #[serde(default)]
+    pub(crate) keywords: Vec<speedwave_runtime::pii_policy::KeywordV3>,
+}
+
+/// Effective PII policy for the active project: `enabled_policies` is the
+/// user ∪ MDM-forced set, `forced_policies` the MDM-locked subset.
+#[derive(Serialize)]
+pub(crate) struct SecurityPolicyResponse {
+    pub(crate) enabled_policies: Vec<String>,
+    pub(crate) forced_policies: Vec<String>,
+    /// Rules with at least one flag on in the resolved union (mirrors `ResolvedPiiPolicy::rules`);
+    /// a rule id absent here is fully off across every enabled policy.
+    pub(crate) effective_rules: Vec<speedwave_runtime::pii_policy::RuleOutput>,
+    pub(crate) custom_policies: Vec<CustomPolicyDto>,
+}
+
+/// A custom detection rule as entered in the Settings form: the UI never
+/// computes the rule id — the server derives it from `display_name` on every save.
+#[derive(Deserialize, Clone)]
+pub(crate) struct SecurityPolicyCustomPatternInput {
+    pub(crate) display_name: String,
+    pub(crate) pattern: String,
+    pub(crate) case_insensitive: bool,
+}
+
+/// A user-defined policy as entered in the Settings form; the server derives
+/// the id from `name`. `enabled` is this policy's own state, never forced.
+#[derive(Deserialize, Clone)]
+pub(crate) struct CustomPolicyDtoInput {
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) categories:
+        std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags>,
+    pub(crate) custom_patterns: Vec<SecurityPolicyCustomPatternInput>,
+    #[serde(default)]
+    pub(crate) keywords: Vec<speedwave_runtime::pii_policy::KeywordV3>,
+}
+
+/// User-supplied PII policy update (Settings → Security save path). `policies`
+/// and each custom entry's `enabled` carry the user's own selection only, never forced ids.
+#[derive(Deserialize)]
+pub(crate) struct SecurityPolicyUpdate {
+    pub(crate) policies: Vec<String>,
+    pub(crate) custom_policies: Vec<CustomPolicyDtoInput>,
+}
+
 #[derive(Serialize, Clone)]
 pub(crate) struct AuthField {
     pub(crate) key: String,

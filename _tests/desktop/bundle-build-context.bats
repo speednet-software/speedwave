@@ -40,6 +40,39 @@ teardown() {
     [ -f "$DEST/build-context/containers/Containerfile.claude" ]
 }
 
+@test "bundle script vendors crates/pii-engine into containers/crates for the proxy build context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/build-context/containers/crates/pii-engine/src" ]
+    [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
+    [ ! -d "$DEST/build-context/containers/crates/pii-engine/target" ]
+    # policy.rs include_str!s this repo-root-relative; Containerfile.proxy COPYs it.
+    [ -f "$DEST/build-context/containers/mcp-servers/policies/rules.yaml" ]
+}
+
+# The digest resolver (bundle.rs::resolve_hash_input) tries <root>/<input> then
+# <root>/containers/<input>; an input resolving in neither aborts every image build in an installed app.
+@test "every ImageDef hash input resolves inside the staged build-context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    local build_rs="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/build.rs"
+    local inputs
+    inputs="$(awk '/^pub const IMAGES/,/^\];/' "$build_rs" \
+        | awk '/hash_inputs: &\[/,/\]/' | grep -oE '"[^"]+"' | tr -d '"' | sort -u)"
+    [ -n "$inputs" ]
+    local missing=""
+    local p
+    while IFS= read -r p; do
+        if [ ! -e "$DEST/build-context/$p" ] && [ ! -e "$DEST/build-context/containers/$p" ]; then
+            missing="$missing $p"
+        fi
+    done <<< "$inputs"
+    if [ -n "$missing" ]; then
+        echo "hash inputs unresolvable in the staged build-context:$missing"
+        return 1
+    fi
+}
+
 @test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
     # Plant a dirty source tree; the trap removes it even on assertion failure.
     local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"
@@ -69,11 +102,68 @@ teardown() {
 @test "bundle script creates all MCP service directories" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    for svc in shared hub slack sharepoint redmine gitlab; do
+    for svc in shared policies hub slack sharepoint redmine gitlab; do
         [ -d "$DEST/build-context/mcp-servers/$svc" ]
         [ -f "$DEST/build-context/mcp-servers/$svc/package.json" ]
         [ -d "$DEST/build-context/mcp-servers/$svc/src" ]
     done
+}
+
+@test "bundle script copies policies templates" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/build-context/mcp-servers/policies/templates" ]
+    [ -f "$DEST/build-context/mcp-servers/policies/templates/strict.yaml" ]
+}
+
+@test "bundle script builds and stages a real policies/wasm-pkg artifact" {
+    # No prebuilt/placeholder fallback: the script builds crates/pii-engine-wasm itself
+    # (requires wasm-pack + the wasm32 target — `make setup-dev`) and hard-fails otherwise.
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$DEST/build-context/mcp-servers/policies/wasm-pkg" ]
+    shopt -s nullglob
+    local staged=("$DEST/build-context/mcp-servers/policies/wasm-pkg"/*_bg.wasm)
+    shopt -u nullglob
+    [ "${#staged[@]}" -gt 0 ]
+    [ -s "${staged[0]}" ]
+}
+
+@test "bundle script rebuilds policies/wasm-pkg from source even when a stale artifact already exists" {
+    local src="$BATS_TEST_DIRNAME/../../mcp-servers/policies/wasm-pkg"
+    trap 'rm -rf "$src"' RETURN
+    mkdir -p "$src"
+    echo fake-wasm > "$src/pii_engine_wasm_bg.wasm"
+
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+
+    local dest_dir="$DEST/build-context/mcp-servers/policies/wasm-pkg"
+    shopt -s nullglob
+    local staged=("$dest_dir"/*_bg.wasm)
+    shopt -u nullglob
+    [ "${#staged[@]}" -gt 0 ]
+    [ -s "${staged[0]}" ]
+    ! grep -q "fake-wasm" "${staged[0]}"
+}
+
+@test "bundle script fails hard when the wasm toolchain is unavailable" {
+    # Stub wasm-pack as a always-failing binary and put it first on PATH; the script must
+    # exit non-zero with a clear remediation hint, never fall back to a placeholder dir.
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    trap 'rm -rf "$stub_dir"' RETURN
+    cat >"$stub_dir/wasm-pack" <<'EOF'
+#!/usr/bin/env bash
+echo "stub wasm-pack: simulated failure" >&2
+exit 1
+EOF
+    chmod +x "$stub_dir/wasm-pack"
+
+    PATH="$stub_dir:$PATH" run "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"make setup-dev"* ]]
+    [ ! -d "$DEST/build-context" ]
 }
 
 @test "bundle script does not include os service in build-context" {

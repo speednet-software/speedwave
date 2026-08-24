@@ -54,11 +54,7 @@ export interface PluginSaveCredentialsEvent {
  * in `crates/speedwave-runtime/src/plugin.rs` (`#[serde(rename_all = "snake_case")]`).
  */
 export type PluginVerificationStatus =
-  | 'verified'
-  | 'missing_signature'
-  | 'invalid_signature'
-  | 'dir_slug_mismatch'
-  | 'manifest_invalid';
+  'verified' | 'missing_signature' | 'invalid_signature' | 'dir_slug_mismatch' | 'manifest_invalid';
 
 /** Status and configuration details for an installed plugin. */
 export interface PluginStatusEntry {
