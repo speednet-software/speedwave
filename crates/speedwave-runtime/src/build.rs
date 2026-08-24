@@ -71,9 +71,8 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.proxy",
         build_args: &[],
-        // Everything the Containerfile COPYies lives under containers/proxy, plus the
-        // vendored crates/pii-engine and mcp-servers/policies/rules.yaml (staged into the build
-        // context by the bundle scripts so pii-engine's repo-relative paths resolve in-container).
+        // Repo-root-relative; in the bundled build-context these vendored sources live under
+        // containers/, which bundle.rs::resolve_hash_input maps to when the direct path is absent.
         hash_inputs: &[
             "containers/Containerfile.proxy",
             "containers/proxy",
@@ -86,15 +85,13 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
-        // pii-engine(-wasm): the wasm-pkg artifact ships prebuilt (not a COPY source hashed
-        // above), so a source change must still retag the image that carries it.
+        // mcp-servers/policies carries the prebuilt wasm-pkg, so a pii-engine(-wasm) source
+        // change reaches this digest through the rebuilt artifact rather than the crate sources.
         hash_inputs: &[
             "mcp-servers/hub",
             "mcp-servers/shared",
             "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
-            "crates/pii-engine",
-            "crates/pii-engine-wasm",
         ],
     },
     ImageDef {
@@ -1395,10 +1392,8 @@ mod tests {
                 img.name
             );
             for input in img.hash_inputs {
-                assert!(
-                    repo_root().join(input).exists(),
-                    "{}: declared hash input '{input}' does not exist in the repo",
-                    img.name
+                crate::bundle::resolve_hash_input_for_test(&repo_root(), input).unwrap_or_else(
+                    |e| panic!("{}: hash input does not resolve in the repo: {e}", img.name),
                 );
             }
         }
