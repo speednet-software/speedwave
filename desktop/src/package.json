@@ -46,7 +46,7 @@
   },
   "devDependencies": {
     "@angular/build": "^21.2.20",
-    "@angular/cli": "^21.2.20",
+    "@angular/cli": "^22.1.5",
     "@angular/compiler-cli": "^21.2.19",
     "@eslint/js": "^10.0.1",
     "@tailwindcss/postcss": "^4.3.3",
