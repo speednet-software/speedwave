@@ -51,8 +51,7 @@ teardown() {
 }
 
 # The digest resolver (bundle.rs::resolve_hash_input) tries <root>/<input> then
-# <root>/containers/<input>; an input resolving in neither aborts every image build
-# in an installed app while repo-rooted CI stays green (the 0.18.0 release blocker).
+# <root>/containers/<input>; an input resolving in neither aborts every image build in an installed app.
 @test "every ImageDef hash input resolves inside the staged build-context" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
