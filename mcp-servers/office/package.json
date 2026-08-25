@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/mcp-office",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Speedwave MCP Office Worker - read/write/create/convert Word, Excel, PowerPoint, PDF; render charts",
   "main": "dist/index.js",
   "type": "module",
