@@ -2662,7 +2662,10 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    let tokens_path = crate::engine_path::to_engine_path(&tokens_dir.join(sid))?;
+    // Convert first, then '/'-join: a native join before conversion emits a
+    // platform-dependent separator for the engine-side path.
+    let tokens_path =
+        crate::engine_path::vm_path_join(&crate::engine_path::to_engine_path(tokens_dir)?, sid);
     let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
     let mem_limit = manifest
         .mem_limit

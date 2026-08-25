@@ -2366,14 +2366,23 @@ mod tests {
         );
     }
 
+    /// The check compares against its own join+convert of `data_dir` — mirror that
+    /// construction (a hand-written literal diverges on Windows separators).
+    fn plugin_resources_source(data_dir: &std::path::Path, slug: &str) -> String {
+        to_engine_path(&data_dir.join("plugins").join(slug).join("claude-resources")).unwrap()
+    }
+
     #[test]
     fn claude_plugin_resources_mount_is_allowed() {
         // A plugin's claude-resources dir mounts read-only at /speedwave/plugins/<slug>.
         let data_dir = std::path::Path::new("/host/.speedwave");
-        let yaml = "services:\n  claude:\n    volumes:\n      \
-                    - /proj:/workspace:rw\n      \
-                    - /host/.speedwave/plugins/figma/claude-resources:/speedwave/plugins/figma:ro\n";
-        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let yaml = format!(
+            "services:\n  claude:\n    volumes:\n      \
+             - /proj:/workspace:rw\n      \
+             - {}:/speedwave/plugins/figma:ro\n",
+            plugin_resources_source(data_dir, "figma")
+        );
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
         let v = SecurityCheck::check_claude_workspace_mount(&doc, &expected, data_dir, "test");
         assert!(
@@ -2622,6 +2631,7 @@ mod tests {
         // modeless /workspace, the managed-settings mount, and a plugin mount.
         let data_dir = std::path::Path::new("/host/.speedwave");
         let managed = managed_source(data_dir, "p");
+        let plugin_resources = plugin_resources_source(data_dir, "figma");
         let yaml = format!(
             "services:\n  claude:\n    volumes:\n      \
              - /host/.speedwave/claude-home/p:/home/speedwave:rw\n      \
@@ -2630,7 +2640,7 @@ mod tests {
              - /host/.speedwave/ide-bridge:/home/speedwave/.claude/ide:ro\n      \
              - /host/.speedwave/usage/p/proxy:/usage:ro\n      \
              - {managed}:/etc/claude-code/managed-settings.json:ro\n      \
-             - /host/.speedwave/plugins/figma/claude-resources:/speedwave/plugins/figma:ro\n"
+             - {plugin_resources}:/speedwave/plugins/figma:ro\n"
         );
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let expected = SecurityExpectedPaths::from_raw("/proj", "/tokens");
