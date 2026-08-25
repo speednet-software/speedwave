@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [0.18.1](https://github.com/speednet-software/speedwave/compare/v0.18.0...v0.18.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* virtiofs ENOENT retry on restore and rollback, error-banner Retry re-entry, Windows dir-DACL inheritance ([#1036](https://github.com/speednet-software/speedwave/issues/1036)) ([cbbc6dd](https://github.com/speednet-software/speedwave/commit/cbbc6dd78377abc6b599fba425a070e647a6a47e))
+
 ## [0.18.0](https://github.com/speednet-software/speedwave/compare/v0.17.0...v0.18.0) (2026-08-24)
 
 
