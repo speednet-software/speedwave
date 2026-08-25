@@ -188,8 +188,8 @@ describe('ShellComponent', () => {
     spy.mockRestore();
   });
 
-  it('retry calls ensureContainersRunning', async () => {
-    const spy = vi.spyOn(projectState, 'ensureContainersRunning').mockResolvedValue();
+  it('retry delegates to projectState.retry', async () => {
+    const spy = vi.spyOn(projectState, 'retry').mockResolvedValue();
     component.retry();
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
