@@ -940,8 +940,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        let unc_input = r"\\wsl.localhost\Speedwave\projects\nonexistent-dispatch-test-xyz-abc-123";
-        let result = add_project_with_data_dir("dispatch-test", unc_input, &data_dir);
+        let unc_input = format!(
+            r"\\wsl.localhost\{}\projects\nonexistent-dispatch-test-xyz-abc-123",
+            crate::consts::wsl_distro_name()
+        );
+        let result = add_project_with_data_dir("dispatch-test", &unc_input, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -951,7 +954,7 @@ mod tests {
         // The UNC branch echoes the raw `dir` argument verbatim in the bail
         // message (canonicalize branch would print a canonicalized form).
         assert!(
-            err.contains(unc_input),
+            err.contains(&unc_input),
             "error should echo the raw UNC input (proving canonicalize was \
              skipped), got: {err}"
         );
