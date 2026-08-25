@@ -103,6 +103,13 @@ pub(crate) fn ensure_images_ready() -> Result<(), String> {
     crate::reconcile::wait_for_images_ready(RECONCILE_WAIT_TIMEOUT)
 }
 
+/// Re-enters the startup bundle reconcile after a failure (error-banner Retry).
+/// Returns false without side effects when the readiness gate is not `Failed`.
+#[tauri::command]
+pub(crate) fn retry_bundle_reconcile(app_handle: tauri::AppHandle) -> bool {
+    crate::reconcile::retry_bundle_reconcile_if_failed(&app_handle)
+}
+
 // Project switch transaction helpers
 // ---------------------------------------------------------------------------
 

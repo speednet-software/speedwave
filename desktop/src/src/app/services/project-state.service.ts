@@ -458,6 +458,13 @@ export class ProjectStateService {
     this.error = '';
     this.status.set('loading');
     this.notifyChange();
+    try {
+      // A failed startup reconcile poisons the readiness gate; re-enter it first
+      // (the backend no-ops unless the gate is Failed) so the ensure below can start.
+      await this.tauri.invoke('retry_bundle_reconcile');
+    } catch (err) {
+      this.log.warn(`retry_bundle_reconcile failed: ${String(err)}`);
+    }
     await this.ensureContainersRunning();
   }
 

@@ -1018,6 +1018,29 @@ describe('ProjectStateService', () => {
     });
   });
 
+  describe('retry', () => {
+    it('re-enters the bundle reconcile before restarting the container flow', async () => {
+      service.activeProject.set('test');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await service.retry();
+      const names = spy.mock.calls.map((c) => c[0]);
+      expect(names[0]).toBe('retry_bundle_reconcile');
+      expect(names).toContain('run_system_check');
+    });
+
+    it('continues the container flow when the reconcile re-entry rejects', async () => {
+      service.activeProject.set('test');
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'retry_bundle_reconcile') throw new Error('gate probe failed');
+        return base(cmd, args);
+      };
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await service.retry();
+      expect(spy.mock.calls.map((c) => c[0])).toContain('run_system_check');
+    });
+  });
+
   describe('switchProject', () => {
     it('invokes the backend switch_project command', async () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
