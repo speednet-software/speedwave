@@ -268,9 +268,13 @@ export class ProjectStateService {
     this.notifySettled();
   }
 
+  /** Latch: exactly one container flow at a time (status alone is event-mutable). */
+  private ensureInFlight = false;
+
   /** Checks OS prereqs, then verifies containers are running, starting them if not. */
   async ensureContainersRunning(): Promise<void> {
     if (
+      this.ensureInFlight ||
       this.status() === 'system_check' ||
       this.status() === 'checking' ||
       this.status() === 'starting' ||
@@ -278,6 +282,16 @@ export class ProjectStateService {
     ) {
       return; // guard: already in progress
     }
+    this.ensureInFlight = true;
+    try {
+      await this.ensureContainersRunningInner();
+    } finally {
+      this.ensureInFlight = false;
+    }
+  }
+
+  /** Body of [ensureContainersRunning]; only the latched wrapper may call it. */
+  private async ensureContainersRunningInner(): Promise<void> {
     if (!this.activeProject()) {
       this.status.set('error');
       this.error = 'No active project selected.';
@@ -658,6 +672,8 @@ export class ProjectStateService {
           this.status() === 'switching' ||
           this.status() === 'starting' ||
           this.status() === 'checking' ||
+          this.status() === 'system_check' ||
+          this.status() === 'loading' ||
           this.status() === 'auth_required'
         ) {
           return;

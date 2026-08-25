@@ -697,6 +697,21 @@ describe('ProjectStateService', () => {
       spy.mockRestore();
     });
 
+    it('ignores reconcile events while the manual retry flow is in progress', async () => {
+      await service.init();
+      for (const active of ['loading', 'system_check'] as const) {
+        service.status.set(active);
+        mockTauri.dispatchEvent('bundle_reconcile_status', {
+          phase: 'images_built',
+          in_progress: true,
+          last_error: null,
+          pending_running_projects: [],
+          applied_bundle_id: null,
+        });
+        expect(service.status()).toBe(active);
+      }
+    });
+
     it('ignores reconcile events during switching', async () => {
       await service.init();
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
@@ -1038,6 +1053,31 @@ describe('ProjectStateService', () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       await service.retry();
       expect(spy.mock.calls.map((c) => c[0])).toContain('run_system_check');
+    });
+  });
+
+  describe('ensure re-entrancy', () => {
+    it('runs a single container flow when re-entered from the rebuilding state', async () => {
+      service.activeProject.set('test');
+      const releases: Array<() => void> = [];
+      const base = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'run_system_check') {
+          await new Promise<void>((r) => releases.push(r));
+          return undefined;
+        }
+        return base(cmd, args);
+      };
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      const first = service.ensureContainersRunning();
+      await new Promise((r) => setTimeout(r, 0));
+      // The bundle-done listener re-enters ensure while the first run is mid-flight.
+      service.status.set('rebuilding');
+      const second = service.ensureContainersRunning();
+      await new Promise((r) => setTimeout(r, 0));
+      while (releases.length) releases.shift()!();
+      await Promise.all([first, second]);
+      expect(spy.mock.calls.filter((c) => c[0] === 'run_system_check')).toHaveLength(1);
     });
   });
 

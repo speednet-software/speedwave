@@ -104,7 +104,8 @@ pub(crate) fn ensure_images_ready() -> Result<(), String> {
 }
 
 /// Re-enters the startup bundle reconcile after a failure (error-banner Retry).
-/// Returns false without side effects when the readiness gate is not `Failed`.
+/// Returns whether a re-entry started: false when the gate is not `Failed`, or
+/// when the CAS lost to a reconcile still in flight / winding down.
 #[tauri::command]
 pub(crate) fn retry_bundle_reconcile(app_handle: tauri::AppHandle) -> bool {
     crate::reconcile::retry_bundle_reconcile_if_failed(&app_handle)
