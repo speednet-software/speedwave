@@ -357,7 +357,7 @@ describe('LiveTranscriptComponent', () => {
       expect(bars[1].pct).toBe(0);
     });
 
-    it('labels a mono capture from the session source and hides the meter without levels', () => {
+    it('labels a mono capture from the session source and shows a flat bar before the first level', () => {
       fixture.componentRef.setInput(
         'session',
         session({ audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' } })
@@ -366,9 +366,38 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       expect(component.meterBars()).toEqual([{ label: 'You', pct: expect.any(Number) }]);
 
+      // Recording but no level event yet: a flat 0% bar reads "silent",
+      // a missing meter reads "broken" — the meter must not disappear.
       svc.audioLevels.set(null);
       fixture.detectChanges();
+      expect(component.meterBars()).toEqual([{ label: 'You', pct: 0 }]);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')
+      ).not.toBeNull();
+
+      // Not recording → no meter at all.
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' },
+        })
+      );
+      fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')).toBeNull();
+    });
+
+    it('shows both channels at 0% for a mixed capture before the first level event', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ audio_source: { source: { kind: 'mixed', mic: null }, label: 'Meeting' } })
+      );
+      svc.audioLevels.set(null);
+      fixture.detectChanges();
+      expect(component.meterBars()).toEqual([
+        { label: 'Meeting', pct: 0 },
+        { label: 'You', pct: 0 },
+      ]);
     });
 
     it('shows the record-only hint only while recording without a live model', () => {

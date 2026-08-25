@@ -208,15 +208,26 @@ export class LiveTranscriptComponent {
 
   /** Loudness bars: label per captured channel, level as 0–100 for the width binding. */
   readonly meterBars = computed<{ label: string; pct: number }[]>(() => {
+    const kind = this.session()?.audio_source.source.kind;
     const levels = this.transcription.audioLevels();
-    if (!levels || levels.length === 0) return [];
+    if (!levels || levels.length === 0) {
+      // Recording but no level event yet (capture still spinning up): show the
+      // expected channels at 0% — a flat bar reads "silent", a missing meter
+      // reads "broken". Channel count comes from the source shape.
+      if (this.status() !== 'recording' || !kind) return [];
+      return kind === 'mixed'
+        ? [
+            { label: 'Meeting', pct: 0 },
+            { label: 'You', pct: 0 },
+          ]
+        : [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: 0 }];
+    }
     if (levels.length === 2) {
       return [
         { label: 'Meeting', pct: rmsToPct(levels[0]) },
         { label: 'You', pct: rmsToPct(levels[1]) },
       ];
     }
-    const kind = this.session()?.audio_source.source.kind;
     return [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: rmsToPct(levels[0]) }];
   });
   /** Finalize progress 0–100 (0 when not finalizing). */

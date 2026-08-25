@@ -61,6 +61,7 @@ describe('RecordingControlsComponent', () => {
     setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
+    recommendedModel: ReturnType<typeof vi.fn>;
     startRecording: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
@@ -89,6 +90,29 @@ describe('RecordingControlsComponent', () => {
     whisper: [{ key: 'small', downloaded: false, size_bytes: 488_000_000, path: null }],
     total_bytes_used: 0,
   };
+  /** Recommended pair with both passes covered — no finalize warning. */
+  const recAllDownloaded = {
+    live: {
+      key: 'small',
+      display_name: 'Small',
+      size_bytes: 1,
+      downloaded: true,
+      downloading: false,
+    },
+    finalize: {
+      key: 'large-v3',
+      display_name: 'Large v3',
+      size_bytes: 1,
+      downloaded: true,
+      downloading: false,
+    },
+    accel_label: 'CPU',
+  };
+  /** Recommended pair whose finalize model is absent and not downloading. */
+  const recFinalizeMissing = {
+    ...recAllDownloaded,
+    finalize: { ...recAllDownloaded.finalize, downloaded: false },
+  };
 
   beforeEach(async () => {
     recordingSessionId = signal<string | null>(null);
@@ -100,6 +124,7 @@ describe('RecordingControlsComponent', () => {
       setLiveTranscriptPreferred: vi.fn(),
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
+      recommendedModel: vi.fn(async () => recAllDownloaded),
       // Mirror the real service: start/stop drive the shared recording signal.
       startRecording: vi.fn(async (source: AudioSource, language: Language): Promise<StartAck> => {
         recordingSessionId.set('sess-1');
@@ -477,5 +502,47 @@ describe('RecordingControlsComponent', () => {
     svc.listModels.mockRejectedValueOnce(new Error('boom'));
     await component.refreshModelAvailability();
     expect(component.modelsKnown()).toBe(false);
+  });
+
+  it('warns when the finalize model is missing: Start stays enabled, the quality cost is named', async () => {
+    svc.recommendedModel.mockResolvedValue(recFinalizeMissing);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const warn = fixture.nativeElement.querySelector('[data-testid="finalize-model-warning"]');
+    expect(warn).not.toBeNull();
+    expect(warn.textContent).toContain('Large v3');
+    expect(warn.textContent).toContain('lower-quality live model');
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
+  });
+
+  it('no finalize warning when the pair is downloaded, downloading, or single-model', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const sel = '[data-testid="finalize-model-warning"]';
+    expect(fixture.nativeElement.querySelector(sel)).toBeNull();
+    // Mid-download: the Settings row already shows progress — no nag here.
+    svc.recommendedModel.mockResolvedValue({
+      ...recAllDownloaded,
+      finalize: { ...recAllDownloaded.finalize, downloaded: false, downloading: true },
+    });
+    await component.refreshModelAvailability();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector(sel)).toBeNull();
+    // Live model serves both passes (finalize: null).
+    svc.recommendedModel.mockResolvedValue({ ...recAllDownloaded, finalize: null });
+    await component.refreshModelAvailability();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector(sel)).toBeNull();
+  });
+
+  it('finalize warning is suppressed while no model at all is downloaded (the no-model note owns that)', async () => {
+    svc.listModels.mockResolvedValue(modelsEmpty);
+    svc.recommendedModel.mockResolvedValue(recFinalizeMissing);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="finalize-model-warning"]')
+    ).toBeNull();
   });
 });

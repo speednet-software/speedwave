@@ -155,6 +155,14 @@ function accelLabel(backends: Backend[], gpuClass: GpuClass): string {
         </p>
       }
 
+      @if (hasModel() && missingFinalizeModel(); as missing) {
+        <p class="mono mt-2 text-[10px] text-amber-300" data-testid="finalize-model-warning">
+          The final-pass model ({{ missing }}) is not downloaded — the transcript produced after you
+          stop will fall back to the lower-quality live model. Download it in Settings → Meeting
+          transcription.
+        </p>
+      }
+
       <div class="mt-3">
         @if (!recording()) {
           <button
@@ -211,6 +219,12 @@ export class RecordingControlsComponent implements OnInit {
   readonly modelsKnown = signal(false);
   /** `true` if at least one Whisper model is downloaded (Start needs one). */
   readonly hasModel = signal(false);
+  /**
+   * Display name of this host's finalize-pass model when it is not downloaded, else null.
+   * Start stays allowed — the offline pass falls back to the live model — but the quality
+   * cost must be visible before the recording, not discovered in the finished transcript.
+   */
+  readonly missingFinalizeModel = signal<string | null>(null);
   /** `true` when the chosen source is the mixed (system + mic) one. */
   readonly mixedSourceSelected = computed(
     () => this.sources()[this.sourceIndex()]?.source.kind === 'mixed'
@@ -294,6 +308,16 @@ export class RecordingControlsComponent implements OnInit {
     } catch {
       // Non-fatal — leave Start enabled and let start() surface any error.
       this.modelsKnown.set(false);
+    }
+    try {
+      // `finalize` is null when the live model serves both passes — nothing to warn about.
+      const fin = (await this.transcription.recommendedModel()).finalize;
+      this.missingFinalizeModel.set(
+        fin && !fin.downloaded && !fin.downloading ? fin.display_name : null
+      );
+    } catch {
+      // Non-fatal — no warning beats a wrong one.
+      this.missingFinalizeModel.set(null);
     }
     this.cdr.markForCheck();
   }
