@@ -555,10 +555,10 @@ async fn prepare_live_transcriber(
     // Off the async workers: the model probe may hit the (once-only) blocking Vulkan probe.
     tokio::task::spawn_blocking(move || {
         if pick_offline_model(&m).is_none() {
-            let recommended = transcription::finalize_model_for_this_build().key;
-            return Err(format!(
-                "no Whisper model is downloaded — the final pass needs one (e.g. '{recommended}')"
-            ));
+            return Err(
+                "no Whisper model is downloaded — download it in Settings → Meeting transcription"
+                    .to_string(),
+            );
         }
         Ok(None)
     })
@@ -627,9 +627,7 @@ fn pick_live_model(
         );
         return Ok(any.key);
     }
-    Err(format!(
-        "no live-capable Whisper model is downloaded — download one (e.g. '{recommended}') first"
-    ))
+    Err("no live model is downloaded — download it in Settings → Meeting transcription".to_string())
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -1281,14 +1279,15 @@ mod tests {
     fn pick_live_model_errors_with_a_download_hint_when_nothing_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
-        // No model on disk: errors naming the recommended one, with guidance.
+        // No model on disk: errors pointing at Settings, never naming a model key.
         let e = pick_live_model(
             &store,
             "large-v3-turbo",
             speedwave_runtime::transcription::GpuClass::Discrete,
         )
         .unwrap_err();
-        assert!(e.contains("download") && e.contains("large-v3-turbo"));
+        assert!(e.contains("no live model") && e.contains("Settings"));
+        assert!(!e.contains("large-v3-turbo"));
     }
 
     /// Plants a catalogue model as "downloaded" (a sparse file of the expected size —
