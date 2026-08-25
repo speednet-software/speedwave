@@ -40,7 +40,8 @@ require_pinned_vulkan_dll() {
   pin_file="$(cd "$(dirname "$0")" && pwd)/install-vulkan-sdk.ps1"
   expected="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-f]\{64\}\)'.*/\1/p" "$pin_file")"
   [[ -n "$expected" ]] || fail "Could not read \$RuntimeDllSha256 from $pin_file"
-  actual="$(sha256sum "$path" | cut -d' ' -f1)"
+  # macOS has shasum, Linux/CI has sha256sum — same fallback as the Makefile download targets.
+  actual="$( (sha256sum "$path" 2>/dev/null || shasum -a 256 "$path") | cut -d' ' -f1)"
   [[ "$actual" == "$expected" ]] || fail "vulkan-1.dll SHA256 mismatch: got $actual, expected $expected"
 }
 

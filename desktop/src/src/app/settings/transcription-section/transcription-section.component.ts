@@ -62,21 +62,16 @@ interface ModelRow {
             <div class="flex items-center justify-between gap-3">
               <div>
                 <div class="text-[12px] text-[var(--ink)]">{{ row.title }}</div>
-                @if (row.entry.downloaded) {
-                  <div
-                    class="text-[11px] text-[var(--ink-mute)]"
-                    [attr.data-testid]="'model-state' + row.idSuffix"
-                  >
+                <div
+                  class="text-[11px] text-[var(--ink-mute)]"
+                  [attr.data-testid]="'model-state' + row.idSuffix"
+                >
+                  @if (row.entry.downloaded) {
                     Downloaded ({{ row.entry.display_name }}) · {{ row.hint }}
-                  </div>
-                } @else {
-                  <div
-                    class="text-[11px] text-[var(--ink-mute)]"
-                    [attr.data-testid]="'model-state' + row.idSuffix"
-                  >
+                  } @else {
                     Not downloaded · {{ size(row.entry) }} · {{ row.hint }}
-                  </div>
-                }
+                  }
+                </div>
               </div>
 
               @if (row.entry.downloaded) {

@@ -42,7 +42,7 @@ Every change must work on **both** platforms. `make check` compiles the host tar
 - Validate shell command strings via `shlex::split`, never by shelling to `bash -n` — Git Bash on Windows mangles UTF-8 (claude-code#31295); a bash-based validator regresses Windows only.
 - Never hand-concatenate `PATH` entries with `:` — Windows uses `;`; use the cfg-gated `binary::PATH_SEP` separator (the pattern in `binary.rs::command`), never a hardcoded `:`.
 - CRLF is three-sided: preserve the user's line endings (and bail on UTF-16 from PowerShell `Out-File`) when merging `.wslconfig`/`wsl.conf`; reject control chars incl. `\r\n` in any secret/token value (header injection); repo files are LF-only via `.gitattributes` — a CRLF shebang exits 127 in the container (issue #603; CI re-clones with `autocrlf=true` to assert it).
-- BOM polarity is asymmetric: `.ps1` files must be UTF-8 **with** BOM (PowerShell falls back to the system locale reading a BOM-less `.ps1`; editing one requires `make generate-installer-nsh`); `.vbs` and `.sh` must be BOM-**free** (wscript and shebangs choke on it). Note: only `sweep.ps1` currently carries the BOM in-repo; nothing test-pins `.ps1` BOMs (only `run-hidden.vbs`'s BOM-freeness is pinned).
+- BOM polarity is asymmetric: `.ps1` files must be UTF-8 **with** BOM (PowerShell falls back to the system locale reading a BOM-less `.ps1`; editing one requires `make generate-installer-nsh`); `.vbs` and `.sh` must be BOM-**free** (wscript and shebangs choke on it). Note: `sweep.ps1`, `setup-dev-windows.ps1`, and `install-vulkan-sdk.ps1` carry the BOM in-repo; nothing test-pins `.ps1` BOMs (only `run-hidden.vbs`'s BOM-freeness is pinned).
 
 ## Platform asymmetries to keep in mind
 

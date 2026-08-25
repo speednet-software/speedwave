@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::accel::GpuClass;
 use super::audio::{rms, SAMPLE_RATE_HZ};
 
 /// Languages this feature transcribes (forced into Whisper).
@@ -132,7 +133,8 @@ pub trait Transcriber: Send {
     ) -> Result<Vec<Segment>, TranscribeError>;
 
     /// Decode the current live window. Default = `transcribe(window)`; `WhisperCppTranscriber`
-    /// uses the same (window policy lives in the driver).
+    /// overrides it to shrink the encoder context to the window (`live_audio_ctx`) — a speed
+    /// trade-off the offline pass must never take, so finalize goes through `transcribe`.
     fn feed(
         &mut self,
         pcm_window: &[f32],
@@ -241,13 +243,10 @@ const MIN_AUDIO_CTX: usize = 128;
 const SAMPLES_PER_AUDIO_CTX: usize = 320;
 
 /// The reduced encoder context for a live window of `pcm_len` samples (small headroom for the
-/// mel/conv rounding), or `None` on the offline pass (full 30 s context — quality authority).
-fn live_audio_ctx(pcm_len: usize, live: bool) -> Option<std::ffi::c_int> {
-    if !live {
-        return None;
-    }
+/// mel/conv rounding). Live pass only — the offline pass keeps the full 30 s context.
+fn live_audio_ctx(pcm_len: usize) -> std::ffi::c_int {
     let positions = pcm_len.div_ceil(SAMPLES_PER_AUDIO_CTX) + 16;
-    Some(positions.clamp(MIN_AUDIO_CTX, FULL_AUDIO_CTX) as std::ffi::c_int)
+    positions.clamp(MIN_AUDIO_CTX, FULL_AUDIO_CTX) as std::ffi::c_int
 }
 
 /// Whisper speech-to-text via whisper.cpp. Holds a loaded context for one
@@ -261,13 +260,18 @@ pub struct WhisperCppTranscriber {
     /// One-shot latch so a persistently failing VAD warns once, not per window.
     vad_warned: bool,
     model_label: String,
+    /// Whisper thread count, resolved once at load (`accel::decode_threads()` — invariant
+    /// per process, so never recomputed per decode window).
+    n_threads: i32,
 }
 
 impl WhisperCppTranscriber {
-    /// Loads the GGML model at `model_path`. `model_label` is for error messages.
+    /// Loads the GGML model at `model_path` for a host of GPU `class` (drives `use_gpu`;
+    /// callers pass the probed class so tests can pin the policy). `model_label` is for errors.
     pub fn load(
         model_path: &Path,
         model_label: impl Into<String>,
+        class: GpuClass,
     ) -> Result<Self, TranscribeError> {
         let label = model_label.into();
         if !model_path.is_file() {
@@ -280,9 +284,7 @@ impl WhisperCppTranscriber {
         let mut ctx_params = whisper_rs::WhisperContextParameters::default();
         // A compiled-in GPU backend is not a usable device: keep whisper off the GPU entirely
         // when the probe found none, instead of failing into it per decode.
-        ctx_params.use_gpu(
-            crate::transcription::accel::gpu_class() != crate::transcription::accel::GpuClass::None,
-        );
+        ctx_params.use_gpu(class != GpuClass::None);
         let ctx =
             whisper_rs::WhisperContext::new_with_params(model_path, ctx_params).map_err(|e| {
                 TranscribeError::ModelLoad {
@@ -296,6 +298,7 @@ impl WhisperCppTranscriber {
             vad: None,
             vad_warned: false,
             model_label: label,
+            n_threads: crate::transcription::accel::decode_threads(),
         })
     }
 
@@ -313,7 +316,11 @@ impl WhisperCppTranscriber {
         use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
         let info: &WhisperModelInfo =
             whisper_model(key).ok_or_else(|| TranscribeError::ModelMissing(key.to_string()))?;
-        Self::load(&whisper_dir.join(info.file), key)
+        Self::load(
+            &whisper_dir.join(info.file),
+            key,
+            crate::transcription::accel::gpu_class(),
+        )
     }
 
     /// Catalogue key / path this transcriber was loaded with.
@@ -372,12 +379,11 @@ impl WhisperCppTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        let threads = crate::transcription::accel::decode_threads();
-        params.set_n_threads(threads);
+        params.set_n_threads(self.n_threads);
         // Live windows are shorter than the 30 s whisper always pads to, so the encoder spends
         // most of its time on zero-padding; a proportional audio_ctx skips it (ADR-056 Am. 12).
-        if let Some(ctx) = live_audio_ctx(pcm.len(), live) {
-            params.set_audio_ctx(ctx);
+        if live {
+            params.set_audio_ctx(live_audio_ctx(pcm.len()));
         }
         // Anti-hallucination: no cross-window context, deterministic decoding, blank/nst suppress.
         // `no_speech_thold` is a no-op in whisper.cpp — we gate on per-segment prob below instead.
@@ -570,7 +576,7 @@ mod tests {
 
     // `WhisperCppTranscriber` has no `Debug`, so `unwrap_err()` won't compile — pattern-match it.
     fn load_err(path: &Path, label: &str) -> TranscribeError {
-        match WhisperCppTranscriber::load(path, label) {
+        match WhisperCppTranscriber::load(path, label, GpuClass::None) {
             Ok(_) => panic!("expected load() to fail"),
             Err(e) => e,
         }
@@ -879,17 +885,14 @@ mod tests {
     fn live_audio_ctx_scales_with_the_window_and_clamps_at_both_ends() {
         // 12 s live window: 192000/320 = 600 positions + headroom — the whole point: pay for
         // 12 s of encoder, not the 30 s whisper pads to.
-        assert_eq!(live_audio_ctx(192_000, true), Some(616));
+        assert_eq!(live_audio_ctx(192_000), 616);
         // 5 s window.
-        assert_eq!(live_audio_ctx(80_000, true), Some(266));
+        assert_eq!(live_audio_ctx(80_000), 266);
         // A 30 s (or longer) window uses the full model context — no truncation past the max.
-        assert_eq!(live_audio_ctx(480_000, true), Some(1500));
-        assert_eq!(live_audio_ctx(10_000_000, true), Some(1500));
+        assert_eq!(live_audio_ctx(480_000), 1500);
+        assert_eq!(live_audio_ctx(10_000_000), 1500);
         // Degenerate windows sit on the floor instead of collapsing the embeddings.
-        assert_eq!(live_audio_ctx(0, true), Some(128));
-        assert_eq!(live_audio_ctx(3_200, true), Some(128));
-        // The offline pass never reduces the context — it is the quality authority.
-        assert_eq!(live_audio_ctx(192_000, false), None);
-        assert_eq!(live_audio_ctx(0, false), None);
+        assert_eq!(live_audio_ctx(0), 128);
+        assert_eq!(live_audio_ctx(3_200), 128);
     }
 }

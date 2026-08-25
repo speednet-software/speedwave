@@ -91,7 +91,7 @@ export class TranscriptionService {
   /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
   readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
 
-  /** Latest per-channel capture RMS ([system, mic] or one entry; null = no recording). */
+  /** Latest per-channel capture RMS ([system, mic] or one entry; null until the first `audio_level` event of a recording). */
   readonly audioLevels: Signal<number[] | null> = this.audioLevelsSignal.asReadonly();
 
   /**
@@ -103,7 +103,11 @@ export class TranscriptionService {
   readonly downloadProgress: Signal<DownloadProgress | null> =
     this.downloadProgressSignal.asReadonly();
 
-  /** Capture capabilities + compiled whisper.cpp backends for this build. */
+  /**
+   * Capabilities, compiled backends, probed `gpu_class`, and the host-computed acceleration
+   * label. Side effect: caches `gpu_class`, which `liveTranscriptPreferred()` reads (before
+   * the first call it assumes 'discrete', i.e. live on).
+   */
   async getCapabilities(): Promise<CapabilitiesAck> {
     const ack = await this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
     this.gpuClassSignal.set(ack.gpu_class);
@@ -148,7 +152,7 @@ export class TranscriptionService {
    * @param language - forced PL/EN; never auto-detected.
    * @param live - false = record-only (no live pass; transcript arrives after stop).
    */
-  async startRecording(source: AudioSource, language: Language, live = true): Promise<StartAck> {
+  async startRecording(source: AudioSource, language: Language, live: boolean): Promise<StartAck> {
     const ack = await this.tauri.invoke<StartAck>('start_transcription', {
       params: { source, language, live },
     });
@@ -160,7 +164,7 @@ export class TranscriptionService {
    * @param sessionId - the Done session to reopen.
    * @param live - false = record-only (no live pass; transcript arrives after stop).
    */
-  async resumeRecording(sessionId: string, live = true): Promise<StartAck> {
+  async resumeRecording(sessionId: string, live: boolean): Promise<StartAck> {
     const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId, live });
     return this.applyStartAck(ack, ack.snapshot.audio_source.source, ack.snapshot.language);
   }

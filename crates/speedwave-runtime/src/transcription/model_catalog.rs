@@ -11,8 +11,8 @@ pub fn whisper_model_url(file: &str) -> String {
     format!("https://huggingface.co/{WHISPER_HF_REPO}/resolve/main/{file}")
 }
 
-/// Where in the pipeline a model fits. v1 default set (ADR-056 decision 8): `Small` for CPU
-/// live, `LargeV3Turbo` on GPU/Metal, `LargeV3` for offline; `Medium`/`Tiny`/`Base` are fallbacks.
+/// Where in the pipeline a model fits. Tier names, not scenarios — the class→role mapping lives
+/// in `accel.rs` (`live_model_for_class`/`finalize_model_for_class`, key-pinned by its tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelRole {
@@ -20,13 +20,14 @@ pub enum ModelRole {
     DevTest,
     /// `base` — smallest "OK-ish" for Polish; not recommended for real use.
     SmallestUsable,
-    /// `small` — the CPU-only live model.
+    /// `small` — the live model on CPU-only and integrated-GPU hosts (ADR-085 tiering).
     CpuLive,
     /// `medium` — middle ground; clearly better Polish than `small`.
     Mid,
-    /// `large-v3-turbo` — the live model when a GPU/Metal backend is compiled in.
+    /// `large-v3-turbo` — the live model on discrete-GPU hosts; also the finalize model on
+    /// CPU/iGPU hosts (the largest that still finishes a long meeting there).
     GpuLive,
-    /// `large-v3` — the higher-quality offline-pass model.
+    /// `large-v3` — the finalize model on discrete-GPU hosts.
     Finalize,
 }
 

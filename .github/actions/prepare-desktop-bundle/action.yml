@@ -35,7 +35,7 @@ runs:
     - name: Stage Vulkan runtime loader for bundling
       if: inputs.platform == 'windows-latest'
       shell: bash
-      run: scripts/stage-vulkan-runtime.sh
+      run: bash scripts/stage-vulkan-runtime.sh
 
     - name: Download Node.js for bundling
       uses: ./.github/actions/download-nodejs

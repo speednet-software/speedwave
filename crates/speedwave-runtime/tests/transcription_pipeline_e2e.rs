@@ -90,8 +90,12 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
             device: Some(wav.to_string_lossy().into_owned()),
         })
         .expect("file capture start");
-    let transcriber =
-        WhisperCppTranscriber::load(&model_path, model_key.clone()).expect("load whisper");
+    let transcriber = WhisperCppTranscriber::load(
+        &model_path,
+        model_key.clone(),
+        speedwave_runtime::transcription::gpu_class(),
+    )
+    .expect("load whisper");
     let driver = TranscriptDriver::new(DriverConfig {
         id,
         store: store.clone(),
@@ -105,8 +109,12 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
     assert!(audio_wav.is_file(), "live pass must write audio.wav");
 
     // Offline finalize: re-transcribe the recorded WAV at higher quality.
-    let finalize_transcriber =
-        WhisperCppTranscriber::load(&model_path, model_key.clone()).expect("reload whisper");
+    let finalize_transcriber = WhisperCppTranscriber::load(
+        &model_path,
+        model_key.clone(),
+        speedwave_runtime::transcription::gpu_class(),
+    )
+    .expect("reload whisper");
     run_finalize(FinalizeConfig {
         id,
         store: store.clone(),

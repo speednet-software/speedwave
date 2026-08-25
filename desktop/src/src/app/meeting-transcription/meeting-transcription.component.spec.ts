@@ -73,6 +73,7 @@ describe('MeetingTranscriptionComponent', () => {
         },
         backends: ['cpu'],
         gpu_class: 'none' as const,
+        accel_label: 'CPU',
       })),
       listAudioSources: vi.fn(async () => []),
       liveTranscriptPreferred: vi.fn(() => true),
@@ -218,5 +219,15 @@ describe('MeetingTranscriptionComponent', () => {
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
     expect(banner.textContent).toContain('microphone stopped');
     expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
+  });
+
+  it('renders the dropped-audio warning without blaming the transcriber', () => {
+    // Producers are the ingest channel and the mix buffer — record-only sessions
+    // have no live transcriber, so the copy must not name one.
+    captureWarningSig.set('audio_dropped');
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('audio was dropped');
+    expect(banner.textContent).not.toContain('transcriber');
   });
 });

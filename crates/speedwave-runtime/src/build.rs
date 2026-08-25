@@ -92,8 +92,6 @@ pub const IMAGES: &[ImageDef] = &[
             "mcp-servers/shared",
             "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
-            "crates/pii-engine",
-            "crates/pii-engine-wasm",
         ],
     },
     ImageDef {

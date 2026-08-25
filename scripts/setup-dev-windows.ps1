@@ -183,8 +183,9 @@ try {
 }
 
 # The ggml-vulkan shader ExternalProject nests deep enough to cross MAX_PATH on typical repo
-# paths (observed: TryCompile scratch dirs past 260 chars) — enable NTFS long paths.
-Write-Host "== Enabling Windows long paths (whisper.cpp Vulkan build exceeds MAX_PATH) =="
+# paths. Long paths let ninja traverse them, but cl.exe still cannot open >260-char paths —
+# scripts/check-vulkan-path-budget.sh remains the real gate (cross-platform.md).
+Write-Host "== Enabling Windows long paths (ninja needs them for the whisper.cpp Vulkan build) =="
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
     -Name 'LongPathsEnabled' -Value 1 -Type DWord
 git config --system core.longpaths true 2>$null

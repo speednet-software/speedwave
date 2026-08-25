@@ -60,6 +60,9 @@ pub struct CapabilitiesAck {
     pub backends: Vec<Backend>,
     /// Probed host GPU class (ADR-085) — drives the live-transcript default in the UI.
     pub gpu_class: transcription::GpuClass,
+    /// Acceleration label computed by `accel::accel_label()` — the UI renders it verbatim,
+    /// never re-derives it from `backends`/`gpu_class`.
+    pub accel_label: String,
 }
 
 #[tauri::command]
@@ -70,6 +73,7 @@ pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
         capabilities: transcription::detect_audio_capture().capabilities(),
         backends: transcription::compiled_backends(),
         gpu_class: transcription::gpu_class(),
+        accel_label: transcription::accel_label(),
     })
     .await
     .map_err(|e| format!("capabilities task panicked: {e}"))
@@ -304,8 +308,10 @@ pub async fn resume_transcription(
     validate_source_against_caps(&audio_source, &capture.capabilities())?;
 
     let store_arc = store.inner().clone();
-    // Same record-only contract as start (ADR-056 Am. 13); absent = live, for older frontends.
-    let live_transcriber = prepare_live_transcriber(live.unwrap_or(true), models.inner()).await?;
+    // Same record-only contract as start (ADR-056 Am. 13); the absent-means-live default is
+    // `default_live` — the one place the wire default lives on the Rust side.
+    let live_transcriber =
+        prepare_live_transcriber(live.unwrap_or_else(default_live), models.inner()).await?;
 
     // The new part records past the earlier ones on the session timeline.
     let time_base = resume_time_base(&session.all_audio_parts())?;
@@ -327,8 +333,7 @@ pub async fn resume_transcription(
             unregister_driver(drivers.inner(), id, &stop);
             // Roll back to Done: resume requires Done, so leaving the mutated session
             // behind would strand a finished transcript on a transient capture error.
-            if let Err(re) = store.rollback_resume(id, &next_part, session.models_used.live.clone())
-            {
+            if let Err(re) = store.rollback_resume(id, &next_part) {
                 log::error!(
                     "failed to roll back resumed transcript {} after a capture-start error: {re}",
                     short_id(id)
@@ -427,21 +432,22 @@ pub async fn stop_transcription(
                 return;
             }
         };
-        let transcriber = match WhisperCppTranscriber::load(&path, key.clone()) {
-            Ok(mut t) => {
-                attach_vad(&mut t, &models_arc);
-                Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
-            }
-            Err(e) => {
-                let _ = store_arc.set_status(
-                    id,
-                    TranscriptStatus::Failed {
-                        reason: format!("transcriber: {e}"),
-                    },
-                );
-                return;
-            }
-        };
+        let transcriber =
+            match WhisperCppTranscriber::load(&path, key.clone(), transcription::gpu_class()) {
+                Ok(mut t) => {
+                    attach_vad(&mut t, &models_arc);
+                    Box::new(t) as Box<dyn speedwave_runtime::transcription::Transcriber>
+                }
+                Err(e) => {
+                    let _ = store_arc.set_status(
+                        id,
+                        TranscriptStatus::Failed {
+                            reason: format!("transcriber: {e}"),
+                        },
+                    );
+                    return;
+                }
+            };
         let cfg = FinalizeConfig {
             id,
             store: store_arc.clone(),
@@ -572,13 +578,16 @@ async fn load_live_transcriber(
     models: &ModelStoreHandle,
 ) -> Result<(String, WhisperCppTranscriber), String> {
     let m = models.clone();
-    let recommended = transcription::live_model_for_this_build().key.to_string();
     tokio::task::spawn_blocking(move || -> Result<(String, WhisperCppTranscriber), String> {
-        let key = pick_live_model(&m, &recommended, transcription::gpu_class())?;
+        // Inside spawn_blocking: on a cold cache this runs the full Vulkan probe (ADR-085).
+        let recommended = transcription::live_model_for_this_build().key.to_string();
+        let class = transcription::gpu_class();
+        let key = pick_live_model(&m, &recommended, class)?;
         let path = m
             .ensure_model(&key, &mut |_| {})
             .map_err(|e| e.to_string())?;
-        let mut t = WhisperCppTranscriber::load(&path, key.clone()).map_err(|e| e.to_string())?;
+        let mut t =
+            WhisperCppTranscriber::load(&path, key.clone(), class).map_err(|e| e.to_string())?;
         attach_vad(&mut t, &m);
         Ok((key, t))
     })
@@ -627,7 +636,10 @@ fn pick_live_model(
         );
         return Ok(any.key);
     }
-    Err("no live model is downloaded — download it in Settings → Meeting transcription".to_string())
+    Err(
+        "no downloaded model is live-capable on this hardware — download one in Settings → Meeting transcription"
+            .to_string(),
+    )
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -828,14 +840,15 @@ pub struct RecommendedModelAck {
 }
 
 /// Resolves one catalogue model to its UI entry (on-disk state plus any in-flight download).
+/// `status` is a pre-scanned `whisper_status()` list — the Settings UI polls this every 2 s,
+/// so the directory is scanned once per call, not once per entry.
 fn model_entry(
     info: &transcription::WhisperModelInfo,
-    models: &ModelStore,
+    status: &[ModelStatusEntry],
     downloads: &DownloadsHandle,
 ) -> Result<RecommendedModelEntry, String> {
-    let status = models
-        .whisper_status()
-        .into_iter()
+    let status = status
+        .iter()
         .find(|m| m.key == info.key)
         .ok_or_else(|| format!("model '{}' missing from catalogue", info.key))?;
     Ok(RecommendedModelEntry {
@@ -859,13 +872,14 @@ pub async fn recommended_transcription_model(
     tokio::task::spawn_blocking(move || {
         let live_info = transcription::live_model_for_this_build();
         let finalize_info = transcription::finalize_model_for_this_build();
-        let live = model_entry(live_info, &models, &downloads)?;
+        let status = models.whisper_status();
+        let live = model_entry(live_info, &status, &downloads)?;
         // One model can serve both passes (nothing to show twice); on CPU-only hosts they differ,
         // because a model fast enough to keep up live is not the one that reads Polish best.
         let finalize = if finalize_info.key == live_info.key {
             None
         } else {
-            Some(model_entry(finalize_info, &models, &downloads)?)
+            Some(model_entry(finalize_info, &status, &downloads)?)
         };
         Ok(RecommendedModelAck {
             live,
@@ -1107,7 +1121,7 @@ mod tests {
             .unwrap();
         // Capture failed → the command unregisters and rolls back.
         unregister_driver(&drivers, id, &stop);
-        store.rollback_resume(id, &next_part, None).unwrap();
+        store.rollback_resume(id, &next_part).unwrap();
 
         let snap = store.get(id).unwrap();
         assert!(matches!(snap.status, TranscriptStatus::Done));
@@ -1144,19 +1158,6 @@ mod tests {
     fn short_id_truncates_to_eight_hex_chars() {
         let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(short_id(id), "550e8400");
-    }
-
-    #[test]
-    fn accel_label_matches_the_probed_gpu_class() {
-        // The label is runtime truth (ADR-085): a Vulkan build with no usable device says CPU.
-        let label = transcription::accel_label();
-        match transcription::gpu_class() {
-            transcription::GpuClass::None => assert_eq!(label, "CPU"),
-            transcription::GpuClass::Integrated => {
-                assert!(label.contains("(integrated GPU)"), "got {label}")
-            }
-            transcription::GpuClass::Discrete => assert!(label.ends_with("(GPU)"), "got {label}"),
-        }
     }
 
     #[test]
@@ -1268,11 +1269,36 @@ mod tests {
     }
 
     #[test]
-    fn pick_offline_model_prefers_large_v3_then_any_downloaded() {
+    fn pick_offline_model_prefers_the_builds_finalize_model_then_any_downloaded() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
         // Nothing downloaded → None.
         assert_eq!(pick_offline_model(&store), None);
+        // Some other model downloaded → the fallback picks it.
+        plant_model(dir.path(), "tiny");
+        assert_eq!(pick_offline_model(&store).as_deref(), Some("tiny"));
+        // The build's finalize model downloaded → preferred over the fallback.
+        let best = speedwave_runtime::transcription::finalize_model_for_this_build().key;
+        plant_model(dir.path(), best);
+        assert_eq!(pick_offline_model(&store).as_deref(), Some(best));
+    }
+
+    #[tokio::test]
+    async fn record_only_start_gate_requires_some_downloaded_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: ModelStoreHandle = Arc::new(ModelStore::with_root(dir.path()));
+        // Nothing downloaded → actionable error at Start, not a late failure at Stop.
+        let e = prepare_live_transcriber(false, &store).await.unwrap_err();
+        assert!(
+            e.contains("no Whisper model") && e.contains("Settings"),
+            "got: {e}"
+        );
+        // Any downloaded model lifts the gate; record-only never loads a live transcriber.
+        plant_model(dir.path(), "tiny");
+        assert!(prepare_live_transcriber(false, &store)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1286,7 +1312,10 @@ mod tests {
             speedwave_runtime::transcription::GpuClass::Discrete,
         )
         .unwrap_err();
-        assert!(e.contains("no live model") && e.contains("Settings"));
+        assert!(
+            e.contains("live-capable") && e.contains("Settings"),
+            "got: {e}"
+        );
         assert!(!e.contains("large-v3-turbo"));
     }
 

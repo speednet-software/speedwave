@@ -13,11 +13,7 @@ use super::audio::{
     CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
     SAMPLE_RATE_HZ,
 };
-use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
-
-/// How long the wasapi capture loop waits for the buffer-ready event, and the channel streams
-/// block per `next_chunk`, before yielding — snappy teardown on silence without busy-spinning.
-const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES, KEEPALIVE_AFTER};
 
 /// Channel depth for chunks in flight from the capture thread to the consumer — a few seconds of
 /// audio, enough to absorb a slow consumer without unbounded growth (a full channel drops chunks).
@@ -508,7 +504,7 @@ fn run_wasapi_loopback(
     // would misplace audio starting mid-recording.
     let mut resampler = Resampler::new(src_rate, src_channels).anchored_at(epoch);
     let mut queue: VecDeque<u8> = VecDeque::new();
-    let timeout_ms = WASAPI_POLL_TIMEOUT.as_millis() as u32;
+    let timeout_ms = KEEPALIVE_AFTER.as_millis() as u32;
 
     while !stop.load(Ordering::SeqCst) {
         // Wait for the buffer-ready event, but time out so `stop` gets re-checked on silence.
@@ -776,7 +772,7 @@ impl AudioStream for CpalAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
         // Bounded recv + keepalive: a hung/removed device must not wedge the ingest loop's stop
         // handling. A disconnected channel = stream dropped/callback stopped (EOF).
-        match self.rx.recv_timeout(WASAPI_POLL_TIMEOUT) {
+        match self.rx.recv_timeout(KEEPALIVE_AFTER) {
             Ok(chunk) => Ok(Some(chunk)),
             Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
             Err(RecvTimeoutError::Disconnected) => Ok(None),
@@ -805,7 +801,7 @@ impl AudioStream for WasapiLoopbackStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
         // Bounded recv: an idle loopback delivers nothing, and the ingest loop honours stop only
         // between chunks — an unbounded recv deadlocks stop (keepalive hands control back).
-        match self.rx.recv_timeout(WASAPI_POLL_TIMEOUT) {
+        match self.rx.recv_timeout(KEEPALIVE_AFTER) {
             Ok(chunk) => {
                 if let Some(t) = self.zero.feed(&chunk.samples) {
                     self.health.push(t);

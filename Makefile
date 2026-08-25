@@ -67,7 +67,7 @@ guard-not-prod-data-dir:
 
 .PHONY: all build test check clean dev install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
+        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
@@ -291,6 +291,7 @@ generate-installer-nsh:
 	@bash scripts/generate-installer-nsh.sh
 
 build-desktop: generate-installer-nsh
+	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	cd desktop/src-tauri && cargo build
 
 build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
@@ -302,8 +303,7 @@ build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nod
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
-	@bash scripts/check-vulkan-path-budget.sh
-	@bash scripts/stage-vulkan-runtime.sh
+	@"$(MAKE)" stage-vulkan-windows
 else
 	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
@@ -352,6 +352,12 @@ bundle-static-licenses:
 	@mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
 	@cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
 	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
+
+# Windows only: gate the ggml-vulkan shader build's path budget, then stage the pinned
+# vulkan-1.dll for bundling (ADR-085). One target so the pair can never drift apart.
+stage-vulkan-windows:
+	@bash scripts/check-vulkan-path-budget.sh
+	@bash scripts/stage-vulkan-runtime.sh
 
 verify-bundled-assets:
 ifeq ($(OS),Windows_NT)
@@ -410,8 +416,7 @@ test-build-phase: generate-installer-nsh build-cli build-angular build-mcp build
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
-	@bash scripts/check-vulkan-path-budget.sh
-	@bash scripts/stage-vulkan-runtime.sh
+	@"$(MAKE)" stage-vulkan-windows
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
@@ -437,7 +442,7 @@ test-desktop-build-run:
 	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
 	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats
+	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run: guard-not-prod-data-dir
@@ -630,7 +635,7 @@ test-desktop-build: build-angular build-mcp
 	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
 	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats
+	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
@@ -763,6 +768,7 @@ check-clippy:
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
+	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	@bash scripts/bundle-build-context.sh
 	@bash scripts/create-desktop-stubs.sh
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
@@ -990,8 +996,7 @@ dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-ins
 	@bash scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
-	@bash scripts/check-vulkan-path-budget.sh
-	@bash scripts/stage-vulkan-runtime.sh
+	@"$(MAKE)" stage-vulkan-windows
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else

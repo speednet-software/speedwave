@@ -14,7 +14,9 @@ $Root = Join-Path 'C:\VulkanSDK' $Version
 function Get-Verified([string]$Path, [string]$Url, [string]$Expected, [string]$What) {
     if (-not (Test-Path $Path) -or (Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Expected) {
         Write-Output "Downloading $What..."
-        curl.exe -fsSL -o $Path $Url
+        # System32 curl by absolute path: this script runs elevated and executes what it
+        # downloads — a PATH-planted curl.exe must not win (same rule as binary.rs).
+        & (Join-Path $env:SystemRoot 'System32\curl.exe') -fsSL -o $Path $Url
         if ($LASTEXITCODE -ne 0) { throw "$What download failed (exit $LASTEXITCODE)" }
     }
     $hash = (Get-FileHash -Algorithm SHA256 $Path).Hash

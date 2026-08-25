@@ -143,7 +143,7 @@ populate_windows() {
     # pass path (pin extraction + hash compare) is exercised without the real LunarG DLL.
     scripts_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/scripts.XXXXXX")"
     cp "$SCRIPT" "$scripts_dir/verify-bundled-assets.sh"
-    pin="$(sha256sum "$ROOT/vulkan-1.dll" | cut -d' ' -f1)"
+    pin="$( (sha256sum "$ROOT/vulkan-1.dll" 2>/dev/null || shasum -a 256 "$ROOT/vulkan-1.dll") | cut -d' ' -f1)"
     printf "\$RuntimeDllSha256 = '%s'\n" "$pin" > "$scripts_dir/install-vulkan-sdk.ps1"
 
     # Via bash: the copy sits in a tmpdir that may be mounted noexec.

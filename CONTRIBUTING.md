@@ -31,7 +31,7 @@ cd speedwave
 make setup-dev
 ```
 
-Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain via Chocolatey; requires admin and self-elevates), then open a **new** Git Bash and run `make setup-dev`.
+Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain via Chocolatey; requires admin and self-elevates), then open a **new** Git Bash and run `make setup-dev`. Clone into a short path (e.g. `C:\src\speedwave`): the Windows whisper Vulkan build is path-length gated (`scripts/check-vulkan-path-budget.sh`), and a deep clone path fails the desktop build with a pointer to the escape hatch.
 
 ### Running Tests
 

@@ -38,7 +38,8 @@ pub enum TranscriptStatus {
 /// Which Whisper model was used for each pass.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelsUsed {
-    /// Whisper catalogue key used for the live pass.
+    /// Whisper catalogue key used for the live pass; `None` = record-only (no live pass ran
+    /// for the current part — the UI keys record-only rendering on it, ADR-056 Am. 13).
     pub live: Option<String>,
     /// Whisper catalogue key used for the higher-quality offline pass.
     pub finalize: Option<String>,
@@ -75,6 +76,10 @@ pub struct TranscriptSession {
     /// never persisted and never part of `effective_segments`.
     #[serde(skip, default)]
     pub live_draft: String,
+    /// `models_used.live` as it was before the in-flight resume — consumed by
+    /// `rollback_resume` so the invariant lives in the store, not at call sites.
+    #[serde(skip, default)]
+    pub(crate) prior_live_model: Option<String>,
 }
 
 impl TranscriptSession {
@@ -104,6 +109,7 @@ impl TranscriptSession {
             models_used: ModelsUsed::default(),
             last_seq: 0,
             live_draft: String::new(),
+            prior_live_model: None,
         }
     }
 

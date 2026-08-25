@@ -245,11 +245,16 @@ impl Ingest {
 }
 
 /// Locks the shared ingest state, recovering a poisoned mutex — a panicked peer thread must not
-/// strand a recording that is otherwise fine.
+/// strand a recording that is otherwise fine (the join-side check still fails the session).
 fn lock_ingest(shared: &Mutex<Ingest>) -> std::sync::MutexGuard<'_, Ingest> {
-    shared
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    shared.lock().unwrap_or_else(|poisoned| {
+        // Once per process: the mutex stays poisoned, and this is called on every loop tick.
+        static POISON_WARNED: std::sync::Once = std::sync::Once::new();
+        POISON_WARNED.call_once(|| {
+            log::warn!(target: "transcription::driver", "ingest state mutex poisoned by a panicked peer thread — recovering");
+        });
+        poisoned.into_inner()
+    })
 }
 
 /// Ring size per lane: the live window plus the lag the live pass may absorb before it skips.
@@ -360,8 +365,9 @@ fn ingest_loop(
             Ok(None) => return Ok(()), // stream ended
             Err(e) => return Err(DriverError::Capture(e.to_string())),
         };
-        // Idle keepalive: nothing to place — loop back so `stop` is re-checked.
-        if chunk.samples.is_empty() {
+        // Idle keepalive: nothing to place — loop back so `stop` is re-checked. Must stay
+        // above the channel-count check (a keepalive has `mic: None` on any stream shape).
+        if chunk.is_keepalive() {
             continue;
         }
         let channels = if chunk.mic.is_some() { 2 } else { 1 };
@@ -520,6 +526,17 @@ impl TranscriptDriver {
         // Wind the ingest down and wait for the WAV to be finalized before reporting anything.
         self.stop.stop();
         let joined = ingest.join();
+        // Health queued after the decode loop's last poll (e.g. during a long final decode or
+        // the wind-down itself) — including the one-shot AudioDropped — must still land.
+        {
+            let health = std::mem::take(&mut lock_ingest(&self.ingest).health);
+            for t in health {
+                let _ = match t {
+                    CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
+                    CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
+                };
+            }
+        }
         // An ingest failure landing after the decode loop's last poll (or during wind-down,
         // e.g. WAV finalize) must not let a broken recording report success.
         let result = result.and_then(|()| {
@@ -539,7 +556,7 @@ impl TranscriptDriver {
                 // Final live decode flushes the not-yet-agreed tail (no further
                 // pass will confirm it), then hand off to the finalize pass.
                 if self.transcriber.is_some() {
-                    let _ = self.decode_window(true);
+                    let _ = self.decode_final_window();
                 }
                 let _ = self
                     .store
@@ -586,15 +603,9 @@ impl TranscriptDriver {
             if let Some(e) = error {
                 return Err(e);
             }
-            if lane_count == 0 {
-                if finished {
-                    return Ok(());
-                }
-                std::thread::sleep(DECODE_POLL_INTERVAL);
-                continue;
-            }
-            // Record-only session: capture health and lifecycle only, no decoding.
-            if self.transcriber.is_none() {
+            // Nothing to decode yet (no lanes) or record-only (no live transcriber):
+            // capture health and lifecycle only.
+            if lane_count == 0 || self.transcriber.is_none() {
                 if finished {
                     return Ok(());
                 }
@@ -617,11 +628,11 @@ impl TranscriptDriver {
         }
     }
 
-    /// Decodes the newest window. `flush` commits the held-back tails, which the wind-down pass
-    /// needs because nothing after it will confirm them.
-    fn decode_window(&mut self, flush: bool) -> Result<(), DriverError> {
+    /// Decodes the newest window with the flush semantics the wind-down needs: the held-back
+    /// tails commit, because nothing after this pass will confirm them.
+    fn decode_final_window(&mut self) -> Result<(), DriverError> {
         let head = lock_ingest(&self.ingest).head();
-        self.decode_window_ending(head as f32 / SAMPLE_RATE_HZ as f32, flush)
+        self.decode_window_ending(head as f32 / SAMPLE_RATE_HZ as f32, true)
     }
 
     /// Re-decodes the [`LIVE_WINDOW_SECS`] ending at `end_secs` per lane, committing only past
@@ -720,8 +731,11 @@ impl TranscriptDriver {
         }
         let source = self.lanes[lane_idx].source;
         let Some(transcriber) = self.transcriber.as_mut() else {
-            // Record-only sessions never reach a decode; guard instead of panicking on a bug.
-            return Ok((Vec::new(), String::new()));
+            // Unreachable by construction (every decode path is gated on a live transcriber) —
+            // fail loud instead of silently decoding nothing if a future gating bug lands here.
+            return Err(DriverError::Transcribe(
+                "decode reached on a record-only session (driver bug)".to_string(),
+            ));
         };
         let segs = transcriber
             .feed(window, &self.transcribe_opts)
@@ -2893,7 +2907,7 @@ mod tests {
             TranscriptStatus::Failed { .. }
         ));
         // The WAV written before the panic is still finalized (readable header).
-        assert!(crate::transcription::audio::wav_duration(&wav).is_ok());
+        assert!(crate::transcription::audio::wav_duration(&wav).is_some());
     }
 
     /// One chunk, then blocks until `stop` trips and only then errors — a failure landing
@@ -2915,6 +2929,81 @@ mod tests {
             }
             Err(CaptureError::Failed("device vanished".to_string()))
         }
+    }
+
+    /// One chunk after `stop` trips, with a warning queued on it — health landing after the
+    /// decode loop's last drain (the wind-down path must forward it).
+    struct LateHealthStream {
+        pulled: bool,
+        stop: StopSignal,
+    }
+    impl AudioStream for LateHealthStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if self.pulled {
+                return Ok(None);
+            }
+            while !self.stop.is_stopped() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            self.pulled = true;
+            Ok(Some(chunk_at(0, 1600, None)))
+        }
+
+        fn take_health(&mut self) -> Vec<CaptureHealth> {
+            if self.pulled {
+                vec![CaptureHealth::Raised(
+                    crate::transcription::CaptureWarning::AudioDropped,
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn health_queued_after_the_decode_loops_last_poll_still_reaches_the_store() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("late-health.wav");
+        let id = mk_session(&store, &wav);
+        let sub = store.subscribe(id).unwrap();
+        let stop = StopSignal::new();
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(LateHealthStream {
+                pulled: false,
+                stop: stop.clone(),
+            }),
+            transcriber: live(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let runner = std::thread::spawn({
+            let wav = wav.clone();
+            move || driver.run(&wav)
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        stop.stop();
+        runner.join().unwrap().unwrap();
+        let mut rx = sub.events;
+        let mut saw = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let crate::transcription::TranscriptEvent::CaptureWarning {
+                warning: crate::transcription::CaptureWarning::AudioDropped,
+                ..
+            } = ev
+            {
+                saw = true;
+            }
+        }
+        assert!(
+            saw,
+            "the AudioDropped raised after the decode loop exited must still be forwarded"
+        );
     }
 
     #[test]
@@ -2976,6 +3065,93 @@ mod tests {
             (secs - 0.3).abs() < 0.02,
             "expected 0.3 s (0.2 plus the 0.1 s tail), got {secs}"
         );
+    }
+
+    /// A paired chunk with distinct per-channel amplitudes, so a channel swap or
+    /// desync is visible in the written WAV.
+    fn stereo_chunk_at(ms: u64, samples: usize) -> crate::transcription::audio::AudioChunk {
+        crate::transcription::audio::AudioChunk {
+            samples: vec![0.1; samples],
+            mic: Some(vec![0.3; samples]),
+            offset: Duration::from_millis(ms),
+        }
+    }
+
+    #[test]
+    fn a_capture_gap_on_a_paired_capture_pads_both_channels_in_lockstep() {
+        // The default source is mixed (two lanes): `write_silence(gap, channels)` is where a
+        // frame/sample mix-up would desync the two WAV channels for the rest of the recording.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("gapped-stereo.wav");
+        let id = mk_session(&store, &wav);
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream {
+                chunks: vec![stereo_chunk_at(0, 3_200), stereo_chunk_at(10_000, 3_200)],
+            }),
+            transcriber: live(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        driver.run(&wav).unwrap();
+        let (channels, _) = crate::transcription::audio::parse_wav_to_channels_f32(&wav).unwrap();
+        assert_eq!(channels.len(), 2);
+        let frames = channels[0].len();
+        assert_eq!(frames, channels[1].len());
+        // 0.2 s + 9.8 s gap + 0.2 s at 16 kHz.
+        assert!(
+            (frames as f32 / 16_000.0 - 10.2).abs() < 0.05,
+            "expected ~10.2 s of frames per channel, got {frames}"
+        );
+        // Post-gap audio still lands channel-aligned: sys 0.1, mic 0.3 in the final chunk.
+        let tail = frames - 1_600;
+        assert!(
+            (channels[0][tail] - 0.1).abs() < 0.02,
+            "sys channel desynced after the gap"
+        );
+        assert!(
+            (channels[1][tail] - 0.3).abs() < 0.02,
+            "mic channel desynced after the gap"
+        );
+        // The gap itself is silence on both channels.
+        assert!(channels[0][frames / 2].abs() < 1e-6);
+        assert!(channels[1][frames / 2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_backwards_offset_correction_keeps_paired_channels_aligned() {
+        // The mic tail is written as `&mic[skip..]`: a wrong skip would shift the mic channel
+        // against the system channel from this chunk on.
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("overlap-stereo.wav");
+        let id = mk_session(&store, &wav);
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream {
+                chunks: vec![stereo_chunk_at(0, 3_200), stereo_chunk_at(100, 3_200)],
+            }),
+            transcriber: live(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        driver.run(&wav).unwrap();
+        let (channels, _) = crate::transcription::audio::parse_wav_to_channels_f32(&wav).unwrap();
+        assert_eq!(channels.len(), 2);
+        let frames = channels[0].len();
+        assert_eq!(frames, channels[1].len());
+        assert!(
+            (frames as f32 / 16_000.0 - 0.3).abs() < 0.02,
+            "expected 0.3 s per channel, got {frames} frames"
+        );
+        // Every frame keeps its channel identity — no zero-padding or swap anywhere.
+        assert!(channels[0].iter().all(|&s| (s - 0.1).abs() < 0.02));
+        assert!(channels[1].iter().all(|&s| (s - 0.3).abs() < 0.02));
     }
 
     /// Endless 200 ms chunks, counting what the driver has pulled. The small sleep keeps the

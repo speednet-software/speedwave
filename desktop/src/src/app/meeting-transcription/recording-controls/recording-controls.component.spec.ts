@@ -3,6 +3,7 @@ import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
+import { LoggerService } from '../../services/logger.service';
 import type {
   AudioSource,
   AudioSourceInfo,
@@ -70,6 +71,12 @@ describe('RecordingControlsComponent', () => {
     recordingSource: typeof recordingSource;
     recordingLanguage: typeof recordingLanguage;
   };
+  let logger: {
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    debug: ReturnType<typeof vi.fn>;
+  };
 
   const caps: CapabilitiesAck = {
     capabilities: {
@@ -79,6 +86,7 @@ describe('RecordingControlsComponent', () => {
     },
     backends: ['cpu', 'metal'],
     gpu_class: 'discrete' as const,
+    accel_label: 'Metal (GPU)',
   };
   /** A model list with at least one downloaded Whisper model. */
   const modelsWithSmall = {
@@ -149,9 +157,13 @@ describe('RecordingControlsComponent', () => {
       recordingSource,
       recordingLanguage,
     };
+    logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [RecordingControlsComponent],
-      providers: [{ provide: TranscriptionService, useValue: svc }],
+      providers: [
+        { provide: TranscriptionService, useValue: svc },
+        { provide: LoggerService, useValue: logger },
+      ],
     }).compileComponents();
     fixture = TestBed.createComponent(RecordingControlsComponent);
     component = fixture.componentInstance;
@@ -161,7 +173,7 @@ describe('RecordingControlsComponent', () => {
     await component.ngOnInit();
     expect(component.sources().length).toBe(2);
     expect(component.sourceIndex()).toBe(0); // system_wide
-    expect(component.accel()).toBe('Acceleration: Metal');
+    expect(component.accel()).toBe('Acceleration: Metal (GPU)');
   });
 
   it('live toggle: defaults from the service preference, persists a change, and gates start()', async () => {
@@ -185,33 +197,44 @@ describe('RecordingControlsComponent', () => {
     expect(svc.startRecording.mock.calls.at(-1)?.[2]).toBe(false);
   });
 
-  it('labels a Vulkan build and a CPU-only build correctly', async () => {
-    svc.getCapabilities.mockResolvedValueOnce({ ...caps, backends: ['cpu', 'vulkan'] });
+  it('live-transcript checkbox: reflects the signal, disables while recording, persists on change', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(false);
     await component.ngOnInit();
-    expect(component.accel()).toBe('Acceleration: Vulkan');
+    fixture.detectChanges();
+    const box = (): HTMLInputElement =>
+      fixture.nativeElement.querySelector('[data-testid="live-transcript-toggle"]');
+    expect(box().checked).toBe(false);
+    expect(box().disabled).toBe(false);
 
-    svc.getCapabilities.mockResolvedValueOnce({ ...caps, backends: ['cpu'] });
-    await component.ngOnInit();
-    expect(component.accel()).toBe('Acceleration: CPU only');
+    // A real DOM change event drives the (change) binding, not a direct method call.
+    box().checked = true;
+    box().dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(true);
+    expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
+    expect(box().checked).toBe(true);
+
+    // While recording, the choice is locked in.
+    recordingSessionId.set('sess-1');
+    fixture.detectChanges();
+    expect(box().disabled).toBe(true);
   });
 
-  it('labels from the probed GPU class, not the compiled backend list', async () => {
-    // A Vulkan build on a host with no usable device must say CPU (runtime truth).
+  it('renders the host-computed acceleration label verbatim, never re-deriving it', async () => {
+    // The label is Rust's `accel_label()` (SSOT) — the badge must not recompute it from
+    // backends/gpu_class, so a contradictory pair changes nothing.
     svc.getCapabilities.mockResolvedValueOnce({
       ...caps,
-      backends: ['cpu', 'vulkan'],
+      backends: ['cpu'],
       gpu_class: 'none' as const,
-    });
-    await component.ngOnInit();
-    expect(component.accel()).toBe('Acceleration: CPU only');
-
-    svc.getCapabilities.mockResolvedValueOnce({
-      ...caps,
-      backends: ['cpu', 'vulkan'],
-      gpu_class: 'integrated' as const,
+      accel_label: 'Vulkan (integrated GPU)',
     });
     await component.ngOnInit();
     expect(component.accel()).toBe('Acceleration: Vulkan (integrated GPU)');
+
+    svc.getCapabilities.mockResolvedValueOnce({ ...caps, accel_label: 'CPU' });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: CPU');
   });
 
   it('defaults to the "Whole meeting" mixed source when the backend offers it', async () => {
@@ -502,6 +525,14 @@ describe('RecordingControlsComponent', () => {
     svc.listModels.mockRejectedValueOnce(new Error('boom'));
     await component.refreshModelAvailability();
     expect(component.modelsKnown()).toBe(false);
+  });
+
+  it('a recommendedModel failure clears the finalize warning and is logged, never silent', async () => {
+    await component.ngOnInit();
+    svc.recommendedModel.mockRejectedValueOnce(new Error('ipc down'));
+    await component.refreshModelAvailability();
+    expect(component.missingFinalizeModel()).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('ipc down'));
   });
 
   it('warns when the finalize model is missing: Start stays enabled, the quality cost is named', async () => {

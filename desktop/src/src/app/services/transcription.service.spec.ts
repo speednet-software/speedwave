@@ -88,7 +88,7 @@ describe('TranscriptionService', () => {
       mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
       const spy = vi.spyOn(mockTauri, 'invoke');
       const mixed = { kind: 'mixed' as const, mic: null };
-      await svc.startRecording(mixed, 'pl');
+      await svc.startRecording(mixed, 'pl', true);
       expect(spy).toHaveBeenCalledWith('start_transcription', {
         params: {
           source: mixed,
@@ -116,7 +116,9 @@ describe('TranscriptionService', () => {
       mockTauri.listen = vi.fn(async () => {
         throw new Error('ipc down');
       });
-      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
+        'ipc down'
+      );
       expect(invoked).toContain('stop_transcription');
       expect(svc.recordingSessionId()).toBeNull();
       expect(svc.recordingSource()).toBeNull();
@@ -137,7 +139,9 @@ describe('TranscriptionService', () => {
       mockTauri.listen = vi.fn(async () => {
         throw new Error('ipc down');
       });
-      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
+        'ipc down'
+      );
       // The backend still records; the Stop control must keep its target.
       expect(svc.recordingSessionId()).toBe('sess-1');
     });
@@ -151,7 +155,7 @@ describe('TranscriptionService', () => {
         snapshot: snapshot({ id }),
       };
       mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
-      await svc.startRecording({ kind: 'system_wide' }, 'pl');
+      await svc.startRecording({ kind: 'system_wide' }, 'pl', true);
     }
 
     it('stopRecording clears the tracked id, source, and language', async () => {

@@ -404,8 +404,9 @@ jobs:
     # on windows-latest with stubbed bundle resources so Windows-only compile
     # errors (e.g. cfg-gated imports of types used in cross-platform fn
     # signatures) are caught in PR CI without paying for a full Tauri bundle.
+    # The budget covers a cold whisper.cpp + ggml-vulkan shader build (ADR-085).
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash

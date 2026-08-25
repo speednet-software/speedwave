@@ -51,6 +51,7 @@ export interface Segment {
 
 /** Which models were used for each pass of a session. */
 export interface ModelsUsed {
+  /** Live-pass model key; null = record-only for the current part (drives the record-only UI). */
   live: string | null;
   finalize: string | null;
 }
@@ -114,6 +115,8 @@ export interface CapabilitiesAck {
   capabilities: CaptureCapabilities;
   backends: Backend[];
   gpu_class: GpuClass;
+  /** Acceleration label computed host-side (`accel::accel_label()`) — render verbatim. */
+  accel_label: string;
 }
 
 /** `start_transcription` command return type. */

@@ -1782,6 +1782,14 @@ mod tests {
                 "install-vulkan-sdk.ps1",
                 include_str!("../../../scripts/install-vulkan-sdk.ps1"),
             ),
+            (
+                "create-desktop-stubs.sh",
+                include_str!("../../../scripts/create-desktop-stubs.sh"),
+            ),
+            (
+                "desktop/src-tauri/.gitignore",
+                include_str!("../../../desktop/src-tauri/.gitignore"),
+            ),
         ] {
             assert!(
                 body.contains(expected),

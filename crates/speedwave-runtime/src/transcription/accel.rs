@@ -123,7 +123,7 @@ fn full_model_with_role(role: ModelRole) -> &'static WhisperModelInfo {
 
 /// The live-pass model for a host GPU `class`: `large-v3-turbo` where a discrete GPU carries
 /// it, `small` everywhere else (an iGPU cannot hold the GPU-tier model at live cadence).
-pub fn live_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
+pub(super) fn live_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
     full_model_with_role(match class {
         GpuClass::Discrete => ModelRole::GpuLive,
         GpuClass::Integrated | GpuClass::None => ModelRole::CpuLive,
@@ -132,7 +132,7 @@ pub fn live_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
 
 /// The finalize-pass model for `class`: `large-v3` on a discrete GPU, else the turbo variant —
 /// the largest that still finishes a long meeting (4 decoder layers against 32).
-pub fn finalize_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
+pub(super) fn finalize_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
     full_model_with_role(match class {
         GpuClass::Discrete => ModelRole::Finalize,
         GpuClass::Integrated | GpuClass::None => ModelRole::GpuLive,

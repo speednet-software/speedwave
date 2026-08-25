@@ -10,13 +10,8 @@ import {
 } from '@angular/core';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import type {
-  AudioSource,
-  AudioSourceInfo,
-  Backend,
-  GpuClass,
-  Language,
-} from '../../models/transcript';
+import { LoggerService } from '../../services/logger.service';
+import type { AudioSource, AudioSourceInfo, Language } from '../../models/transcript';
 
 /** A named input device for the microphone dropdown. */
 interface MicChoice {
@@ -38,20 +33,6 @@ function micDeviceId(s: AudioSource): string | null {
  */
 function micName(label: string): string {
   return label.replace(/^Microphone:\s*/, '');
-}
-
-/**
- * A short "Acceleration: …" string from the runtime truth (mirrors Rust `accel_label()`):
- * a Vulkan build with no usable device says CPU, an iGPU host says so.
- * @param backends - whisper.cpp backends compiled into this build.
- * @param gpuClass - the probed host GPU class.
- */
-function accelLabel(backends: Backend[], gpuClass: GpuClass): string {
-  const gpu = backends.includes('metal') ? 'Metal' : backends.includes('vulkan') ? 'Vulkan' : null;
-  if (!gpu || gpuClass === 'none') return 'Acceleration: CPU only';
-  return gpuClass === 'integrated'
-    ? `Acceleration: ${gpu} (integrated GPU)`
-    : `Acceleration: ${gpu}`;
 }
 
 /**
@@ -129,9 +110,11 @@ function accelLabel(backends: Backend[], gpuClass: GpuClass): string {
           live transcript
         </label>
 
-        <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
-          {{ accel() }}
-        </span>
+        @if (accel()) {
+          <span class="mono text-[10px] text-[var(--ink-mute)]" data-testid="accel-badge">
+            {{ accel() }}
+          </span>
+        }
       </div>
 
       @if (!liveTranscript()) {
@@ -203,12 +186,8 @@ export class RecordingControlsComponent implements OnInit {
   readonly sources = signal<AudioSourceInfo[]>([]);
   /** Index into `sources()` of the chosen source. */
   readonly sourceIndex = signal(0);
-  /** Compiled whisper.cpp backends for this build. */
-  readonly backends = signal<Backend[]>([]);
-  /** Probed host GPU class (runtime truth, not the compile-time backend list). */
-  readonly gpuClass = signal<GpuClass>('none');
-  /** Derived acceleration label. */
-  readonly accel = computed(() => accelLabel(this.backends(), this.gpuClass()));
+  /** Acceleration badge text, from the host-computed `accel_label` (empty until loaded). */
+  readonly accel = signal('');
   /** Whether the next recording runs the live pass (persisted; default from the GPU class). */
   readonly liveTranscript = signal(true);
   /** Disables Start/Stop while a transition is in flight. */
@@ -244,6 +223,7 @@ export class RecordingControlsComponent implements OnInit {
   });
 
   private readonly transcription = inject(TranscriptionService);
+  private readonly log = inject(LoggerService);
   private readonly cdr = inject(ChangeDetectorRef);
 
   /**
@@ -256,8 +236,7 @@ export class RecordingControlsComponent implements OnInit {
   async ngOnInit(): Promise<void> {
     try {
       const caps = await this.transcription.getCapabilities();
-      this.backends.set(caps.backends);
-      this.gpuClass.set(caps.gpu_class);
+      this.accel.set(`Acceleration: ${caps.accel_label}`);
       this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);
@@ -315,8 +294,9 @@ export class RecordingControlsComponent implements OnInit {
       this.missingFinalizeModel.set(
         fin && !fin.downloaded && !fin.downloading ? fin.display_name : null
       );
-    } catch {
-      // Non-fatal — no warning beats a wrong one.
+    } catch (e: unknown) {
+      // Non-fatal — no warning beats a wrong one — but the failure must be visible in logs.
+      this.log.warn(`recommended-model check failed: ${e instanceof Error ? e.message : e}`);
       this.missingFinalizeModel.set(null);
     }
     this.cdr.markForCheck();

@@ -62,13 +62,13 @@ impl LevelBalancer {
 /// (e.g. a corrupt timestamp) is refused rather than driving an unbounded allocation.
 const MAX_BUFFERED_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 60;
 
-/// How long since the last delivery (either side) before `poll_paired_chunk` treats the
+/// How long since the last landed delivery (either side) before the mixed paths treat the
 /// capture as dead — never per call: one side still delivering means waiting, not stalled.
-const STALL_GIVE_UP: Duration = Duration::from_secs(2);
+pub const STALL_GIVE_UP: Duration = Duration::from_secs(2);
 
-/// How long one `poll_paired_chunk` call blocks without a chunk before yielding an empty
-/// keepalive so the ingest loop re-checks `stop` (the single-stream paths' recv bound).
-const KEEPALIVE_AFTER: Duration = Duration::from_millis(100);
+/// How long one bounded `next_chunk` blocks without a chunk before yielding an empty keepalive
+/// so the ingest loop re-checks `stop`. SSOT for every platform's recv/poll bound.
+pub const KEEPALIVE_AFTER: Duration = Duration::from_millis(100);
 
 /// One side lagging this far behind the other (5 s of samples) is treated as
 /// dead: the mix keeps flowing from the healthy side instead of stalling.
@@ -233,6 +233,9 @@ impl MixBuffer {
         for (i, &s) in samples[skip..].iter().enumerate() {
             buf[rel + i] += s * gain; // additive so overlapping pushes within a stream sum
         }
+        // Only audio that actually lands feeds the stall detector: a source emitting nothing
+        // but rejected (stale / over-cap) chunks must still time out after STALL_GIVE_UP.
+        self.last_delivery = std::time::Instant::now();
         self.bump_filled(source, end);
     }
 
@@ -241,7 +244,6 @@ impl MixBuffer {
             MixSource::System => self.sys_filled = self.sys_filled.max(end),
             MixSource::Mic => self.mic_filled = self.mic_filled.max(end),
         }
-        self.last_delivery = std::time::Instant::now();
         self.refresh_health();
     }
 
@@ -334,6 +336,11 @@ impl MixBuffer {
     pub fn offset_ns(&self) -> u64 {
         self.base.saturating_mul(1_000_000_000) / SAMPLE_RATE_HZ as u64
     }
+
+    /// Time since audio last landed on either side — the mixed streams' stall give-up clock.
+    pub fn stalled_for(&self) -> Duration {
+        self.last_delivery.elapsed()
+    }
 }
 
 /// The shared `AudioStream::next_chunk` body for a mixed capture fed from background threads:
@@ -345,7 +352,7 @@ pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, C
         let stalled_for = match buf.lock() {
             Ok(mut b) => {
                 let start_ns = b.offset_ns();
-                let stalled_for = b.last_delivery.elapsed();
+                let stalled_for = b.stalled_for();
                 // On stall, drain tail first so it isn't lost.
                 let chunk = b.pop_pair(want, want).or_else(|| {
                     (stalled_for >= STALL_GIVE_UP)
@@ -499,6 +506,27 @@ mod tests {
         assert_eq!(sys.len(), 16);
         // 0.4 RMS > LEVEL_TARGET_RMS (0.1) → gain 1.0.
         assert!(sys.iter().all(|&s| (s - 0.4).abs() < 1e-6));
+    }
+
+    #[test]
+    fn rejected_pushes_do_not_reset_the_stall_detector() {
+        let mut b = MixBuffer::new();
+        b.push(MixSource::System, 0, &[1.0; 32]);
+        b.push(MixSource::Mic, 0, &[0.0; 32]);
+        let _ = b.pop_pair(1, 32).unwrap(); // base now 32
+        let stalled = std::time::Instant::now() - STALL_GIVE_UP;
+        // Entirely-in-the-past push: dropped — must not look like a delivery.
+        b.last_delivery = stalled;
+        b.push(MixSource::System, 0, &[9.9; 16]);
+        assert!(b.last_delivery.elapsed() >= STALL_GIVE_UP);
+        // Over-cap push: dropped — same rule.
+        b.last_delivery = stalled;
+        b.push(MixSource::System, 3600 * 1_000_000_000, &[1.0; 16]);
+        assert!(b.last_delivery.elapsed() >= STALL_GIVE_UP);
+        // A landing push is a real delivery and resets the detector.
+        b.last_delivery = stalled;
+        b.push(MixSource::System, 2_000_000, &[0.4; 16]);
+        assert!(b.last_delivery.elapsed() < STALL_GIVE_UP);
     }
 
     #[test]

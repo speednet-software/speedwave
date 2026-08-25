@@ -92,6 +92,12 @@ impl AudioChunk {
             offset: Duration::ZERO,
         }
     }
+
+    /// `true` for an idle keepalive. Consumers must check this before any shape check —
+    /// a keepalive carries `mic: None` even on a two-channel stream.
+    pub fn is_keepalive(&self) -> bool {
+        self.samples.is_empty()
+    }
 }
 
 /// Errors a capture backend can produce.

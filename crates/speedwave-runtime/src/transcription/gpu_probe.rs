@@ -34,7 +34,9 @@ pub(super) fn probe() -> GpuClass {
     use ash::vk;
     // SAFETY: Entry::load dynamically loads vulkan-1.dll; failure returns Err (no loader).
     let Ok(entry) = (unsafe { ash::Entry::load() }) else {
-        log::debug!(target: "transcription::gpu", "vulkan-1.dll not loadable — no GPU probe");
+        // The loader ships next to the exe — failing to load it means a broken install,
+        // not a GPU-less host; warn per logging.md (degradation), the probe still degrades.
+        log::warn!(target: "transcription::gpu", "vulkan-1.dll not loadable — GPU acceleration disabled, falling back to CPU");
         return GpuClass::None;
     };
     let create_info = vk::InstanceCreateInfo::default();
