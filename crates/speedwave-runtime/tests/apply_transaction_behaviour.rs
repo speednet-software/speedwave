@@ -341,7 +341,7 @@ fn prune_does_not_run_when_apply_update_transaction_fails() {
 
 #[test]
 #[serial_test::serial]
-fn apply_rollback_transaction_runs_save_then_recreate_skipping_vm_validate() {
+fn apply_rollback_transaction_runs_save_validate_then_recreate() {
     let data_dir = shared_data_dir();
     let project = "tx-rollback";
     let (rt, handles) = MockRuntimeBuilder::new().build();
@@ -349,9 +349,10 @@ fn apply_rollback_transaction_runs_save_then_recreate_skipping_vm_validate() {
 
     let validate = handles.validate_calls.lock().unwrap().clone();
     let recreate = handles.recreate_calls.lock().unwrap().clone();
-    assert!(
-        validate.is_empty(),
-        "rollback path skips VM-side validate (recovery resilience, ADR-066)"
+    assert_eq!(
+        validate,
+        vec![project.to_string()],
+        "rollback runs the best-effort VM-side validate before recreate (ADR-066)"
     );
     assert_eq!(recreate, vec![project.to_string()]);
 
@@ -365,26 +366,56 @@ fn apply_rollback_transaction_runs_save_then_recreate_skipping_vm_validate() {
 
 #[test]
 #[serial_test::serial]
-fn apply_rollback_transaction_proceeds_with_recreate_when_validate_would_fail() {
-    // Resilience contract: rollback attempts recreate even if validate would fail.
+fn apply_rollback_transaction_proceeds_with_recreate_when_validate_fails() {
+    // Resilience contract: a validate failure must never block the recovery recreate.
     let data_dir = shared_data_dir();
-    let project = "tx-rollback-no-validate";
+    let project = "tx-rollback-validate-fails";
     let (rt, handles) = MockRuntimeBuilder::new()
-        .push_validate_result(Err(
-            "service \"x\" refers to undefined network y: invalid compose project".to_string(),
-        ))
+        .push_validate_result(Err("connection refused".to_string()))
         .build();
     apply_rollback_transaction(&rt, project, VALID_YAML).unwrap();
 
-    // Pre-loaded validate failure was never consumed (rollback never called validate).
-    assert!(
-        handles.validate_calls.lock().unwrap().is_empty(),
-        "rollback must not consume the queued validate failure"
+    // Non-propagation failure: consumed on the first attempt, no retry, recovery continues.
+    assert_eq!(
+        handles.validate_calls.lock().unwrap().clone(),
+        vec![project.to_string()],
+        "best-effort validate runs once and its failure is swallowed"
     );
     assert_eq!(
         handles.recreate_calls.lock().unwrap().clone(),
         vec![project.to_string()],
-        "recreate proceeds despite virtiofs lag that would block validate"
+        "recreate proceeds despite the validate failure"
+    );
+
+    let compose_path = data_dir.join("compose").join(project).join("compose.yml");
+    assert_eq!(std::fs::read_to_string(&compose_path).unwrap(), VALID_YAML);
+}
+
+#[test]
+#[serial_test::serial]
+fn apply_rollback_transaction_retries_compose_file_enoent_before_recreate() {
+    // The stale-dentry ENOENT after the snapshot rename is absorbed by the retry,
+    // so recovery reaches recreate with the guest cache warmed.
+    let data_dir = shared_data_dir();
+    let project = "tx-rollback-enoent";
+    let (rt, handles) = MockRuntimeBuilder::new()
+        .push_validate_result(Err(
+            "limactl failed: time=\"2026-08-25T09:37:03+02:00\" level=fatal \
+             msg=\"open /Users/u/.speedwave/compose/tx-rollback-enoent/compose.yml: \
+             no such file or directory\""
+                .to_string(),
+        ))
+        .build();
+    apply_rollback_transaction(&rt, project, VALID_YAML).unwrap();
+
+    assert_eq!(
+        handles.validate_calls.lock().unwrap().len(),
+        2,
+        "ENOENT on compose.yml is retried instead of surfacing"
+    );
+    assert_eq!(
+        handles.recreate_calls.lock().unwrap().clone(),
+        vec![project.to_string()],
     );
 
     let compose_path = data_dir.join("compose").join(project).join("compose.yml");

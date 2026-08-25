@@ -417,7 +417,7 @@ endif
 
 # Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -462,7 +462,9 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	@# `test-support` is required, not cosmetic: the `required-features = ["test-support"]`
+	@# integration suites (apply_transaction_behaviour, lock suites) are silently skipped without it.
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
 	@# doesn't compile the `transcription` module. Test it explicitly here.
@@ -1006,7 +1008,7 @@ endif
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
 	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="
