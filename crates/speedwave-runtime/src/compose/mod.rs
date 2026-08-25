@@ -680,12 +680,17 @@ pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose
 /// SSOT for compose schema/parse error fragments seen on a stale/torn virtiofs
 /// read; recognised by `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // Field-specific fragments (path + type), never bare "must be a string". See ADR-068.
+    // Field-specific fragments (path + type), never bare "must be a string". See ADR-066.
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
     "yaml:", // any yaml-go parse error: rendered YAML is always valid, so torn read
 ];
+
+/// ENOENT on a compose.yml the host just renamed into place: a stale virtiofs
+/// dentry, not a missing file. Contiguous because `open <path>:` ends in the name.
+pub(crate) const COMPOSE_FILE_ENOENT_ERROR_FRAGMENT: &str =
+    "compose.yml: no such file or directory";
 
 /// Asserts every `services.<svc>.networks: [name]` resolves to a declared top-level
 /// `networks.<name>`. Catches render bugs and torn writes with missing network entries.
@@ -3628,14 +3633,15 @@ services:
         )
         .unwrap();
         // Expected paths must derive from the render's data_dir; compute() reads the production singleton.
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         // The mount-source checks (policy, managed-settings) compare the rendered
         // volume against `data_dir` — must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
             data_dir.path(),
         );
         assert!(
@@ -3670,14 +3676,15 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         // The mount-source checks (policy, audit, managed-settings) compare the
         // rendered volume against `data_dir`: must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
             data_dir.path(),
         );
         assert!(
@@ -6011,7 +6018,10 @@ services:
             result
         );
 
-        let expected_mount = format!("{}:/secrets/os-auth-token:ro", token_path.display());
+        let expected_mount = format!(
+            "{}:/secrets/os-auth-token:ro",
+            to_engine_path(&token_path).unwrap()
+        );
         assert!(
             result.contains(&expected_mount),
             "Token file must be mounted into hub.\nExpected: {}\nGot:\n{}",
@@ -8479,9 +8489,9 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
-        let expected =
-            SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy());
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        let expected = SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir);
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",

@@ -1225,11 +1225,7 @@ pub fn cli_install_path_for(
             cli_binary_filename(true)
         )
     } else {
-        home.join(".local")
-            .join("bin")
-            .join(CLI_BINARY)
-            .to_string_lossy()
-            .into_owned()
+        format!("{}/.local/bin/{}", home.to_string_lossy(), CLI_BINARY)
     }
 }
 
@@ -2198,9 +2194,13 @@ mod tests {
     #[test]
     fn test_data_dir_from_absolute_path() {
         let home = std::path::Path::new("/fake/home");
+        #[cfg(windows)]
+        let abs = r"C:\opt\sw-dev";
+        #[cfg(not(windows))]
+        let abs = "/opt/sw-dev";
         assert_eq!(
-            data_dir_from(Some("/opt/sw-dev"), home),
-            std::path::PathBuf::from("/opt/sw-dev")
+            data_dir_from(Some(abs), home),
+            std::path::PathBuf::from(abs)
         );
     }
 
@@ -2221,9 +2221,13 @@ mod tests {
     #[test]
     fn test_data_dir_from_absolute_path_with_trailing_slash() {
         let home = std::path::Path::new("/fake/home");
-        let result = data_dir_from(Some("/tmp/foo/"), home);
+        #[cfg(windows)]
+        let (with_slash, without) = (r"C:\tmp\foo\", r"C:\tmp\foo");
+        #[cfg(not(windows))]
+        let (with_slash, without) = ("/tmp/foo/", "/tmp/foo");
+        let result = data_dir_from(Some(with_slash), home);
         // PathBuf preserves trailing slash but path resolution works the same
-        assert!(result.starts_with("/tmp/foo"));
+        assert!(result.starts_with(without));
     }
 
     #[test]

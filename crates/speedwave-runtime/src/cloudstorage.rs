@@ -334,8 +334,9 @@ mod tests {
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
         assert_eq!(result, Some(CloudStorageProvider::Dropbox));
+        // Windows matches the well-known component name anywhere in the path.
         #[cfg(target_os = "windows")]
-        assert!(result.is_none());
+        assert_eq!(result, Some(CloudStorageProvider::Dropbox));
     }
 
     #[test]
@@ -376,10 +377,15 @@ mod tests {
     }
 
     #[test]
-    fn detect_onedrive_outside_users_is_none() {
-        // Token at a boundary but not under /Users/ is not a real mount.
+    fn detect_onedrive_outside_users() {
+        // macOS: a token outside /Users/ is not a real mount. Windows: the
+        // component-name match is the documented semantics (OneDrive can sit anywhere).
         let path = Path::new("/tmp/OneDrive/foo");
-        assert!(detect_cloudstorage_provider(path).is_none());
+        let result = detect_cloudstorage_provider(path);
+        #[cfg(target_os = "macos")]
+        assert!(result.is_none());
+        #[cfg(target_os = "windows")]
+        assert_eq!(result, Some(CloudStorageProvider::OneDrive));
     }
 
     // -- is_permission_error tests --
