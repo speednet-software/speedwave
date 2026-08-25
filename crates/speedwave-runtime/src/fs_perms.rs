@@ -412,7 +412,7 @@ pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
-        set_windows_acl_owner_only(path).map_err(|e| {
+        set_windows_acl_owner_only_in(path, true).map_err(|e| {
             anyhow::anyhow!("DACL tighten failed on directory {}: {}", path.display(), e)
         })?;
     }
@@ -1218,6 +1218,21 @@ mod tests {
         std::fs::write(target.join("file.txt"), b"contents").unwrap();
 
         set_owner_only_dir(&target).unwrap();
+
+        let content = std::fs::read_to_string(target.join("file.txt")).unwrap();
+        assert_eq!(content, "contents");
+    }
+
+    #[test]
+    fn ensure_owner_only_dir_keeps_existing_contents_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ensure-existing");
+        std::fs::create_dir(&target).unwrap();
+        // Re-tightening an existing dir must not lock the owner out of its
+        // contents (Windows: the inheritable-ACE propagation contract).
+        std::fs::write(target.join("file.txt"), b"contents").unwrap();
+
+        ensure_owner_only_dir(&target).unwrap();
 
         let content = std::fs::read_to_string(target.join("file.txt")).unwrap();
         assert_eq!(content, "contents");
