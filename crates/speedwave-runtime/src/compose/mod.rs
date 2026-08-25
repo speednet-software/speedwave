@@ -680,7 +680,7 @@ pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose
 /// SSOT for compose schema/parse error fragments seen on a stale/torn virtiofs
 /// read; recognised by `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // Field-specific fragments (path + type), never bare "must be a string".
+    // Field-specific fragments (path + type), never bare "must be a string". See ADR-066.
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
