@@ -368,12 +368,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
+        // Base must be platform-absolute or the absolute-path bail fires first.
+        let base = tmp.path().join("project").display().to_string();
         for injected in [
-            "/tmp/project\n      - /:/host:ro\n      - /tmp/payload",
-            "/tmp/pro\rject",
-            "/tmp/pro\0ject",
+            format!("{base}\n      - /:/host:ro\n      - /tmp/payload"),
+            format!("{base}\rx"),
+            format!("{base}\0x"),
         ] {
-            let result = add_project_with_data_dir("myproject", injected, &data_dir);
+            let result = add_project_with_data_dir("myproject", &injected, &data_dir);
             assert!(result.is_err(), "must reject control char in {injected:?}");
             assert!(
                 result
@@ -663,7 +665,13 @@ mod tests {
         // Register a project dir
         let project_dir = tmp.path().join("shared-dir");
         std::fs::create_dir_all(&project_dir).unwrap();
-        let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
+        // Seed the product-stored shape: canonicalized WITHOUT the `\\?\` prefix
+        // (add_project strips it before storing; a raw seed never string-matches).
+        let canonical_raw = std::fs::canonicalize(&project_dir).unwrap();
+        let canonical_lossy = canonical_raw.to_string_lossy();
+        let canonical_dir = std::path::PathBuf::from(
+            crate::engine_path::strip_extended_length_prefix(&canonical_lossy),
+        );
 
         // Seed config with a project at that path
         let data_dir = tmp.path().join("data");
@@ -847,8 +855,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        let result =
-            add_project_with_data_dir("myproject", r"\\wsl.localhost\Speedwave\", &data_dir);
+        // The runtime distro name derives from the process data dir (test env net),
+        // so build the UNC from it — a literal would hit the other-distro branch.
+        let unc = format!(r"\\wsl.localhost\{}\", crate::consts::wsl_distro_name());
+        let result = add_project_with_data_dir("myproject", &unc, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -863,8 +873,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        let result =
-            add_project_with_data_dir("myproject", r"\\wsl.localhost\Speedwave", &data_dir);
+        let unc = format!(r"\\wsl.localhost\{}", crate::consts::wsl_distro_name());
+        let result = add_project_with_data_dir("myproject", &unc, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("WSL distribution root"));
@@ -878,11 +888,11 @@ mod tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         // Runtime distro but the subdirectory does not exist — metadata()
         // returns Err, our branch bails with "does not exist".
-        let result = add_project_with_data_dir(
-            "myproject",
-            r"\\wsl.localhost\Speedwave\projects\definitely-not-a-real-folder-xyz",
-            &data_dir,
+        let unc = format!(
+            r"\\wsl.localhost\{}\projects\definitely-not-a-real-folder-xyz",
+            crate::consts::wsl_distro_name()
         );
+        let result = add_project_with_data_dir("myproject", &unc, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -930,8 +940,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        let unc_input = r"\\wsl.localhost\Speedwave\projects\nonexistent-dispatch-test-xyz-abc-123";
-        let result = add_project_with_data_dir("dispatch-test", unc_input, &data_dir);
+        let unc_input = format!(
+            r"\\wsl.localhost\{}\projects\nonexistent-dispatch-test-xyz-abc-123",
+            crate::consts::wsl_distro_name()
+        );
+        let result = add_project_with_data_dir("dispatch-test", &unc_input, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -941,7 +954,7 @@ mod tests {
         // The UNC branch echoes the raw `dir` argument verbatim in the bail
         // message (canonicalize branch would print a canonicalized form).
         assert!(
-            err.contains(unc_input),
+            err.contains(&unc_input),
             "error should echo the raw UNC input (proving canonicalize was \
              skipped), got: {err}"
         );
