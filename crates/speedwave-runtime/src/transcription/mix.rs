@@ -287,9 +287,8 @@ impl MixBuffer {
         lo.max(hi.saturating_sub(DEAD_GAP_SAMPLES))
     }
 
-    /// Pops the next aligned channel pair of up to `max_samples`, or `None` if fewer than
-    /// `min_samples` are ready (unless finished, then it returns the remainder). Both sides
-    /// come back `take`-long (the shorter zero-padded) and clamped to ±1.
+    /// Pops the next aligned pair of up to `max_samples`, or `None` under `min_samples` (unless
+    /// finished — then the remainder); both sides equal-length (zero-padded), clamped to ±1.
     pub fn pop_pair(&mut self, min_samples: usize, max_samples: usize) -> Option<PairedPcm> {
         debug_assert!(
             min_samples <= max_samples,
@@ -691,9 +690,8 @@ mod tests {
             b.take_health(),
             vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
         );
-        // A non-zero push that lands entirely past the buffering cap is dropped —
-        // it must not be treated as "signal arrived" and clear the warning. (The
-        // bogus watermark legitimately raises a mic-stall; only Cleared matters here.)
+        // A non-zero push landing past the buffering cap is dropped — it must not read as
+        // "signal arrived" and clear the warning (only Cleared matters here).
         let one_hour_ns: u64 = 3600 * 1_000_000_000;
         b.push(MixSource::System, one_hour_ns, &[1.0; 16]);
         let health = b.take_health();

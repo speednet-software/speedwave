@@ -170,6 +170,25 @@ describe('RecordingControlsComponent', () => {
     expect(component.accel()).toBe('Acceleration: CPU only');
   });
 
+  it('labels from the probed GPU class, not the compiled backend list', async () => {
+    // A Vulkan build on a host with no usable device must say CPU (runtime truth).
+    svc.getCapabilities.mockResolvedValueOnce({
+      ...caps,
+      backends: ['cpu', 'vulkan'],
+      gpu_class: 'none' as const,
+    });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: CPU only');
+
+    svc.getCapabilities.mockResolvedValueOnce({
+      ...caps,
+      backends: ['cpu', 'vulkan'],
+      gpu_class: 'integrated' as const,
+    });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: Vulkan (integrated GPU)');
+  });
+
   it('defaults to the "Whole meeting" mixed source when the backend offers it', async () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();

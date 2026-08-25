@@ -173,9 +173,12 @@ if ((Test-Path $vcvars) -and $msvcVer) {
 
 
 Write-Host "== Vulkan SDK (Windows whisper Vulkan backend, ADR-085) =="
-& (Join-Path $repoRoot 'scripts\install-vulkan-sdk.ps1')
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Vulkan SDK install failed with exit code $LASTEXITCODE"
+# try/catch, not $LASTEXITCODE: `&` on a .ps1 never sets $LASTEXITCODE, so the guard would read
+# a stale native exit code (choco's 3010) and abort a successful install; failures throw.
+try {
+    & (Join-Path $repoRoot 'scripts\install-vulkan-sdk.ps1')
+} catch {
+    Write-Host "ERROR: Vulkan SDK install failed: $_"
     exit 1
 }
 

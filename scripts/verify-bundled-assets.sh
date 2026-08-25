@@ -31,6 +31,19 @@ require_non_empty_dir() {
   find "$path" -mindepth 1 -print -quit | grep -q . || fail "Bundled directory is empty: $path"
 }
 
+# The bundled Vulkan loader is a signed, load-time import — presence is not enough; it must
+# match the pin in install-vulkan-sdk.ps1 (the SSOT for the SDK artifact hashes).
+require_pinned_vulkan_dll() {
+  local path="$1"
+  require_file "$path"
+  local pin_file expected actual
+  pin_file="$(cd "$(dirname "$0")" && pwd)/install-vulkan-sdk.ps1"
+  expected="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-f]\{64\}\)'.*/\1/p" "$pin_file")"
+  [[ -n "$expected" ]] || fail "Could not read \$RuntimeDllSha256 from $pin_file"
+  actual="$(sha256sum "$path" | cut -d' ' -f1)"
+  [[ "$actual" == "$expected" ]] || fail "vulkan-1.dll SHA256 mismatch: got $actual, expected $expected"
+}
+
 # Any Mach-O under the tree — including one wrapped in gzip — fails Apple
 # notarization if unsigned. `file -z` inspects compressed payloads directly.
 require_no_macho_under() {
@@ -89,7 +102,7 @@ case "$platform" in
     require_file "$root/cli/speedwave.exe"
     require_file "$root/windows/sweep.ps1"
     require_file "$root/windows/firewall.ps1"
-    require_file "$root/vulkan-1.dll"
+    require_pinned_vulkan_dll "$root/vulkan-1.dll"
     ;;
 esac
 

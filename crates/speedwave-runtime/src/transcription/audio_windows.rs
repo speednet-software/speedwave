@@ -2,7 +2,7 @@
 //! (cpal's loopback is unreliable — RustAudio/cpal#476), microphone via cpal.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,8 +15,8 @@ use super::audio::{
 };
 use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
 
-/// How long the wasapi capture loop waits for the buffer-ready event before re-checking the stop
-/// flag — short enough for snappy teardown on silence, long enough to not busy-spin.
+/// How long the wasapi capture loop waits for the buffer-ready event, and the channel streams
+/// block per `next_chunk`, before yielding — snappy teardown on silence without busy-spinning.
 const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Channel depth for chunks in flight from the capture thread to the consumer — a few seconds of
@@ -31,33 +31,38 @@ enum LoopbackRole {
     Communications,
 }
 
-/// Counts chunks a full consumer channel forced the capture thread to drop. Shared with the owning
-/// stream, which reports the first loss once — a silent hole in a recording is worse than a banner.
+/// Counts chunks a full consumer channel forced the capture thread to drop, and latches the
+/// one-shot report — a silent hole in a recording is worse than a banner. Shared via `Arc`.
 #[derive(Clone, Default)]
-struct DropCounter(Arc<AtomicU64>);
+struct DropCounter(Arc<DropState>);
+
+#[derive(Default)]
+struct DropState {
+    count: AtomicU64,
+    reported: AtomicBool,
+}
 
 impl DropCounter {
     fn record(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        self.0.count.fetch_add(1, Ordering::Relaxed);
     }
 
     fn count(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+        self.0.count.load(Ordering::Relaxed)
     }
-}
 
-/// One-shot `AudioDropped` transition for a stream that lost chunks; `reported` is the latch.
-fn drop_health(dropped: &DropCounter, reported: &mut bool) -> Option<CaptureHealth> {
-    let n = dropped.count();
-    if n == 0 || *reported {
-        return None;
+    /// One-shot `AudioDropped` transition once any chunk has been lost.
+    fn take_health(&self) -> Option<CaptureHealth> {
+        let n = self.count();
+        if n == 0 || self.0.reported.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        log::warn!(
+            target: "transcription::capture",
+            "dropped {n} captured chunk(s) — the consumer could not keep up; that span is missing from the recording"
+        );
+        Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
     }
-    *reported = true;
-    log::warn!(
-        target: "transcription::capture",
-        "dropped {n} captured chunk(s) — the consumer could not keep up; that span is missing from the recording"
-    );
-    Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
 }
 
 /// Windows capture backend. Stateless; `start()` opens a fresh cpal stream.
@@ -154,7 +159,6 @@ impl AudioCapture for WasapiAudioCapture {
                     zero: ZeroStreakDetector::default(),
                     health: Vec::new(),
                     dropped,
-                    drop_reported: false,
                 }))
             }
             AudioSource::Microphone { device } => {
@@ -172,7 +176,6 @@ impl AudioCapture for WasapiAudioCapture {
                     _streams: vec![stream],
                     rx,
                     dropped,
-                    drop_reported: false,
                 }))
             }
             AudioSource::Mixed { mic } => {
@@ -765,25 +768,23 @@ struct CpalAudioStream {
     /// Held to keep the stream(s) alive (one for system or mic capture).
     _streams: Vec<cpal::Stream>,
     rx: Receiver<AudioChunk>,
-    /// Chunks a full channel forced the callback to drop.
+    /// Chunks a full channel forced the callback to drop (carries the one-shot report latch).
     dropped: DropCounter,
-    /// One-shot latch for the drop warning.
-    drop_reported: bool,
 }
 
 impl AudioStream for CpalAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // Block for the next chunk; a disconnected channel = stream dropped/callback stopped (EOF).
-        match self.rx.recv() {
+        // Bounded recv + keepalive: a hung/removed device must not wedge the ingest loop's stop
+        // handling. A disconnected channel = stream dropped/callback stopped (EOF).
+        match self.rx.recv_timeout(WASAPI_POLL_TIMEOUT) {
             Ok(chunk) => Ok(Some(chunk)),
-            Err(_) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
 
     fn take_health(&mut self) -> Vec<CaptureHealth> {
-        drop_health(&self.dropped, &mut self.drop_reported)
-            .into_iter()
-            .collect()
+        self.dropped.take_health().into_iter().collect()
     }
 }
 
@@ -796,32 +797,32 @@ struct WasapiLoopbackStream {
     /// Flags a capture that has been digital silence since start.
     zero: ZeroStreakDetector,
     health: Vec<CaptureHealth>,
-    /// Chunks a full channel forced the capture thread to drop.
+    /// Chunks a full channel forced the capture thread to drop (carries the report latch).
     dropped: DropCounter,
-    /// One-shot latch for the drop warning.
-    drop_reported: bool,
 }
 
 impl AudioStream for WasapiLoopbackStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // `recv` blocks until a chunk or the sender drops; a disconnect after an abort is an error.
-        match self.rx.recv() {
+        // Bounded recv: an idle loopback delivers nothing, and the ingest loop honours stop only
+        // between chunks — an unbounded recv deadlocks stop (keepalive hands control back).
+        match self.rx.recv_timeout(WASAPI_POLL_TIMEOUT) {
             Ok(chunk) => {
                 if let Some(t) = self.zero.feed(&chunk.samples) {
                     self.health.push(t);
                 }
                 Ok(Some(chunk))
             }
-            Err(_) if self._handle.aborted() => Err(CaptureError::Failed(
-                "wasapi capture stopped on a device-read error".to_string(),
-            )),
-            Err(_) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
+            Err(RecvTimeoutError::Disconnected) if self._handle.aborted() => Err(
+                CaptureError::Failed("wasapi capture stopped on a device-read error".to_string()),
+            ),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
 
     fn take_health(&mut self) -> Vec<CaptureHealth> {
         let mut health = std::mem::take(&mut self.health);
-        health.extend(drop_health(&self.dropped, &mut self.drop_reported));
+        health.extend(self.dropped.take_health());
         health
     }
 }
@@ -1146,16 +1147,19 @@ mod tests {
             "the second chunk is counted, not lost silently"
         );
 
-        // The stream reports it once and then stays quiet, like every other health latch.
-        let mut reported = false;
+        // The counter reports it once and then stays quiet, like every other health latch.
         assert_eq!(
-            drop_health(&dropped, &mut reported),
+            dropped.take_health(),
             Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
         );
-        assert_eq!(drop_health(&dropped, &mut reported), None);
-        // A counter that never moved never warns.
-        let mut fresh = false;
-        assert_eq!(drop_health(&DropCounter::default(), &mut fresh), None);
-        assert!(!fresh, "the latch stays armed while nothing is lost");
+        assert_eq!(dropped.take_health(), None);
+        // A counter that never moved never warns — and the latch stays armed for a later loss.
+        let fresh = DropCounter::default();
+        assert_eq!(fresh.take_health(), None);
+        fresh.record();
+        assert_eq!(
+            fresh.take_health(),
+            Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+        );
     }
 }

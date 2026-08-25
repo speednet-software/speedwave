@@ -52,8 +52,8 @@ hound = { version = "3", optional = true }
 # `rustls-tls` to match the rest of Speedwave (no system OpenSSL).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
 # Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
-# submodule via cmake at build time (so CI needs `cmake`). The `metal` backend
-# is added on macOS only via the target-specific block below; CPU elsewhere.
+# submodule via cmake at build time (so CI needs `cmake`). GPU backends come from the
+# target-specific blocks below: `metal` on macOS, `vulkan` on Windows (ADR-085); CPU otherwise.
 # `log_backend` routes whisper.cpp/ggml internals (backend picked, GPU init failures) into the
 # `log` facade — without it a GPU fallback is invisible.
 whisper-rs = { version = "0.16", optional = true, features = ["log_backend"] }

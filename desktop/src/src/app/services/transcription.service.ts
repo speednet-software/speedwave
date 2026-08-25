@@ -127,7 +127,7 @@ export class TranscriptionService {
 
   /**
    * Persists the live-transcript choice (tolerates private-mode/quota failures).
-   *  live - the user's pick.
+   * @param live - the user's pick.
    */
   setLiveTranscriptPreferred(live: boolean): void {
     try {
@@ -342,7 +342,7 @@ export class TranscriptionService {
       const ack = await this.recommendedModel();
       // The offline-pass model is a separate entry, so match `modelId` against both; keying only
       // off the live one would poll forever while the other model downloads.
-      const entry = ack.key === modelId ? ack : ack.finalize;
+      const entry = ack.live.key === modelId ? ack.live : ack.finalize;
       if (entry?.key === modelId && !entry.downloading) {
         this.clearDownloadTracking();
       }

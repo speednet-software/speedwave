@@ -174,13 +174,7 @@ export class TranscriptionSectionComponent implements OnInit {
     if (!m) {
       return [];
     }
-    const live: RecommendedModelEntry = {
-      key: m.key,
-      display_name: m.display_name,
-      size_bytes: m.size_bytes,
-      downloaded: m.downloaded,
-      downloading: m.downloading,
-    };
+    const live = m.live;
     if (!m.finalize) {
       return [
         {

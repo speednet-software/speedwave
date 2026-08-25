@@ -10,7 +10,13 @@ import {
 } from '@angular/core';
 
 import { TranscriptionService } from '../../services/transcription.service';
-import type { AudioSource, AudioSourceInfo, Backend, Language } from '../../models/transcript';
+import type {
+  AudioSource,
+  AudioSourceInfo,
+  Backend,
+  GpuClass,
+  Language,
+} from '../../models/transcript';
 
 /** A named input device for the microphone dropdown. */
 interface MicChoice {
@@ -35,13 +41,17 @@ function micName(label: string): string {
 }
 
 /**
- * Joins compiled backends into a short "Acceleration: …" string.
+ * A short "Acceleration: …" string from the runtime truth (mirrors Rust `accel_label()`):
+ * a Vulkan build with no usable device says CPU, an iGPU host says so.
  * @param backends - whisper.cpp backends compiled into this build.
+ * @param gpuClass - the probed host GPU class.
  */
-function accelLabel(backends: Backend[]): string {
-  if (backends.includes('metal')) return 'Acceleration: Metal';
-  if (backends.includes('vulkan')) return 'Acceleration: Vulkan';
-  return 'Acceleration: CPU only';
+function accelLabel(backends: Backend[], gpuClass: GpuClass): string {
+  const gpu = backends.includes('metal') ? 'Metal' : backends.includes('vulkan') ? 'Vulkan' : null;
+  if (!gpu || gpuClass === 'none') return 'Acceleration: CPU only';
+  return gpuClass === 'integrated'
+    ? `Acceleration: ${gpu} (integrated GPU)`
+    : `Acceleration: ${gpu}`;
 }
 
 /**
@@ -187,8 +197,10 @@ export class RecordingControlsComponent implements OnInit {
   readonly sourceIndex = signal(0);
   /** Compiled whisper.cpp backends for this build. */
   readonly backends = signal<Backend[]>([]);
+  /** Probed host GPU class (runtime truth, not the compile-time backend list). */
+  readonly gpuClass = signal<GpuClass>('none');
   /** Derived acceleration label. */
-  readonly accel = computed(() => accelLabel(this.backends()));
+  readonly accel = computed(() => accelLabel(this.backends(), this.gpuClass()));
   /** Whether the next recording runs the live pass (persisted; default from the GPU class). */
   readonly liveTranscript = signal(true);
   /** Disables Start/Stop while a transition is in flight. */
@@ -231,6 +243,7 @@ export class RecordingControlsComponent implements OnInit {
     try {
       const caps = await this.transcription.getCapabilities();
       this.backends.set(caps.backends);
+      this.gpuClass.set(caps.gpu_class);
       this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
       const list = await this.transcription.listAudioSources();
       this.sources.set(list);

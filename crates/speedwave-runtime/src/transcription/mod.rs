@@ -18,7 +18,7 @@ pub mod transcript_store;
 
 pub use accel::{
     accel_label, compiled_backends, decode_threads, finalize_model_for_this_build, gpu_class,
-    has_gpu_backend, live_model_for_this_build, Backend, GpuClass,
+    live_model_for_this_build, Backend, GpuClass,
 };
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,

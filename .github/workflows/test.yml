@@ -431,7 +431,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             desktop/src-tauri/target/
-          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+            target/
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
 
       - name: Install Vulkan SDK
@@ -454,6 +455,13 @@ jobs:
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
+
+      # The runtime transcription module carries #[cfg(windows)] tests (audio_windows: WASAPI
+      # capture, drop counters) that no other job compiles — the macOS lane's
+      # `make test-transcription` skips them by target. The module filter runs every current
+      # and future windows-gated test in the module, so there is no name list to drift.
+      - name: cargo test speedwave-runtime transcription (windows)
+        run: cargo test -p speedwave-runtime --features audio-transcription "transcription::"
 
       # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
       # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.

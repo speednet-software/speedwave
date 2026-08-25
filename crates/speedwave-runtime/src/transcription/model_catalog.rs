@@ -1,6 +1,8 @@
 //! SSOT catalogue of Whisper transcription models downloaded on demand (ADR-056; diarization
 //! removed — ADR-075). Bump 1 const; from `ggerganov/whisper.cpp` on HF, not `ggml-org` (401s).
 
+use crate::transcription::accel::GpuClass;
+
 /// Hugging Face repo path the Whisper GGML models are downloaded from.
 pub const WHISPER_HF_REPO: &str = "ggerganov/whisper.cpp";
 
@@ -60,9 +62,9 @@ pub struct WhisperModelInfo {
     pub role: ModelRole,
     /// Full-precision vs quantised.
     pub quantization: Quantization,
-    /// `true` for the models v1 considers "live-capable" on the relevant
-    /// backend (`small` on CPU, `large-v3-turbo` on GPU/Metal).
-    pub live_capable: bool,
+    /// Weakest host [`GpuClass`] this model keeps up with the live pass on
+    /// (`None` = never live): `small` from CPU-only up, `large-v3-turbo` on discrete only.
+    pub live_floor: Option<GpuClass>,
     /// SPDX-ish licence string for the model weights.
     pub license: &'static str,
 }
@@ -71,6 +73,11 @@ impl WhisperModelInfo {
     /// Download URL for this model.
     pub fn url(&self) -> String {
         whisper_model_url(self.file)
+    }
+
+    /// `true` when this model can serve the live pass on a host of GPU class `class`.
+    pub fn live_capable_on(&self, class: GpuClass) -> bool {
+        self.live_floor.is_some_and(|floor| class >= floor)
     }
 }
 
@@ -85,7 +92,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
         role: ModelRole::CpuLive,
         quantization: Quantization::Full,
-        live_capable: true,
+        live_floor: Some(GpuClass::None),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -96,7 +103,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
         role: ModelRole::CpuLive,
         quantization: Quantization::Q5_1,
-        live_capable: true,
+        live_floor: Some(GpuClass::None),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -107,7 +114,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
         role: ModelRole::Mid,
         quantization: Quantization::Full,
-        live_capable: false,
+        live_floor: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -118,7 +125,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",
         role: ModelRole::Mid,
         quantization: Quantization::Q5_0,
-        live_capable: false,
+        live_floor: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -129,7 +136,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
         role: ModelRole::GpuLive,
         quantization: Quantization::Full,
-        live_capable: true,
+        live_floor: Some(GpuClass::Discrete),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -140,7 +147,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         role: ModelRole::GpuLive,
         quantization: Quantization::Q5_0,
-        live_capable: true,
+        live_floor: Some(GpuClass::Discrete),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -151,7 +158,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
         role: ModelRole::Finalize,
         quantization: Quantization::Full,
-        live_capable: false,
+        live_floor: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -162,7 +169,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
         role: ModelRole::Finalize,
         quantization: Quantization::Q5_0,
-        live_capable: false,
+        live_floor: None,
         license: "MIT",
     },
     WhisperModelInfo {
@@ -173,7 +180,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
         role: ModelRole::SmallestUsable,
         quantization: Quantization::Full,
-        live_capable: true,
+        live_floor: Some(GpuClass::None),
         license: "MIT",
     },
     WhisperModelInfo {
@@ -184,7 +191,7 @@ pub const WHISPER_MODELS: &[WhisperModelInfo] = &[
         sha256: "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
         role: ModelRole::DevTest,
         quantization: Quantization::Full,
-        live_capable: true,
+        live_floor: Some(GpuClass::None),
         license: "MIT",
     },
 ];
@@ -308,10 +315,10 @@ mod tests {
         );
         assert!(WHISPER_MODELS
             .iter()
-            .any(|m| m.role == ModelRole::CpuLive && m.live_capable));
+            .any(|m| m.role == ModelRole::CpuLive && m.live_capable_on(GpuClass::None)));
         assert!(WHISPER_MODELS
             .iter()
-            .any(|m| m.role == ModelRole::GpuLive && m.live_capable));
+            .any(|m| m.role == ModelRole::GpuLive && m.live_capable_on(GpuClass::Discrete)));
         assert!(WHISPER_MODELS.iter().any(|m| m.role == ModelRole::Finalize));
     }
 

@@ -23,9 +23,8 @@ pub(super) fn classify_device_types(device_types: &[i32]) -> GpuClass {
     GpuClass::None
 }
 
-/// Enumerates Vulkan physical devices via the dynamically loaded `vulkan-1.dll`. Every failure —
-/// no loader, no ICD, no devices — degrades to `GpuClass::None`, never an error: the probe's only
-/// job is to keep whisper off a GPU path that would not work.
+/// Enumerates Vulkan devices via the dynamically loaded `vulkan-1.dll`. Every failure (no
+/// loader, no ICD, no devices) degrades to `GpuClass::None`, never an error.
 #[cfg(windows)]
 #[expect(
     unsafe_code,
@@ -45,10 +44,17 @@ pub(super) fn probe() -> GpuClass {
         return GpuClass::None;
     };
     // SAFETY: `instance` is valid until the destroy below.
+    let devices = match unsafe { instance.enumerate_physical_devices() } {
+        Ok(d) => d,
+        Err(e) => {
+            // Distinguish "enumeration failed" from a genuine zero-device host in the logs.
+            log::debug!(target: "transcription::gpu", "vkEnumeratePhysicalDevices failed: {e}");
+            Vec::new()
+        }
+    };
+    // SAFETY: `instance` is valid until the destroy below; `d` came from it.
     let device_types: Vec<i32> = unsafe {
-        instance
-            .enumerate_physical_devices()
-            .unwrap_or_default()
+        devices
             .into_iter()
             .map(|d| {
                 instance

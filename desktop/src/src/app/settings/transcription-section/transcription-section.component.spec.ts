@@ -9,6 +9,7 @@ import type {
   DownloadProgress,
   MicPermissionStatus,
   RecommendedModelAck,
+  RecommendedModelEntry,
 } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
@@ -31,16 +32,22 @@ describe('TranscriptionSectionComponent', () => {
   };
   let platform: string;
 
-  const notDownloaded: RecommendedModelAck = {
+  const liveEntry: RecommendedModelEntry = {
     key: 'large-v3',
     display_name: 'Large v3 (multilingual)',
     size_bytes: 3_100_000_000,
     downloaded: false,
     downloading: false,
+  };
+  const notDownloaded: RecommendedModelAck = {
+    live: liveEntry,
     accel_label: 'Metal (GPU)',
     finalize: null,
   };
-  const downloaded: RecommendedModelAck = { ...notDownloaded, downloaded: true };
+  const downloaded: RecommendedModelAck = {
+    ...notDownloaded,
+    live: { ...liveEntry, downloaded: true },
+  };
 
   beforeEach(async () => {
     downloadingModelKey = signal<string | null>(null);
@@ -92,9 +99,12 @@ describe('TranscriptionSectionComponent', () => {
     it('renders live and final rows when the host needs two different models', async () => {
       svc.recommendedModel.mockResolvedValue({
         ...notDownloaded,
-        key: 'small',
-        display_name: 'Small (multilingual)',
-        size_bytes: 487_601_967,
+        live: {
+          ...liveEntry,
+          key: 'small',
+          display_name: 'Small (multilingual)',
+          size_bytes: 487_601_967,
+        },
         accel_label: 'CPU',
         finalize: {
           key: 'large-v3-turbo',
@@ -132,7 +142,11 @@ describe('TranscriptionSectionComponent', () => {
         downloaded: false,
         downloading: true,
       };
-      svc.recommendedModel.mockResolvedValue({ ...notDownloaded, key: 'small', finalize });
+      svc.recommendedModel.mockResolvedValue({
+        ...notDownloaded,
+        live: { ...liveEntry, key: 'small' },
+        finalize,
+      });
       downloadingModelKey.set('large-v3-turbo');
       downloadProgress.set({
         model_key: 'large-v3-turbo',
@@ -142,7 +156,7 @@ describe('TranscriptionSectionComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      expect(component.downloadLabel({ ...notDownloaded, key: 'small' })).toBe('download model');
+      expect(component.downloadLabel({ ...liveEntry, key: 'small' })).toBe('download model');
       expect(component.downloadLabel(finalize)).toBe('downloading 50%');
     });
   });
@@ -249,7 +263,7 @@ describe('TranscriptionSectionComponent', () => {
     svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.download('large-v3');
     expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
-    expect(component.model()?.downloaded).toBe(true);
+    expect(component.model()?.live.downloaded).toBe(true);
     expect(component.busy()).toBe(false);
   });
 
@@ -259,7 +273,7 @@ describe('TranscriptionSectionComponent', () => {
     svc.recommendedModel.mockResolvedValueOnce(notDownloaded);
     await component.remove('large-v3');
     expect(svc.deleteModel).toHaveBeenCalledWith('large-v3');
-    expect(component.model()?.downloaded).toBe(false);
+    expect(component.model()?.live.downloaded).toBe(false);
   });
 
   it('reports a download error and clears busy', async () => {
@@ -300,7 +314,10 @@ describe('TranscriptionSectionComponent', () => {
   });
 
   it('resumes progress tracking when the backend reports an untracked download', async () => {
-    svc.recommendedModel.mockResolvedValueOnce({ ...notDownloaded, downloading: true });
+    svc.recommendedModel.mockResolvedValueOnce({
+      ...notDownloaded,
+      live: { ...liveEntry, downloading: true },
+    });
     await component.ngOnInit();
     expect(svc.resumeDownloadTracking).toHaveBeenCalledWith('large-v3');
   });
@@ -341,7 +358,7 @@ describe('TranscriptionSectionComponent', () => {
   });
 
   it('size() formats GB and MB', () => {
-    expect(component.size({ ...notDownloaded, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
-    expect(component.size({ ...notDownloaded, size_bytes: 488_000_000 })).toBe('465.4 MB');
+    expect(component.size({ ...liveEntry, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
+    expect(component.size({ ...liveEntry, size_bytes: 488_000_000 })).toBe('465.4 MB');
   });
 });

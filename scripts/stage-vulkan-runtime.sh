@@ -22,5 +22,20 @@ if [ ! -f "$SRC" ]; then
   exit 1
 fi
 
+# The staged DLL gets signed and shipped with a load-time import — verify it against the pin
+# in install-vulkan-sdk.ps1 (the SSOT), not just its presence on disk.
+PIN_FILE="$(cd "$(dirname "$0")" && pwd)/install-vulkan-sdk.ps1"
+EXPECTED="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-f]\{64\}\)'.*/\1/p" "$PIN_FILE")"
+if [ -z "$EXPECTED" ]; then
+  echo "❌ Could not read \$RuntimeDllSha256 from $PIN_FILE." >&2
+  exit 1
+fi
+ACTUAL="$(sha256sum "$SRC" | cut -d' ' -f1)"
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+  echo "❌ vulkan-1.dll SHA256 mismatch at $SRC: got $ACTUAL, expected $EXPECTED." >&2
+  echo "   Re-run scripts/install-vulkan-sdk.ps1 to restore the pinned loader." >&2
+  exit 1
+fi
+
 cp -f "$SRC" "$DEST"
-echo "✅ Staged $(basename "$DEST") from $SRC"
+echo "✅ Staged $(basename "$DEST") from $SRC (SHA256 verified)"

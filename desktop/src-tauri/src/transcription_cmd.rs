@@ -64,13 +64,15 @@ pub struct CapabilitiesAck {
 
 #[tauri::command]
 pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
-    let capabilities = transcription::detect_audio_capture().capabilities();
-    let backends = transcription::compiled_backends();
-    Ok(CapabilitiesAck {
-        capabilities,
-        backends,
+    // The first `gpu_class()` call runs the Vulkan probe (loader init, vkCreateInstance, device
+    // enumeration — unbounded FFI): keep it off the async workers (cached afterwards).
+    tokio::task::spawn_blocking(|| CapabilitiesAck {
+        capabilities: transcription::detect_audio_capture().capabilities(),
+        backends: transcription::compiled_backends(),
         gpu_class: transcription::gpu_class(),
     })
+    .await
+    .map_err(|e| format!("capabilities task panicked: {e}"))
 }
 
 #[tauri::command]
@@ -139,19 +141,7 @@ pub async fn start_transcription(
     validate_source_against_caps(&audio_source, &caps)?;
 
     let store_arc = store.inner().clone();
-    // Record-only sessions load no live model, but the offline pass still needs one — fail at
-    // Start (actionable) rather than at Stop (recording already made, nothing to show).
-    let live_transcriber = if live {
-        Some(load_live_transcriber(models.inner()).await?)
-    } else {
-        if pick_offline_model(models.inner()).is_none() {
-            let recommended = transcription::finalize_model_for_this_build().key;
-            return Err(format!(
-                "no Whisper model is downloaded — the final pass needs one (e.g. '{recommended}')"
-            ));
-        }
-        None
-    };
+    let live_transcriber = prepare_live_transcriber(live, models.inner()).await?;
 
     // audio.wav lives under `<root>/<id>/`, so pick the id before creating the session — the
     // path is then correct from the first persisted write (no fragile post-create patch).
@@ -223,9 +213,8 @@ pub async fn start_transcription(
     })
 }
 
-/// Claims the driver-registry slot for `id`. Rejecting an occupied slot is the
-/// single-recording invariant per session — a blind insert would let a losing
-/// concurrent start/resume clobber the winner's live entry.
+/// Claims the driver-registry slot for `id`; rejecting an occupied slot is the one-recording-
+/// per-session invariant (a blind insert would let a losing start/resume clobber the winner).
 fn register_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) -> Result<(), String> {
     let mut g = drivers
         .lock()
@@ -316,17 +305,7 @@ pub async fn resume_transcription(
 
     let store_arc = store.inner().clone();
     // Same record-only contract as start (ADR-056 Am. 13); absent = live, for older frontends.
-    let live_transcriber = if live.unwrap_or(true) {
-        Some(load_live_transcriber(models.inner()).await?)
-    } else {
-        if pick_offline_model(models.inner()).is_none() {
-            let recommended = transcription::finalize_model_for_this_build().key;
-            return Err(format!(
-                "no Whisper model is downloaded — the final pass needs one (e.g. '{recommended}')"
-            ));
-        }
-        None
-    };
+    let live_transcriber = prepare_live_transcriber(live.unwrap_or(true), models.inner()).await?;
 
     // The new part records past the earlier ones on the session timeline.
     let time_base = resume_time_base(&session.all_audio_parts())?;
@@ -337,7 +316,8 @@ pub async fn resume_transcription(
     // covers the whole resume window (delete refuses while an entry is live).
     let stop = StopSignal::new();
     register_driver(drivers.inner(), id, &stop)?;
-    if let Err(e) = store.resume(id, next_part.clone()) {
+    let resumed_live_model = live_transcriber.as_ref().map(|(key, _)| key.clone());
+    if let Err(e) = store.resume(id, next_part.clone(), resumed_live_model) {
         unregister_driver(drivers.inner(), id, &stop);
         return Err(e.to_string());
     }
@@ -347,7 +327,8 @@ pub async fn resume_transcription(
             unregister_driver(drivers.inner(), id, &stop);
             // Roll back to Done: resume requires Done, so leaving the mutated session
             // behind would strand a finished transcript on a transient capture error.
-            if let Err(re) = store.rollback_resume(id, &next_part) {
+            if let Err(re) = store.rollback_resume(id, &next_part, session.models_used.live.clone())
+            {
                 log::error!(
                     "failed to roll back resumed transcript {} after a capture-start error: {re}",
                     short_id(id)
@@ -422,8 +403,8 @@ pub async fn stop_transcription(
     let models_arc = models.inner().clone();
     let audio_paths = offline_pass_parts(&store, id)?;
     tokio::task::spawn_blocking(move || {
-        // Pick the offline model: `large-v3` if present, else fall back to any
-        // downloaded Whisper model (the live one is guaranteed present).
+        // Pick the offline model: this build's finalize model if present, else any downloaded
+        // one (record-only sessions load no live model, and a user may delete models anytime).
         let offline_key = pick_offline_model(&models_arc);
         let Some(key) = offline_key else {
             let _ = store_arc.set_status(
@@ -547,8 +528,8 @@ fn session_language(store: &TranscriptStore, id: Uuid) -> Language {
     store.get(id).map(|s| s.language).unwrap_or(Language::Pl)
 }
 
-/// Picks the model for the offline pass: this build's model if downloaded, else the first
-/// downloaded Whisper model (the live one is guaranteed present); `None` if none is downloaded.
+/// Picks the model for the offline pass: this build's finalize model if downloaded, else the
+/// first downloaded one; `None` when nothing is (record-only sessions load no live model).
 fn pick_offline_model(models: &ModelStore) -> Option<String> {
     let best = transcription::finalize_model_for_this_build().key;
     if models.whisper_is_present_by_key(best) {
@@ -561,6 +542,30 @@ fn pick_offline_model(models: &ModelStore) -> Option<String> {
         .map(|m| m.key)
 }
 
+/// The shared start/resume gate (ADR-056 Am. 13): loads the live transcriber, or for record-only
+/// verifies the offline pass has a model — fail at Start (actionable), not at Stop.
+async fn prepare_live_transcriber(
+    live: bool,
+    models: &ModelStoreHandle,
+) -> Result<Option<(String, WhisperCppTranscriber)>, String> {
+    if live {
+        return Ok(Some(load_live_transcriber(models).await?));
+    }
+    let m = models.clone();
+    // Off the async workers: the model probe may hit the (once-only) blocking Vulkan probe.
+    tokio::task::spawn_blocking(move || {
+        if pick_offline_model(&m).is_none() {
+            let recommended = transcription::finalize_model_for_this_build().key;
+            return Err(format!(
+                "no Whisper model is downloaded — the final pass needs one (e.g. '{recommended}')"
+            ));
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(|e| format!("model check task panicked: {e}"))?
+}
+
 /// Picks the live model (recommended → any downloaded), ensures it on disk,
 /// loads the transcriber, and attaches the VAD gate — shared by start and resume.
 async fn load_live_transcriber(
@@ -569,7 +574,7 @@ async fn load_live_transcriber(
     let m = models.clone();
     let recommended = transcription::live_model_for_this_build().key.to_string();
     tokio::task::spawn_blocking(move || -> Result<(String, WhisperCppTranscriber), String> {
-        let key = pick_live_model(&m, &recommended)?;
+        let key = pick_live_model(&m, &recommended, transcription::gpu_class())?;
         let path = m
             .ensure_model(&key, &mut |_| {})
             .map_err(|e| e.to_string())?;
@@ -598,13 +603,24 @@ fn attach_vad(transcriber: &mut WhisperCppTranscriber, models: &ModelStoreHandle
     });
 }
 
-/// Picks the model for the live pass: `override_key` (must be downloaded) → `recommended` (if
-/// downloaded) → first downloaded model → download-hint error (no auto-dl; UI prompts).
-fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, String> {
+/// Picks the model for the live pass: `recommended` (if downloaded) → first downloaded model
+/// live-capable on this host's `class` → download-hint error (no auto-dl; UI prompts).
+fn pick_live_model(
+    models: &ModelStore,
+    recommended: &str,
+    class: transcription::GpuClass,
+) -> Result<String, String> {
     if models.whisper_is_present_by_key(recommended) {
         return Ok(recommended.to_string());
     }
-    if let Some(any) = models.whisper_status().into_iter().find(|m| m.downloaded) {
+    // The fallback must stay live-capable on this GPU class (ADR-056 Am. 11): a downloaded
+    // finalize-tier model silently becoming the live pass is exactly the defect it fixed.
+    if let Some(any) = models
+        .whisper_status()
+        .into_iter()
+        .filter(|m| m.downloaded)
+        .find(|m| transcription::whisper_model(&m.key).is_some_and(|i| i.live_capable_on(class)))
+    {
         log::info!(
             "recommended live model '{recommended}' not downloaded — falling back to '{}'",
             any.key
@@ -612,7 +628,7 @@ fn pick_live_model(models: &ModelStore, recommended: &str) -> Result<String, Str
         return Ok(any.key);
     }
     Err(format!(
-        "no Whisper model is downloaded — download one (e.g. '{recommended}') first"
+        "no live-capable Whisper model is downloaded — download one (e.g. '{recommended}') first"
     ))
 }
 
@@ -719,9 +735,8 @@ pub async fn delete_transcript(
     drivers: tauri::State<'_, DriversHandle>,
 ) -> Result<(), String> {
     let id = parse_transcript_id(&session_id)?;
-    // A live driver writes into the session dir — deleting under it would orphan
-    // an unstoppable capture. The registry lock is held across the delete so a
-    // concurrent start/resume cannot register into the check→delete gap.
+    // A live driver writes into the session dir — deleting under it would orphan the capture.
+    // The registry lock spans the delete, closing the check→delete gap for start/resume.
     let guard = drivers
         .lock()
         .map_err(|e| format!("drivers lock poisoned: {e}"))?;
@@ -806,8 +821,7 @@ pub struct RecommendedModelEntry {
 /// one for the higher-quality offline pass. The UI offers exactly these, with no picker.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RecommendedModelAck {
-    /// The live-pass model, flattened so the wire shape stays what the UI card already reads.
-    #[serde(flatten)]
+    /// The live-pass model.
     pub live: RecommendedModelEntry,
     /// The offline-pass model, or `None` when the live model serves both passes.
     pub finalize: Option<RecommendedModelEntry>,
@@ -840,25 +854,29 @@ pub async fn recommended_transcription_model(
     models: tauri::State<'_, ModelStoreHandle>,
     downloads: tauri::State<'_, DownloadsHandle>,
 ) -> Result<RecommendedModelAck, String> {
-    let live_info = transcription::live_model_for_this_build();
-    let finalize_info = transcription::finalize_model_for_this_build();
-    let live = model_entry(live_info, models.inner(), downloads.inner())?;
-    // One model can serve both passes (nothing to show twice); on CPU-only hosts they differ,
-    // because a model fast enough to keep up live is not the one that reads Polish best.
-    let finalize = if finalize_info.key == live_info.key {
-        None
-    } else {
-        Some(model_entry(
-            finalize_info,
-            models.inner(),
-            downloads.inner(),
-        )?)
-    };
-    Ok(RecommendedModelAck {
-        live,
-        finalize,
-        accel_label: transcription::accel_label(),
+    let models = models.inner().clone();
+    let downloads = downloads.inner().clone();
+    // `*_for_this_build()`/`accel_label()` hit the (once-only) Vulkan probe — blocking FFI,
+    // so it runs off the async workers, like the other model-store work in this file.
+    tokio::task::spawn_blocking(move || {
+        let live_info = transcription::live_model_for_this_build();
+        let finalize_info = transcription::finalize_model_for_this_build();
+        let live = model_entry(live_info, &models, &downloads)?;
+        // One model can serve both passes (nothing to show twice); on CPU-only hosts they differ,
+        // because a model fast enough to keep up live is not the one that reads Polish best.
+        let finalize = if finalize_info.key == live_info.key {
+            None
+        } else {
+            Some(model_entry(finalize_info, &models, &downloads)?)
+        };
+        Ok(RecommendedModelAck {
+            live,
+            finalize,
+            accel_label: transcription::accel_label(),
+        })
     })
+    .await
+    .map_err(|e| format!("recommended-model task panicked: {e}"))?
 }
 
 #[tauri::command]
@@ -1086,10 +1104,12 @@ mod tests {
         let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
         let stop = StopSignal::new();
         register_driver(&drivers, id, &stop).unwrap();
-        store.resume(id, next_part.clone()).unwrap();
+        store
+            .resume(id, next_part.clone(), Some("small".to_string()))
+            .unwrap();
         // Capture failed → the command unregisters and rolls back.
         unregister_driver(&drivers, id, &stop);
-        store.rollback_resume(id, &next_part).unwrap();
+        store.rollback_resume(id, &next_part, None).unwrap();
 
         let snap = store.get(id).unwrap();
         assert!(matches!(snap.status, TranscriptStatus::Done));
@@ -1097,7 +1117,7 @@ mod tests {
         assert!(drivers.lock().unwrap().is_empty());
         // A later resume succeeds: the transient failure did not strand the session.
         register_driver(&drivers, id, &StopSignal::new()).unwrap();
-        store.resume(id, next_part).unwrap();
+        store.resume(id, next_part, None).unwrap();
         assert!(matches!(
             store.get(id).unwrap().status,
             TranscriptStatus::Recording
@@ -1167,7 +1187,9 @@ mod tests {
     fn the_live_pass_never_asks_for_the_offline_only_model() {
         // The regression this split fixes: a CPU-only host was handed the GPU-class live model,
         // and a GPU host was handed the one the catalogue flags as offline-only.
-        assert!(transcription::live_model_for_this_build().live_capable);
+        assert!(
+            transcription::live_model_for_this_build().live_capable_on(transcription::gpu_class())
+        );
     }
 
     /// Driving Tauri commands fully needs a `tauri::State` wrapper, not trivial to fabricate in
@@ -1260,8 +1282,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::with_root(dir.path());
         // No model on disk: errors naming the recommended one, with guidance.
-        let e = pick_live_model(&store, "large-v3-turbo").unwrap_err();
+        let e = pick_live_model(
+            &store,
+            "large-v3-turbo",
+            speedwave_runtime::transcription::GpuClass::Discrete,
+        )
+        .unwrap_err();
         assert!(e.contains("download") && e.contains("large-v3-turbo"));
+    }
+
+    /// Plants a catalogue model as "downloaded" (a sparse file of the expected size —
+    /// presence checks are size-window based, the SHA runs only at download time).
+    fn plant_model(root: &std::path::Path, key: &str) {
+        let info = speedwave_runtime::transcription::whisper_model(key).unwrap();
+        let dir = root.join("whisper");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = std::fs::File::create(dir.join(info.file)).unwrap();
+        f.set_len(info.approx_bytes).unwrap();
+    }
+
+    #[test]
+    fn pick_live_model_falls_back_only_to_models_live_capable_on_the_host_class() {
+        use speedwave_runtime::transcription::GpuClass;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::with_root(dir.path());
+        // Only the finalize-tier model on disk (never live): the fallback must not pick it for
+        // the live pass (ADR-056 Am. 11) — the error asks for a live-capable one.
+        plant_model(dir.path(), "large-v3");
+        let e = pick_live_model(&store, "large-v3-turbo", GpuClass::Discrete).unwrap_err();
+        assert!(e.contains("live-capable"), "got: {e}");
+        // A GPU-tier live model on disk is no fallback for a CPU-only host — its floor is
+        // Discrete and a CPU host cannot keep up with it live.
+        plant_model(dir.path(), "large-v3-turbo-q5_0");
+        let e = pick_live_model(&store, "small", GpuClass::None).unwrap_err();
+        assert!(e.contains("live-capable"), "got: {e}");
+        // With a CPU-floor model present, the fallback picks it on every class.
+        plant_model(dir.path(), "small");
+        assert_eq!(
+            pick_live_model(&store, "large-v3-turbo", GpuClass::Discrete).unwrap(),
+            "small"
+        );
+        assert_eq!(
+            pick_live_model(&store, "medium", GpuClass::None).unwrap(),
+            "small"
+        );
     }
 
     #[test]

@@ -153,10 +153,11 @@ export interface RecommendedModelEntry {
 }
 
 /**
- * `recommended_transcription_model` — the live model (flattened) plus the offline-pass model when
- * this host needs a different one. Mirrors Rust `RecommendedModelAck`.
+ * `recommended_transcription_model` — the live model plus the offline-pass model when this
+ * host needs a different one. Mirrors Rust `RecommendedModelAck`.
  */
-export interface RecommendedModelAck extends RecommendedModelEntry {
+export interface RecommendedModelAck {
+  live: RecommendedModelEntry;
   finalize: RecommendedModelEntry | null;
   accel_label: string;
 }

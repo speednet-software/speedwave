@@ -53,14 +53,11 @@ pub fn compiled_backends() -> Vec<Backend> {
     }
 }
 
-/// `true` if any GPU backend was compiled in.
-pub fn has_gpu_backend() -> bool {
-    compiled_backends().iter().any(|b| b.is_gpu())
-}
-
-/// What GPU the host actually offers — a compiled-in backend is not a usable device (ADR-085):
-/// a Vulkan build on an iGPU-only laptop must not be handed GPU-tier models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// What GPU the host actually offers (ADR-085) — a compiled-in backend is not a usable device.
+/// Ordered weakest → strongest, so `live_floor` comparisons read naturally.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuClass {
     /// No usable GPU (or only a software rasterizer) — CPU tiers, whisper `use_gpu` off.
@@ -124,9 +121,8 @@ fn full_model_with_role(role: ModelRole) -> &'static WhisperModelInfo {
         .unwrap_or(&WHISPER_MODELS[0])
 }
 
-/// The model the live pass runs for a host GPU `class`: `large-v3-turbo` where a discrete GPU
-/// carries it, `small` everywhere else — an integrated GPU speeds `small` up but cannot hold the
-/// GPU-tier model at live cadence. Both picks are the catalogue's live-capable model per tier.
+/// The live-pass model for a host GPU `class`: `large-v3-turbo` where a discrete GPU carries
+/// it, `small` everywhere else (an iGPU cannot hold the GPU-tier model at live cadence).
 pub fn live_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
     full_model_with_role(match class {
         GpuClass::Discrete => ModelRole::GpuLive,
@@ -134,9 +130,8 @@ pub fn live_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
     })
 }
 
-/// The model the offline finalize pass runs for `class`: `large-v3` on a discrete GPU, else the
-/// turbo variant — the largest that still finishes a long meeting (4 decoder layers against 32),
-/// since the finalize pass has no latency budget but does have a patience budget.
+/// The finalize-pass model for `class`: `large-v3` on a discrete GPU, else the turbo variant —
+/// the largest that still finishes a long meeting (4 decoder layers against 32).
 pub fn finalize_model_for_class(class: GpuClass) -> &'static WhisperModelInfo {
     full_model_with_role(match class {
         GpuClass::Discrete => ModelRole::Finalize,
@@ -178,14 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn has_gpu_backend_matches_compiled_backends() {
-        assert_eq!(
-            has_gpu_backend(),
-            compiled_backends().iter().any(|b| b.is_gpu())
-        );
-    }
-
-    #[test]
     fn live_model_is_turbo_on_discrete_and_small_elsewhere() {
         assert_eq!(
             live_model_for_class(GpuClass::Discrete).key,
@@ -209,18 +196,18 @@ mod tests {
     }
 
     #[test]
-    fn the_live_model_is_always_one_the_catalogue_calls_live_capable() {
-        // The catalogue owns that judgement; a live pass must never be handed a model it flags as
-        // offline-only. This is the guard the inverted GPU/CPU mapping used to slip past.
+    fn the_live_model_is_always_live_capable_on_its_own_class() {
+        // The catalogue owns that judgement per GPU class: a bare live_capable bool let a
+        // re-inverted tier mapping (turbo on CPU-only hosts) pass; the floor comparison catches it.
         for class in [GpuClass::None, GpuClass::Integrated, GpuClass::Discrete] {
             let m = live_model_for_class(class);
             assert!(
-                m.live_capable,
-                "live model {} for {class:?} is not live_capable",
+                m.live_capable_on(class),
+                "live model {} is not live-capable on {class:?}",
                 m.key
             );
         }
-        assert!(live_model_for_this_build().live_capable);
+        assert!(live_model_for_this_build().live_capable_on(gpu_class()));
     }
 
     #[test]

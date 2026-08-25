@@ -30,8 +30,8 @@ const LIVE_LAG_TOLERANCE_SECS: f32 = 30.0;
 /// [`LIVE_DECODE_EVERY_SECS`], so a caught-up decoder still reacts promptly to `stop`.
 const DECODE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Cap on one honoured capture gap: a real idle stretch pads that much silence, while a corrupt
-/// offset cannot pad hours of it.
+/// Cap on one honoured capture gap: a real idle stretch pads up to this much silence; a larger
+/// jump is a corrupt offset and splices without padding (it must not snowball pad per chunk).
 const MAX_GAP_SAMPLES: u64 = SAMPLE_RATE_HZ as u64 * 3600;
 
 /// Cadence of `TranscriptEvent::AudioLevel` while chunks flow — fast enough for a lively meter,
@@ -152,9 +152,8 @@ impl Lane {
     }
 }
 
-/// One lane's bounded ring of the most recent PCM, addressed by absolute sample index. The live
-/// pass only ever reads a trailing window, so older audio is dropped instead of grown forever
-/// (the offline pass re-reads the recorded WAV, never this buffer).
+/// One lane's bounded ring of recent PCM, addressed by absolute sample index: the live pass
+/// reads only a trailing window, so older audio drops (the offline pass re-reads the WAV).
 struct LaneRing {
     buf: VecDeque<f32>,
     /// Absolute index of `buf.front()`; kept equal to `filled - buf.len()`.
@@ -263,6 +262,18 @@ fn offset_to_samples(offset: Duration) -> u64 {
     (offset.as_nanos() as u64).saturating_mul(SAMPLE_RATE_HZ as u64) / 1_000_000_000
 }
 
+/// Everything the ingest loop shares with its driver: the rings, stop signal, WAV target,
+/// and the store identity the loudness meter publishes under.
+#[derive(Clone, Copy)]
+struct IngestEnv<'a> {
+    shared: &'a Mutex<Ingest>,
+    stop: &'a StopSignal,
+    wav_path: &'a Path,
+    ring_capacity: usize,
+    store: &'a Arc<TranscriptStore>,
+    id: Uuid,
+}
+
 /// The ingest thread body: capture chunks → WAV + lane rings, until `stop` or end of stream. The
 /// WAV is finalized here so the offline pass never reads a header that still claims zero samples.
 fn run_ingest(
@@ -274,48 +285,65 @@ fn run_ingest(
     store: &Arc<TranscriptStore>,
     id: Uuid,
 ) {
-    let mut wav: Option<WavWriter> = None;
-    let result = ingest_loop(
-        audio.as_mut(),
+    let env = IngestEnv {
         shared,
         stop,
         wav_path,
         ring_capacity,
-        &mut wav,
         store,
         id,
-    );
-    if let Some(w) = wav {
-        if let Err(e) = w.finalize() {
-            log::warn!("failed to finalize the recorded WAV: {e}");
-        }
+    };
+    let mut wav: Option<WavWriter> = None;
+    // A panicking loop must still flip `finished` and surface an error — otherwise the decode
+    // loop polls a dead capture forever and the session reports success (silently truncated).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ingest_loop(audio.as_mut(), &env, &mut wav)
+    }))
+    .unwrap_or_else(|p| {
+        let msg = p
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        Err(DriverError::Capture(format!(
+            "the capture thread panicked: {msg}"
+        )))
+    });
+    let finalized = match wav {
+        Some(w) => w.finalize(),
+        None => Ok(()),
+    };
+    if let Err(e) = &finalized {
+        log::warn!("failed to finalize the recorded WAV: {e}");
     }
     let mut g = lock_ingest(shared);
     g.finished = true;
-    if let Err(e) = result {
+    // A broken WAV breaks the offline pass too — a finalize failure is a session error.
+    if let Err(e) = result.and(finalized) {
         g.error = Some(e);
     }
 }
 /// Pumps capture chunks into `wav` and the shared rings. Every chunk is placed at the absolute
 /// position its offset declares, so a source that went idle leaves silence rather than a splice.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "private capture-loop body; a params struct would only rename the coupling"
-)]
 fn ingest_loop(
     audio: &mut dyn AudioStream,
-    shared: &Mutex<Ingest>,
-    stop: &StopSignal,
-    wav_path: &Path,
-    ring_capacity: usize,
+    env: &IngestEnv<'_>,
     wav: &mut Option<WavWriter>,
-    store: &Arc<TranscriptStore>,
-    id: Uuid,
 ) -> Result<(), DriverError> {
+    let IngestEnv {
+        shared,
+        stop,
+        wav_path,
+        ring_capacity,
+        store,
+        id,
+    } = *env;
     // Frames already written to the WAV — the absolute timeline every chunk offset lands on.
     let mut written: u64 = 0;
     // `None` until the first chunk: the meter shows up immediately, then throttles.
     let mut last_level_emit: Option<std::time::Instant> = None;
+    // One-shot: a corrupt offset repeats on every following chunk — log the splice once.
+    let mut corrupt_offset_reported = false;
     loop {
         if stop.is_stopped() {
             return Ok(());
@@ -332,6 +360,10 @@ fn ingest_loop(
             Ok(None) => return Ok(()), // stream ended
             Err(e) => return Err(DriverError::Capture(e.to_string())),
         };
+        // Idle keepalive: nothing to place — loop back so `stop` is re-checked.
+        if chunk.samples.is_empty() {
+            continue;
+        }
         let channels = if chunk.mic.is_some() { 2 } else { 1 };
         {
             let mut g = lock_ingest(shared);
@@ -364,22 +396,25 @@ fn ingest_loop(
         };
         let start = offset_to_samples(chunk.offset);
         let gap = start.saturating_sub(written);
-        if gap > 0 {
-            let pad = gap.min(MAX_GAP_SAMPLES);
-            if pad < gap {
+        if gap > MAX_GAP_SAMPLES {
+            // Corrupt offset: splice at `written` with no padding — clamping would re-pad the
+            // remainder on every following chunk and snowball hours of silence.
+            if !corrupt_offset_reported {
+                corrupt_offset_reported = true;
                 log::error!(
-                    "capture offset implies a {gap}-sample gap — clamped to {pad}; timestamps past this point shift"
+                    "capture offset implies a {gap}-sample gap — spliced without padding; timestamps past this point shift"
                 );
             }
+        } else if gap > 0 {
             log::debug!(
                 "padding {:.1}s of silence for a capture gap",
-                pad as f32 / SAMPLE_RATE_HZ as f32
+                gap as f32 / SAMPLE_RATE_HZ as f32
             );
-            writer.write_silence(pad, channels as u16)?;
-            written += pad;
+            writer.write_silence(gap, channels as u16)?;
+            written += gap;
             let mut g = lock_ingest(shared);
             for lane in g.lanes.iter_mut() {
-                lane.push_silence(pad);
+                lane.push_silence(gap);
             }
         }
         // A backwards offset correction re-declares audio already written; only its tail is new.
@@ -484,9 +519,20 @@ impl TranscriptDriver {
         let result = self.decode_loop();
         // Wind the ingest down and wait for the WAV to be finalized before reporting anything.
         self.stop.stop();
-        if ingest.join().is_err() {
-            log::error!("transcript ingest thread panicked for {}", self.id);
-        }
+        let joined = ingest.join();
+        // An ingest failure landing after the decode loop's last poll (or during wind-down,
+        // e.g. WAV finalize) must not let a broken recording report success.
+        let result = result.and_then(|()| {
+            if joined.is_err() {
+                return Err(DriverError::Capture(
+                    "the capture thread panicked".to_string(),
+                ));
+            }
+            match lock_ingest(&self.ingest).error.take() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        });
 
         match result {
             Ok(()) => {
@@ -514,9 +560,8 @@ impl TranscriptDriver {
         }
     }
 
-    /// The live pass: decode the next window as soon as the ingest has captured enough audio.
-    /// `Ok` when the stream ends or `stop` trips; `Err` on a capture, transcribe, WAV, or store
-    /// failure (the caller flips the session to `Failed`).
+    /// The live pass: decode the next window once the ingest has captured enough. `Ok` on end
+    /// of stream or `stop`; `Err` on any failure (the caller flips the session to `Failed`).
     fn decode_loop(&mut self) -> Result<(), DriverError> {
         loop {
             if self.stop.is_stopped() {
@@ -579,10 +624,8 @@ impl TranscriptDriver {
         self.decode_window_ending(head as f32 / SAMPLE_RATE_HZ as f32, flush)
     }
 
-    /// Re-decodes the [`LIVE_WINDOW_SECS`] ending at `end_secs` on every lane and appends only
-    /// segments older than [`LIVE_COMMIT_HOLDBACK`] — the window tail is still unstable between
-    /// passes, so the live view stays append-only and never flickers. The held-back tails go out
-    /// as a replace-only draft so the UI shows text within one decode.
+    /// Re-decodes the [`LIVE_WINDOW_SECS`] ending at `end_secs` per lane, committing only past
+    /// [`LIVE_COMMIT_HOLDBACK`] (the unstable tail streams as a replace-only draft instead).
     fn decode_window_ending(&mut self, end_secs: f32, flush: bool) -> Result<(), DriverError> {
         let want = (LIVE_WINDOW_SECS * SAMPLE_RATE_HZ as f32) as usize;
         let requested = (end_secs.max(0.0) * SAMPLE_RATE_HZ as f32) as u64;
@@ -622,9 +665,8 @@ impl TranscriptDriver {
         let horizon =
             Duration::from_secs_f32(self.last_decode_at).saturating_sub(LIVE_COMMIT_HOLDBACK);
 
-        // Collect every ripe commit first, so they persist as one fsync'd save instead of one
-        // durable write per segment; the still-unstable tails (not yet ripe to commit) stream
-        // out separately as a replace-only draft.
+        // Collect every ripe commit first — one fsync'd save for the cycle, not one durable
+        // write per segment; unripe tails stream separately as a replace-only draft.
         let mut batch = Vec::new();
         let mut drafts = Vec::new();
         for (lane_idx, (win_start, window)) in windows.iter().enumerate() {
@@ -826,10 +868,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         "no audio was captured — check that audio was playing and that microphone / \
          system-audio recording permission is granted";
 
-    // 1) Cheap header pass: fixes each part's timeline base and the progress weights
-    //    without loading any PCM — loading happens one part at a time below.
-    // A part that never got audio has no file (the WAV is created lazily) — skipped;
-    // failing the whole pass over one empty resume would discard the good parts.
+    // 1) Cheap header pass: timeline bases + progress weights without loading PCM. A part that
+    //    never got audio has no file (lazy WAV) — skipped rather than failing the good parts.
     struct PartPlan<'a> {
         path: &'a Path,
         part_base: Duration,
@@ -894,9 +934,8 @@ pub fn run_finalize(cfg: FinalizeConfig) -> Result<(), DriverError> {
         );
     }
 
-    // 2) + 3) Load, transcribe, and drop ONE part at a time (~30 s windows with overlap),
-    //    emitting per-window progress (fills the 5%..60% band); merged by start time.
-    //    Peak memory stays one part's PCM, not the whole meeting's.
+    // 2) + 3) Load, transcribe, and drop ONE part at a time (~30 s overlapped windows; progress
+    //    fills 5%..60%; merged by start time) — peak memory stays one part's PCM.
     let _ = store.finalize_progress(id, 0.05);
     let total_samples: u64 = plans.iter().map(|p| p.samples).sum();
     let mut final_segs: Vec<Segment> = Vec::new();
@@ -1381,6 +1420,59 @@ mod tests {
             store.get(id).unwrap().status,
             TranscriptStatus::Failed { .. }
         ));
+    }
+
+    /// One real chunk, then endless idle keepalives — a silent source that never ends its stream.
+    struct KeepaliveStream {
+        sent_real: bool,
+    }
+    impl AudioStream for KeepaliveStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if !self.sent_real {
+                self.sent_real = true;
+                return Ok(Some(chunk_at(0, 1600, None)));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            Ok(Some(crate::transcription::audio::AudioChunk::keepalive()))
+        }
+    }
+
+    #[test]
+    fn stop_unwedges_an_idle_source_and_keepalives_leave_no_trace_in_the_wav() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(KeepaliveStream { sent_real: false }),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let runner = std::thread::spawn({
+            let out_wav = out_wav.clone();
+            move || driver.run(&out_wav)
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        stop.stop();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !runner.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver.run() must return after stop despite an idle (keepalive-only) source"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        runner.join().unwrap().unwrap();
+        // Keepalives must not pad the timeline: the WAV holds exactly the one real chunk.
+        let reader = hound::WavReader::open(&out_wav).unwrap();
+        assert_eq!(reader.duration(), 1600);
     }
 
     #[test]
@@ -1949,9 +2041,8 @@ mod tests {
         let script = vec![
             vec![seg_at(0.0, 4.5, "ala ma kota")],
             vec![seg_at(0.0, 5.0, "ala ma kota")],
-            // Decodes 3-4 run with window_start ≈ 3 s, so these window-relative
-            // times land at abs 4.5-5.2 s: a wordless verbatim re-decode jittered
-            // across the 5.0 s horizon — trim can't shorten it, the guard drops it.
+            // Decodes 3-4 run with window_start ≈ 3 s → abs 4.5-5.2 s: a wordless verbatim
+            // re-decode jittered across the 5.0 s horizon; trim can't shorten it, the guard drops it.
             vec![seg_at(1.5, 2.2, "ala ma kota")],
             vec![seg_at(1.5, 2.2, "ala ma kota")],
         ];
@@ -2689,6 +2780,174 @@ mod tests {
             (secs - 10.2).abs() < 0.05,
             "expected ~10.2 s (0.2 + 9.8 gap + 0.2), got {secs}"
         );
+    }
+
+    #[test]
+    fn a_corrupt_offset_past_the_gap_cap_splices_without_padding() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("corrupt.wav");
+        let id = mk_session(&store, &wav);
+        // 200 ms at offset 0, then two chunks declared 2 h in: the gap exceeds MAX_GAP_SAMPLES,
+        // so both splice at the write head — no padding at all, and no per-chunk re-padding.
+        let two_hours_ms = 2 * 3600 * 1000;
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream {
+                chunks: vec![
+                    chunk_at(0, 3_200, None),
+                    chunk_at(two_hours_ms, 3_200, None),
+                    chunk_at(two_hours_ms + 200, 3_200, None),
+                ],
+            }),
+            transcriber: live(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        driver.run(&wav).unwrap();
+        let secs = crate::transcription::audio::wav_duration(&wav)
+            .expect("the spliced WAV must be readable")
+            .as_secs_f32();
+        assert!(
+            (secs - 0.6).abs() < 0.02,
+            "expected 0.6 s (three 0.2 s chunks, zero padding), got {secs}"
+        );
+    }
+
+    #[test]
+    fn a_lagging_live_pass_skips_ahead_when_the_ring_evicted_its_window() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("a.wav"));
+        let mut driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream { chunks: vec![] }),
+            transcriber: live(MockTranscriber {
+                seg_secs: 2.0,
+                text_template: "s{n}".to_string(),
+            }),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        // 60 s captured into the production-sized ring (42 s): everything before
+        // `oldest` (18 s) is evicted, and the decoder is far behind at 5 s.
+        {
+            let mut g = lock_ingest(&driver.ingest);
+            g.lanes = vec![LaneRing::new(ring_capacity_samples())];
+            g.lanes[0].push(&vec![0.1; SAMPLE_RATE_HZ as usize * 60]);
+        }
+        driver.decode_window_ending(5.0, false).unwrap();
+        // The Am. 11 lag skip: jump to the head instead of decoding evicted
+        // (empty) windows for the rest of the meeting.
+        assert!(
+            (driver.last_decode_at - 60.0).abs() < 0.01,
+            "expected the decode cursor at the head (60 s), got {}",
+            driver.last_decode_at
+        );
+        let snap = store.get(id).unwrap();
+        assert!(
+            !snap.live_segments.is_empty(),
+            "the skipped-ahead window must decode real audio"
+        );
+    }
+
+    /// Panics on the second pull — a capture backend blowing up mid-recording.
+    struct PanickingStream {
+        pulled: bool,
+    }
+    impl AudioStream for PanickingStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if !self.pulled {
+                self.pulled = true;
+                return Ok(Some(chunk_at(0, 1600, None)));
+            }
+            panic!("capture backend blew up");
+        }
+    }
+
+    #[test]
+    fn an_ingest_panic_fails_the_session_instead_of_reporting_success() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("panic.wav");
+        let id = mk_session(&store, &wav);
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(PanickingStream { pulled: false }),
+            transcriber: live(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        let err = driver.run(&wav).unwrap_err();
+        assert!(err.to_string().contains("panicked"), "got: {err}");
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
+        // The WAV written before the panic is still finalized (readable header).
+        assert!(crate::transcription::audio::wav_duration(&wav).is_ok());
+    }
+
+    /// One chunk, then blocks until `stop` trips and only then errors — a failure landing
+    /// after the decode loop's last poll (the decode side exits on stop, never seeing it).
+    struct LateErrorStream {
+        pulled: bool,
+        stop: StopSignal,
+    }
+    impl AudioStream for LateErrorStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if !self.pulled {
+                self.pulled = true;
+                return Ok(Some(chunk_at(0, 1600, None)));
+            }
+            while !self.stop.is_stopped() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(CaptureError::Failed("device vanished".to_string()))
+        }
+    }
+
+    #[test]
+    fn a_capture_error_landing_after_the_decode_loop_exits_still_fails_the_session() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("late-error.wav");
+        let id = mk_session(&store, &wav);
+        let stop = StopSignal::new();
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(LateErrorStream {
+                pulled: false,
+                stop: stop.clone(),
+            }),
+            transcriber: live(MockTranscriber::new()),
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let runner = std::thread::spawn({
+            let wav = wav.clone();
+            move || driver.run(&wav)
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        stop.stop();
+        let err = runner.join().unwrap().unwrap_err();
+        assert!(err.to_string().contains("device vanished"), "got: {err}");
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Failed { .. }
+        ));
     }
 
     #[test]

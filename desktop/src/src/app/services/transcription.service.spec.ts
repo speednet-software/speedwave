@@ -271,10 +271,14 @@ describe('TranscriptionService', () => {
   describe('recommendedModel', () => {
     it('reads the recommended model via recommended_transcription_model', async () => {
       const ack = {
-        key: 'large-v3',
-        display_name: 'Large v3',
-        size_bytes: 3_100_000_000,
-        downloaded: false,
+        live: {
+          key: 'large-v3',
+          display_name: 'Large v3',
+          size_bytes: 3_100_000_000,
+          downloaded: false,
+          downloading: false,
+        },
+        finalize: null,
         accel_label: 'Metal (GPU)',
       };
       mockTauri.invokeHandler = async (cmd) =>
@@ -716,11 +720,14 @@ describe('TranscriptionService', () => {
         mockTauri.invokeHandler = async (cmd) =>
           cmd === 'recommended_transcription_model'
             ? {
-                key: 'large-v3',
-                display_name: 'Large v3',
-                size_bytes: 3_100_000_000,
-                downloaded: true,
-                downloading: false,
+                live: {
+                  key: 'large-v3',
+                  display_name: 'Large v3',
+                  size_bytes: 3_100_000_000,
+                  downloaded: true,
+                  downloading: false,
+                },
+                finalize: null,
                 accel_label: 'Metal (GPU)',
               }
             : undefined;
@@ -734,11 +741,14 @@ describe('TranscriptionService', () => {
         mockTauri.invokeHandler = async (cmd) =>
           cmd === 'recommended_transcription_model'
             ? {
-                key: 'large-v3',
-                display_name: 'Large v3',
-                size_bytes: 3_100_000_000,
-                downloaded: false,
-                downloading: true,
+                live: {
+                  key: 'large-v3',
+                  display_name: 'Large v3',
+                  size_bytes: 3_100_000_000,
+                  downloaded: false,
+                  downloading: true,
+                },
+                finalize: null,
                 accel_label: 'Metal (GPU)',
               }
             : undefined;
@@ -753,11 +763,13 @@ describe('TranscriptionService', () => {
         mockTauri.invokeHandler = async (cmd) =>
           cmd === 'recommended_transcription_model'
             ? {
-                key: 'small',
-                display_name: 'Small',
-                size_bytes: 487_601_967,
-                downloaded: true,
-                downloading: false,
+                live: {
+                  key: 'small',
+                  display_name: 'Small',
+                  size_bytes: 487_601_967,
+                  downloaded: true,
+                  downloading: false,
+                },
                 accel_label: 'CPU',
                 finalize: {
                   key: 'large-v3-turbo',

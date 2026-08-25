@@ -240,9 +240,8 @@ const MIN_AUDIO_CTX: usize = 128;
 /// Samples per encoder position at 16 kHz: a 10 ms mel hop (160 samples) then a stride-2 conv.
 const SAMPLES_PER_AUDIO_CTX: usize = 320;
 
-/// The reduced encoder context for a live window of `pcm_len` samples, or `None` on the offline
-/// pass (which keeps whisper's full 30 s context — it is the quality authority). A small headroom
-/// covers the mel/conv boundary rounding.
+/// The reduced encoder context for a live window of `pcm_len` samples (small headroom for the
+/// mel/conv rounding), or `None` on the offline pass (full 30 s context — quality authority).
 fn live_audio_ctx(pcm_len: usize, live: bool) -> Option<std::ffi::c_int> {
     if !live {
         return None;
