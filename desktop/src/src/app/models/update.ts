@@ -8,8 +8,7 @@ export interface UpdateInfo {
 
 /** Tagged result of `check_for_update`; mirrors Rust `updater::UpdateCheckOutcome` (serde tag "kind", snake_case). */
 export type UpdateCheckOutcome =
-  | { kind: 'up_to_date' }
-  | ({ kind: 'update_available' } & UpdateInfo);
+  { kind: 'up_to_date' } | ({ kind: 'update_available' } & UpdateInfo);
 
 /** User-configurable auto-update check preferences. */
 export interface UpdateSettings {
@@ -39,11 +38,7 @@ export interface ContainerUpdateResult {
 
 /** Reconcile phase names — must match Rust BundleReconcilePhase serde(rename_all = "snake_case"). */
 export type BundleReconcilePhase =
-  | 'pending'
-  | 'resources_synced'
-  | 'images_built'
-  | 'projects_restored'
-  | 'done';
+  'pending' | 'resources_synced' | 'images_built' | 'projects_restored' | 'done';
 
 /** Startup reconcile status for applying a newly installed bundle. */
 export interface BundleReconcileStatus {

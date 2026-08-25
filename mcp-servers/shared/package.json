@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/mcp-shared",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Shared MCP infrastructure for Speedwave workers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -35,10 +35,10 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-jsdoc": "^63.0.6",
     "eslint-plugin-prettier": "^5.1.0",
-    "globals": "^17.9.0",
+    "globals": "^17.11.0",
     "prettier": "^3.9.6",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.66.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^4.0.16"
   }
 }

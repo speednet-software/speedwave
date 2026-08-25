@@ -327,7 +327,7 @@ pub fn generate_bundle_manifest(
         let mut components: Vec<(&str, &str)> = Vec::with_capacity(img.hash_inputs.len());
         for input in img.hash_inputs {
             if !component_cache.contains_key(input) {
-                let hash = digest_paths(&[(input, &build_root.join(input))])?;
+                let hash = digest_paths(&[(input, &resolve_hash_input(build_root, input)?)])?;
                 component_cache.insert(input, hash);
             }
         }
@@ -664,6 +664,33 @@ fn validate_bundled_asset(
     Ok(())
 }
 
+/// A hash input is repo-root-relative; in the bundled build-context the bundle scripts stage
+/// vendored sources under `containers/`, so a missing direct path falls back to that layout.
+fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf> {
+    let direct = build_root.join(input);
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let vendored = build_root.join("containers").join(input);
+    if vendored.exists() {
+        return Ok(vendored);
+    }
+    anyhow::bail!(
+        "Missing path for bundle digest: {} (also tried {})",
+        direct.display(),
+        vendored.display()
+    );
+}
+
+/// Test-only seam: `build.rs`'s catalog tests assert every declared input resolves.
+#[cfg(test)]
+pub(crate) fn resolve_hash_input_for_test(
+    build_root: &Path,
+    input: &str,
+) -> anyhow::Result<PathBuf> {
+    resolve_hash_input(build_root, input)
+}
+
 fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for (prefix, path) in paths {
@@ -772,6 +799,45 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_hash_input_prefers_the_direct_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("crates/pii-engine")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/crates/pii-engine")).unwrap();
+        let resolved = resolve_hash_input(tmp.path(), "crates/pii-engine").unwrap();
+        assert_eq!(resolved, tmp.path().join("crates/pii-engine"));
+    }
+
+    #[test]
+    fn resolve_hash_input_falls_back_to_the_vendored_containers_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/crates/pii-engine")).unwrap();
+        let resolved = resolve_hash_input(tmp.path(), "crates/pii-engine").unwrap();
+        assert_eq!(resolved, tmp.path().join("containers/crates/pii-engine"));
+    }
+
+    #[test]
+    fn resolve_hash_input_error_names_both_candidate_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_hash_input(tmp.path(), "crates/pii-engine")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Missing path for bundle digest"), "{err}");
+        assert!(
+            err.contains(&tmp.path().join("crates/pii-engine").display().to_string()),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                &tmp.path()
+                    .join("containers/crates/pii-engine")
+                    .display()
+                    .to_string()
+            ),
+            "{err}"
+        );
+    }
 
     #[test]
     #[cfg(unix)]

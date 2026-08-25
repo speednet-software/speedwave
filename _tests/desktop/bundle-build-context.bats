@@ -50,6 +50,29 @@ teardown() {
     [ -f "$DEST/build-context/containers/mcp-servers/policies/rules.yaml" ]
 }
 
+# The digest resolver (bundle.rs::resolve_hash_input) tries <root>/<input> then
+# <root>/containers/<input>; an input resolving in neither aborts every image build in an installed app.
+@test "every ImageDef hash input resolves inside the staged build-context" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    local build_rs="$BATS_TEST_DIRNAME/../../crates/speedwave-runtime/src/build.rs"
+    local inputs
+    inputs="$(awk '/^pub const IMAGES/,/^\];/' "$build_rs" \
+        | awk '/hash_inputs: &\[/,/\]/' | grep -oE '"[^"]+"' | tr -d '"' | sort -u)"
+    [ -n "$inputs" ]
+    local missing=""
+    local p
+    while IFS= read -r p; do
+        if [ ! -e "$DEST/build-context/$p" ] && [ ! -e "$DEST/build-context/containers/$p" ]; then
+            missing="$missing $p"
+        fi
+    done <<< "$inputs"
+    if [ -n "$missing" ]; then
+        echo "hash inputs unresolvable in the staged build-context:$missing"
+        return 1
+    fi
+}
+
 @test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
     # Plant a dirty source tree; the trap removes it even on assertion failure.
     local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"

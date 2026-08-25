@@ -43,14 +43,15 @@ const E2E_PROJECT_NAME = 'e2e-test';
 describe('Local Provider + Resume', function () {
   before(async function () {
     this.timeout(180_000);
-    // No route to the local LLM here; skipping leaves OpenRouter active, which is
-    // what the later specs expect anyway.
-    if (localLlmUnreachable()) this.skip();
-    // Spec 10 left e2e-second active — return to the project holding the chat.
+    // Spec 10 left e2e-second active — return to the project holding the chat BEFORE
+    // any skip, or later specs open chat on the no-provider project and time out.
     if ((await activeProjectSlug()) !== E2E_PROJECT_NAME) {
       await switchToProject(E2E_PROJECT_NAME);
     }
     expect(await activeProjectSlug()).toBe(E2E_PROJECT_NAME);
+    // No route to the local LLM here; skipping leaves OpenRouter active, which is
+    // what the later specs expect anyway.
+    if (localLlmUnreachable()) this.skip();
   });
 
   it('switches the provider to the local server (full restart)', async function () {

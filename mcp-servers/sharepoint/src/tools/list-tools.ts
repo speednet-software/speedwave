@@ -629,8 +629,7 @@ async function handleAddListColumn(
   try {
     const payload = buildColumnPayload(params);
     const col = (await columns(client).addColumn(params.listId, payload)) as
-      | ColumnDefinition
-      | undefined;
+      ColumnDefinition | undefined;
     return { success: true, data: { columnId: col?.id ?? '' } };
   } catch (e) {
     return wrapErr('ADD_LIST_COLUMN_FAILED', e);
@@ -679,8 +678,7 @@ async function handleListItems(
     if (params.filter) extra.push(`$filter=${encodeURIComponent(params.filter)}`);
     if (params.top) extra.push(`$top=${params.top}`);
     const resp = (await lists(client).listItems(params.listId, extra)) as
-      | { value?: SharePointListItem[] }
-      | undefined;
+      { value?: SharePointListItem[] } | undefined;
     return {
       success: true,
       data: {
@@ -734,8 +732,7 @@ async function handleGetItem(
   if (e2) return e2;
   try {
     const item = (await lists(client).getItem(params.listId, params.itemId)) as
-      | SharePointListItem
-      | undefined;
+      SharePointListItem | undefined;
     return { success: true, data: { item } };
   } catch (e) {
     return wrapErr('GET_ITEM_FAILED', e);

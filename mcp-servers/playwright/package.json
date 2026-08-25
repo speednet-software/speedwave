@@ -1,6 +1,6 @@
 {
   "name": "@speedwave/mcp-playwright",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Speedwave MCP Playwright worker — packages Microsoft's @playwright/mcp as a hardened shared browser-automation service",
   "private": true,
   "type": "module",

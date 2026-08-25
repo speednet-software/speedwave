@@ -121,13 +121,7 @@ interface OctokitErrorLike {
 
 /** Coarse category of a GitHub API failure — shared by `formatError` and `testConnection`. */
 type ErrorCategory =
-  | 'auth'
-  | 'permission'
-  | 'not_found'
-  | 'validation'
-  | 'network'
-  | 'server'
-  | 'unknown';
+  'auth' | 'permission' | 'not_found' | 'validation' | 'network' | 'server' | 'unknown';
 
 /**
  * Classifies an Octokit-style error (or any thrown value) into a coarse {@link ErrorCategory}.
