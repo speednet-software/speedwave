@@ -24,7 +24,7 @@ jobs:
     # macos/windows after ADR-059. Ubuntu would fire that error before clippy
     # ever runs. macOS-latest is the cheapest runner that satisfies the cfg.
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -67,8 +67,14 @@ jobs:
           rustup target add wasm32-unknown-unknown
           npm install -g wasm-pack
 
+      # cmake builds whisper.cpp for check-clippy's audio-transcription pass (ADR-056).
+      - name: Install cmake
+        run: brew install cmake
+
+      # `make check-clippy` is the authoritative gate: --all-targets (test code,
+      # integration binaries) plus the test-support + audio-transcription feature pass.
       - name: Rust clippy
-        run: cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+        run: make check-clippy
 
       # containers/proxy is its own Cargo workspace (separate lockfile) — its
       # deny-level [lints.clippy] table needs its own clippy invocation.
@@ -334,11 +340,11 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
-  # Windows behaviour the macos-latest lint/test jobs can't cover; each step below
-  # is scoped because compose/consts fixtures use POSIX paths that fail on Windows.
+  # Windows behaviour the macos-latest lint/test jobs can't cover: the full
+  # runtime + CLI suite on a real Windows filesystem/shell.
   runtime-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -359,26 +365,10 @@ jobs:
           key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
-      - name: cargo test runtime::lima
-        run: cargo test -p speedwave-runtime --lib "runtime::lima::"
-
-      - name: cargo test runtime::wsl
-        run: cargo test -p speedwave-runtime --lib "runtime::wsl::"
-
-      - name: cargo test runtime build
-        shell: bash
-        run: cargo test -p speedwave-runtime --lib "build::"
-
-      - name: cargo test host_mcp_process::job_object
-        # Windows-only kill-on-close end-to-end — see ADR-048.
-        shell: bash
-        run: cargo test -p speedwave-runtime --lib "host_mcp_process::job_object"
-
-      - name: cargo test binary
-        run: cargo test -p speedwave-runtime --lib "binary::"
-
-      - name: cargo test speedwave-cli
-        run: cargo test -p speedwave-cli --bins
+      # Mirrors `make test-rust`'s cargo line (guard: _tests/ci/rust-coverage-gates.bats);
+      # audio-transcription (whisper.cpp) runs in the macOS `test` job instead.
+      - name: cargo test (full suite incl. test-support)
+        run: cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash

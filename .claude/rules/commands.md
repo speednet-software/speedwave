@@ -5,7 +5,7 @@ make setup-dev         # first-time: prerequisites + all dependencies
 make setup-dev-windows # Windows only: install the toolchain via Chocolatey (needs admin; self-elevates)
 make test           # all tests (Rust + Angular + MCP + entrypoint + desktop + proxy) — optional locally; CI runs it
 make check-fmt      # fmt (root + desktop + proxy) + prettier — the pre-push hook gate, no builds/tests
-make check          # lint + clippy + type-check + format — thorough local pass; CI runs the same checks as separate raw steps
+make check          # lint + clippy + type-check + format — thorough local pass; CI runs the same checks as separate steps
 make check-all      # check + test + coverage + audit
 make dev            # desktop dev mode (Tauri + Angular hot reload)
 make build          # build everything
