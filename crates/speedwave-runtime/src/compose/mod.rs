@@ -680,12 +680,17 @@ pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose
 /// SSOT for compose schema/parse error fragments seen on a stale/torn virtiofs
 /// read; recognised by `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // Field-specific fragments (path + type), never bare "must be a string". See ADR-068.
+    // Field-specific fragments (path + type), never bare "must be a string".
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
     "yaml:", // any yaml-go parse error: rendered YAML is always valid, so torn read
 ];
+
+/// ENOENT on a compose.yml the host just renamed into place: a stale virtiofs
+/// dentry, not a missing file. Contiguous because `open <path>:` ends in the name.
+pub(crate) const COMPOSE_FILE_ENOENT_ERROR_FRAGMENT: &str =
+    "compose.yml: no such file or directory";
 
 /// Asserts every `services.<svc>.networks: [name]` resolves to a declared top-level
 /// `networks.<name>`. Catches render bugs and torn writes with missing network entries.
