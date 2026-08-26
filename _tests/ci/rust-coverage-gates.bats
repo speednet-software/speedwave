@@ -95,3 +95,13 @@ _makefile_check_clippy_cargo_lines() {
         return 1
     }
 }
+
+@test "audit job delegates cargo audit to make audit-rust" {
+    grep -q 'run: make audit-rust' "$WORKFLOW"
+
+    # A hand-rolled cargo audit re-copies AUDIT_IGNORE and drifts from the Makefile.
+    if grep -n 'run:.*cargo audit' "$WORKFLOW"; then
+        echo "Run make audit-rust instead of a hand-rolled cargo audit."
+        return 1
+    fi
+}
