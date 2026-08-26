@@ -6,8 +6,9 @@
 
 set -euo pipefail
 
-# The deepest observed path below the target dir (TryCompile scratch + testCCompiler.c).
-SUFFIX_BUDGET=205
+# The deepest observed path below the target dir: the MSBuild-generator TryCompile scratch
+# incl. generated files (cmTC_*.dir\Debug\*.obj — ~214 chars measured on CI; ninja is shallower).
+SUFFIX_BUDGET=220
 MAX_PATH=259
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"

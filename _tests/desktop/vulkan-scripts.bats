@@ -78,7 +78,7 @@ stage_rig() {
 }
 
 @test "check-vulkan-path-budget rejects a target dir past the MAX_PATH budget" {
-    # 259 - 205 = 54 usable chars; 80 chars is safely over the budget.
+    # 259 - 220 = 39 usable chars; 80 chars is safely over the budget.
     local deep
     deep="/$(printf 'x%.0s' {1..80})"
     CARGO_TARGET_DIR="$deep" run bash "$BUDGET_SCRIPT"

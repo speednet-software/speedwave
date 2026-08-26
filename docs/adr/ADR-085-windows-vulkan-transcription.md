@@ -22,7 +22,7 @@ The supporting sub-decisions:
 
 ## Known limitations
 
-- The ggml-vulkan shader ExternalProject nests ~205 chars of CMake scratch below the cargo target dir, and `cl.exe` cannot open >260-char paths even with NTFS long paths enabled[^6]; `scripts/check-vulkan-path-budget.sh` gates Windows desktop builds, with a short crate-local `target-dir` as the escape (see cross-platform rules).
+- The ggml-vulkan shader ExternalProject nests ~220 chars of CMake scratch below the cargo target dir (MSBuild-generator TryCompile incl. generated files; ninja is shallower), and `cl.exe` cannot open >260-char paths even with NTFS long paths enabled[^6]; `scripts/check-vulkan-path-budget.sh` gates Windows desktop builds, with a short crate-local `target-dir` as the escape (see cross-platform rules).
 - macOS `GpuClass::Discrete` is asserted, not probed — Metal init failure would still fall back silently inside whisper.cpp (now at least visible in logs via the routed hooks).
 - An integrated GPU is classified by Vulkan device type, not measured throughput; an unusually fast iGPU still gets CPU-tier models.
 
