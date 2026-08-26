@@ -4,6 +4,9 @@ These have no third-party imports and run on any interpreter. The library-driven
 (`docx_build.py`, `xlsx_build.py`, `pptx_build.py`, `pdf_ops.py`, `render_chart.py`,
 `python_docx_extract.py`) are covered by `test_scripts.py`, which self-skips when its deps
 (python-docx / openpyxl / python-pptx / pypdf / matplotlib) are absent.
+
+This file also carries a source-text guard asserting that no script enables WeasyPrint
+presentational hints.
 """
 
 from __future__ import annotations

@@ -835,8 +835,8 @@ audit: audit-rust audit-mcp audit-desktop
 # parses GitHub's release feed over pinned TLS). No fixed self_update release (pins ^0.37).
 # Remove both when self_update bumps quick-xml to >=0.41.
 #
-# glib unsoundness (informational, non-fatal): glib 0.18.5 comes only via the GTK/WebKitGTK
-# stack, which tauri/wry/tao gate on Linux+BSD. Remove when Tauri moves to glib 0.20+.
+# glib unsoundness: informational, never fails cargo audit. glib 0.18.5 comes only via the
+# Linux+BSD-gated GTK stack, so it is never built for macOS/Windows. Drop at Tauri glib 0.20+.
 AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
 
 audit-rust:
