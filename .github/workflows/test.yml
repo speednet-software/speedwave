@@ -407,6 +407,10 @@ jobs:
     # The budget covers a cold whisper.cpp + ggml-vulkan shader build (ADR-085).
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # The runner's D:\a\speedwave\speedwave base plus the MSBuild TryCompile scratch of the
+      # ggml-vulkan shader build crosses MAX_PATH (C1083) — the cross-platform.md escape hatch.
+      CARGO_TARGET_DIR: D:\st
     defaults:
       run:
         shell: bash
@@ -431,8 +435,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            desktop/src-tauri/target/
-            target/
+            D:\st
           key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
 

@@ -1288,7 +1288,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store: ModelStoreHandle = Arc::new(ModelStore::with_root(dir.path()));
         // Nothing downloaded → actionable error at Start, not a late failure at Stop.
-        let e = prepare_live_transcriber(false, &store).await.unwrap_err();
+        // `WhisperCppTranscriber` has no `Debug`, so `unwrap_err()` won't compile — match it.
+        let e = match prepare_live_transcriber(false, &store).await {
+            Ok(_) => panic!("expected the record-only gate to fail without a model"),
+            Err(e) => e,
+        };
         assert!(
             e.contains("no Whisper model") && e.contains("Settings"),
             "got: {e}"

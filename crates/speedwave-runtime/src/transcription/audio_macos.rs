@@ -190,6 +190,7 @@ enum RawEvent {
 }
 
 /// One bounded `read_frame` result. `Pending` = nothing arrived within [`KEEPALIVE_AFTER`].
+#[derive(Debug)]
 enum RawRead {
     Frame(u32, u64, Vec<f32>),
     Pending,

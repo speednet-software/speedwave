@@ -100,7 +100,7 @@ fn full_pipeline_capture_transcribe_finalize_markdown() {
         id,
         store: store.clone(),
         audio: stream,
-        transcriber: Box::new(transcriber),
+        transcriber: Some(Box::new(transcriber)),
         transcribe_opts: TranscribeOptions::for_language(Language::En),
         stop: StopSignal::new(),
         time_base: std::time::Duration::ZERO,
