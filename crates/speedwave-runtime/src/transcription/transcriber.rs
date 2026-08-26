@@ -405,9 +405,10 @@ impl WhisperCppTranscriber {
             .map_err(|e| TranscribeError::Inference(format!("whisper_full: {e}")))?;
         log::debug!(
             target: "transcription::transcriber",
-            "decoded a {:.1}s window with {} on {threads} threads in {} ms",
+            "decoded a {:.1}s window with {} on {} threads in {} ms",
             pcm.len() as f32 / SAMPLE_RATE_HZ as f32,
             self.model_label,
+            self.n_threads,
             started.elapsed().as_millis()
         );
 
