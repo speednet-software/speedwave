@@ -38,7 +38,8 @@ require_pinned_vulkan_dll() {
   require_file "$path"
   local pin_file expected actual
   pin_file="$(cd "$(dirname "$0")" && pwd)/install-vulkan-sdk.ps1"
-  expected="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-f]\{64\}\)'.*/\1/p" "$pin_file")"
+  # Case-insensitive scrape + lowercase normalization: Get-FileHash emits uppercase hex.
+  expected="$(sed -n "s/^\\\$RuntimeDllSha256 = '\([0-9a-fA-F]\{64\}\)'.*/\1/p" "$pin_file" | tr '[:upper:]' '[:lower:]')"
   [[ -n "$expected" ]] || fail "Could not read \$RuntimeDllSha256 from $pin_file"
   # macOS has shasum, Linux/CI has sha256sum — same fallback as the Makefile download targets.
   actual="$( (sha256sum "$path" 2>/dev/null || shasum -a 256 "$path") | cut -d' ' -f1)"
@@ -82,6 +83,8 @@ require_file "$root/mcp-os/shared/package-lock.json"
 require_non_empty_dir "$root/mcp-os/shared/node_modules"
 [[ -d "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "Missing mcp-shared dir: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
 [[ ! -L "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "mcp-shared must be a real directory, not a symlink: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
+# Third-party notices ship in every bundle (make bundle-static-licenses / the CI copy step).
+require_non_empty_dir "$root/THIRD-PARTY-LICENSES"
 
 case "$platform" in
   macos)
@@ -104,6 +107,8 @@ case "$platform" in
     require_file "$root/windows/sweep.ps1"
     require_file "$root/windows/firewall.ps1"
     require_pinned_vulkan_dll "$root/vulkan-1.dll"
+    # The notice for the redistributed loader must ship next to it (ADR-085, Apache-2.0).
+    require_file "$root/THIRD-PARTY-LICENSES/VulkanRT-License.txt"
     ;;
 esac
 

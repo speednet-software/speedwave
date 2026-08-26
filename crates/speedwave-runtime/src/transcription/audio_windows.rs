@@ -38,6 +38,19 @@ struct DropState {
     reported: AtomicBool,
 }
 
+impl Drop for DropState {
+    fn drop(&mut self) {
+        // The one-shot banner reports only the first drop — the total lands here, at close.
+        let n = *self.count.get_mut();
+        if n > 0 {
+            log::info!(
+                target: "transcription::capture",
+                "capture stream closed with {n} dropped chunk(s) in total"
+            );
+        }
+    }
+}
+
 impl DropCounter {
     fn record(&self) {
         self.0.count.fetch_add(1, Ordering::Relaxed);

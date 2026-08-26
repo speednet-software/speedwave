@@ -354,7 +354,7 @@ bundle-static-licenses:
 	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
 
 # Windows only: gate the ggml-vulkan shader build's path budget, then stage the pinned
-# vulkan-1.dll for bundling (ADR-085). One target so the pair can never drift apart.
+# vulkan-1.dll (ADR-085). CI runs the same pair as two steps in prepare-desktop-bundle.
 stage-vulkan-windows:
 	@bash scripts/check-vulkan-path-budget.sh
 	@bash scripts/stage-vulkan-runtime.sh
@@ -516,10 +516,12 @@ test-desktop: build-cli build-angular build-mcp build-os-cli generate-installer-
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@"$(MAKE)" stage-vulkan-windows
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@# The bundle is staged above (bundle-build-context.sh + build-mcp), so run
@@ -669,10 +671,12 @@ test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@cargo build -p speedwave-cli --release
 ifeq ($(OS),Windows_NT)
 	@cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+	@"$(MAKE)" stage-vulkan-windows
 else
 	@cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
 	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
@@ -997,6 +1001,7 @@ dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-ins
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
 	@"$(MAKE)" stage-vulkan-windows
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
@@ -1009,6 +1014,7 @@ dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs ge
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
 endif

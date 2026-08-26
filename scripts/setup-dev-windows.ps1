@@ -188,7 +188,10 @@ try {
 Write-Host "== Enabling Windows long paths (ninja needs them for the whisper.cpp Vulkan build) =="
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
     -Name 'LongPathsEnabled' -Value 1 -Type DWord
-git config --system core.longpaths true 2>$null
+$gitLongPaths = git config --system core.longpaths true 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "git config --system core.longpaths failed (exit ${LASTEXITCODE}): $gitLongPaths"
+}
 
 Write-Host ""
 Write-Host "== Done. Next steps =="

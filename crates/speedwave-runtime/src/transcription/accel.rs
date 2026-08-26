@@ -160,15 +160,35 @@ mod tests {
     }
 
     #[test]
-    fn gpu_backend_matches_the_platform() {
-        let backends = compiled_backends();
-        assert_eq!(
-            backends.contains(&Backend::Metal),
-            cfg!(all(feature = "audio-transcription", target_os = "macos"))
+    fn gpu_backend_features_are_pinned_in_the_manifest() {
+        // compiled_backends() keys on cfg(platform), not on how whisper-rs was built — pin the
+        // manifest so silently dropping a GPU feature cannot leave `accel_label` lying.
+        fn target_deps<'a>(manifest: &'a str, header: &str) -> &'a str {
+            let start = manifest.find(header).expect("target dep section present");
+            let rest = &manifest[start + header.len()..];
+            &rest[..rest.find("\n[").unwrap_or(rest.len())]
+        }
+        let manifest = include_str!("../../Cargo.toml");
+        let windows = target_deps(manifest, "[target.'cfg(windows)'.dependencies]");
+        let whisper_windows = windows
+            .lines()
+            .find(|l| l.trim_start().starts_with("whisper-rs"))
+            .expect("windows whisper-rs dep");
+        assert!(
+            whisper_windows.contains("\"vulkan\""),
+            "whisper-rs on Windows must carry the vulkan feature: {whisper_windows}"
         );
-        assert_eq!(
-            backends.contains(&Backend::Vulkan),
-            cfg!(all(feature = "audio-transcription", windows))
+        let macos = target_deps(
+            manifest,
+            "[target.'cfg(target_os = \"macos\")'.dependencies]",
+        );
+        let whisper_macos = macos
+            .lines()
+            .find(|l| l.trim_start().starts_with("whisper-rs"))
+            .expect("macos whisper-rs dep");
+        assert!(
+            whisper_macos.contains("\"metal\""),
+            "whisper-rs on macOS must carry the metal feature: {whisper_macos}"
         );
     }
 
@@ -297,7 +317,8 @@ mod tests {
                 b
             );
         }
-        // The TS mirror renders capability chips from this union — keep it in sync.
+        // The TS union must stay in sync; today only test fixtures read `backends` — the UI
+        // renders `accel_label` verbatim (transcription-section.component.ts).
         let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
         for (b, tag) in [
             (Backend::Cpu, "'cpu'"),

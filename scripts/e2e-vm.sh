@@ -431,6 +431,13 @@ Assert-ExitCode
 curl.exe -fsSL -o desktop\src-tauri\wsl\ubuntu-rootfs.tar.gz "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz"
 Assert-ExitCode
 
+Write-Host "── Staging Vulkan runtime loader + static licenses (ADR-085)..."
+$vsdk = [System.Environment]::GetEnvironmentVariable('VULKAN_SDK','Machine')
+if (-not $vsdk) { Write-Error 'VULKAN_SDK not set — run scripts/e2e-vm-setup.sh windows first'; exit 1 }
+Copy-Item (Join-Path $vsdk 'runtime\x64\vulkan-1.dll') desktop\src-tauri\vulkan-1.dll
+New-Item -ItemType Directory -Path desktop\src-tauri\THIRD-PARTY-LICENSES -Force | Out-Null
+Copy-Item desktop\src-tauri\licenses-static\* desktop\src-tauri\THIRD-PARTY-LICENSES\
+
 Write-Host "── Bundling build context..."
 powershell -ExecutionPolicy Bypass -File scripts\bundle-build-context.ps1
 Assert-ExitCode
@@ -465,6 +472,8 @@ function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command faile
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
+# whisper-rs-sys needs the pinned SDK (ADR-085); fresh ssh sessions carry stale machine env.
+$env:VULKAN_SDK = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cargo-build'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 Set-Location C:\speedwave-e2e

@@ -36,6 +36,18 @@ stage_rig() {
     [ -f "$WORK/repo/desktop/src-tauri/vulkan-1.dll" ]
 }
 
+@test "stage-vulkan-runtime accepts an uppercase pin pasted from Get-FileHash" {
+    stage_rig
+    printf "\$RuntimeDllSha256 = '%s'\n" \
+        "$(hash_of "$WORK/sdk/runtime/x64/vulkan-1.dll" | tr '[:lower:]' '[:upper:]')" \
+        > "$WORK/repo/scripts/install-vulkan-sdk.ps1"
+
+    VULKAN_SDK="$WORK/sdk" run bash "$WORK/repo/scripts/stage-vulkan-runtime.sh"
+
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/repo/desktop/src-tauri/vulkan-1.dll" ]
+}
+
 @test "stage-vulkan-runtime rejects a loader that does not match the pin" {
     stage_rig
     printf "\$RuntimeDllSha256 = '%s'\n" \
@@ -87,15 +99,50 @@ stage_rig() {
     [[ "$output" == *"too deep"* ]]
 }
 
+@test "check-vulkan-path-budget measures a relative CARGO_TARGET_DIR as an absolute path" {
+    # The literal "t" is 1 char; only the resolved absolute path can exceed the budget.
+    local deep_cwd
+    deep_cwd="$WORK/$(printf 'x%.0s' {1..80})"
+    mkdir -p "$deep_cwd"
+    cd "$deep_cwd"
+    CARGO_TARGET_DIR="t" run bash "$BUDGET_SCRIPT"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"too deep"* ]]
+}
+
+# Fabricates a minimal crate so `cargo metadata` (the config-layer resolver) works in isolation.
+budget_rig() {
+    mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri/.cargo" "$WORK/repo/desktop/src-tauri/src"
+    cp "$BUDGET_SCRIPT" "$WORK/repo/scripts/check-vulkan-path-budget.sh"
+    printf '[package]\nname = "budget-rig"\nversion = "0.0.0"\nedition = "2021"\n' \
+        > "$WORK/repo/desktop/src-tauri/Cargo.toml"
+    : > "$WORK/repo/desktop/src-tauri/src/lib.rs"
+}
+
 @test "check-vulkan-path-budget reads the crate-local .cargo/config.toml target-dir escape" {
     # The escape hatch documented in cross-platform.md: a short crate-local target-dir
     # must pass even when the default crate path would fail.
-    mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri/.cargo"
-    cp "$BUDGET_SCRIPT" "$WORK/repo/scripts/check-vulkan-path-budget.sh"
+    budget_rig
     printf '[build]\ntarget-dir = "/t"\n' > "$WORK/repo/desktop/src-tauri/.cargo/config.toml"
 
-    CARGO_TARGET_DIR="" run bash "$WORK/repo/scripts/check-vulkan-path-budget.sh"
+    run env -u CARGO_TARGET_DIR bash "$WORK/repo/scripts/check-vulkan-path-budget.sh"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/t:"* ]]
+    if command -v cygpath >/dev/null 2>&1; then
+        [[ "$output" == *"$(cygpath -w /t):"* ]]
+    else
+        [[ "$output" == *"/t:"* ]]
+    fi
+}
+
+@test "check-vulkan-path-budget rejects a deep target-dir from .cargo/config.toml" {
+    budget_rig
+    printf '[build]\ntarget-dir = "/%s"\n' "$(printf 'x%.0s' {1..80})" \
+        > "$WORK/repo/desktop/src-tauri/.cargo/config.toml"
+
+    run env -u CARGO_TARGET_DIR bash "$WORK/repo/scripts/check-vulkan-path-budget.sh"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"too deep"* ]]
 }

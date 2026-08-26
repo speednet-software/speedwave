@@ -465,7 +465,11 @@ jobs:
       # `make test-transcription` skips them by target. The module filter runs every current
       # and future windows-gated test in the module, so there is no name list to drift.
       - name: cargo test speedwave-runtime transcription (windows)
-        run: cargo test -p speedwave-runtime --features audio-transcription "transcription::"
+        # A renamed module would zero the filter and green-out this step — assert it matches.
+        run: |
+          LIST="$(cargo test -p speedwave-runtime --features audio-transcription "transcription::" -- --list)"
+          grep -q ': test' <<<"$LIST" || { echo '::error::filter "transcription::" matched no tests'; exit 1; }
+          cargo test -p speedwave-runtime --features audio-transcription "transcription::"
 
       # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
       # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.

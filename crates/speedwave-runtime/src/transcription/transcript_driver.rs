@@ -22,8 +22,8 @@ const LIVE_WINDOW_SECS: f32 = 12.0;
 /// How often (in seconds of captured audio) the live transcriber re-decodes.
 const LIVE_DECODE_EVERY_SECS: f32 = 5.0;
 
-/// How far the live pass may fall behind capture before it abandons the audio it never reached
-/// and jumps to the newest window; the recorded WAV keeps every sample either way.
+/// Ring headroom past the live window: the live pass abandons audio it never reached once its
+/// lag exceeds `LIVE_WINDOW_SECS + LIVE_LAG_TOLERANCE_SECS` (the ring size); the WAV keeps all.
 const LIVE_LAG_TOLERANCE_SECS: f32 = 30.0;
 
 /// Poll cadence while the decode loop waits for the next window — well under
@@ -530,12 +530,7 @@ impl TranscriptDriver {
         // the wind-down itself) — including the one-shot AudioDropped — must still land.
         {
             let health = std::mem::take(&mut lock_ingest(&self.ingest).health);
-            for t in health {
-                let _ = match t {
-                    CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
-                    CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
-                };
-            }
+            self.forward_health(health);
         }
         // An ingest failure landing after the decode loop's last poll (or during wind-down,
         // e.g. WAV finalize) must not let a broken recording report success.
@@ -577,6 +572,23 @@ impl TranscriptDriver {
         }
     }
 
+    /// Forwards queued capture-health transitions to the store. A store rejection must leave
+    /// a trace — the warning would otherwise vanish without reaching the UI or the log.
+    fn forward_health(&self, health: Vec<CaptureHealth>) {
+        for t in health {
+            let res = match t {
+                CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
+                CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
+            };
+            if let Err(e) = res {
+                log::warn!(
+                    target: "transcription::driver",
+                    "a capture-health event was dropped — the store rejected it: {e}"
+                );
+            }
+        }
+    }
+
     /// The live pass: decode the next window once the ingest has captured enough. `Ok` on end
     /// of stream or `stop`; `Err` on any failure (the caller flips the session to `Failed`).
     fn decode_loop(&mut self) -> Result<(), DriverError> {
@@ -594,12 +606,7 @@ impl TranscriptDriver {
                     std::mem::take(&mut g.health),
                 )
             };
-            for t in health {
-                let _ = match t {
-                    CaptureHealth::Raised(w) => self.store.capture_warning(self.id, w),
-                    CaptureHealth::Cleared(w) => self.store.capture_warning_cleared(self.id, w),
-                };
-            }
+            self.forward_health(health);
             if let Some(e) = error {
                 return Err(e);
             }
@@ -3079,8 +3086,8 @@ mod tests {
 
     #[test]
     fn a_capture_gap_on_a_paired_capture_pads_both_channels_in_lockstep() {
-        // The default source is mixed (two lanes): `write_silence(gap, channels)` is where a
-        // frame/sample mix-up would desync the two WAV channels for the rest of the recording.
+        // Chunks carry paired system+mic lanes (via stereo_chunk_at): `write_silence(gap,
+        // channels)` is where a frame/sample mix-up would desync the two WAV channels for good.
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let wav = store_dir.path().join("gapped-stereo.wav");

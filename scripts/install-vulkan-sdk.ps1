@@ -16,7 +16,8 @@ function Get-Verified([string]$Path, [string]$Url, [string]$Expected, [string]$W
         Write-Output "Downloading $What..."
         # System32 curl by absolute path: this script runs elevated and executes what it
         # downloads — a PATH-planted curl.exe must not win (same rule as binary.rs).
-        & (Join-Path $env:SystemRoot 'System32\curl.exe') -fsSL -o $Path $Url
+        # Bounded: a stalled CDN must fail the step, not hang it until the job timeout.
+        & (Join-Path $env:SystemRoot 'System32\curl.exe') -fsSL --connect-timeout 30 --retry 3 --max-time 1800 -o $Path $Url
         if ($LASTEXITCODE -ne 0) { throw "$What download failed (exit $LASTEXITCODE)" }
     }
     $hash = (Get-FileHash -Algorithm SHA256 $Path).Hash
@@ -31,6 +32,7 @@ if (-not ((Test-Path (Join-Path $Root 'Lib\vulkan-1.lib')) -and (Test-Path (Join
     Get-Verified $installer "https://sdk.lunarg.com/sdk/download/$Version/windows/vulkan_sdk.exe" $Sha256 "Vulkan SDK $Version"
     Write-Output "Installing Vulkan SDK $Version to $Root..."
     & $installer --root $Root --accept-licenses --default-answer --confirm-command install
+    if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK installer exited with $LASTEXITCODE" }
     if (-not ((Test-Path (Join-Path $Root 'Lib\vulkan-1.lib')) -and (Test-Path (Join-Path $Root 'Bin\glslc.exe')))) {
         throw "Vulkan SDK install did not produce Lib\vulkan-1.lib + Bin\glslc.exe under $Root"
     }

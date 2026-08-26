@@ -37,6 +37,7 @@ populate_common() {
     mkdir -p "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/dist"
     write_file "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/dist/index.js" "export {};"
     write_file "$ROOT/mcp-os/os/node_modules/@speedwave/mcp-shared/package.json" "{}"
+    write_file "$ROOT/THIRD-PARTY-LICENSES/whisper-cpp-LICENSE"
 }
 
 populate_macos() {
@@ -113,6 +114,24 @@ populate_windows() {
     write_file "$ROOT/windows/sweep.ps1"
     write_file "$ROOT/windows/firewall.ps1"
     write_file "$ROOT/vulkan-1.dll" "not-the-pinned-loader"
+    write_file "$ROOT/THIRD-PARTY-LICENSES/VulkanRT-License.txt"
+}
+
+@test "verify-bundled-assets rejects a windows tree missing the VulkanRT notice" {
+    populate_common
+    populate_windows
+    rm "$ROOT/THIRD-PARTY-LICENSES/VulkanRT-License.txt"
+    # Satisfy the pin check so the failure isolates the missing notice.
+    scripts_dir="$ROOT/scripts-shim"
+    mkdir -p "$scripts_dir"
+    cp "$SCRIPT" "$scripts_dir/verify-bundled-assets.sh"
+    pin="$( (sha256sum "$ROOT/vulkan-1.dll" 2>/dev/null || shasum -a 256 "$ROOT/vulkan-1.dll") | cut -d' ' -f1)"
+    printf "\$RuntimeDllSha256 = '%s'\n" "$pin" > "$scripts_dir/install-vulkan-sdk.ps1"
+
+    run bash "$scripts_dir/verify-bundled-assets.sh" windows "$ROOT"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"VulkanRT-License.txt"* ]]
 }
 
 @test "verify-bundled-assets rejects a missing vulkan-1.dll on windows" {

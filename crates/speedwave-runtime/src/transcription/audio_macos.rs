@@ -172,10 +172,8 @@ impl AudioCapture for MacOsAudioCapture {
     }
 }
 
-/// Reads the CLI child's framed stdout: a JSON header (consumed by `start()`), then `<u32 stream>
-/// <u32 nframes> <u64 offset_ns> <f32*nframes>` chunks. The blocking pipe reads run on their own
-/// thread so `read_frame` stays bounded (`next_chunk` must honour stop even when the CLI goes
-/// silent without closing stdout). On drop, killed gracefully then SIGKILL.
+/// Reads the CLI's framed stdout (`<u32 stream> <u32 nframes> <u64 offset_ns> <f32*nframes>`
+/// after the JSON header) on its own thread, so `read_frame` stays bounded. Drop reaps the CLI.
 struct CliRawReader {
     child: Child,
     rx: Receiver<RawEvent>,
@@ -208,19 +206,47 @@ const MAX_SESSION_NS: u64 = 24 * 3600 * 1_000_000_000;
 
 impl CliRawReader {
     fn new(
-        child: Child,
+        mut child: Child,
         reader: BufReader<std::process::ChildStdout>,
     ) -> Result<Self, CaptureError> {
         let (tx, rx) = mpsc::sync_channel(READER_CHANNEL_DEPTH);
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("capture-cli-reader".to_string())
             .spawn(move || reader_thread(reader, &tx))
-            .map_err(|e| CaptureError::Failed(format!("spawn capture reader thread: {e}")))?;
+        {
+            // No `Self` exists yet, so its Drop can't reap the CLI — it would keep
+            // the CoreAudio tap and the microphone until the process exits.
+            super::audio::kill_child_gracefully(&mut child);
+            return Err(CaptureError::Failed(format!(
+                "spawn capture reader thread: {e}"
+            )));
+        }
         Ok(Self {
             child,
             rx,
             done: false,
         })
+    }
+
+    /// Reaps the CLI at EOF. The stop path never reaches EOF, so a non-zero exit here is a
+    /// mid-session crash — the recording is truncated and must not finalize as complete.
+    fn reap_at_eof(&mut self) -> Result<(), CaptureError> {
+        self.done = true;
+        match self.child.wait() {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => {
+                log::warn!(
+                    target: "transcription::capture",
+                    "audio-capture-cli exited with {status} before a clean end-of-stream"
+                );
+                Err(CaptureError::Failed(format!(
+                    "audio-capture-cli exited with {status} mid-session — the recording is truncated"
+                )))
+            }
+            Err(e) => Err(CaptureError::Failed(format!(
+                "reap audio-capture-cli at EOF: {e}"
+            ))),
+        }
     }
 
     /// Bounded read of the next parsed frame. An error kills the CLI and marks the reader
@@ -340,8 +366,7 @@ impl AudioStream for PassthroughCliStream {
                 // Alive but silent — keepalive keeps the ingest loop's stop check responsive.
                 RawRead::Pending => return Ok(Some(AudioChunk::keepalive())),
                 RawRead::Eof => {
-                    self.raw.done = true;
-                    let _ = self.raw.child.wait();
+                    self.raw.reap_at_eof()?;
                     return Ok(None);
                 }
                 RawRead::Frame(0, offset_ns, samples) => {
@@ -412,8 +437,7 @@ impl AudioStream for MixedCliStream {
                             offset: Duration::from_nanos(start_ns),
                         }));
                     }
-                    self.raw.done = true;
-                    let _ = self.raw.child.wait();
+                    self.raw.reap_at_eof()?;
                     return Ok(None);
                 }
                 RawRead::Frame(idx, off, samples) => {
@@ -632,6 +656,52 @@ mod tests {
             .unwrap();
         let reader = BufReader::new(child.stdout.take().unwrap());
         CliRawReader::new(child, reader).unwrap()
+    }
+
+    /// A `CliRawReader` over a child that closes stdout immediately and exits with `code`.
+    fn raw_reader_exiting(code: i32) -> CliRawReader {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &format!("exit {code}")])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let reader = BufReader::new(child.stdout.take().unwrap());
+        CliRawReader::new(child, reader).unwrap()
+    }
+
+    #[test]
+    fn eof_with_a_clean_exit_ends_the_stream_as_complete() {
+        let mut s = PassthroughCliStream {
+            raw: raw_reader_exiting(0),
+            zero: None,
+            health: Vec::new(),
+        };
+        assert!(next_real_chunk(&mut s).unwrap().is_none());
+        // The `done` latch holds: later polls stay ended instead of re-reaping.
+        assert!(s.next_chunk().unwrap().is_none());
+    }
+
+    #[test]
+    fn eof_with_a_nonzero_exit_fails_the_capture_instead_of_finalizing() {
+        let mut s = PassthroughCliStream {
+            raw: raw_reader_exiting(3),
+            zero: None,
+            health: Vec::new(),
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let err = loop {
+            match s.next_chunk() {
+                Ok(Some(c)) if c.samples.is_empty() => {
+                    assert!(std::time::Instant::now() < deadline, "no EOF within 5 s");
+                }
+                Ok(_) => panic!("a crashed CLI must fail the capture, not deliver audio"),
+                Err(e) => break e,
+            }
+        };
+        let CaptureError::Failed(msg) = err else {
+            panic!("expected CaptureError::Failed");
+        };
+        assert!(msg.contains("truncated"), "{msg}");
     }
 
     /// Polls `read_frame` past transient `Pending`s (the reader thread needs a moment to

@@ -133,8 +133,7 @@ pub trait Transcriber: Send {
     ) -> Result<Vec<Segment>, TranscribeError>;
 
     /// Decode the current live window. Default = `transcribe(window)`; `WhisperCppTranscriber`
-    /// overrides it to shrink the encoder context to the window (`live_audio_ctx`) — a speed
-    /// trade-off the offline pass must never take, so finalize goes through `transcribe`.
+    /// shrinks the encoder context (`live_audio_ctx`) — a speed cut finalize must never take.
     fn feed(
         &mut self,
         pcm_window: &[f32],

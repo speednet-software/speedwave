@@ -616,9 +616,8 @@ mod tests {
     #[test]
     fn a_system_side_that_never_started_is_a_quiet_start_not_a_stall() {
         let mut b = MixBuffer::new();
-        // Idle Windows loopback: no system packets at all. Mix must flow from the
-        // mic immediately (not after the dead gap — the loudness meter reads it)
-        // and without a spurious SystemAudioStalled warning.
+        // Idle Windows loopback (no system packets): mix must flow from the mic immediately,
+        // feeding the loudness meter, without a spurious SystemAudioStalled warning.
         b.push(MixSource::Mic, 0, &[0.8; 16]);
         let PairedPcm { system: sys, mic } = b.pop_pair(1, 16).expect("mic flows immediately");
         assert_eq!(mic.len(), 16);
@@ -909,9 +908,8 @@ mod tests {
     #[test]
     fn poll_paired_chunk_drains_the_tail_then_errors_on_stall() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // A sub-chunk tail, never finished, never more data: poll yields keepalives
-        // while the stall window runs, drains the tail once it elapses, then errors
-        // on the next poll (nothing left, no clean EOF).
+        // A sub-chunk tail, never finished, no more data: keepalives while the stall window
+        // runs, the tail drains once it elapses, then the next poll errors (no clean EOF).
         {
             let mut b = buf.lock().unwrap();
             b.push(MixSource::System, 0, &[1.0; 8]);
