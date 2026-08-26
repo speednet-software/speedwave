@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import markdown_utils
 import script_runner
@@ -94,3 +95,19 @@ def test_io_main_passes_argv_tail(capsys) -> None:
         sys.argv = saved_argv
     assert received == ["a", "b"]
     capsys.readouterr()
+
+
+def test_weasyprint_scripts_never_enable_presentational_hints() -> None:
+    """CVE-2026-49452 is only reachable with presentational hints on; no script may enable them."""
+    scripts_dir = Path(__file__).resolve().parent
+    checked = []
+    for path in sorted(scripts_dir.glob("*.py")):
+        if path.name.startswith("test_"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "from weasyprint import" not in source and "import weasyprint" not in source:
+            continue
+        checked.append(path.name)
+        assert "presentational_hints=True" not in source, f"{path.name} enables presentational hints"
+        assert "presentational_hints=False" in source, f"{path.name} must pass presentational_hints=False"
+    assert checked == ["weasyprint_render.py"], f"unexpected weasyprint call sites: {checked}"
