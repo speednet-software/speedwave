@@ -427,7 +427,7 @@ endif
 
 # Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -472,7 +472,9 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	@# `test-support` is required, not cosmetic: the `required-features = ["test-support"]`
+	@# integration suites (apply_transaction_behaviour, lock suites) are silently skipped without it.
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
 	@# doesn't compile the `transcription` module. Test it explicitly here.
@@ -631,7 +633,8 @@ test-entrypoint:
 
 test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats
+	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
+	  _tests/ci/rust-coverage-gates.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -1027,7 +1030,7 @@ endif
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
 	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="

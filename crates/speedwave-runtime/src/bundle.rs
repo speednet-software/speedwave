@@ -824,19 +824,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Missing path for bundle digest"), "{err}");
-        assert!(
-            err.contains(&tmp.path().join("crates/pii-engine").display().to_string()),
-            "{err}"
-        );
-        assert!(
-            err.contains(
-                &tmp.path()
-                    .join("containers/crates/pii-engine")
-                    .display()
-                    .to_string()
-            ),
-            "{err}"
-        );
+        // Separator-insensitive: the message mixes native joins with the
+        // POSIX-relative input on Windows.
+        let norm = err.replace('\\', "/");
+        let direct = tmp.path().join("crates/pii-engine");
+        let vendored = tmp.path().join("containers/crates/pii-engine");
+        for candidate in [direct, vendored] {
+            let expected = candidate.display().to_string().replace('\\', "/");
+            assert!(norm.contains(&expected), "{err}");
+        }
     }
 
     #[test]

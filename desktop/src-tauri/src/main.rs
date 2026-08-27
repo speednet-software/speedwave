@@ -1291,6 +1291,7 @@ fn main() {
             containers_cmd::is_setup_complete,
             containers_cmd::build_images,
             containers_cmd::start_containers,
+            containers_cmd::retry_bundle_reconcile,
             containers_cmd::defer_container_start,
             containers_cmd::check_containers_running,
             // Settings

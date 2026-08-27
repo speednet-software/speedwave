@@ -2662,7 +2662,10 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    let tokens_path = crate::engine_path::to_engine_path(&tokens_dir.join(sid))?;
+    // Convert first, then '/'-join: a native join before conversion emits a
+    // platform-dependent separator for the engine-side path.
+    let tokens_path =
+        crate::engine_path::vm_path_join(&crate::engine_path::to_engine_path(tokens_dir)?, sid);
     let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
     let mem_limit = manifest
         .mem_limit
@@ -3322,7 +3325,12 @@ mod tests {
             yaml.contains("/tmp:noexec,nosuid,size=512m"),
             "default tmpfs from PLUGIN_DEFAULT_TMPFS: {yaml}"
         );
-        assert!(yaml.contains("/tokens:ro"), "token mount: {yaml}");
+        // Full engine-side source: '/'-joined on every host (a native join
+        // before conversion would emit '\' on Windows).
+        assert!(
+            yaml.contains("/home/user/.speedwave/tokens/myproject/example-plugin:/tokens:ro"),
+            "token mount: {yaml}"
+        );
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
         // ADR-038: every worker — including plugins — uses PORT_WORKER (3000).
         assert!(yaml.contains("PORT=3000"), "PORT env: {yaml}");

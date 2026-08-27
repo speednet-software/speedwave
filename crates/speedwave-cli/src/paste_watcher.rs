@@ -149,9 +149,13 @@ mod tests {
     #[test]
     fn clip_path_is_under_project_pastes_dir() {
         let p = clip_path(Path::new("/tmp/proj"));
+        // Join-built on both sides — a formatted literal diverges on Windows separators.
         assert_eq!(
             p,
-            PathBuf::from(format!("/tmp/proj/{DATA_DIR}/pastes/clip.png"))
+            Path::new("/tmp/proj")
+                .join(DATA_DIR)
+                .join("pastes")
+                .join("clip.png")
         );
     }
 
