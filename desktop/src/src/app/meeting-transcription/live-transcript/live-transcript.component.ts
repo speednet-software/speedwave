@@ -17,7 +17,7 @@ import {
 import { Router } from '@angular/router';
 
 import { TooltipDirective } from '../../shared/tooltip.directive';
-import { ChatStateService } from '../../services/chat-state.service';
+import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
 import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
@@ -147,6 +147,7 @@ interface TranscriptLine {
               type="button"
               class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
               data-testid="send-to-chat-btn"
+              [attr.aria-label]="ariaLabel('Send to new chat', sendBlockedReason())"
               [disabled]="sending() || sendBlockedReason() !== ''"
               (click)="sendToChat()"
             >
@@ -158,6 +159,7 @@ interface TranscriptLine {
               type="button"
               class="mono rounded px-3 py-1 text-[12px] font-medium text-[var(--ink)] ring-1 ring-[var(--line)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-40"
               data-testid="append-to-chat-btn"
+              [attr.aria-label]="ariaLabel('Add to current chat', appendBlockedReason())"
               [disabled]="sending() || appendBlockedReason() !== ''"
               (click)="sendToChat('current-chat')"
             >
@@ -214,23 +216,22 @@ export class LiveTranscriptComponent {
     () => this.status() === 'recording' && this.session()?.models_used.live == null
   );
 
-  /** There is a conversation the transcript could be appended to. */
-  readonly canAppend = computed(() => this.chat.hasConversation());
-
-  /** A send mid-reply is refused by the service — disable rather than fail after the confirm. */
-  readonly chatBusy = computed(() => this.chat.isStreamingFromState());
-
-  /** Why sending is blocked ('' when it is not) — a disabled button explains nothing on its own. */
-  readonly sendBlockedReason = computed(() => {
-    if (this.status() === 'recording') return 'Stop the recording first';
-    if (this.chatBusy()) return 'The chat is still replying';
-    return '';
-  });
+  /**
+   * Why sending is blocked ('' when it is not) — the service owns every reason but
+   * the recording gate, so the disabled state matches what the send would refuse.
+   */
+  readonly sendBlockedReason = computed(() =>
+    this.status() === 'recording'
+      ? 'Stop the recording first'
+      : this.chat.newConversationBlockedReason()
+  );
 
   /** Append is blocked by everything above, plus having no conversation to append to. */
-  readonly appendBlockedReason = computed(
-    () => this.sendBlockedReason() || (this.canAppend() ? '' : 'No open chat to add to')
-  );
+  readonly appendBlockedReason = computed(() => {
+    if (this.status() === 'recording') return 'Stop the recording first';
+    if (this.chat.isStreamingFromState()) return NEW_CONVERSATION_STREAMING;
+    return this.chat.hasConversation() ? '' : 'No open chat to add to';
+  });
 
   /** Loudness bars: label per captured channel, level as 0–100 for the width binding. */
   readonly meterBars = computed<{ label: string; pct: number }[]>(() => {
@@ -296,6 +297,16 @@ export class LiveTranscriptComponent {
     });
   }
 
+  /**
+   * Button label carrying its blocked reason: a `disabled` button fires no hover or
+   * focus events, so the tooltip alone never reaches keyboard or screen-reader users.
+   * @param label - the visible button text.
+   * @param reason - the blocked reason, '' when the button is live.
+   */
+  ariaLabel(label: string, reason: string): string {
+    return reason ? `${label} (unavailable: ${reason})` : label;
+  }
+
   /** Tracks whether the user sits at (within 50 px of) the bottom. */
   onBodyScroll(): void {
     const el = this.body()?.nativeElement;
@@ -335,7 +346,8 @@ export class LiveTranscriptComponent {
    */
   async sendToChat(target: SendTarget = 'new-chat'): Promise<void> {
     const s = this.session();
-    if (!s || s.status.state === 'recording') return;
+    const blocked = target === 'new-chat' ? this.sendBlockedReason() : this.appendBlockedReason();
+    if (!s || blocked) return;
     const where =
       target === 'new-chat'
         ? 'This starts a new chat and drops the transcript text into it'

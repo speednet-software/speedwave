@@ -494,12 +494,24 @@ describe('TranscriptionService', () => {
   });
 
   describe('sendToChat', () => {
-    it('sends the transcript with a Polish summarization instruction on top', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'pl' });
+    /**
+     * Answers the two transcript reads a send performs.
+     * @param language - session language the snapshot reports.
+     */
+    function transcriptHandler(language: 'pl' | 'en') {
+      return async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language });
         if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
         return undefined;
       };
+    }
+
+    beforeEach(() => {
+      mockTauri.invokeHandler = transcriptHandler('en');
+    });
+
+    it('sends the transcript with a Polish summarization instruction on top', async () => {
+      mockTauri.invokeHandler = transcriptHandler('pl');
       await svc.sendToChat('sess-1');
       const [text, label] = mockChat.sendMessage.mock.calls[0];
       expect(label).toBe('Meeting transcript');
@@ -508,11 +520,6 @@ describe('TranscriptionService', () => {
     });
 
     it('uses the English instruction for an English session', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
       await svc.sendToChat('sess-1');
       const [text] = mockChat.sendMessage.mock.calls[0];
       expect(text).toContain('summary');
@@ -521,21 +528,11 @@ describe('TranscriptionService', () => {
     });
 
     it('opens a new conversation before sending, by default', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
       await svc.sendToChat('sess-1');
       expect(mockChat.calls).toEqual(['startNewConversation', 'sendMessage']);
     });
 
     it('appends to the active conversation when the caller asks for it', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
       await svc.sendToChat('sess-1', 'current-chat');
       expect(mockChat.startNewConversation).not.toHaveBeenCalled();
       expect(mockChat.sendMessage).toHaveBeenCalledTimes(1);
@@ -552,22 +549,12 @@ describe('TranscriptionService', () => {
     });
 
     it('does not send when the new conversation fails to start', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
       mockChat.startNewConversation.mockRejectedValueOnce(new Error('no session'));
       await expect(svc.sendToChat('sess-1')).rejects.toThrow('no session');
       expect(mockChat.sendMessage).not.toHaveBeenCalled();
     });
 
     it('refuses to append while the current conversation is still replying', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
       mockChat.isStreamingFromState.set(true);
       await expect(svc.sendToChat('sess-1', 'current-chat')).rejects.toThrow(
         NEW_CONVERSATION_STREAMING

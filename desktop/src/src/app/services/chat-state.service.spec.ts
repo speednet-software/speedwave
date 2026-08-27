@@ -5,6 +5,7 @@ import {
   NEW_CONVERSATION_AUTH,
   NEW_CONVERSATION_BUSY,
   NEW_CONVERSATION_FAILED,
+  NEW_CONVERSATION_NO_PROJECT,
   NEW_CONVERSATION_STREAMING,
   historyFitsTarget,
   isNotAuthenticatedError,
@@ -190,7 +191,7 @@ describe('ChatStateService', () => {
      * Handler answering the bootstrap commands.
      * @param startChat - what the `start_chat` command does.
      */
-    function readyHandler(startChat: () => void | never) {
+    function readyHandler(startChat: () => void) {
       return async (cmd: string) => {
         if (cmd === 'start_chat') return startChat();
         if (cmd === 'list_projects')
@@ -217,6 +218,29 @@ describe('ChatStateService', () => {
       expect(service.messages.length).toBe(0);
       expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
       expect(service.lastKnownSessionId).toBeNull();
+      expect(service.hasConversation()).toBe(false);
+    });
+
+    it('attaches the stream listener before the session starts', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const order: string[] = [];
+      vi.spyOn(mockTauri, 'listen').mockImplementation(async (event: string) => {
+        order.push(`listen:${event}`);
+        return () => undefined;
+      });
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        order.push(`invoke:${cmd}`);
+        return mockTauri.invokeHandler(cmd, args);
+      });
+
+      await service.startNewConversation();
+
+      // A send that beats the listener loses its reply, so the attach must come first.
+      expect(order.indexOf('listen:chat_stream')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('listen:chat_stream')).toBeLessThan(order.indexOf('invoke:start_chat'));
     });
 
     it('claims the bootstrap slot so a later init does not start a second session', async () => {
@@ -241,13 +265,57 @@ describe('ChatStateService', () => {
         return undefined;
       });
 
+      service.seedSessionId('sess-old');
+
       await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
 
-      // The slot is free again: a retry starts a session instead of no-opping.
+      // The clear already happened, but the durable id survives so a restart can
+      // still resume what the user was in.
+      expect(service.messages.length).toBe(0);
+      expect(service.lastKnownSessionId).toBe('sess-old');
+
+      // The slot is free again once the project recovers: a retry really starts a session.
       fail = false;
+      projectState.status.set('ready');
       const spy = vi.spyOn(mockTauri, 'invoke');
       await service.startNewConversation();
       expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('keeps the conversation and names the cause when the project is not ready', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+        sessionStats: null,
+      });
+      projectState.status.set('starting');
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_BUSY);
+
+      expect(service.messages.length).toBe(1);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
+    });
+
+    it('tells the user to open a project instead of asking them to wait', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set(null);
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_NO_PROJECT);
+    });
+
+    it('refuses while a resume owns the session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const resuming = service.resumeConversation('sess-1');
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_BUSY);
+      await resuming;
     });
 
     it('keeps the conversation when a reply is still streaming', async () => {

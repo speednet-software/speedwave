@@ -1,10 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 import { provideRouter, Router } from '@angular/router';
 import { LiveTranscriptComponent } from './live-transcript.component';
 import { TranscriptionService } from '../../services/transcription.service';
-import { ChatStateService } from '../../services/chat-state.service';
+import {
+  ChatStateService,
+  NEW_CONVERSATION_BUSY,
+  NEW_CONVERSATION_STREAMING,
+} from '../../services/chat-state.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 function seg(start: number, text: string): Segment {
@@ -46,6 +52,7 @@ describe('LiveTranscriptComponent', () => {
   let chat: {
     hasConversation: WritableSignal<boolean>;
     isStreamingFromState: WritableSignal<boolean>;
+    newConversationBlockedReason: WritableSignal<string>;
   };
 
   beforeEach(async () => {
@@ -54,7 +61,11 @@ describe('LiveTranscriptComponent', () => {
       liveDraft: signal(''),
       audioLevels: signal<number[] | null>(null),
     };
-    chat = { hasConversation: signal(false), isStreamingFromState: signal(false) };
+    chat = {
+      hasConversation: signal(false),
+      isStreamingFromState: signal(false),
+      newConversationBlockedReason: signal(''),
+    };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
       providers: [
@@ -219,6 +230,7 @@ describe('LiveTranscriptComponent', () => {
     it('disables both send buttons while the chat is still replying, and says so', () => {
       chat.hasConversation.set(true);
       chat.isStreamingFromState.set(true);
+      chat.newConversationBlockedReason.set(NEW_CONVERSATION_STREAMING);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -230,8 +242,22 @@ describe('LiveTranscriptComponent', () => {
       expect(
         fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]').disabled
       ).toBe(true);
-      expect(component.sendBlockedReason()).toBe('The chat is still replying');
-      expect(component.appendBlockedReason()).toBe('The chat is still replying');
+      expect(component.sendBlockedReason()).toBe(NEW_CONVERSATION_STREAMING);
+      expect(component.appendBlockedReason()).toBe(NEW_CONVERSATION_STREAMING);
+    });
+
+    it('disables both buttons on a refusal the chat service owns', () => {
+      chat.hasConversation.set(true);
+      chat.newConversationBlockedReason.set(NEW_CONVERSATION_BUSY);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(component.sendBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
+        true
+      );
     });
 
     it('disables the append button and carries the reason as its tooltip when no chat is open', () => {
@@ -243,6 +269,15 @@ describe('LiveTranscriptComponent', () => {
       const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
       expect(btn.disabled).toBe(true);
       expect(component.appendBlockedReason()).toBe('No open chat to add to');
+      // A disabled button fires no hover or focus events, so the reason must also
+      // reach the accessibility tree, not only the tooltip.
+      expect(btn.getAttribute('aria-label')).toContain('No open chat to add to');
+      expect(
+        fixture.debugElement
+          .query(By.css('[data-testid="append-to-chat-btn"]'))
+          .parent?.injector.get(TooltipDirective)
+          .label()
+      ).toBe('No open chat to add to');
       // The new-chat path stays available: it does not need an existing conversation.
       expect(component.sendBlockedReason()).toBe('');
       expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
@@ -382,7 +417,7 @@ describe('LiveTranscriptComponent', () => {
   });
 
   describe('recording gate', () => {
-    it('disables the send buttons while recording', () => {
+    it('disables the send button while recording', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] })
@@ -406,7 +441,7 @@ describe('LiveTranscriptComponent', () => {
       expect(navSpy).not.toHaveBeenCalled();
     });
 
-    it('enables the send buttons once finalizing completes (status done)', () => {
+    it('enables the send button once finalizing completes (status done)', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })

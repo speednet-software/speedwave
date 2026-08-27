@@ -288,7 +288,7 @@ export class TranscriptionService {
   }
 
   /**
-   * Sends the transcript to Claude with a summarization instruction on top, in the session language.
+   * Sends the transcript to the chat with a summarization instruction on top, in the session language.
    * @param sessionId - the session to send.
    * @param target - `'new-chat'` (default) opens a fresh conversation first; `'current-chat'` appends.
    */
@@ -296,14 +296,11 @@ export class TranscriptionService {
     // Read the transcript before touching the chat: a failed read must not wipe
     // the conversation the user was in.
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
-    const instruction = SEND_TO_CHAT_INSTRUCTIONS[session.language] ?? SEND_TO_CHAT_INSTRUCTIONS.en;
-    if (target === 'new-chat') {
-      await this.chatState.startNewConversation();
-    } else if (this.chatState.isStreamingFromState()) {
-      // sendMessage silently drops a send mid-stream — refuse instead of opening
-      // a chat that never received the transcript.
-      throw new Error(NEW_CONVERSATION_STREAMING);
-    }
+    const instruction = SEND_TO_CHAT_INSTRUCTIONS[session.language];
+    if (target === 'new-chat') await this.chatState.startNewConversation();
+    // Checked last, after every await: sendMessage silently drops a send that lands
+    // mid-stream, and the caller would open a chat that never got the transcript.
+    if (this.chatState.isStreamingFromState()) throw new Error(NEW_CONVERSATION_STREAMING);
     await this.chatState.sendMessage(`${instruction}\n\n${md}`, 'Meeting transcript');
   }
 
