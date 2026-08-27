@@ -61,6 +61,20 @@ const SESSION_START_TIMEOUT_MS = 30_000;
 /** Polling interval while waiting for a session to start. */
 const SESSION_START_POLL_MS = 500;
 
+/** Surfaced by `startNewConversation` when the backend session never came up. */
+export const NEW_CONVERSATION_FAILED =
+  'Could not start a new chat. Open the chat tab to see why, then try again.';
+
+/** Surfaced by `startNewConversation` while a session start or resume already owns the chat. */
+export const NEW_CONVERSATION_BUSY = 'The chat session is still starting. Try again in a moment.';
+
+/** Surfaced by `startNewConversation` when a reply is still streaming into the current chat. */
+export const NEW_CONVERSATION_STREAMING =
+  'The chat is still replying. Wait for it to finish, then try again.';
+
+/** Surfaced by `startNewConversation` when the backend rejected the start as unauthenticated. */
+export const NEW_CONVERSATION_AUTH = 'Sign in to your LLM provider in Settings, then try again.';
+
 /**
  * Returns null for anything but the two known backend phrasings.
  * @param raw - Raw error message from the backend.
@@ -152,7 +166,8 @@ export class ChatStateService {
   }
 
   private unlisten: UnlistenFn | null = null;
-  private listenerReady = false;
+  /** In-flight (or settled) listener setup; a promise, so a second caller awaits the same attach. */
+  private listenerSetup: Promise<void> | null = null;
   private initialized = false;
   private startingSession = false;
   /**
@@ -212,6 +227,9 @@ export class ChatStateService {
 
   /** ADR-042 — projection of `state().is_streaming` onto a signal. */
   readonly isStreamingFromState: Signal<boolean> = computed(() => this._state().is_streaming);
+
+  /** `true` when the chat holds a conversation, including the entry currently streaming. */
+  readonly hasConversation: Signal<boolean> = computed(() => this._state().entries.length > 0);
 
   /** True while a resumed conversation's transcript is being fetched. */
   private readonly _loadingTranscript = signal<boolean>(false);
@@ -299,20 +317,25 @@ export class ChatStateService {
     );
   }
 
-  /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
-  async init(): Promise<void> {
-    this.log.debug(
-      `[chat-state] init: listenerReady=${this.listenerReady} initialized=${this.initialized}`
-    );
-    if (!this.listenerReady) {
-      this.listenerReady = true;
+  /** Attaches the stream + lifecycle listeners exactly once; concurrent callers await the same attach. */
+  private ensureListeners(): Promise<void> {
+    this.listenerSetup ??= (async () => {
       await this.setupStreamListener();
       this.setupProjectStateListeners();
       this.setupRestartResumeListeners();
       // Best-effort cache warm so the chat footer has a context window
       // ready before the first Result chunk lands.
       void this.refreshLlmConfigCache();
-    }
+    })();
+    return this.listenerSetup;
+  }
+
+  /** Ensures the stream listener runs exactly once. Waits for project ready before starting chat. */
+  async init(): Promise<void> {
+    this.log.debug(
+      `[chat-state] init: listenerReady=${this.listenerSetup !== null} initialized=${this.initialized}`
+    );
+    await this.ensureListeners();
     if (!this.initialized) {
       this.initialized = true;
       // Start session in background (UI stays responsive); sendMessage
@@ -328,13 +351,17 @@ export class ChatStateService {
     }
   }
 
-  private async startChatSession(): Promise<void> {
+  /**
+   * Starts a backend session for the active project.
+   * @returns `true` when a session was started, `false` when skipped or failed.
+   */
+  private async startChatSession(): Promise<boolean> {
     const project = this.projectState.activeProject();
     // A resume owns the session; a remount must not clobber it with a fresh start.
     // newConversation/delete null _lastKnownSessionId, so this gates only resume.
     if (this._resumeInProgress || this._lastKnownSessionId) {
       this.log.debug('[chat-state] startChatSession: skipped (resume owns the session)');
-      return;
+      return false;
     }
     if (project && !this.startingSession) {
       this.startingSession = true;
@@ -343,12 +370,13 @@ export class ChatStateService {
       try {
         await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
+        return true;
       } catch (err) {
         // A resume superseded this start while it was in flight — don't surface
         // its failure as the resumed session's error.
         if (gen !== this._sessionGeneration) {
           this.log.debug('[chat-state] startChatSession: superseded by resume, ignoring');
-          return;
+          return false;
         }
         const msg = String(err);
         if (isNotAuthenticatedError(msg)) {
@@ -366,6 +394,35 @@ export class ChatStateService {
         this.startingSession = false;
       }
     }
+    return false;
+  }
+
+  /**
+   * Clears the conversation and awaits a fresh backend session, so the caller can
+   * send into an empty chat. Throws without clearing anything when a session
+   * cannot be started right now.
+   */
+  async startNewConversation(): Promise<void> {
+    // Listeners first: a send that beats the stream listener loses its reply,
+    // and the chat tab may never have been mounted in this run.
+    await this.ensureListeners();
+    // Check before clearing: a start that would be skipped must not cost the user
+    // the conversation they were in.
+    if (this.isStreaming) throw new Error(NEW_CONVERSATION_STREAMING);
+    if (this._resumeInProgress || this.startingSession || !this.projectState.activeProject()) {
+      throw new Error(NEW_CONVERSATION_BUSY);
+    }
+    this.resetForNewConversation();
+    // Claim the bootstrap slot: a ChatComponent mounting later must not fire a
+    // second start_chat over the session this call owns.
+    this.initialized = true;
+    if (await this.startChatSession()) return;
+    this.initialized = false;
+    throw new Error(
+      this.projectState.status() === 'auth_required'
+        ? NEW_CONVERSATION_AUTH
+        : NEW_CONVERSATION_FAILED
+    );
   }
 
   /**
@@ -1126,8 +1183,12 @@ export class ChatStateService {
    * Resets tracking first so the new session isn't gated by the stale durable id.
    */
   private async startFreshSession(): Promise<void> {
-    this.resetForNewConversation();
-    await this.startChatSession();
+    try {
+      await this.startNewConversation();
+    } catch (err) {
+      // Nothing to surface to: this runs from a restart listener, not a click.
+      this.log.error(`[chat-state] startFreshSession failed: ${String(err)}`);
+    }
   }
 
   /**

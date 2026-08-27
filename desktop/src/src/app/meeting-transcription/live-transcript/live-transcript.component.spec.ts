@@ -4,6 +4,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 import { LiveTranscriptComponent } from './live-transcript.component';
 import { TranscriptionService } from '../../services/transcription.service';
+import { ChatStateService } from '../../services/chat-state.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 function seg(start: number, text: string): Segment {
@@ -42,6 +43,10 @@ describe('LiveTranscriptComponent', () => {
     liveDraft: WritableSignal<string>;
     audioLevels: WritableSignal<number[] | null>;
   };
+  let chat: {
+    hasConversation: WritableSignal<boolean>;
+    isStreamingFromState: WritableSignal<boolean>;
+  };
 
   beforeEach(async () => {
     svc = {
@@ -49,10 +54,12 @@ describe('LiveTranscriptComponent', () => {
       liveDraft: signal(''),
       audioLevels: signal<number[] | null>(null),
     };
+    chat = { hasConversation: signal(false), isStreamingFromState: signal(false) };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
       providers: [
         { provide: TranscriptionService, useValue: svc },
+        { provide: ChatStateService, useValue: chat },
         provideRouter([{ path: '**', children: [] }]),
       ],
     }).compileComponents();
@@ -164,7 +171,7 @@ describe('LiveTranscriptComponent', () => {
     fixture.detectChanges();
     await component.sendToChat();
     expect(confirmSpy).toHaveBeenCalled();
-    expect(svc.sendToChat).toHaveBeenCalledWith('sess-1');
+    expect(svc.sendToChat).toHaveBeenCalledWith('sess-1', 'new-chat');
     expect(navSpy).toHaveBeenCalledWith(['/chat']);
   });
 
@@ -195,16 +202,84 @@ describe('LiveTranscriptComponent', () => {
     expect(component.error()).toBe('chat busy');
   });
 
-  it('labels the button "Send to chat" and describes opening the chat', () => {
+  it('labels the two send targets so neither needs an explanation', () => {
     fixture.componentRef.setInput(
       'session',
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
-    expect(btn).not.toBeNull();
-    expect(btn.textContent).toContain('Send to chat');
-    expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain('chat');
+    expect(btn.textContent).toContain('Send to new chat');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]').textContent
+    ).toContain('Add to current chat');
+  });
+
+  describe('append to the current chat', () => {
+    it('disables both send buttons while the chat is still replying, and says so', () => {
+      chat.hasConversation.set(true);
+      chat.isStreamingFromState.set(true);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
+        true
+      );
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]').disabled
+      ).toBe(true);
+      expect(component.sendBlockedReason()).toBe('The chat is still replying');
+      expect(component.appendBlockedReason()).toBe('The chat is still replying');
+    });
+
+    it('disables the append button and carries the reason as its tooltip when no chat is open', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
+      expect(btn.disabled).toBe(true);
+      expect(component.appendBlockedReason()).toBe('No open chat to add to');
+      // The new-chat path stays available: it does not need an existing conversation.
+      expect(component.sendBlockedReason()).toBe('');
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
+        false
+      );
+    });
+
+    it('sends to the current chat when the append button is used', async () => {
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
+      chat.hasConversation.set(true);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
+      btn.click();
+      await fixture.whenStable();
+      expect(svc.sendToChat).toHaveBeenCalledWith('sess-1', 'current-chat');
+      expect(navSpy).toHaveBeenCalledWith(['/chat']);
+    });
+
+    it('names the target conversation in each confirm prompt', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      chat.hasConversation.set(true);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      await component.sendToChat();
+      await component.sendToChat('current-chat');
+      expect(confirmSpy.mock.calls[0][0]).toContain('starts a new chat');
+      expect(confirmSpy.mock.calls[1][0]).toContain('your current chat');
+      expect(svc.sendToChat).not.toHaveBeenCalled();
+    });
   });
 
   describe('auto-scroll', () => {
@@ -307,7 +382,7 @@ describe('LiveTranscriptComponent', () => {
   });
 
   describe('recording gate', () => {
-    it('disables the Send to chat button while recording', () => {
+    it('disables the send buttons while recording', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] })
@@ -331,7 +406,7 @@ describe('LiveTranscriptComponent', () => {
       expect(navSpy).not.toHaveBeenCalled();
     });
 
-    it('enables Send to chat once finalizing completes (status done)', () => {
+    it('enables the send buttons once finalizing completes (status done)', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })

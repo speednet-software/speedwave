@@ -16,7 +16,9 @@ import {
 } from '@angular/core';
 import { Router } from '@angular/router';
 
-import { TranscriptionService } from '../../services/transcription.service';
+import { TooltipDirective } from '../../shared/tooltip.directive';
+import { ChatStateService } from '../../services/chat-state.service';
+import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 /**
@@ -58,12 +60,12 @@ interface TranscriptLine {
 
 /**
  * Live transcript view (right pane): segments (offline `final_segments` if run, else
- * `live_segments`), finalize progress bar, and a "Send to chat" button behind a confirm dialog.
+ * `live_segments`), finalize progress bar, and the send-to-chat actions behind a confirm dialog.
  */
 @Component({
   selector: 'app-live-transcript',
   standalone: true,
-  imports: [],
+  imports: [TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-col" data-testid="live-transcript">
@@ -139,22 +141,28 @@ interface TranscriptLine {
       </div>
 
       @if (session()) {
-        <div class="mt-2 border-t border-[var(--line)] pt-2">
-          <button
-            type="button"
-            class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
-            data-testid="send-to-chat-btn"
-            [disabled]="sending() || status() === 'recording'"
-            (click)="sendToChat()"
-          >
-            {{ sending() ? 'sending…' : 'Send to chat' }}
-          </button>
-          <span class="mono ml-2 text-[10px] text-[var(--ink-mute)]">
-            @if (status() === 'recording') {
-              stop recording first
-            } @else {
-              drops the transcript into the chat and opens it
-            }
+        <div class="mt-2 flex flex-wrap items-center gap-2 border-t border-[var(--line)] pt-2">
+          <span [appTooltip]="sendBlockedReason()" placement="top">
+            <button
+              type="button"
+              class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+              data-testid="send-to-chat-btn"
+              [disabled]="sending() || sendBlockedReason() !== ''"
+              (click)="sendToChat()"
+            >
+              {{ sending() ? 'sending…' : 'Send to new chat' }}
+            </button>
+          </span>
+          <span [appTooltip]="appendBlockedReason()" placement="top">
+            <button
+              type="button"
+              class="mono rounded px-3 py-1 text-[12px] font-medium text-[var(--ink)] ring-1 ring-[var(--line)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-40"
+              data-testid="append-to-chat-btn"
+              [disabled]="sending() || appendBlockedReason() !== ''"
+              (click)="sendToChat('current-chat')"
+            >
+              Add to current chat
+            </button>
           </span>
         </div>
       }
@@ -167,7 +175,7 @@ export class LiveTranscriptComponent {
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
 
-  /** `true` while a "Send to chat" call is in flight. */
+  /** `true` while a send call is in flight. */
   readonly sending = signal(false);
   /** Local error string. */
   readonly error = signal('');
@@ -206,6 +214,24 @@ export class LiveTranscriptComponent {
     () => this.status() === 'recording' && this.session()?.models_used.live == null
   );
 
+  /** There is a conversation the transcript could be appended to. */
+  readonly canAppend = computed(() => this.chat.hasConversation());
+
+  /** A send mid-reply is refused by the service — disable rather than fail after the confirm. */
+  readonly chatBusy = computed(() => this.chat.isStreamingFromState());
+
+  /** Why sending is blocked ('' when it is not) — a disabled button explains nothing on its own. */
+  readonly sendBlockedReason = computed(() => {
+    if (this.status() === 'recording') return 'Stop the recording first';
+    if (this.chatBusy()) return 'The chat is still replying';
+    return '';
+  });
+
+  /** Append is blocked by everything above, plus having no conversation to append to. */
+  readonly appendBlockedReason = computed(
+    () => this.sendBlockedReason() || (this.canAppend() ? '' : 'No open chat to add to')
+  );
+
   /** Loudness bars: label per captured channel, level as 0–100 for the width binding. */
   readonly meterBars = computed<{ label: string; pct: number }[]>(() => {
     const kind = this.session()?.audio_source.source.kind;
@@ -237,6 +263,7 @@ export class LiveTranscriptComponent {
   });
 
   private readonly transcription = inject(TranscriptionService);
+  private readonly chat = inject(ChatStateService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly router = inject(Router);
   private readonly injector = inject(Injector);
@@ -302,18 +329,23 @@ export class LiveTranscriptComponent {
     );
   }
 
-  /** Confirms, drops the transcript into the chat, then opens the chat tab. */
-  async sendToChat(): Promise<void> {
+  /**
+   * Confirms, drops the transcript into a chat, then opens the chat tab.
+   * @param target - `'new-chat'` (default) or `'current-chat'` to keep the active thread.
+   */
+  async sendToChat(target: SendTarget = 'new-chat'): Promise<void> {
     const s = this.session();
     if (!s || s.status.state === 'recording') return;
-    const ok = window.confirm(
-      'This drops the transcript text into the chat (sent to your configured LLM provider). Continue?'
-    );
+    const where =
+      target === 'new-chat'
+        ? 'This starts a new chat and drops the transcript text into it'
+        : 'This drops the transcript text into your current chat';
+    const ok = window.confirm(`${where} (sent to your configured LLM provider). Continue?`);
     if (!ok) return;
     this.sending.set(true);
     this.error.set('');
     try {
-      await this.transcription.sendToChat(s.id);
+      await this.transcription.sendToChat(s.id, target);
       // Open the chat so the user sees the message they just sent.
       await this.router.navigate(['/chat']);
     } catch (e: unknown) {

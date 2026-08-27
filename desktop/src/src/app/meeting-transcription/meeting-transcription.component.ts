@@ -20,7 +20,7 @@ import { SessionListComponent } from './session-list/session-list.component';
 
 /**
  * Meeting transcription tab (beta-gated): recordings list + controls/live transcript. Transcription
- * is local; only "Send to Claude" uses the network. No model yet → gate points to Settings.
+ * is local; only sending the transcript to chat uses the network. No model yet → gate points to Settings.
  */
 @Component({
   selector: 'app-meeting-transcription',
@@ -54,7 +54,8 @@ import { SessionListComponent } from './session-list/session-list.component';
           <div>
             <h1 class="text-lg font-semibold">Meeting transcription</h1>
             <p class="text-sm text-[var(--ink-mute)]">
-              Audio is transcribed locally on this machine. "Send to chat" uses the network.
+              Audio is transcribed locally on this machine. Sending the transcript to chat uses the
+              network.
             </p>
             <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
               Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;

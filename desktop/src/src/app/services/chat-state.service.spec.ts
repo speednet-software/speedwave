@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import {
   ChatStateService,
+  NEW_CONVERSATION_AUTH,
+  NEW_CONVERSATION_BUSY,
+  NEW_CONVERSATION_FAILED,
+  NEW_CONVERSATION_STREAMING,
   historyFitsTarget,
   isNotAuthenticatedError,
   mapContextOverflowError,
@@ -178,6 +182,118 @@ describe('ChatStateService', () => {
 
       expect(firstCallCount).toBe(1);
       expect(secondCallCount).toBe(1);
+    });
+  });
+
+  describe('startNewConversation', () => {
+    /**
+     * Handler answering the bootstrap commands.
+     * @param startChat - what the `start_chat` command does.
+     */
+    function readyHandler(startChat: () => void | never) {
+      return async (cmd: string) => {
+        if (cmd === 'start_chat') return startChat();
+        if (cmd === 'list_projects')
+          return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+        if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
+        if (cmd === 'check_containers_running') return true;
+        return undefined;
+      };
+    }
+
+    it('clears the conversation and awaits a started session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+        sessionStats: null,
+      });
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.startNewConversation();
+
+      expect(service.messages.length).toBe(0);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+      expect(service.lastKnownSessionId).toBeNull();
+    });
+
+    it('claims the bootstrap slot so a later init does not start a second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.startNewConversation();
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('throws and releases the slot when the session never starts', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      let fail = true;
+      mockTauri.invokeHandler = readyHandler(() => {
+        if (fail) throw new Error('chat backend crashed');
+        return undefined;
+      });
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
+
+      // The slot is free again: a retry starts a session instead of no-opping.
+      fail = false;
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      await service.startNewConversation();
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(1);
+    });
+
+    it('keeps the conversation when a reply is still streaming', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+        sessionStats: null,
+      });
+      service.isStreaming = true;
+      const spy = vi.spyOn(mockTauri, 'invoke');
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_STREAMING);
+
+      expect(service.messages.length).toBe(1);
+      expect(spy.mock.calls.filter((c) => c[0] === 'start_chat').length).toBe(0);
+    });
+
+    it('keeps the conversation when a session start is already in flight', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => undefined);
+      service._setState({
+        messages: [{ role: 'user', blocks: [{ type: 'text', content: 'old' }], timestamp: 1 }],
+        currentBlocks: [],
+        sessionStats: null,
+      });
+      const release = service.beginStartingSession();
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_BUSY);
+
+      expect(service.messages.length).toBe(1);
+      release();
+    });
+
+    it('points at Settings when the backend rejects the start as unauthenticated', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      mockTauri.invokeHandler = readyHandler(() => {
+        throw new Error('not authenticated');
+      });
+
+      await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_AUTH);
+      expect(projectState.status()).toBe('auth_required');
     });
   });
 

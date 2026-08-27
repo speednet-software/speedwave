@@ -18,7 +18,7 @@ import type {
   TranscriptEvent,
   TranscriptSession,
 } from '../models/transcript';
-import { ChatStateService } from './chat-state.service';
+import { ChatStateService, NEW_CONVERSATION_STREAMING } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 
@@ -30,6 +30,9 @@ const RESUMED_DOWNLOAD_POLL_MS = 2000;
 
 /** localStorage key for the live-transcript preference. Exported so tests assert the real key. */
 export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
+
+/** Where a transcript send lands: a fresh conversation, or the one on screen. */
+export type SendTarget = 'new-chat' | 'current-chat';
 
 /** Instruction prepended to a transcript sent to chat, per session language. */
 const SEND_TO_CHAT_INSTRUCTIONS: Record<Language, string> = {
@@ -287,10 +290,20 @@ export class TranscriptionService {
   /**
    * Sends the transcript to Claude with a summarization instruction on top, in the session language.
    * @param sessionId - the session to send.
+   * @param target - `'new-chat'` (default) opens a fresh conversation first; `'current-chat'` appends.
    */
-  async sendToChat(sessionId: string): Promise<void> {
+  async sendToChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
+    // Read the transcript before touching the chat: a failed read must not wipe
+    // the conversation the user was in.
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
-    const instruction = SEND_TO_CHAT_INSTRUCTIONS[session.language];
+    const instruction = SEND_TO_CHAT_INSTRUCTIONS[session.language] ?? SEND_TO_CHAT_INSTRUCTIONS.en;
+    if (target === 'new-chat') {
+      await this.chatState.startNewConversation();
+    } else if (this.chatState.isStreamingFromState()) {
+      // sendMessage silently drops a send mid-stream — refuse instead of opening
+      // a chat that never received the transcript.
+      throw new Error(NEW_CONVERSATION_STREAMING);
+    }
     await this.chatState.sendMessage(`${instruction}\n\n${md}`, 'Meeting transcript');
   }
 
