@@ -105,3 +105,13 @@ _makefile_check_clippy_cargo_lines() {
         return 1
     fi
 }
+
+@test "audit job delegates npm audit to the Makefile targets" {
+    grep -q 'run: make audit-mcp audit-desktop' "$WORKFLOW"
+
+    # A hand-rolled npm audit re-copies the threshold and drifts from NPM_AUDIT_LEVEL.
+    if grep -n 'run:.*npm audit' "$WORKFLOW"; then
+        echo "Run make audit-mcp audit-desktop instead of a hand-rolled npm audit."
+        return 1
+    fi
+}

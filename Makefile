@@ -845,12 +845,15 @@ audit-rust:
 	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
+# Shared with CI, which runs these targets rather than its own npm audit line.
+NPM_AUDIT_LEVEL := high
+
 audit-mcp:
-	cd mcp-servers && $(NPM) audit --omit=dev
+	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ MCP dependencies: no vulnerabilities"
 
 audit-desktop:
-	cd desktop/src && $(NPM) audit --omit=dev
+	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ Desktop dependencies: no vulnerabilities"
 
 # ── Full quality gate (run before push) ──────────────────────────────────────

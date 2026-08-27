@@ -310,11 +310,8 @@ jobs:
           key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-audit-
 
-      - name: npm audit (mcp-servers)
-        run: cd mcp-servers && npm audit --audit-level=high --omit=dev
-
-      - name: npm audit (desktop)
-        run: cd desktop/src && npm audit --audit-level=high --omit=dev
+      - name: npm audit (both workspaces)
+        run: make audit-mcp audit-desktop
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
