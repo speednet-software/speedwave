@@ -48,6 +48,22 @@ stage_rig() {
     [ -f "$WORK/repo/desktop/src-tauri/vulkan-1.dll" ]
 }
 
+@test "stage-vulkan-runtime prefers the pinned SDK version over a lexicographically later one" {
+    stage_rig
+    mkdir -p "$WORK/sdks/1.4.357.0/runtime/x64" "$WORK/sdks/9.9.9.9/runtime/x64"
+    printf 'pinned loader' > "$WORK/sdks/1.4.357.0/runtime/x64/vulkan-1.dll"
+    printf 'wrong loader' > "$WORK/sdks/9.9.9.9/runtime/x64/vulkan-1.dll"
+    printf "\$Version = '1.4.357.0'\n\$RuntimeDllSha256 = '%s'\n" \
+        "$(hash_of "$WORK/sdks/1.4.357.0/runtime/x64/vulkan-1.dll")" \
+        > "$WORK/repo/scripts/install-vulkan-sdk.ps1"
+
+    SPEEDWAVE_VULKANSDK_BASE="$WORK/sdks" run \
+        env -u VULKAN_SDK bash "$WORK/repo/scripts/stage-vulkan-runtime.sh"
+
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/repo/desktop/src-tauri/vulkan-1.dll" ]
+}
+
 @test "stage-vulkan-runtime rejects a loader that does not match the pin" {
     stage_rig
     printf "\$RuntimeDllSha256 = '%s'\n" \
@@ -99,13 +115,14 @@ stage_rig() {
     [[ "$output" == *"too deep"* ]]
 }
 
-@test "check-vulkan-path-budget measures a relative CARGO_TARGET_DIR as an absolute path" {
-    # The literal "t" is 1 char; only the resolved absolute path can exceed the budget.
-    local deep_cwd
-    deep_cwd="$WORK/$(printf 'x%.0s' {1..80})"
-    mkdir -p "$deep_cwd"
-    cd "$deep_cwd"
-    CARGO_TARGET_DIR="t" run bash "$BUDGET_SCRIPT"
+@test "check-vulkan-path-budget resolves a relative CARGO_TARGET_DIR against the crate dir" {
+    # The literal "t" is 1 char; only the crate-dir-resolved path can exceed the budget.
+    local deep
+    deep="$WORK/$(printf 'x%.0s' {1..80})"
+    mkdir -p "$deep/repo/scripts" "$deep/repo/desktop/src-tauri"
+    cp "$BUDGET_SCRIPT" "$deep/repo/scripts/check-vulkan-path-budget.sh"
+
+    CARGO_TARGET_DIR="t" run bash "$deep/repo/scripts/check-vulkan-path-budget.sh"
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"too deep"* ]]
@@ -130,7 +147,9 @@ budget_rig() {
 
     [ "$status" -eq 0 ]
     if command -v cygpath >/dev/null 2>&1; then
-        [[ "$output" == *"$(cygpath -w /t):"* ]]
+        # cargo already returns a Windows-absolute path there; asserting its exact shape
+        # would re-encode cygpath's MSYS-root mapping. The budget verdict is the contract.
+        [[ "$output" == *"path budget OK"* ]]
     else
         [[ "$output" == *"/t:"* ]]
     fi

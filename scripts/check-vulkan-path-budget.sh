@@ -16,17 +16,22 @@ crate_dir="$repo_root/desktop/src-tauri"
 # every remaining layer (CARGO_BUILD_TARGET_DIR, crate-local/home/repo-root config.toml).
 target_dir="${CARGO_TARGET_DIR:-}"
 if [ -z "$target_dir" ]; then
-  unset CARGO_TARGET_DIR
-  metadata="$(cd "$crate_dir" && cargo metadata --format-version 1 --no-deps)" || {
-    echo "❌ cargo metadata failed in $crate_dir — cannot resolve the effective target dir." >&2
-    exit 1
-  }
-  if command -v jq >/dev/null 2>&1; then
-    target_dir="$(printf '%s' "$metadata" | jq -r .target_directory)"
+  if command -v cargo >/dev/null 2>&1; then
+    unset CARGO_TARGET_DIR
+    metadata="$(cd "$crate_dir" && cargo metadata --format-version 1 --no-deps)" || {
+      echo "❌ cargo metadata failed in $crate_dir — cannot resolve the effective target dir." >&2
+      exit 1
+    }
+    if command -v jq >/dev/null 2>&1; then
+      target_dir="$(printf '%s' "$metadata" | jq -r .target_directory)"
+    else
+      # No jq (bare dev shells): scrape the JSON, un-escape the doubled Windows backslashes.
+      target_dir="$(printf '%s' "$metadata" | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+      target_dir="${target_dir//\\\\/\\}"
+    fi
   else
-    # No jq (bare dev shells): scrape the JSON, un-escape the doubled Windows backslashes.
-    target_dir="$(printf '%s' "$metadata" | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
-    target_dir="${target_dir//\\\\/\\}"
+    # No cargo on PATH (bare shells): assume the default crate-local target dir.
+    target_dir="$crate_dir/target"
   fi
 fi
 if [ -z "$target_dir" ]; then
@@ -34,10 +39,11 @@ if [ -z "$target_dir" ]; then
   exit 1
 fi
 
-# A relative CARGO_TARGET_DIR resolves against the working directory — measure the real path.
+# A relative CARGO_TARGET_DIR resolves against cargo's working directory — the crate dir for
+# the tauri/desktop build — so measure it from there, not from this script's cwd.
 case "$target_dir" in
   /* | [A-Za-z]:* | \\\\*) ;;
-  *) target_dir="$PWD/$target_dir" ;;
+  *) target_dir="$crate_dir/$target_dir" ;;
 esac
 
 # Windows-style length is what cl.exe sees.
@@ -51,7 +57,8 @@ if [ $(( ${#win_target} + SUFFIX_BUDGET )) -gt "$MAX_PATH" ]; then
   echo "❌ The desktop build dir is too deep for the ggml-vulkan shader build:" >&2
   echo "   $win_target (${#win_target} chars) + ~$SUFFIX_BUDGET of CMake scratch > $MAX_PATH (MAX_PATH)." >&2
   echo "   cl.exe cannot open such paths even with LongPathsEnabled. Either clone the repo" >&2
-  echo "   under a shorter path, or create desktop/src-tauri/.cargo/config.toml with:" >&2
+  echo "   under a shorter path, set CARGO_TARGET_DIR to a short directory (e.g. D:\\st)," >&2
+  echo "   or create desktop/src-tauri/.cargo/config.toml with:" >&2
   echo '     [build]' >&2
   echo '     target-dir = "C:/spwd"   # any short directory' >&2
   exit 1

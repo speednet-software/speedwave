@@ -1189,6 +1189,35 @@ mod tests {
         store.create(s).unwrap()
     }
 
+    #[test]
+    fn forward_health_survives_a_store_rejection_and_keeps_the_store_usable() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let wav = store_dir.path().join("unused.wav");
+        let known = mk_session(&store, &wav);
+        // A driver pointed at a session the store does not know: every forward is rejected.
+        let driver = TranscriptDriver::new(DriverConfig {
+            id: Uuid::new_v4(),
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream { chunks: vec![] }),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: StopSignal::new(),
+            time_base: Duration::ZERO,
+        });
+        driver.forward_health(vec![
+            CaptureHealth::Raised(crate::transcription::audio::CaptureWarning::AudioDropped),
+            CaptureHealth::Cleared(crate::transcription::audio::CaptureWarning::AudioDropped),
+        ]);
+        // The rejection is logged and dropped — the store still accepts the known session.
+        assert!(store
+            .capture_warning(
+                known,
+                crate::transcription::audio::CaptureWarning::AudioDropped
+            )
+            .is_ok());
+    }
+
     /// Builds a fixture WAV of `secs` seconds of a quiet 220 Hz tone (16 kHz
     /// mono int16) and returns its path + the directory guard.
     fn make_fixture_wav(secs: f32) -> (tempfile::TempDir, PathBuf) {

@@ -318,7 +318,7 @@ mod tests {
             );
         }
         // The TS union must stay in sync; today only test fixtures read `backends` — the UI
-        // renders `accel_label` verbatim (transcription-section.component.ts).
+        // renders `accel_label` verbatim.
         let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
         for (b, tag) in [
             (Backend::Cpu, "'cpu'"),

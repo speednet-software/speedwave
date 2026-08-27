@@ -72,7 +72,7 @@ whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 # cpal stays for the microphone (ADR-056). macOS uses the bundled audio-capture-cli instead.
 cpal = { version = "0.18", optional = true }
 wasapi = { version = "0.24", optional = true }
-# Vulkan backend on Windows, mirroring the macOS `metal` block below — a target-conditional
+# Vulkan backend on Windows, mirroring the macOS `metal` block above — a target-conditional
 # feature union, deliberately not a cargo feature. Needs the pinned SDK (install-vulkan-sdk.ps1).
 whisper-rs = { version = "0.16", optional = true, features = ["vulkan"] }
 # Runtime GPU probe (`transcription/gpu_probe.rs`); `loaded` = ash itself loads dynamically.

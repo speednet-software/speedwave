@@ -56,10 +56,10 @@ ensure_provisioned_windows() {
     # shellcheck disable=SC2086
     ssh $WINDOWS_SSH_OPTS "$WINDOWS_HOST" "wsl.exe -d $WINDOWS_WSL_DISTRO -- echo ready" >/dev/null 2>&1 || ok=0
     if [ "$ok" -eq 1 ]; then
-        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
+        echo 'if (-not (Get-Command node -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { exit 1 }; if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { exit 1 }; $p = [System.Environment]::GetEnvironmentVariable("LIBCLANG_PATH","Machine"); if (-not $p -or -not (Test-Path "$p\libclang.dll")) { exit 1 }; $v = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine"); if (-not $v -or -not (Test-Path "$v\runtime\x64\vulkan-1.dll")) { exit 1 }' | windows_ps >/dev/null 2>&1 || ok=0
     fi
     if [ "$ok" -eq 1 ]; then
-        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang found)"
+        echo "[windows] Provisioning: OK (WSL2 + node + cargo + cmake + libclang + Vulkan SDK found)"
         return
     fi
     echo "[windows] Provisioning: missing tools — running setup..."
@@ -434,7 +434,12 @@ Assert-ExitCode
 Write-Host "── Staging Vulkan runtime loader + static licenses (ADR-085)..."
 $vsdk = [System.Environment]::GetEnvironmentVariable('VULKAN_SDK','Machine')
 if (-not $vsdk) { Write-Error 'VULKAN_SDK not set — run scripts/e2e-vm-setup.sh windows first'; exit 1 }
-Copy-Item (Join-Path $vsdk 'runtime\x64\vulkan-1.dll') desktop\src-tauri\vulkan-1.dll
+$dll = Join-Path $vsdk 'runtime\x64\vulkan-1.dll'
+# Same pin gate as stage-vulkan-runtime.sh — the rig's NSIS installer must not ship an
+# unpinned loader (-ne on strings is case-insensitive, so the pin's case is irrelevant).
+$pin = (Select-String -Path scripts\install-vulkan-sdk.ps1 -Pattern "RuntimeDllSha256 = '([0-9a-fA-F]{64})'").Matches[0].Groups[1].Value
+if ((Get-FileHash -Algorithm SHA256 $dll).Hash -ne $pin) { Write-Error "vulkan-1.dll at $dll does not match the pin — re-run scripts/e2e-vm-setup.sh windows"; exit 1 }
+Copy-Item $dll desktop\src-tauri\vulkan-1.dll
 New-Item -ItemType Directory -Path desktop\src-tauri\THIRD-PARTY-LICENSES -Force | Out-Null
 Copy-Item desktop\src-tauri\licenses-static\* desktop\src-tauri\THIRD-PARTY-LICENSES\
 

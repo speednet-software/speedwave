@@ -421,6 +421,7 @@ else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@echo "✅ Build phase complete"
 
@@ -486,6 +487,8 @@ test-transcription: guard-not-prod-data-dir
 	@# without the feature and is already exercised by `test-rust`. Without the
 	@# `transcription::` filter, cargo re-runs the whole suite a second time
 	@# (~100 compose tests at ~5s each), which alone blows past the CI job budget.
+	@# `transcription::` filter without `--lib` on purpose: this target is the RUN_STT_E2E
+	@# opt-in runner for transcription_pipeline_e2e.rs (CI's windows step uses --lib).
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
 
@@ -689,7 +692,8 @@ test-e2e-desktop: test-e2e-desktop-build
 	@"$(MAKE)" _e2e-run
 	@echo "✅ Desktop E2E tests passed"
 
-E2E_BINARY = desktop/src-tauri/target/release/speedwave-desktop
+# Honour the CARGO_TARGET_DIR escape (Windows MAX_PATH) when locating the built app.
+E2E_BINARY = $(or $(CARGO_TARGET_DIR),desktop/src-tauri/target)/release/speedwave-desktop
 
 # All platforms: app embeds tauri-plugin-webdriver on port 4445.
 # Launch app, wait for WebDriver ready, run wdio, cleanup.

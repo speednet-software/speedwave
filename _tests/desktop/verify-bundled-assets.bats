@@ -155,6 +155,19 @@ populate_windows() {
     [[ "$output" == *"SHA256 mismatch"* ]]
 }
 
+@test "verify-bundled-assets accepts an uppercase pin pasted from Get-FileHash" {
+    populate_common
+    populate_windows
+    scripts_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/scripts.XXXXXX")"
+    cp "$SCRIPT" "$scripts_dir/verify-bundled-assets.sh"
+    pin="$( (sha256sum "$ROOT/vulkan-1.dll" 2>/dev/null || shasum -a 256 "$ROOT/vulkan-1.dll") | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+    printf "\$RuntimeDllSha256 = '%s'\n" "$pin" > "$scripts_dir/install-vulkan-sdk.ps1"
+
+    run bash "$scripts_dir/verify-bundled-assets.sh" windows "$ROOT"
+
+    [ "$status" -eq 0 ]
+}
+
 @test "verify-bundled-assets accepts a vulkan-1.dll matching the pin read from install-vulkan-sdk.ps1" {
     populate_common
     populate_windows

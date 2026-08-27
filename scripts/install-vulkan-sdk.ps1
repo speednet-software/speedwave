@@ -17,7 +17,7 @@ function Get-Verified([string]$Path, [string]$Url, [string]$Expected, [string]$W
         # System32 curl by absolute path: this script runs elevated and executes what it
         # downloads — a PATH-planted curl.exe must not win (same rule as binary.rs).
         # Bounded: a stalled CDN must fail the step, not hang it until the job timeout.
-        & (Join-Path $env:SystemRoot 'System32\curl.exe') -fsSL --connect-timeout 30 --retry 3 --max-time 1800 -o $Path $Url
+        & (Join-Path $env:SystemRoot 'System32\curl.exe') -fsSL --connect-timeout 30 --retry 3 --retry-all-errors --max-time 1800 -o $Path $Url
         if ($LASTEXITCODE -ne 0) { throw "$What download failed (exit $LASTEXITCODE)" }
     }
     $hash = (Get-FileHash -Algorithm SHA256 $Path).Hash

@@ -465,11 +465,15 @@ jobs:
       # `make test-transcription` skips them by target. The module filter runs every current
       # and future windows-gated test in the module, so there is no name list to drift.
       - name: cargo test speedwave-runtime transcription (windows)
-        # A renamed module would zero the filter and green-out this step — assert it matches.
+        # --lib: the windows-gated tests live in the lib target; without it every integration
+        # target relinks libwhisper+ggml-vulkan to run zero tests. Guard pins audio_windows.
         run: |
-          LIST="$(cargo test -p speedwave-runtime --features audio-transcription "transcription::" -- --list)"
-          grep -q ': test' <<<"$LIST" || { echo '::error::filter "transcription::" matched no tests'; exit 1; }
-          cargo test -p speedwave-runtime --features audio-transcription "transcription::"
+          LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
+          grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
+          cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::"
+          # Integration targets (transcription_pipeline_e2e) must still compile with the
+          # feature — check-only, so nothing links libwhisper for zero runnable tests.
+          cargo check --tests -p speedwave-runtime --features audio-transcription
 
       # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
       # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.

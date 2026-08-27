@@ -188,9 +188,11 @@ try {
 Write-Host "== Enabling Windows long paths (ninja needs them for the whisper.cpp Vulkan build) =="
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
     -Name 'LongPathsEnabled' -Value 1 -Type DWord
-$gitLongPaths = git config --system core.longpaths true 2>&1
+# No 2>&1 capture: under EAP=Stop PS 5.1 turns merged native stderr into a terminating
+# NativeCommandError. A warning matches the choco-3010 handling above — setup must not die here.
+git config --system core.longpaths true
 if ($LASTEXITCODE -ne 0) {
-    throw "git config --system core.longpaths failed (exit ${LASTEXITCODE}): $gitLongPaths"
+    Write-Warning "git config --system core.longpaths failed (exit $LASTEXITCODE) — set it manually if the whisper build hits long git paths."
 }
 
 Write-Host ""
