@@ -226,7 +226,10 @@ export class LiveTranscriptComponent {
       : this.chat.newConversationBlockedReason()
   );
 
-  /** Append is blocked by everything above, plus having no conversation to append to. */
+  /**
+   * Narrower than {@link sendBlockedReason} on purpose: an open conversation implies a
+   * ready project, and `sendMessage` waits out a session start instead of refusing.
+   */
   readonly appendBlockedReason = computed(() => {
     if (this.status() === 'recording') return 'Stop the recording first';
     if (this.chat.isStreamingFromState()) return NEW_CONVERSATION_STREAMING;

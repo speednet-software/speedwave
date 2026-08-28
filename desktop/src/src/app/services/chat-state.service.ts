@@ -433,7 +433,9 @@ export class ChatStateService {
         }
         return 'failed';
       } finally {
-        this.startingSession = false;
+        // A resume that superseded this start owns the flag now and clears it
+        // in its own disposer; releasing it here would unblock a racing send.
+        if (gen === this._sessionGeneration) this.startingSession = false;
       }
     }
     return 'skipped';
@@ -458,11 +460,16 @@ export class ChatStateService {
     // project is ready, so neither fires a second start_chat over this session.
     this.initialized = true;
     this._sessionGeneration += 1;
+    const gen = this._sessionGeneration;
     const outcome = await this.startChatSession();
     if (outcome === 'started') return;
-    this.initialized = false;
-    // Keep the durable id so a container restart can still resume what the user was in.
-    this._lastKnownSessionId = priorSessionId;
+    // Only unwind what this call still owns: a resume that landed mid-flight has
+    // already stamped its own session id, and the prior one is stale by now.
+    if (gen === this._sessionGeneration) {
+      this.initialized = false;
+      // Keep the durable id so a container restart can still resume what the user was in.
+      this._lastKnownSessionId = priorSessionId;
+    }
     if (outcome === 'auth') throw new Error(NEW_CONVERSATION_AUTH);
     throw new Error(outcome === 'skipped' ? NEW_CONVERSATION_BUSY : NEW_CONVERSATION_FAILED);
   }
@@ -507,6 +514,9 @@ export class ChatStateService {
 
     const invokeArgs = { blocks: wireBlocks, displayText: surfaceText };
     try {
+      // A send that beats the stream listener loses its reply: the transcript pane
+      // appends to a conversation without the chat tab ever having been mounted.
+      await this.ensureListeners();
       await this.tauri.invoke('send_message', invokeArgs);
     } catch (err) {
       const errStr = String(err);

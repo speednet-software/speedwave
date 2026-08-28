@@ -318,6 +318,52 @@ describe('ChatStateService', () => {
       await resuming;
     });
 
+    it('leaves a resume that superseded it owning the session id', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      let releaseStart: (() => void) | null = null;
+      let releaseResume: (() => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        switch (cmd) {
+          case 'start_chat':
+            await new Promise<void>((r) => (releaseStart = r));
+            return undefined;
+          case 'resume_conversation':
+            await new Promise<void>((r) => (releaseResume = r));
+            return undefined;
+          case 'get_conversation':
+            return { session_id: 'sess-resumed', messages: [] };
+          case 'list_projects':
+            return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
+          case 'get_bundle_reconcile_state':
+            return MOCK_BUNDLE_RECONCILE_DONE;
+          case 'check_containers_running':
+            return true;
+          default:
+            return undefined;
+        }
+      };
+      service.seedSessionId('sess-stale');
+
+      const starting = service.startNewConversation();
+      await vi.waitFor(() => {
+        expect(releaseStart).not.toBeNull();
+      });
+      // Supersede the in-flight start, then let it finish and unwind.
+      const resuming = service.resumeConversation('sess-resumed');
+      releaseStart!();
+
+      await expect(starting).rejects.toThrow(NEW_CONVERSATION_BUSY);
+      // Asserted before the resume settles: its own seed would mask a clobber here.
+      expect(service.lastKnownSessionId).toBe('sess-resumed');
+      // The resume still owns the busy flag the superseded start shares.
+      expect(service.newConversationBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
+
+      releaseResume!();
+      await resuming;
+      expect(service.lastKnownSessionId).toBe('sess-resumed');
+    });
+
     it('keeps the conversation when a reply is still streaming', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
