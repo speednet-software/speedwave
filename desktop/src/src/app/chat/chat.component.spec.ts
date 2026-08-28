@@ -8,6 +8,7 @@ import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
+import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 
 function makeMockLogger() {
@@ -350,6 +351,86 @@ describe('ChatComponent', () => {
       expect(chatState.messages).toHaveLength(2);
       const errorBlock = chatState.messages[1].blocks[0];
       expect(errorBlock.type).toBe('error');
+    });
+  });
+
+  // ── staged meeting transcript ────────────────────────────────────────────
+
+  describe('staged meeting transcript', () => {
+    /** Stages a transcript against the current chat, the way the transcript pane does. */
+    async function stage(): Promise<TranscriptionService> {
+      const transcription = TestBed.inject(TranscriptionService);
+      const prior = mockTauri.invokeHandler;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return { language: 'en' };
+        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
+        return prior(cmd);
+      };
+      await transcription.stageForChat('sess-1', 'current-chat');
+      mockTauri.invokeHandler = prior;
+      return transcription;
+    }
+
+    it('appends the transcript after a blank line and unstages it', async () => {
+      const transcription = await stage();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockResolvedValue(undefined);
+
+      await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
+
+      expect(invokeSpy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: 'summarize this\n\n# Meeting transcript' }],
+        displayText: 'summarize this',
+      });
+      expect(transcription.stagedTranscript()).toBe('');
+    });
+
+    it('shows only the typed text in the local bubble', async () => {
+      await stage();
+      await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
+      expect(chatState.messages[0].blocks[0]).toEqual({
+        type: 'text',
+        content: 'summarize this',
+      });
+    });
+
+    it('sends the message alone once the transcript is unpinned', async () => {
+      const transcription = await stage();
+      transcription.clearStagedTranscript();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      invokeSpy.mockResolvedValue(undefined);
+
+      await component.sendMessage({ payload: 'never mind', displayText: 'never mind' });
+
+      expect(invokeSpy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: 'never mind' }],
+        displayText: 'never mind',
+      });
+    });
+
+    it('rides along with a message queued mid-stream', async () => {
+      const transcription = await stage();
+      await component.onQueueRequested('summarize this');
+      expect(chatState.pendingQueueFromState()?.text).toBe(
+        'summarize this\n\n# Meeting transcript'
+      );
+      expect(transcription.stagedTranscript()).toBe('');
+    });
+
+    it('keeps the transcript staged when the send is refused mid-stream', async () => {
+      const transcription = await stage();
+      chatState.isStreaming = true;
+      await component.sendMessage({ payload: 'summarize this', displayText: 'summarize this' });
+      expect(transcription.stagedTranscript()).toBe('# Meeting transcript');
+    });
+
+    it('marks the composer while a transcript is staged', async () => {
+      projectState.status.set('ready');
+      await stage();
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="composer-transcript"]')
+      ).toBeTruthy();
     });
   });
 

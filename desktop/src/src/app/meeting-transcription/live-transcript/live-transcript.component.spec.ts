@@ -45,7 +45,7 @@ describe('LiveTranscriptComponent', () => {
   let component: LiveTranscriptComponent;
   let fixture: ComponentFixture<LiveTranscriptComponent>;
   let svc: {
-    sendToChat: ReturnType<typeof vi.fn>;
+    stageForChat: ReturnType<typeof vi.fn>;
     liveDraft: WritableSignal<string>;
     audioLevels: WritableSignal<number[] | null>;
   };
@@ -57,7 +57,7 @@ describe('LiveTranscriptComponent', () => {
 
   beforeEach(async () => {
     svc = {
-      sendToChat: vi.fn(async () => undefined),
+      stageForChat: vi.fn(async () => undefined),
       liveDraft: signal(''),
       audioLevels: signal<number[] | null>(null),
     };
@@ -172,7 +172,7 @@ describe('LiveTranscriptComponent', () => {
     expect(bar.textContent).toContain('40%');
   });
 
-  it('confirms, sends, then navigates to the chat tab', async () => {
+  it('stages the transcript without a confirm dialog, then navigates to the chat tab', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput(
@@ -180,35 +180,21 @@ describe('LiveTranscriptComponent', () => {
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
-    await component.sendToChat();
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(svc.sendToChat).toHaveBeenCalledWith('sess-1', 'new-chat');
+    await component.stageForChat();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(svc.stageForChat).toHaveBeenCalledWith('sess-1', 'new-chat');
     expect(navSpy).toHaveBeenCalledWith(['/chat']);
   });
 
-  it('does not send or navigate when the confirm is dismissed', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+  it('stays on the tab (no navigation) if staging fails', async () => {
+    svc.stageForChat.mockRejectedValueOnce(new Error('chat busy'));
     const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput(
       'session',
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
-    await component.sendToChat();
-    expect(svc.sendToChat).not.toHaveBeenCalled();
-    expect(navSpy).not.toHaveBeenCalled();
-  });
-
-  it('stays on the tab (no navigation) if sending fails', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    svc.sendToChat.mockRejectedValueOnce(new Error('chat busy'));
-    const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
-    fixture.componentRef.setInput(
-      'session',
-      session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
-    );
-    fixture.detectChanges();
-    await component.sendToChat();
+    await component.stageForChat();
     expect(navSpy).not.toHaveBeenCalled();
     expect(component.error()).toBe('chat busy');
   });
@@ -285,8 +271,7 @@ describe('LiveTranscriptComponent', () => {
       );
     });
 
-    it('sends to the current chat when the append button is used', async () => {
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
+    it('stages against the current chat when the append button is used', async () => {
       const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
       chat.hasConversation.set(true);
       fixture.componentRef.setInput(
@@ -297,23 +282,8 @@ describe('LiveTranscriptComponent', () => {
       const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
       btn.click();
       await fixture.whenStable();
-      expect(svc.sendToChat).toHaveBeenCalledWith('sess-1', 'current-chat');
+      expect(svc.stageForChat).toHaveBeenCalledWith('sess-1', 'current-chat');
       expect(navSpy).toHaveBeenCalledWith(['/chat']);
-    });
-
-    it('names the target conversation in each confirm prompt', async () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-      chat.hasConversation.set(true);
-      fixture.componentRef.setInput(
-        'session',
-        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
-      );
-      fixture.detectChanges();
-      await component.sendToChat();
-      await component.sendToChat('current-chat');
-      expect(confirmSpy.mock.calls[0][0]).toContain('starts a new chat');
-      expect(confirmSpy.mock.calls[1][0]).toContain('your current chat');
-      expect(svc.sendToChat).not.toHaveBeenCalled();
     });
   });
 
@@ -427,17 +397,15 @@ describe('LiveTranscriptComponent', () => {
       expect(btn.disabled).toBe(true);
     });
 
-    it('sendToChat is a no-op while the session is still recording', async () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    it('stageForChat is a no-op while the session is still recording', async () => {
       const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] })
       );
       fixture.detectChanges();
-      await component.sendToChat();
-      expect(confirmSpy).not.toHaveBeenCalled();
-      expect(svc.sendToChat).not.toHaveBeenCalled();
+      await component.stageForChat();
+      expect(svc.stageForChat).not.toHaveBeenCalled();
       expect(navSpy).not.toHaveBeenCalled();
     });
 
