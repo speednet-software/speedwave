@@ -127,7 +127,7 @@ mockito = "1"
 # Serialises tests that mutate the process-global environment
 # (`std::env::set_var`) — without it they race each other and concurrent
 # runtime tests.
-serial_test = "3"
+serial_test = "4"
 
 [lints]
 workspace = true
