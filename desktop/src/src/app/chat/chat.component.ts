@@ -16,6 +16,7 @@ import { TauriService } from '../services/tauri.service';
 import { ChatStateService } from '../services/chat-state.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
+import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
 import type { ConversationSummary, ChatAttachment } from '../models/chat';
 import { ChatHeaderComponent } from './header/chat-header.component';
@@ -81,6 +82,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly chat = inject(ChatStateService);
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
+  readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private tauri = inject(TauriService);
   private router = inject(Router);
@@ -227,7 +229,11 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (this.chat.isStreaming) return;
     if (!event?.payload && attachments.length === 0) return;
     this.cdr.markForCheck();
-    await this.chat.sendMessage({ text: event.payload ?? '', attachments }, event.displayText);
+    await this.chat.sendMessage(
+      { text: this.withStagedTranscript(event.payload ?? ''), attachments },
+      event.displayText
+    );
+    this.transcription.clearStagedTranscript();
   }
 
   /**
@@ -236,8 +242,18 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   async onQueueRequested(text: string): Promise<void> {
     if (!text) return;
-    await this.chat.queueMessage(text);
+    await this.chat.queueMessage(this.withStagedTranscript(text));
+    this.transcription.clearStagedTranscript();
     this.cdr.markForCheck();
+  }
+
+  /**
+   * Appends the staged meeting transcript, if one is pinned, after a blank line.
+   * @param text - the user's own message text.
+   */
+  private withStagedTranscript(text: string): string {
+    const staged = this.transcription.stagedTranscript();
+    return staged ? `${text}\n\n${staged}` : text;
   }
 
   /** ADR-045 — composer signalled queue cancellation (X button). */

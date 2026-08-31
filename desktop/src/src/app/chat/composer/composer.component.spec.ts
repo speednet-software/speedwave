@@ -642,4 +642,68 @@ describe('ComposerComponent', () => {
       expect(textarea().style.height).toBe('');
     });
   });
+
+  // ── meeting transcript staged for the next message ──────────────────
+  describe('staged transcript', () => {
+    function transcriptRow(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-transcript"]');
+    }
+
+    function detachButton(): HTMLButtonElement | null {
+      return rootEl.querySelector<HTMLButtonElement>('[data-testid="composer-transcript-detach"]');
+    }
+
+    it('renders no transcript row by default', () => {
+      expect(transcriptRow()).toBeNull();
+    });
+
+    it('names the destination so the user knows the text leaves the machine', () => {
+      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.detectChanges();
+      expect(transcriptRow()?.textContent).toContain('next message');
+      expect(transcriptRow()?.textContent).toContain('LLM provider');
+    });
+
+    it('emits transcriptDetached when the row is unpinned', () => {
+      const detached: number[] = [];
+      component.transcriptDetached.subscribe(() => detached.push(1));
+      fixture.componentRef.setInput('transcriptAttached', true);
+      fixture.detectChanges();
+      expect(detachButton()?.getAttribute('aria-label')).toBe('Detach meeting transcript');
+      detachButton()!.click();
+      expect(detached.length).toBe(1);
+    });
+
+    it('loads a draft into the field and reports it applied', async () => {
+      const applied: number[] = [];
+      component.draftApplied.subscribe(() => applied.push(1));
+      fixture.componentRef.setInput('draftText', 'summarize the meeting');
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(component.text.value).toBe('summarize the meeting');
+      expect(applied.length).toBe(1);
+      expect(textarea().selectionStart).toBe('summarize the meeting'.length);
+    });
+
+    it('leaves user edits alone once the parent clears the draft', async () => {
+      fixture.componentRef.setInput('draftText', 'summarize the meeting');
+      fixture.detectChanges();
+      component.text.setValue('my own prompt');
+      fixture.componentRef.setInput('draftText', '');
+      fixture.detectChanges();
+      await fixture.whenStable();
+      expect(component.text.value).toBe('my own prompt');
+    });
+
+    it('does not submit an empty field, so a cleared prompt sends nothing', () => {
+      const emitted: string[] = [];
+      component.submitted.subscribe((v) => emitted.push(v.payload));
+      fixture.componentRef.setInput('transcriptAttached', true);
+      component.text.setValue('');
+      fixture.detectChanges();
+      textarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false }));
+      expect(emitted).toEqual([]);
+      expect(transcriptRow()).not.toBeNull();
+    });
+  });
 });

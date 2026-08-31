@@ -65,9 +65,13 @@
             [streaming]="chat.isStreamingFromState()"
             [queuedText]="chat.pendingQueueFromState()?.text ?? ''"
             [model]="chat.sessionStatsFromState()?.model ?? ''"
+            [transcriptAttached]="transcription.stagedTranscript() !== ''"
+            [draftText]="transcription.chatPromptDraft()"
             (submitted)="sendMessage($event)"
             (queueRequested)="onQueueRequested($event)"
             (queueCancelled)="onQueueCancelled()"
+            (transcriptDetached)="transcription.clearStagedTranscript()"
+            (draftApplied)="transcription.clearChatPromptDraft()"
             (stopRequested)="onStopClicked()"
           />
           <app-session-stats [stats]="chat.sessionStatsFromState()" [branch]="gitBranch()" />

@@ -60,7 +60,7 @@ interface TranscriptLine {
 
 /**
  * Live transcript view (right pane): segments (offline `final_segments` if run, else
- * `live_segments`), finalize progress bar, and the send-to-chat actions behind a confirm dialog.
+ * `live_segments`), finalize progress bar, and the actions that stage the transcript for the chat composer.
  */
 @Component({
   selector: 'app-live-transcript',
@@ -149,9 +149,9 @@ interface TranscriptLine {
               data-testid="send-to-chat-btn"
               [attr.aria-label]="ariaLabel('Send to new chat', sendBlockedReason())"
               [disabled]="sending() || sendBlockedReason() !== ''"
-              (click)="sendToChat()"
+              (click)="stageForChat()"
             >
-              {{ sending() ? 'sending…' : 'Send to new chat' }}
+              {{ sending() ? 'opening…' : 'Send to new chat' }}
             </button>
           </span>
           <span [appTooltip]="appendBlockedReason()" placement="top">
@@ -161,7 +161,7 @@ interface TranscriptLine {
               data-testid="append-to-chat-btn"
               [attr.aria-label]="ariaLabel('Add to current chat', appendBlockedReason())"
               [disabled]="sending() || appendBlockedReason() !== ''"
-              (click)="sendToChat('current-chat')"
+              (click)="stageForChat('current-chat')"
             >
               Add to current chat
             </button>
@@ -177,7 +177,7 @@ export class LiveTranscriptComponent {
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
 
-  /** `true` while a send call is in flight. */
+  /** `true` while the staging call is in flight. */
   readonly sending = signal(false);
   /** Local error string. */
   readonly error = signal('');
@@ -344,24 +344,18 @@ export class LiveTranscriptComponent {
   }
 
   /**
-   * Confirms, drops the transcript into a chat, then opens the chat tab.
+   * Stages the transcript for the chat composer, then opens the chat tab so the user can edit
+   * the prompt before sending. Nothing leaves the machine here.
    * @param target - `'new-chat'` (default) or `'current-chat'` to keep the active thread.
    */
-  async sendToChat(target: SendTarget = 'new-chat'): Promise<void> {
+  async stageForChat(target: SendTarget = 'new-chat'): Promise<void> {
     const s = this.session();
     const blocked = target === 'new-chat' ? this.sendBlockedReason() : this.appendBlockedReason();
     if (!s || blocked) return;
-    const where =
-      target === 'new-chat'
-        ? 'This starts a new chat and drops the transcript text into it'
-        : 'This drops the transcript text into your current chat';
-    const ok = window.confirm(`${where} (sent to your configured LLM provider). Continue?`);
-    if (!ok) return;
     this.sending.set(true);
     this.error.set('');
     try {
-      await this.transcription.sendToChat(s.id, target);
-      // Open the chat so the user sees the message they just sent.
+      await this.transcription.stageForChat(s.id, target);
       await this.router.navigate(['/chat']);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
