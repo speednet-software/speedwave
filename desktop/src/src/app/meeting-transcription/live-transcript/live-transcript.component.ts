@@ -37,6 +37,17 @@ function bySegmentStart(a: Segment, b: Segment): number {
   return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
 }
 
+/**
+ * Maps linear RMS to a 0-100 meter width on a dB scale (-60..0 dBFS) — speech RMS sits around
+ * 0.005-0.15, which a linear meter would render as a near-invisible sliver.
+ * @param rms - linear RMS in 0..1.
+ */
+function rmsToPct(rms: number): number {
+  if (rms <= 0) return 0;
+  const db = 20 * Math.log10(rms);
+  return Math.round(Math.min(100, Math.max(0, ((db + 60) / 60) * 100)));
+}
+
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
@@ -67,6 +78,30 @@ interface TranscriptLine {
             <div class="h-full bg-[var(--accent)]" [style.width.%]="finalizePct()"></div>
           </div>
         </div>
+      }
+
+      @if (status() === 'recording' && meterBars().length > 0) {
+        <div class="mb-2 space-y-1" data-testid="audio-level-meter">
+          @for (bar of meterBars(); track bar.label) {
+            <div class="flex items-center gap-2">
+              <span class="mono w-14 shrink-0 text-[10px] text-[var(--ink-mute)]">{{
+                bar.label
+              }}</span>
+              <div class="h-1.5 flex-1 overflow-hidden rounded bg-[var(--bg-2)]">
+                <div
+                  class="h-full bg-[var(--accent)] transition-[width] duration-150"
+                  [style.width.%]="bar.pct"
+                ></div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      @if (recordOnly()) {
+        <p class="mb-2 text-[12px] text-[var(--ink-mute)]" data-testid="record-only-hint">
+          Live transcript is off — the transcript will appear after you stop recording.
+        </p>
       }
 
       <div
@@ -165,6 +200,36 @@ export class LiveTranscriptComponent {
   readonly draft = computed(() =>
     this.status() === 'recording' ? this.transcription.liveDraft() : ''
   );
+
+  /** Record-only session: recording with no live pass — the meter is the only feedback. */
+  readonly recordOnly = computed(
+    () => this.status() === 'recording' && this.session()?.models_used.live == null
+  );
+
+  /** Loudness bars: label per captured channel, level as 0–100 for the width binding. */
+  readonly meterBars = computed<{ label: string; pct: number }[]>(() => {
+    const kind = this.session()?.audio_source.source.kind;
+    const levels = this.transcription.audioLevels();
+    if (!levels || levels.length === 0) {
+      // Recording but no level event yet (capture still spinning up): show the
+      // expected channels at 0% — a flat bar reads "silent", a missing meter
+      // reads "broken". Channel count comes from the source shape.
+      if (this.status() !== 'recording' || !kind) return [];
+      return kind === 'mixed'
+        ? [
+            { label: 'Meeting', pct: 0 },
+            { label: 'You', pct: 0 },
+          ]
+        : [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: 0 }];
+    }
+    if (levels.length === 2) {
+      return [
+        { label: 'Meeting', pct: rmsToPct(levels[0]) },
+        { label: 'You', pct: rmsToPct(levels[1]) },
+      ];
+    }
+    return [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: rmsToPct(levels[0]) }];
+  });
   /** Finalize progress 0–100 (0 when not finalizing). */
   readonly finalizePct = computed(() => {
     const st = this.session()?.status;

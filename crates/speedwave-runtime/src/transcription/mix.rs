@@ -62,9 +62,13 @@ impl LevelBalancer {
 /// (e.g. a corrupt timestamp) is refused rather than driving an unbounded allocation.
 const MAX_BUFFERED_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 60;
 
-/// How long `poll_paired_chunk` polls a stalled buffer before treating the
-/// capture as dead and returning an error.
-const STALL_GIVE_UP: Duration = Duration::from_secs(2);
+/// How long since the last landed delivery (either side) before the mixed paths treat the
+/// capture as dead — never per call: one side still delivering means waiting, not stalled.
+pub const STALL_GIVE_UP: Duration = Duration::from_secs(2);
+
+/// How long one bounded `next_chunk` blocks without a chunk before yielding an empty keepalive
+/// so the ingest loop re-checks `stop`. SSOT for every platform's recv/poll bound.
+pub const KEEPALIVE_AFTER: Duration = Duration::from_millis(100);
 
 /// One side lagging this far behind the other (5 s of samples) is treated as
 /// dead: the mix keeps flowing from the healthy side instead of stalling.
@@ -126,8 +130,13 @@ pub struct MixBuffer {
     mic_level: LevelBalancer,
     /// One-shot all-zeros detection for the system side (shared mechanism).
     zero: ZeroStreakDetector,
+    /// One-shot latch for the over-cap drop warning below.
+    dropped_reported: bool,
     /// Health transitions not yet drained by `take_health`.
     pending_health: Vec<CaptureHealth>,
+    /// When either side last delivered (any push). Read by [`poll_paired_chunk`] so its
+    /// give-up never fires while one side is alive (mic delivering, loopback idle).
+    last_delivery: std::time::Instant,
 }
 
 impl Default for MixBuffer {
@@ -158,7 +167,9 @@ impl MixBuffer {
             sys_level: LevelBalancer::default(),
             mic_level: LevelBalancer::default(),
             zero: ZeroStreakDetector::default(),
+            dropped_reported: false,
             pending_health: Vec::new(),
+            last_delivery: std::time::Instant::now(),
         }
     }
 
@@ -191,6 +202,11 @@ impl MixBuffer {
                 target: "transcription::mix",
                 "{source:?} push at offset {offset_ns}ns would buffer {needed} samples (cap {MAX_BUFFERED_SAMPLES}) — dropped"
             );
+            if !self.dropped_reported {
+                self.dropped_reported = true;
+                self.pending_health
+                    .push(CaptureHealth::Raised(CaptureWarning::AudioDropped));
+            }
             self.bump_filled(source, end);
             return;
         }
@@ -217,6 +233,9 @@ impl MixBuffer {
         for (i, &s) in samples[skip..].iter().enumerate() {
             buf[rel + i] += s * gain; // additive so overlapping pushes within a stream sum
         }
+        // Only audio that actually lands feeds the stall detector: a source emitting nothing
+        // but rejected (stale / over-cap) chunks must still time out after STALL_GIVE_UP.
+        self.last_delivery = std::time::Instant::now();
         self.bump_filled(source, end);
     }
 
@@ -274,14 +293,18 @@ impl MixBuffer {
         if self.finished {
             return self.base + self.sys.len().max(self.mic.len()) as u64;
         }
+        // A never-delivering system side is a quiet start (idle loopback), not a slow
+        // starter — gating on it would silence the mix and meter for the whole dead gap.
+        if self.sys_filled == 0 {
+            return self.mic_filled;
+        }
         let lo = self.sys_filled.min(self.mic_filled);
         let hi = self.sys_filled.max(self.mic_filled);
         lo.max(hi.saturating_sub(DEAD_GAP_SAMPLES))
     }
 
-    /// Pops the next aligned channel pair of up to `max_samples`, or `None` if fewer than
-    /// `min_samples` are ready (unless finished, then it returns the remainder). Both sides
-    /// come back `take`-long (the shorter zero-padded) and clamped to ±1.
+    /// Pops the next aligned pair of up to `max_samples`, or `None` under `min_samples` (unless
+    /// finished — then the remainder); both sides equal-length (zero-padded), clamped to ±1.
     pub fn pop_pair(&mut self, min_samples: usize, max_samples: usize) -> Option<PairedPcm> {
         debug_assert!(
             min_samples <= max_samples,
@@ -313,20 +336,26 @@ impl MixBuffer {
     pub fn offset_ns(&self) -> u64 {
         self.base.saturating_mul(1_000_000_000) / SAMPLE_RATE_HZ as u64
     }
+
+    /// Time since audio last landed on either side — the mixed streams' stall give-up clock.
+    pub fn stalled_for(&self) -> Duration {
+        self.last_delivery.elapsed()
+    }
 }
 
-/// The shared `AudioStream::next_chunk` body for a mixed capture fed from background threads.
-/// Polls for a full chunk; drains the tail and errors after `STALL_GIVE_UP`, or `Ok(None)` on EOF.
+/// The shared `AudioStream::next_chunk` body for a mixed capture fed from background threads:
+/// a full chunk, a keepalive while alive-but-gated, `Ok(None)` on EOF, an error on stall.
 pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, CaptureError> {
     let want = CHUNK_SAMPLES;
-    let mut waited = Duration::ZERO;
+    let mut blocked = Duration::ZERO;
     loop {
-        match buf.lock() {
+        let stalled_for = match buf.lock() {
             Ok(mut b) => {
                 let start_ns = b.offset_ns();
+                let stalled_for = b.stalled_for();
                 // On stall, drain tail first so it isn't lost.
                 let chunk = b.pop_pair(want, want).or_else(|| {
-                    (waited >= STALL_GIVE_UP)
+                    (stalled_for >= STALL_GIVE_UP)
                         .then(|| b.pop_pair(1, want))
                         .flatten()
                 });
@@ -338,26 +367,30 @@ pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, C
                     }));
                 }
                 // Empty + finished = clean end of stream.
-                let drained_and_finished = b.is_finished_and_empty();
-                drop(b);
-                if drained_and_finished {
+                if b.is_finished_and_empty() {
                     return Ok(None);
                 }
+                stalled_for
             }
             Err(_) => {
                 // Reader thread panicked; treat capture as dead.
                 log::warn!(target: "transcription::mix", "mix buffer poisoned — capture stopped");
                 return Err(CaptureError::Failed("mix buffer poisoned".to_string()));
             }
-        }
-        if waited >= STALL_GIVE_UP {
+        };
+        if stalled_for >= STALL_GIVE_UP {
             return Err(CaptureError::Failed(
                 "audio capture stalled — both streams stopped without a clean end-of-stream"
                     .to_string(),
             ));
         }
+        // Alive but gated (e.g. quiet system side inside the dead-gap window):
+        // hand the ingest loop a keepalive instead of blocking here.
+        if blocked >= KEEPALIVE_AFTER {
+            return Ok(Some(AudioChunk::keepalive()));
+        }
         std::thread::sleep(POLL_INTERVAL);
-        waited += POLL_INTERVAL;
+        blocked += POLL_INTERVAL;
     }
 }
 
@@ -476,6 +509,27 @@ mod tests {
     }
 
     #[test]
+    fn rejected_pushes_do_not_reset_the_stall_detector() {
+        let mut b = MixBuffer::new();
+        b.push(MixSource::System, 0, &[1.0; 32]);
+        b.push(MixSource::Mic, 0, &[0.0; 32]);
+        let _ = b.pop_pair(1, 32).unwrap(); // base now 32
+        let stalled = std::time::Instant::now() - STALL_GIVE_UP;
+        // Entirely-in-the-past push: dropped — must not look like a delivery.
+        b.last_delivery = stalled;
+        b.push(MixSource::System, 0, &[9.9; 16]);
+        assert!(b.last_delivery.elapsed() >= STALL_GIVE_UP);
+        // Over-cap push: dropped — same rule.
+        b.last_delivery = stalled;
+        b.push(MixSource::System, 3600 * 1_000_000_000, &[1.0; 16]);
+        assert!(b.last_delivery.elapsed() >= STALL_GIVE_UP);
+        // A landing push is a real delivery and resets the detector.
+        b.last_delivery = stalled;
+        b.push(MixSource::System, 2_000_000, &[0.4; 16]);
+        assert!(b.last_delivery.elapsed() < STALL_GIVE_UP);
+    }
+
+    #[test]
     fn push_over_the_cap_is_dropped() {
         let mut b = MixBuffer::new();
         // An offset of 1 hour ≫ the 1-minute cap → the payload is dropped.
@@ -562,11 +616,12 @@ mod tests {
     #[test]
     fn a_system_side_that_never_started_is_a_quiet_start_not_a_stall() {
         let mut b = MixBuffer::new();
-        // Idle Windows loopback: no system packets at all. Mix must flow from
-        // the mic without a spurious SystemAudioStalled warning.
-        let six_secs = SAMPLE_RATE_HZ as usize * 6;
-        b.push(MixSource::Mic, 0, &vec![0.8; six_secs]);
-        assert!(b.pop_pair(1, six_secs).is_some());
+        // Idle Windows loopback (no system packets): mix must flow from the mic immediately,
+        // feeding the loudness meter, without a spurious SystemAudioStalled warning.
+        b.push(MixSource::Mic, 0, &[0.8; 16]);
+        let PairedPcm { system: sys, mic } = b.pop_pair(1, 16).expect("mic flows immediately");
+        assert_eq!(mic.len(), 16);
+        assert!(sys.iter().all(|&s| s == 0.0));
         assert_eq!(b.take_health(), vec![]);
     }
 
@@ -683,9 +738,8 @@ mod tests {
             b.take_health(),
             vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
         );
-        // A non-zero push that lands entirely past the buffering cap is dropped —
-        // it must not be treated as "signal arrived" and clear the warning. (The
-        // bogus watermark legitimately raises a mic-stall; only Cleared matters here.)
+        // A non-zero push landing past the buffering cap is dropped — it must not read as
+        // "signal arrived" and clear the warning (only Cleared matters here).
         let one_hour_ns: u64 = 3600 * 1_000_000_000;
         b.push(MixSource::System, one_hour_ns, &[1.0; 16]);
         let health = b.take_health();
@@ -854,16 +908,20 @@ mod tests {
     #[test]
     fn poll_paired_chunk_drains_the_tail_then_errors_on_stall() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // A sub-chunk tail, never finished, never more data: poll drains it once the stall
-        // window elapses, then errors on the next poll (nothing left, no clean EOF).
+        // A sub-chunk tail, never finished, no more data: keepalives while the stall window
+        // runs, the tail drains once it elapses, then the next poll errors (no clean EOF).
         {
             let mut b = buf.lock().unwrap();
             b.push(MixSource::System, 0, &[1.0; 8]);
             b.push(MixSource::Mic, 0, &[1.0; 8]);
         }
-        let tail = poll_paired_chunk(&buf)
-            .unwrap()
-            .expect("the tail is drained");
+        let tail = loop {
+            match poll_paired_chunk(&buf).unwrap() {
+                Some(c) if c.samples.is_empty() => continue, // keepalive — stall window still open
+                Some(c) => break c,
+                None => panic!("unexpected clean EOF"),
+            }
+        };
         assert_eq!(tail.samples.len(), 8);
         assert!(tail.samples.iter().all(|&s| (s - 1.0).abs() < 1e-6));
         let mic = tail.mic.expect("mic channel present");
@@ -871,6 +929,38 @@ mod tests {
         assert!(mic.iter().all(|&s| (s - 1.0).abs() < 1e-6));
         let err = poll_paired_chunk(&buf).unwrap_err();
         assert!(matches!(err, CaptureError::Failed(_)));
+    }
+
+    #[test]
+    fn poll_paired_chunk_keeps_alive_while_one_side_delivers() {
+        let buf = Arc::new(Mutex::new(MixBuffer::new()));
+        // System delivered once then went idle while the mic keeps delivering: the
+        // gated pair must yield keepalives past STALL_GIVE_UP, never a stall error.
+        buf.lock().unwrap().push(MixSource::System, 0, &[1.0; 16]);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let feeder = {
+            let buf = Arc::clone(&buf);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut off_ns: u64 = 0;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    buf.lock()
+                        .unwrap()
+                        .push(MixSource::Mic, off_ns, &[0.5; 320]);
+                    off_ns += 20_000_000; // 320 samples = 20 ms at 16 kHz
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        // Keepalives (or, once the mic outruns the dead gap, real chunks) — never an error.
+        let deadline = std::time::Instant::now() + STALL_GIVE_UP + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let _ = poll_paired_chunk(&buf)
+                .expect("a live side must never surface a stall error")
+                .expect("no clean EOF here");
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        feeder.join().unwrap();
     }
 
     #[test]
@@ -885,5 +975,21 @@ mod tests {
         .join();
         let err = poll_paired_chunk(&buf).unwrap_err();
         assert!(matches!(err, CaptureError::Failed(_)));
+    }
+
+    #[test]
+    fn an_over_cap_push_is_dropped_with_a_health_warning_not_in_silence() {
+        let mut b = MixBuffer::new();
+        // An offset past the per-side cap cannot be buffered. The payload goes, but the user has
+        // to learn the recording has a hole instead of wondering where the words went.
+        let far_ns = (MAX_BUFFERED_SAMPLES as u64 + 1) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
+        b.push(MixSource::Mic, far_ns, &[0.5; 16]);
+        assert_eq!(
+            b.take_health(),
+            vec![CaptureHealth::Raised(CaptureWarning::AudioDropped)]
+        );
+        // One-shot, like every other health latch: a second over-cap push stays quiet.
+        b.push(MixSource::Mic, far_ns, &[0.5; 16]);
+        assert!(b.take_health().is_empty());
     }
 }

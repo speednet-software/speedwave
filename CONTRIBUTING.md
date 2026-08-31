@@ -31,7 +31,7 @@ cd speedwave
 make setup-dev
 ```
 
-Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain via Chocolatey; requires admin and self-elevates), then open a **new** Git Bash and run `make setup-dev`.
+Windows: run `make setup-dev-windows` once from Git Bash (installs the toolchain via Chocolatey and the pinned Vulkan SDK; requires admin and self-elevates), then open a **new** Git Bash and run `make setup-dev`. The Windows whisper Vulkan build is path-length gated (`scripts/check-vulkan-path-budget.sh`) and the budget leaves only ~39 characters for the cargo target dir — even a clone at `C:\src\speedwave` exceeds it — so create `desktop/src-tauri/.cargo/config.toml` (gitignored) with `[build]` / `target-dir = "C:/spwd"` (any short directory).
 
 ### Running Tests
 

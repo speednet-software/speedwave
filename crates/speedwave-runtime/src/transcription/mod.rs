@@ -7,6 +7,7 @@ pub mod audio;
 pub mod audio_macos;
 #[cfg(windows)]
 pub mod audio_windows;
+mod gpu_probe;
 pub mod mix;
 pub mod model_catalog;
 pub mod model_store;
@@ -15,7 +16,10 @@ pub mod transcript;
 pub mod transcript_driver;
 pub mod transcript_store;
 
-pub use accel::{best_model_for_this_build, compiled_backends, has_gpu_backend, Backend};
+pub use accel::{
+    accel_label, compiled_backends, decode_threads, finalize_model_for_this_build, gpu_class,
+    live_model_for_this_build, Backend, GpuClass,
+};
 pub use audio::{
     bytes_to_f32_samples, drain_child_stderr, kill_child_gracefully, parse_wav_to_mono_f32,
     wav_duration, AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream,

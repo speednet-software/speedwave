@@ -62,7 +62,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-053](ADR-053-worker-implementation-own-vs-wrap-official-mcp.md)   | Worker Implementation — Own Thin Worker vs Wrapping an Official MCP Server                                                  | Accepted                                                |
 | [ADR-054](ADR-054-host-exec-worker.md)                                 | `host_exec` — Per-Project Host-Side MCP Worker for the Project Toolchain                                                    | Reverted                                                |
 | [ADR-055](ADR-055-built-in-office-document-worker.md)                  | Built-in `office` MCP Worker — Word/Excel/PowerPoint/PDF Read · Write · Convert · Charts                                    | Accepted                                                |
-| [ADR-056](ADR-056-host-side-audio-transcription.md)                    | Host-Side Audio Capture and Local Meeting Transcription                                                                     | Proposed                                                |
+| [ADR-056](ADR-056-host-side-audio-transcription.md)                    | Host-Side Audio Capture and Local Meeting Transcription                                                                     | Accepted                                                |
 | [ADR-057](ADR-057-lazy-build-of-enabled-worker-images.md)              | Lazy Build of Enabled Worker Container Images                                                                               | Accepted                                                |
 | [ADR-058](ADR-058-beta-features-toggle.md)                             | Beta Features Toggle in the Tray Menu                                                                                       | Accepted                                                |
 | [ADR-059](ADR-059-drop-linux-support.md)                               | Drop Linux Support — Windows and macOS Only                                                                                 | Accepted                                                |
@@ -91,6 +91,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-082](ADR-082-policy-engine-pii-tokenization.md)                   | Policy engine: PII tokenization via a resolved, host-rendered policy mounted read-only into mcp-hub                         | Superseded by ADR-083                                   |
 | [ADR-083](ADR-083-vaultless-pii-tokenization.md)                       | Vaultless PII tokenization via a shared Rust engine (AES-SIV, policy v2, proxy + hub enforcement)                           | Accepted (policy.json wire contract revised by ADR-084) |
 | [ADR-084](ADR-084-policy-v3-open-rule-id-set.md)                       | Policy.json v3 — open rule-ID set replacing the fixed category enum, amending ADR-083                                       | Accepted                                                |
+| [ADR-085](ADR-085-windows-vulkan-transcription.md)                     | Windows Vulkan backend for whisper transcription: runtime GPU-class probe, bundled loader, pinned SDK                       | Accepted                                                |
 
 ## Creating a New ADR
 

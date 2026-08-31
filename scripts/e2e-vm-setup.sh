@@ -195,6 +195,17 @@ New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 cargo install tauri-cli --locked
 SCRIPT
 
+    echo "[windows] Installing pinned Vulkan SDK (whisper-rs-sys needs VULKAN_SDK — ADR-085)..."
+    local vsdk_ps1
+    vsdk_ps1="$(dirname "$0")/install-vulkan-sdk.ps1"
+    # Run the repo's pinned installer verbatim (the SSOT for the SDK hashes); strip its
+    # on-disk BOM first — windows_ps prepends its own.
+    if [ "$(head -c 3 "$vsdk_ps1")" = $'\xef\xbb\xbf' ]; then
+        tail -c +4 "$vsdk_ps1" | windows_ps
+    else
+        windows_ps < "$vsdk_ps1"
+    fi
+
     echo "[windows] Installing WSL2 distro $WINDOWS_WSL_DISTRO..."
     local wsl_distro="$WINDOWS_WSL_DISTRO"
     windows_ps <<SCRIPT
@@ -225,6 +236,7 @@ Write-Host "Cargo: $(cargo --version)"
 Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
 Write-Host "cmake: $(cmake --version 2>&1 | Select-Object -First 1)"
 Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
+Write-Host "VULKAN_SDK: $([System.Environment]::GetEnvironmentVariable('VULKAN_SDK','Machine'))"
 Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
 SCRIPT
 

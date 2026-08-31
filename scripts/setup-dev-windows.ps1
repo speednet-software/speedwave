@@ -171,6 +171,30 @@ if ((Test-Path $vcvars) -and $msvcVer) {
     Write-Warning "vcvars64.bat/MSVC not found -- skipped ~/msvc-env.sh (re-run after VS Build Tools finishes/reboot)."
 }
 
+
+Write-Host "== Vulkan SDK (Windows whisper Vulkan backend, ADR-085) =="
+# try/catch, not $LASTEXITCODE: `&` on a .ps1 never sets $LASTEXITCODE, so the guard would read
+# a stale native exit code (choco's 3010) and abort a successful install; failures throw.
+try {
+    & (Join-Path $repoRoot 'scripts\install-vulkan-sdk.ps1')
+} catch {
+    Write-Host "ERROR: Vulkan SDK install failed: $_"
+    exit 1
+}
+
+# The ggml-vulkan shader ExternalProject nests deep enough to cross MAX_PATH on typical repo
+# paths. Long paths let ninja traverse them, but cl.exe still cannot open >260-char paths —
+# scripts/check-vulkan-path-budget.sh remains the real gate (cross-platform.md).
+Write-Host "== Enabling Windows long paths (ninja needs them for the whisper.cpp Vulkan build) =="
+Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+    -Name 'LongPathsEnabled' -Value 1 -Type DWord
+# No 2>&1 capture: under EAP=Stop PS 5.1 turns merged native stderr into a terminating
+# NativeCommandError. A warning matches the choco-3010 handling above — setup must not die here.
+git config --system core.longpaths true
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "git config --system core.longpaths failed (exit $LASTEXITCODE) — set it manually if the whisper build hits long git paths."
+}
+
 Write-Host ""
 Write-Host "== Done. Next steps =="
 Write-Host "  1. Open a NEW Git Bash window (to pick up PATH + ~/.bashrc)."

@@ -394,8 +394,13 @@ jobs:
     # on windows-latest with stubbed bundle resources so Windows-only compile
     # errors (e.g. cfg-gated imports of types used in cross-platform fn
     # signatures) are caught in PR CI without paying for a full Tauri bundle.
+    # The budget covers a cold whisper.cpp + ggml-vulkan shader build (ADR-085).
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
+    env:
+      # The runner's D:\a\speedwave\speedwave base plus the MSBuild TryCompile scratch of the
+      # ggml-vulkan shader build crosses MAX_PATH (C1083) — the cross-platform.md escape hatch.
+      CARGO_TARGET_DIR: D:\st
     defaults:
       run:
         shell: bash
@@ -420,9 +425,21 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            desktop/src-tauri/target/
-          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+            D:\st
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
+
+      - name: Install Vulkan SDK
+        # The Windows whisper build carries the Vulkan backend (ADR-085); the runtime loader
+        # dir goes on PATH so `cargo test --bins` binaries (load-time vulkan-1.dll import)
+        # start on a GPU-less runner — no device is a clean CPU fallback, no loader is not.
+        shell: pwsh
+        run: |
+          $out = scripts/install-vulkan-sdk.ps1
+          $out | Write-Output
+          $root = (($out | Select-String -Pattern '^VULKAN_SDK=').Line) -replace '^VULKAN_SDK=', ''
+          "VULKAN_SDK=$root" | Add-Content $env:GITHUB_ENV
+          Join-Path $root 'runtime\x64' | Add-Content $env:GITHUB_PATH
 
       - name: Create resource stubs for Tauri build script
         run: scripts/create-desktop-stubs.sh
@@ -432,6 +449,21 @@ jobs:
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
+
+      # The runtime transcription module carries #[cfg(windows)] tests (audio_windows: WASAPI
+      # capture, drop counters) that no other job compiles — the macOS lane's
+      # `make test-transcription` skips them by target. The module filter runs every current
+      # and future windows-gated test in the module, so there is no name list to drift.
+      - name: cargo test speedwave-runtime transcription (windows)
+        # --lib: the windows-gated tests live in the lib target; without it every integration
+        # target relinks libwhisper+ggml-vulkan to run zero tests. Guard pins audio_windows.
+        run: |
+          LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
+          grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
+          cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::"
+          # Integration targets (transcription_pipeline_e2e) must still compile with the
+          # feature — check-only, so nothing links libwhisper for zero runnable tests.
+          cargo check --tests -p speedwave-runtime --features audio-transcription
 
       # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
       # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.

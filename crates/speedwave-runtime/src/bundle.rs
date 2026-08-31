@@ -159,6 +159,12 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "cli/speedwave.exe",
         kind: BundledAssetKind::File,
     },
+    // The Vulkan loader must sit next to the exe: the whisper Vulkan backend is a load-time
+    // import and ggml touches it on every whisper init (ADR-085). Same path staged + installed.
+    BundledAssetSpec {
+        path: "vulkan-1.dll",
+        kind: BundledAssetKind::File,
+    },
 ];
 
 /// Manifest of the currently shipped app bundle.
@@ -1203,6 +1209,7 @@ mod tests {
                 std::fs::write(root.join("wsl/ubuntu-rootfs.tar.gz"), "binary").unwrap();
                 std::fs::write(root.join("nodejs/node.exe"), "binary").unwrap();
                 std::fs::write(root.join("cli/speedwave.exe"), "binary").unwrap();
+                std::fs::write(root.join("vulkan-1.dll"), "binary").unwrap();
             }
             other => panic!("unexpected target os in test: {other}"),
         }
@@ -1741,6 +1748,50 @@ mod tests {
             tauri_cfg.contains(&expected),
             "tauri.windows.conf.json must bundle {expected}; rename it there too"
         );
+    }
+
+    #[test]
+    fn windows_vulkan_loader_path_is_aligned_across_bundle_config_and_scripts() {
+        // The literal `vulkan-1.dll` recurs in the asset list, the Tauri resource map, and the
+        // stage/verify/install scripts — no SSOT const carries it, so pin the copies together.
+        let expected = "vulkan-1.dll";
+        let assets = required_bundled_assets("windows").expect("windows assets");
+        assert!(
+            assets.iter().any(|a| a.path == expected),
+            "WINDOWS_BUNDLED_ASSETS must carry {expected}"
+        );
+        let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
+        assert!(
+            tauri_cfg.contains(expected),
+            "tauri.windows.conf.json must bundle {expected}"
+        );
+        for (name, body) in [
+            (
+                "stage-vulkan-runtime.sh",
+                include_str!("../../../scripts/stage-vulkan-runtime.sh"),
+            ),
+            (
+                "verify-bundled-assets.sh",
+                include_str!("../../../scripts/verify-bundled-assets.sh"),
+            ),
+            (
+                "install-vulkan-sdk.ps1",
+                include_str!("../../../scripts/install-vulkan-sdk.ps1"),
+            ),
+            (
+                "create-desktop-stubs.sh",
+                include_str!("../../../scripts/create-desktop-stubs.sh"),
+            ),
+            (
+                "desktop/src-tauri/.gitignore",
+                include_str!("../../../desktop/src-tauri/.gitignore"),
+            ),
+        ] {
+            assert!(
+                body.contains(expected),
+                "scripts/{name} must reference {expected}; the staged filename drifted"
+            );
+        }
     }
 
     #[test]

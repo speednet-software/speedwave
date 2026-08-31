@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::accel::GpuClass;
 use super::audio::{rms, SAMPLE_RATE_HZ};
 
 /// Languages this feature transcribes (forced into Whisper).
@@ -132,7 +133,7 @@ pub trait Transcriber: Send {
     ) -> Result<Vec<Segment>, TranscribeError>;
 
     /// Decode the current live window. Default = `transcribe(window)`; `WhisperCppTranscriber`
-    /// uses the same (window policy lives in the driver).
+    /// shrinks the encoder context (`live_audio_ctx`) — a speed cut finalize must never take.
     fn feed(
         &mut self,
         pcm_window: &[f32],
@@ -230,39 +231,73 @@ fn vad_failure_should_warn(already_warned: &mut bool) -> bool {
     !std::mem::replace(already_warned, true)
 }
 
+/// Encoder positions of a full 30 s whisper window (the model maximum).
+const FULL_AUDIO_CTX: usize = 1500;
+
+/// Floor for a reduced encoder context: below this, positional embeddings are truncated so hard
+/// that quality collapses; degenerate windows still decode, just without the shortcut benefit.
+const MIN_AUDIO_CTX: usize = 128;
+
+/// Samples per encoder position at 16 kHz: a 10 ms mel hop (160 samples) then a stride-2 conv.
+const SAMPLES_PER_AUDIO_CTX: usize = 320;
+
+/// The reduced encoder context for a live window of `pcm_len` samples (small headroom for the
+/// mel/conv rounding). Live pass only — the offline pass keeps the full 30 s context.
+fn live_audio_ctx(pcm_len: usize) -> std::ffi::c_int {
+    let positions = pcm_len.div_ceil(SAMPLES_PER_AUDIO_CTX) + 16;
+    positions.clamp(MIN_AUDIO_CTX, FULL_AUDIO_CTX) as std::ffi::c_int
+}
+
 /// Whisper speech-to-text via whisper.cpp. Holds a loaded context for one
 /// model; create one per recording.
 pub struct WhisperCppTranscriber {
     ctx: whisper_rs::WhisperContext,
+    /// Reused across windows: `whisper_init_state` allocates the KV caches and reserves the
+    /// compute graphs, which is pure waste per decode (`no_context` clears any carry-over).
+    state: Option<whisper_rs::WhisperState>,
     vad: Option<SileroVad>,
     /// One-shot latch so a persistently failing VAD warns once, not per window.
     vad_warned: bool,
     model_label: String,
+    /// Whisper thread count, resolved once at load (`accel::decode_threads()` — invariant
+    /// per process, so never recomputed per decode window).
+    n_threads: i32,
 }
 
 impl WhisperCppTranscriber {
-    /// Loads the GGML model at `model_path`. `model_label` is for error messages.
+    /// Loads the GGML model at `model_path` for a host of GPU `class` (drives `use_gpu`;
+    /// callers pass the probed class so tests can pin the policy). `model_label` is for errors.
     pub fn load(
         model_path: &Path,
         model_label: impl Into<String>,
+        class: GpuClass,
     ) -> Result<Self, TranscribeError> {
         let label = model_label.into();
         if !model_path.is_file() {
             return Err(TranscribeError::ModelMissing(label));
         }
-        let ctx = whisper_rs::WhisperContext::new_with_params(
-            model_path,
-            whisper_rs::WhisperContextParameters::default(),
-        )
-        .map_err(|e| TranscribeError::ModelLoad {
-            model: label.clone(),
-            detail: e.to_string(),
-        })?;
+        // Route whisper.cpp/ggml logs into the `log` facade once — a silent GPU-init fallback
+        // would otherwise be invisible (ADR-085).
+        static LOG_HOOKS: std::sync::Once = std::sync::Once::new();
+        LOG_HOOKS.call_once(whisper_rs::install_logging_hooks);
+        let mut ctx_params = whisper_rs::WhisperContextParameters::default();
+        // A compiled-in GPU backend is not a usable device: keep whisper off the GPU entirely
+        // when the probe found none, instead of failing into it per decode.
+        ctx_params.use_gpu(class != GpuClass::None);
+        let ctx =
+            whisper_rs::WhisperContext::new_with_params(model_path, ctx_params).map_err(|e| {
+                TranscribeError::ModelLoad {
+                    model: label.clone(),
+                    detail: e.to_string(),
+                }
+            })?;
         Ok(Self {
             ctx,
+            state: None,
             vad: None,
             vad_warned: false,
             model_label: label,
+            n_threads: crate::transcription::accel::decode_threads(),
         })
     }
 
@@ -280,7 +315,11 @@ impl WhisperCppTranscriber {
         use crate::transcription::model_catalog::{whisper_model, WhisperModelInfo};
         let info: &WhisperModelInfo =
             whisper_model(key).ok_or_else(|| TranscribeError::ModelMissing(key.to_string()))?;
-        Self::load(&whisper_dir.join(info.file), key)
+        Self::load(
+            &whisper_dir.join(info.file),
+            key,
+            crate::transcription::accel::gpu_class(),
+        )
     }
 
     /// Catalogue key / path this transcriber was loaded with.
@@ -292,6 +331,7 @@ impl WhisperCppTranscriber {
         &mut self,
         pcm: &[f32],
         opts: &TranscribeOptions,
+        live: bool,
     ) -> Result<Vec<Segment>, TranscribeError> {
         // Near-silent input makes Whisper emit trained-in filler ("Dziękuję"/"Thank you") — skip.
         if pcm.is_empty() || is_silent(pcm) {
@@ -318,10 +358,18 @@ impl WhisperCppTranscriber {
         {
             return Ok(Vec::new());
         }
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::Inference(format!("create state: {e}")))?;
+        if self.state.is_none() {
+            let fresh = self
+                .ctx
+                .create_state()
+                .map_err(|e| TranscribeError::Inference(format!("create state: {e}")))?;
+            self.state = Some(fresh);
+        }
+        let Some(state) = self.state.as_mut() else {
+            return Err(TranscribeError::Inference(
+                "whisper state unavailable".to_string(),
+            ));
+        };
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(opts.language.code())); // forced, never auto
@@ -330,6 +378,12 @@ impl WhisperCppTranscriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        params.set_n_threads(self.n_threads);
+        // Live windows are shorter than the 30 s whisper always pads to, so the encoder spends
+        // most of its time on zero-padding; a proportional audio_ctx skips it (ADR-056 Am. 12).
+        if live {
+            params.set_audio_ctx(live_audio_ctx(pcm.len()));
+        }
         // Anti-hallucination: no cross-window context, deterministic decoding, blank/nst suppress.
         // `no_speech_thold` is a no-op in whisper.cpp — we gate on per-segment prob below instead.
         params.set_no_context(true);
@@ -342,9 +396,20 @@ impl WhisperCppTranscriber {
             params.set_token_timestamps(true);
             params.set_max_len(1); // one token per segment → segment ts == word ts
         }
+        // Timing is the one diagnostic that tells a slow host from a broken one; whisper.cpp
+        // itself logs nothing here, so measure the decode we just asked for.
+        let started = std::time::Instant::now();
         state
             .full(params, pcm)
             .map_err(|e| TranscribeError::Inference(format!("whisper_full: {e}")))?;
+        log::debug!(
+            target: "transcription::transcriber",
+            "decoded a {:.1}s window with {} on {} threads in {} ms",
+            pcm.len() as f32 / SAMPLE_RATE_HZ as f32,
+            self.model_label,
+            self.n_threads,
+            started.elapsed().as_millis()
+        );
 
         let n = state.full_n_segments();
         let mut out = Vec::with_capacity(n.max(0) as usize);
@@ -403,7 +468,7 @@ impl Transcriber for WhisperCppTranscriber {
         pcm: &[f32],
         opts: &TranscribeOptions,
     ) -> Result<Vec<Segment>, TranscribeError> {
-        self.run(pcm, opts)
+        self.run(pcm, opts, false)
     }
 
     fn feed(
@@ -411,7 +476,7 @@ impl Transcriber for WhisperCppTranscriber {
         pcm_window: &[f32],
         opts: &TranscribeOptions,
     ) -> Result<Vec<Segment>, TranscribeError> {
-        self.run(pcm_window, opts)
+        self.run(pcm_window, opts, true)
     }
 }
 
@@ -511,7 +576,7 @@ mod tests {
 
     // `WhisperCppTranscriber` has no `Debug`, so `unwrap_err()` won't compile — pattern-match it.
     fn load_err(path: &Path, label: &str) -> TranscribeError {
-        match WhisperCppTranscriber::load(path, label) {
+        match WhisperCppTranscriber::load(path, label, GpuClass::None) {
             Ok(_) => panic!("expected load() to fail"),
             Err(e) => e,
         }
@@ -815,4 +880,19 @@ mod tests {
 
     // Real whisper.cpp inference (needs a ≥75 MiB model + the C++ engine) is an
     // opt-in CI job, not a unit test — verified end-to-end in ADR-056 spike 0A.
+
+    #[test]
+    fn live_audio_ctx_scales_with_the_window_and_clamps_at_both_ends() {
+        // 12 s live window: 192000/320 = 600 positions + headroom — the whole point: pay for
+        // 12 s of encoder, not the 30 s whisper pads to.
+        assert_eq!(live_audio_ctx(192_000), 616);
+        // 5 s window.
+        assert_eq!(live_audio_ctx(80_000), 266);
+        // A 30 s (or longer) window uses the full model context — no truncation past the max.
+        assert_eq!(live_audio_ctx(480_000), 1500);
+        assert_eq!(live_audio_ctx(10_000_000), 1500);
+        // Degenerate windows sit on the floor instead of collapsing the embeddings.
+        assert_eq!(live_audio_ctx(0), 128);
+        assert_eq!(live_audio_ctx(3_200), 128);
+    }
 }

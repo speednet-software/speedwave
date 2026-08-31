@@ -1,8 +1,8 @@
 //! Windows audio capture (ADR-056): system audio via the `wasapi` crate
 //! (cpal's loopback is unreliable — RustAudio/cpal#476), microphone via cpal.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,11 +13,7 @@ use super::audio::{
     CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
     SAMPLE_RATE_HZ,
 };
-use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES};
-
-/// How long the wasapi capture loop waits for the buffer-ready event before re-checking the stop
-/// flag — short enough for snappy teardown on silence, long enough to not busy-spin.
-const WASAPI_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES, KEEPALIVE_AFTER};
 
 /// Channel depth for chunks in flight from the capture thread to the consumer — a few seconds of
 /// audio, enough to absorb a slow consumer without unbounded growth (a full channel drops chunks).
@@ -29,6 +25,53 @@ const CHANNEL_DEPTH: usize = 32;
 enum LoopbackRole {
     Console,
     Communications,
+}
+
+/// Counts chunks a full consumer channel forced the capture thread to drop, and latches the
+/// one-shot report — a silent hole in a recording is worse than a banner. Shared via `Arc`.
+#[derive(Clone, Default)]
+struct DropCounter(Arc<DropState>);
+
+#[derive(Default)]
+struct DropState {
+    count: AtomicU64,
+    reported: AtomicBool,
+}
+
+impl Drop for DropState {
+    fn drop(&mut self) {
+        // The one-shot banner reports only the first drop — the total lands here, at close.
+        let n = *self.count.get_mut();
+        if n > 0 {
+            log::info!(
+                target: "transcription::capture",
+                "capture stream closed with {n} dropped chunk(s) in total"
+            );
+        }
+    }
+}
+
+impl DropCounter {
+    fn record(&self) {
+        self.0.count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.0.count.load(Ordering::Relaxed)
+    }
+
+    /// One-shot `AudioDropped` transition once any chunk has been lost.
+    fn take_health(&self) -> Option<CaptureHealth> {
+        let n = self.count();
+        if n == 0 || self.0.reported.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        log::warn!(
+            target: "transcription::capture",
+            "dropped {n} captured chunk(s) — the consumer could not keep up; that span is missing from the recording"
+        );
+        Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+    }
 }
 
 /// Windows capture backend. Stateless; `start()` opens a fresh cpal stream.
@@ -108,10 +151,14 @@ impl AudioCapture for WasapiAudioCapture {
             // System audio → wasapi loopback.
             AudioSource::SystemWide => {
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
+                let dropped = DropCounter::default();
                 let stop = Arc::new(AtomicBool::new(false));
                 let handle = spawn_wasapi_loopback(
                     LoopbackRole::Console,
-                    ResamplerSink::Channel(tx),
+                    ResamplerSink::Channel {
+                        tx,
+                        dropped: dropped.clone(),
+                    },
                     &stop,
                     std::time::Instant::now(),
                 )?;
@@ -120,15 +167,24 @@ impl AudioCapture for WasapiAudioCapture {
                     _handle: handle,
                     zero: ZeroStreakDetector::default(),
                     health: Vec::new(),
+                    dropped,
                 }))
             }
             AudioSource::Microphone { device } => {
                 let dev = resolve_mic(&host, device)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
-                let stream = open_capture_stream(&dev, ResamplerSink::Channel(tx))?;
+                let dropped = DropCounter::default();
+                let stream = open_capture_stream(
+                    &dev,
+                    ResamplerSink::Channel {
+                        tx,
+                        dropped: dropped.clone(),
+                    },
+                )?;
                 Ok(Box::new(CpalAudioStream {
                     _streams: vec![stream],
                     rx,
+                    dropped,
                 }))
             }
             AudioSource::Mixed { mic } => {
@@ -461,7 +517,7 @@ fn run_wasapi_loopback(
     // would misplace audio starting mid-recording.
     let mut resampler = Resampler::new(src_rate, src_channels).anchored_at(epoch);
     let mut queue: VecDeque<u8> = VecDeque::new();
-    let timeout_ms = WASAPI_POLL_TIMEOUT.as_millis() as u32;
+    let timeout_ms = KEEPALIVE_AFTER.as_millis() as u32;
 
     while !stop.load(Ordering::SeqCst) {
         // Wait for the buffer-ready event, but time out so `stop` gets re-checked on silence.
@@ -527,8 +583,13 @@ fn run_wasapi_loopback(
 /// Where a resampler delivers its 16 kHz mono output: a channel to a single-stream consumer, or
 /// a shared `MixBuffer` (mixed capture — two streams push as `source`, the buffer sums them).
 enum ResamplerSink {
-    /// Single-stream: push `AudioChunk`s, dropping on a full channel.
-    Channel(SyncSender<AudioChunk>),
+    /// Single-stream: push `AudioChunk`s, counting the ones a full channel forced us to drop.
+    Channel {
+        /// The consumer channel.
+        tx: SyncSender<AudioChunk>,
+        /// Shared with the owning stream, which turns a loss into a one-shot warning.
+        dropped: DropCounter,
+    },
     /// Mixed: push into the shared buffer tagged with which stream this is.
     Mixed {
         /// The buffer both streams write into.
@@ -539,16 +600,30 @@ enum ResamplerSink {
 }
 
 impl ResamplerSink {
+    /// A single-stream sink whose drop counter nobody watches — test-only.
+    #[cfg(test)]
+    fn channel(tx: SyncSender<AudioChunk>) -> Self {
+        Self::Channel {
+            tx,
+            dropped: DropCounter::default(),
+        }
+    }
+
     /// Delivers one completed chunk: `samples` start at `offset_ns` from start.
     fn deliver(&self, samples: Vec<f32>, offset_ns: u64) {
         match self {
-            ResamplerSink::Channel(tx) => {
+            ResamplerSink::Channel { tx, dropped } => {
                 // try_send: never block the cpal callback — a full channel drops, not glitches.
-                let _ = tx.try_send(AudioChunk {
-                    samples,
-                    mic: None,
-                    offset: Duration::from_nanos(offset_ns),
-                });
+                if tx
+                    .try_send(AudioChunk {
+                        samples,
+                        mic: None,
+                        offset: Duration::from_nanos(offset_ns),
+                    })
+                    .is_err()
+                {
+                    dropped.record();
+                }
             }
             ResamplerSink::Mixed { buf, source } => {
                 if let Ok(mut b) = buf.lock() {
@@ -599,7 +674,8 @@ impl Resampler {
     }
 
     /// Anchors chunk offsets to wall clock so audio starting mid-recording lands at the right
-    /// session position (see `REANCHOR_GAP_NS`).
+    /// session position (see `REANCHOR_GAP_NS`). Production anchors via `anchored_at`.
+    #[cfg(test)]
     fn anchored(self) -> Self {
         self.anchored_at(std::time::Instant::now())
     }
@@ -701,15 +777,23 @@ struct CpalAudioStream {
     /// Held to keep the stream(s) alive (one for system or mic capture).
     _streams: Vec<cpal::Stream>,
     rx: Receiver<AudioChunk>,
+    /// Chunks a full channel forced the callback to drop (carries the one-shot report latch).
+    dropped: DropCounter,
 }
 
 impl AudioStream for CpalAudioStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // Block for the next chunk; a disconnected channel = stream dropped/callback stopped (EOF).
-        match self.rx.recv() {
+        // Bounded recv + keepalive: a hung/removed device must not wedge the ingest loop's stop
+        // handling. A disconnected channel = stream dropped/callback stopped (EOF).
+        match self.rx.recv_timeout(KEEPALIVE_AFTER) {
             Ok(chunk) => Ok(Some(chunk)),
-            Err(_) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
+    }
+
+    fn take_health(&mut self) -> Vec<CaptureHealth> {
+        self.dropped.take_health().into_iter().collect()
     }
 }
 
@@ -722,27 +806,33 @@ struct WasapiLoopbackStream {
     /// Flags a capture that has been digital silence since start.
     zero: ZeroStreakDetector,
     health: Vec<CaptureHealth>,
+    /// Chunks a full channel forced the capture thread to drop (carries the report latch).
+    dropped: DropCounter,
 }
 
 impl AudioStream for WasapiLoopbackStream {
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError> {
-        // `recv` blocks until a chunk or the sender drops; a disconnect after an abort is an error.
-        match self.rx.recv() {
+        // Bounded recv: an idle loopback delivers nothing, and the ingest loop honours stop only
+        // between chunks — an unbounded recv deadlocks stop (keepalive hands control back).
+        match self.rx.recv_timeout(KEEPALIVE_AFTER) {
             Ok(chunk) => {
                 if let Some(t) = self.zero.feed(&chunk.samples) {
                     self.health.push(t);
                 }
                 Ok(Some(chunk))
             }
-            Err(_) if self._handle.aborted() => Err(CaptureError::Failed(
-                "wasapi capture stopped on a device-read error".to_string(),
-            )),
-            Err(_) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
+            Err(RecvTimeoutError::Disconnected) if self._handle.aborted() => Err(
+                CaptureError::Failed("wasapi capture stopped on a device-read error".to_string()),
+            ),
+            Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
 
     fn take_health(&mut self) -> Vec<CaptureHealth> {
-        std::mem::take(&mut self.health)
+        let mut health = std::mem::take(&mut self.health);
+        health.extend(self.dropped.take_health());
+        health
     }
 }
 
@@ -860,7 +950,7 @@ mod tests {
     fn resampler_downmixes_stereo_to_mono() {
         // Same rate (16k→16k), 2 channels: output = per-frame average.
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 2);
         // 4 interleaved stereo frames (L,R pairs).
         let interleaved = vec![1.0, 3.0, 2.0, 4.0, -1.0, 1.0, 0.5, 0.5];
@@ -880,7 +970,7 @@ mod tests {
     fn resampler_halves_sample_count_at_2x_rate() {
         // 32k → 16k mono: roughly half as many output samples.
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(32_000, 1);
         let input: Vec<f32> = (0..1000).map(|i| (i as f32) * 0.001).collect();
         r.feed(&input, &sink);
@@ -894,7 +984,7 @@ mod tests {
     #[test]
     fn resampler_empty_buffer_is_noop() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(2);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(48_000, 2);
         r.feed(&[], &sink);
         r.flush(&sink);
@@ -906,7 +996,7 @@ mod tests {
     fn resampler_full_channel_drops_chunk_not_blocks() {
         // Depth-1 channel, never drained: the second flush must not block.
         let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(1);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1);
         r.out = vec![0.0; CHUNK_SAMPLES];
         r.flush(&sink); // fills the channel
@@ -917,7 +1007,7 @@ mod tests {
     #[test]
     fn unanchored_resampler_keeps_stream_position_offsets() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1);
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
@@ -932,7 +1022,7 @@ mod tests {
     #[test]
     fn anchored_resampler_realigns_audio_that_starts_after_an_idle_gap() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1);
         // Simulate a source that stayed idle for ~10 s before its first buffer.
         r.anchor = std::time::Instant::now().checked_sub(Duration::from_secs(10));
@@ -951,7 +1041,7 @@ mod tests {
     #[test]
     fn anchored_resampler_realigns_when_the_stream_drifts_ahead_of_wall_clock() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1).anchored();
         // Simulate accumulated positive device-clock drift: the stream's declared position has
         // crept 10 s ahead of true wall-clock elapsed time (base_ns dominates stream_end_ns).
@@ -980,11 +1070,11 @@ mod tests {
         let mut comms = Resampler::new(16_000, 1).anchored_at(epoch);
         console.feed(
             &vec![0.1f32; CHUNK_SAMPLES],
-            &ResamplerSink::Channel(console_tx),
+            &ResamplerSink::channel(console_tx),
         );
         comms.feed(
             &vec![0.1f32; CHUNK_SAMPLES],
-            &ResamplerSink::Channel(comms_tx),
+            &ResamplerSink::channel(comms_tx),
         );
         let console_chunk = console_rx.recv().unwrap();
         let comms_chunk = comms_rx.recv().unwrap();
@@ -1003,7 +1093,7 @@ mod tests {
     #[test]
     fn anchored_resampler_stays_stream_positioned_while_continuous() {
         let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(8);
-        let sink = ResamplerSink::Channel(tx);
+        let sink = ResamplerSink::channel(tx);
         let mut r = Resampler::new(16_000, 1).anchored();
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
         r.feed(&vec![0.1f32; CHUNK_SAMPLES], &sink);
@@ -1043,5 +1133,42 @@ mod tests {
         assert!(!sys.is_empty());
         assert!(sys.iter().all(|&s| (s - 1.0).abs() < 1e-4));
         assert!(mic.iter().all(|&s| (s - 1.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn a_full_channel_records_the_drop_and_warns_exactly_once() {
+        // Depth-1 channel, never drained: the second flush cannot be delivered.
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<AudioChunk>(1);
+        let dropped = DropCounter::default();
+        let sink = ResamplerSink::Channel {
+            tx,
+            dropped: dropped.clone(),
+        };
+        let mut r = Resampler::new(16_000, 1);
+        r.out = vec![0.0; CHUNK_SAMPLES];
+        r.flush(&sink);
+        assert_eq!(dropped.count(), 0, "the first chunk fits");
+        r.out = vec![0.0; CHUNK_SAMPLES];
+        r.flush(&sink);
+        assert_eq!(
+            dropped.count(),
+            1,
+            "the second chunk is counted, not lost silently"
+        );
+
+        // The counter reports it once and then stays quiet, like every other health latch.
+        assert_eq!(
+            dropped.take_health(),
+            Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+        );
+        assert_eq!(dropped.take_health(), None);
+        // A counter that never moved never warns — and the latch stays armed for a later loss.
+        let fresh = DropCounter::default();
+        assert_eq!(fresh.take_health(), None);
+        fresh.record();
+        assert_eq!(
+            fresh.take_health(),
+            Some(CaptureHealth::Raised(CaptureWarning::AudioDropped))
+        );
     }
 }

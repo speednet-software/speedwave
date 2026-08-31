@@ -905,6 +905,9 @@ fn main() {
                 .level_for("hyper", log::LevelFilter::Warn)
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
+                // whisper.cpp debug builds (-DWHISPER_DEBUG) log decoded tokens per decode step:
+                // meeting speech must never reach the log file / diagnostics ZIP (security.md).
+                .level_for("whisper_rs", log::LevelFilter::Info)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepSome(10))
                 .format(move |callback, message, record| {

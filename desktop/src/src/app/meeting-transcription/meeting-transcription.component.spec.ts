@@ -23,6 +23,8 @@ describe('MeetingTranscriptionComponent', () => {
     // The child components inject TranscriptionService too; stub the rest.
     getCapabilities: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
@@ -70,8 +72,12 @@ describe('MeetingTranscriptionComponent', () => {
           note: null,
         },
         backends: ['cpu'],
+        gpu_class: 'none' as const,
+        accel_label: 'CPU',
       })),
       listAudioSources: vi.fn(async () => []),
+      liveTranscriptPreferred: vi.fn(() => true),
+      setLiveTranscriptPreferred: vi.fn(),
       // Gate predicate matches recording-controls hasModel — any downloaded model lifts it.
       listModels: vi.fn(async () => models(true)),
       list: vi.fn(async () => []),
@@ -213,5 +219,15 @@ describe('MeetingTranscriptionComponent', () => {
     const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
     expect(banner.textContent).toContain('microphone stopped');
     expect(banner.querySelector('[data-testid="open-audio-settings"]')).toBeNull();
+  });
+
+  it('renders the dropped-audio warning without blaming the transcriber', () => {
+    // Producers are the ingest channel and the mix buffer — record-only sessions
+    // have no live transcriber, so the copy must not name one.
+    captureWarningSig.set('audio_dropped');
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-testid="capture-warning"]');
+    expect(banner.textContent).toContain('audio was dropped');
+    expect(banner.textContent).not.toContain('transcriber');
   });
 });

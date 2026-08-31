@@ -136,13 +136,33 @@ jobs:
           - platform: windows-latest
             args: ""
             arch_label: ""
-    timeout-minutes: 45
+    timeout-minutes: 75
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ needs.resolve.outputs.tag_exists == 'true' && needs.resolve.outputs.tag_name || '' }}
           persist-credentials: false
+
+      # The runner's checkout base + the ggml-vulkan CMake scratch crosses MAX_PATH (C1083);
+      # same escape as test.yml's desktop-windows-check.
+      - name: Use a short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          echo 'CARGO_TARGET_DIR=D:\st' >> "$GITHUB_ENV"
+          # Cache key folds in the runner image: a VS bump invalidates CMakeCache generators.
+          echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+
+      # rust-cache (setup-toolchain) caches workspace-relative target dirs only — D:\st
+      # needs its own cache entry; shares the key with desktop-build.yml's Windows leg.
+      - name: Cache the short cargo target dir (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: D:\st
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-bundle-
 
       - name: Setup toolchain (Node + Rust + cache)
         uses: ./.github/actions/setup-toolchain

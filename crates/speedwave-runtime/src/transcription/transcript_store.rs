@@ -77,6 +77,14 @@ pub enum TranscriptEvent {
         /// What recovered.
         warning: crate::transcription::CaptureWarning,
     },
+    /// Throttled capture loudness (replace-only display state, never persisted): RMS 0..1 per
+    /// channel, `[system, mic]` on paired captures, one entry on mono ones (ADR-056 Am. 13).
+    AudioLevel {
+        /// Monotonic seq.
+        seq: u64,
+        /// Latest per-channel RMS.
+        levels: Vec<f32>,
+    },
 }
 
 impl TranscriptEvent {
@@ -90,7 +98,8 @@ impl TranscriptEvent {
             | TranscriptEvent::FinalSegmentsReady { seq, .. }
             | TranscriptEvent::Finished { seq, .. }
             | TranscriptEvent::CaptureWarning { seq, .. }
-            | TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
+            | TranscriptEvent::CaptureWarningCleared { seq, .. }
+            | TranscriptEvent::AudioLevel { seq, .. } => *seq,
         }
     }
 }
@@ -319,9 +328,11 @@ impl TranscriptStore {
             if save {
                 s.save(&dir)?;
             }
-        }
-        for event in &events {
-            let _ = h.tx.send(event.clone());
+            // Broadcast under the session lock: a send after release can interleave with a
+            // concurrent mutator's, delivering seqs out of order (the UI drops seq <= last).
+            for event in &events {
+                let _ = h.tx.send(event.clone());
+            }
         }
         Ok(events)
     }
@@ -373,6 +384,21 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
+    /// Broadcasts the latest capture loudness (display state only — never hits disk) without
+    /// waiting for the session lock: a skipped frame (`Ok(0)`) beats stalling the ingest thread.
+    pub fn audio_level(&self, id: Uuid, levels: Vec<f32>) -> Result<u64, StoreError> {
+        let h = self.activate(id)?;
+        let Some(mut s) = h.session.try_write() else {
+            return Ok(0);
+        };
+        let seq = s.last_seq + 1;
+        s.last_seq = seq;
+        // Send before releasing the lock — see `with_session_inner` on seq/broadcast ordering.
+        let _ = h.tx.send(TranscriptEvent::AudioLevel { seq, levels });
+        drop(s);
+        Ok(seq)
+    }
+
     /// Sets the status.
     pub fn set_status(&self, id: Uuid, status: TranscriptStatus) -> Result<u64, StoreError> {
         let mut seq_out = 0;
@@ -384,9 +410,14 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Reopens a `Done` session for more recording: the offline pass becomes the
-    /// live baseline and a new audio part is registered (ADR-056 Amendment 10).
-    pub fn resume(&self, id: Uuid, next_part: std::path::PathBuf) -> Result<u64, StoreError> {
+    /// Reopens a `Done` session for more recording (ADR-056 Am. 10): finals become the live
+    /// baseline, a new part registers, and `models_used.live` = `live_model` (UI keys on it).
+    pub fn resume(
+        &self,
+        id: Uuid,
+        next_part: std::path::PathBuf,
+        live_model: Option<String>,
+    ) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         // The status gate runs under the session lock — a caller-side pre-check
         // alone would race concurrent stop/start/delete (TOCTOU).
@@ -401,6 +432,10 @@ impl TranscriptStore {
                 s.live_segments = finals;
             }
             s.audio_parts.push(next_part.clone());
+            // Snapshot the pre-resume model so `rollback_resume` restores it without the
+            // caller having to carry it (the segment baseline is snapshotted the same way).
+            s.prior_live_model = s.models_used.live.take();
+            s.models_used.live = live_model.clone();
             s.status = TranscriptStatus::Recording;
             vec![TranscriptEvent::StatusChanged {
                 seq,
@@ -416,7 +451,7 @@ impl TranscriptStore {
     }
 
     /// Reverts a [`Self::resume`] whose capture never started: drops the just-registered
-    /// part, restores the finals baseline, and returns the session to `Done`.
+    /// part, restores the finals baseline and the pre-resume live model, and returns to `Done`.
     pub fn rollback_resume(&self, id: Uuid, expected_part: &Path) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         // Guarded under the session lock like `resume`: only a session still in
@@ -434,6 +469,7 @@ impl TranscriptStore {
             // Inverse of `resume`: the live baseline moves back to finals, so
             // `effective_segments()` is unchanged and a later resume works again.
             s.final_segments = Some(std::mem::take(&mut s.live_segments));
+            s.models_used.live = s.prior_live_model.take();
             s.status = TranscriptStatus::Done;
             vec![TranscriptEvent::StatusChanged {
                 seq,
@@ -923,6 +959,10 @@ mod tests {
                 seq: 12,
                 warning: crate::transcription::CaptureWarning::SystemAudioSilent,
             },
+            TranscriptEvent::AudioLevel {
+                seq: 13,
+                levels: vec![0.1, 0.02],
+            },
         ] {
             let expected = match &ev {
                 TranscriptEvent::SegmentAppended { seq, .. } => *seq,
@@ -933,6 +973,7 @@ mod tests {
                 TranscriptEvent::Finished { seq } => *seq,
                 TranscriptEvent::CaptureWarning { seq, .. } => *seq,
                 TranscriptEvent::CaptureWarningCleared { seq, .. } => *seq,
+                TranscriptEvent::AudioLevel { seq, .. } => *seq,
             };
             assert_eq!(ev.seq(), expected);
         }
@@ -1017,7 +1058,7 @@ mod tests {
 
         let mut sub = store.subscribe(id).unwrap();
         let part2 = dir.path().join("audio-2.wav");
-        store.resume(id, part2.clone()).unwrap();
+        store.resume(id, part2.clone(), None).unwrap();
 
         let snap = store.get(id).unwrap();
         assert!(matches!(snap.status, TranscriptStatus::Recording));
@@ -1045,6 +1086,39 @@ mod tests {
     }
 
     #[test]
+    fn resume_records_the_new_parts_live_model_and_rollback_restores_the_prior_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let mut session = mk_session(&dir.path().join("a.wav"));
+        // Part 1 ran a live pass with "small".
+        session.models_used.live = Some("small".to_string());
+        let id = store.create(session).unwrap();
+        store.finish(id).unwrap();
+
+        // Resumed record-only: the UI keys record-only on `models_used.live == None`.
+        let part2 = dir.path().join("audio-2.wav");
+        store.resume(id, part2.clone(), None).unwrap();
+        assert_eq!(store.get(id).unwrap().models_used.live, None);
+
+        // Rollback restores the pre-resume value from the store's own snapshot.
+        store.rollback_resume(id, &part2).unwrap();
+        assert_eq!(
+            store.get(id).unwrap().models_used.live.as_deref(),
+            Some("small")
+        );
+
+        // The reverse direction: a record-only part 1 resumed with a live pass.
+        let part2 = dir.path().join("audio-2.wav");
+        store
+            .resume(id, part2, Some("large-v3".to_string()))
+            .unwrap();
+        assert_eq!(
+            store.get(id).unwrap().models_used.live.as_deref(),
+            Some("large-v3")
+        );
+    }
+
+    #[test]
     fn resume_on_a_session_without_finals_keeps_the_live_segments() {
         let dir = tempfile::tempdir().unwrap();
         let store = TranscriptStore::with_root(dir.path());
@@ -1053,7 +1127,9 @@ mod tests {
             .append_segment(id, seg(0.0, 1.0, "live only"))
             .unwrap();
         store.set_status(id, TranscriptStatus::Done).unwrap();
-        store.resume(id, dir.path().join("audio-2.wav")).unwrap();
+        store
+            .resume(id, dir.path().join("audio-2.wav"), None)
+            .unwrap();
         let snap = store.get(id).unwrap();
         assert_eq!(snap.live_segments.len(), 1);
         assert_eq!(snap.live_segments[0].text, "live only");
@@ -1072,7 +1148,7 @@ mod tests {
         let before = store.get(id).unwrap();
 
         let part2 = dir.path().join("audio-2.wav");
-        store.resume(id, part2.clone()).unwrap();
+        store.resume(id, part2.clone(), None).unwrap();
         let mut sub = store.subscribe(id).unwrap();
         store.rollback_resume(id, &part2).unwrap();
 
@@ -1094,7 +1170,7 @@ mod tests {
         assert!(matches!(reloaded.status, TranscriptStatus::Done));
         assert!(reloaded.audio_parts.is_empty());
         // And the session is resumable again after the transient failure.
-        store.resume(id, part2.clone()).unwrap();
+        store.resume(id, part2.clone(), None).unwrap();
         let snap = store.get(id).unwrap();
         assert!(matches!(snap.status, TranscriptStatus::Recording));
         assert_eq!(snap.audio_parts, vec![part2]);
@@ -1111,7 +1187,7 @@ mod tests {
             .unwrap();
         store.set_status(id, TranscriptStatus::Done).unwrap();
         let part2 = dir.path().join("audio-2.wav");
-        store.resume(id, part2.clone()).unwrap();
+        store.resume(id, part2.clone(), None).unwrap();
 
         store.rollback_resume(id, &part2).unwrap();
 
@@ -1121,7 +1197,7 @@ mod tests {
         assert_eq!(after.effective_segments().len(), 1);
         assert_eq!(after.effective_segments()[0].text, "live only");
         // A later resume restores the same baseline.
-        store.resume(id, part2).unwrap();
+        store.resume(id, part2, None).unwrap();
         assert_eq!(store.get(id).unwrap().live_segments[0].text, "live only");
     }
 
@@ -1143,7 +1219,7 @@ mod tests {
             StoreError::InvalidState(_)
         ));
         // Resumed, but a different part named → InvalidState and untouched.
-        store.resume(id, part2.clone()).unwrap();
+        store.resume(id, part2.clone(), None).unwrap();
         let err = store
             .rollback_resume(id, &dir.path().join("other.wav"))
             .unwrap_err();
@@ -1172,7 +1248,7 @@ mod tests {
         ] {
             store.set_status(id, status.clone()).unwrap();
             let err = store
-                .resume(id, dir.path().join("audio-2.wav"))
+                .resume(id, dir.path().join("audio-2.wav"), None)
                 .unwrap_err();
             assert!(
                 matches!(err, StoreError::InvalidState(_)),
@@ -1266,6 +1342,71 @@ mod tests {
         assert!(
             src.contains("kind: 'live_draft'"),
             "TS TranscriptEvent union must carry the live_draft kind"
+        );
+    }
+
+    #[test]
+    fn audio_level_broadcasts_without_persisting_or_touching_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        let json_path = store.session_dir(id).join("transcript.json");
+        let before = std::fs::read_to_string(&json_path).unwrap();
+
+        let seq = store.audio_level(id, vec![0.12, 0.03]).unwrap();
+        assert_eq!(seq, 1, "level events share the monotonic seq space");
+
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::AudioLevel { levels, .. } => assert_eq!(levels, vec![0.12, 0.03]),
+            other => panic!("expected AudioLevel, got {other:?}"),
+        }
+        // Pure display state: the durable transcript.json is untouched and a
+        // fresh store reloads with the pre-level last_seq.
+        assert_eq!(std::fs::read_to_string(&json_path).unwrap(), before);
+        let store2 = TranscriptStore::with_root(dir.path());
+        assert_eq!(store2.get(id).unwrap().last_seq, 0);
+        // Unknown session errors instead of broadcasting into the void.
+        assert!(store.audio_level(Uuid::new_v4(), vec![0.5]).is_err());
+    }
+
+    #[test]
+    fn audio_level_skips_the_frame_instead_of_waiting_on_a_contended_session_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        // Hold the session write lock, as the decode thread does across an fsync'd save.
+        let entry_session = store.sessions.get(&id).unwrap().session.clone();
+        let guard = entry_session.write();
+        // A blocking audio_level would deadlock right here; it must skip instead.
+        assert_eq!(store.audio_level(id, vec![0.5]).unwrap(), 0);
+        assert!(
+            sub.events.try_recv().is_err(),
+            "skipped frame emits nothing"
+        );
+        drop(guard);
+        // Uncontended again: the frame flows with a real seq.
+        assert_eq!(store.audio_level(id, vec![0.5]).unwrap(), 1);
+        assert!(matches!(
+            sub.events.try_recv().unwrap(),
+            TranscriptEvent::AudioLevel { seq: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn audio_level_serde_round_trip_and_ts_mirror() {
+        let ev = TranscriptEvent::AudioLevel {
+            seq: 3,
+            levels: vec![0.5],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"kind\":\"audio_level\""));
+        assert_eq!(serde_json::from_str::<TranscriptEvent>(&json).unwrap(), ev);
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("kind: 'audio_level'"),
+            "TS TranscriptEvent union must carry the audio_level kind"
         );
     }
 }

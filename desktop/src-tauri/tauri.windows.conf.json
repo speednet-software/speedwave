@@ -9,6 +9,8 @@
       "mcp-os/": "mcp-os/",
       "oauth/": "oauth/",
       "cli/speedwave.exe": "cli/speedwave.exe",
+      "vulkan-1.dll": "vulkan-1.dll",
+      "THIRD-PARTY-LICENSES/": "THIRD-PARTY-LICENSES/",
       "windows/sweep.ps1": "windows/sweep.ps1",
       "windows/firewall.ps1": "windows/firewall.ps1"
     },

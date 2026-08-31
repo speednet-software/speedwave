@@ -56,7 +56,9 @@ _makefile_check_clippy_cargo_lines() {
 }
 
 @test "workflow has no filtered --lib subset for speedwave-runtime" {
-    if grep -n 'cargo test -p speedwave-runtime --lib' "$WORKFLOW"; then
+    # Sole sanctioned subset: the Windows Vulkan lane's `transcription::` module filter —
+    # additive #[cfg(windows)] coverage with its own vacuous-filter guard, not the full-suite gate.
+    if grep -n 'cargo test -p speedwave-runtime --lib' "$WORKFLOW" | grep -v 'transcription::'; then
         echo "Filtered --lib subsets skip integration binaries and test-support suites."
         return 1
     fi
