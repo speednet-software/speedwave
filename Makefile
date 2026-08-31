@@ -563,8 +563,8 @@ test-mcp-office-py:
 	"$$PY" -m venv --clear "$$VENV"; \
 	"$$VENV/bin/pip" install -q --upgrade pip; \
 	"$$VENV/bin/pip" install -q -r mcp-servers/office/requirements.txt pytest; \
-	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; \
-	rm -rf "$$VENV"
+	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
+	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
