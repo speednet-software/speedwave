@@ -7,7 +7,7 @@
 # - Blast radius: compromise of hub exposes NO service credentials
 
 # Build stage
-FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0 AS builder
+FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS builder
 
 WORKDIR /build
 
@@ -55,7 +55,7 @@ RUN cd hub && npm run build
 RUN cd hub && npm prune --omit=dev
 
 # Production stage
-FROM node:24-alpine@sha256:fb71d01345f11b708a3553c66e7c74074f2d506400ea81973343d915cb64eef0
+FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3
 
 # curl for healthcheck; tzdata for TZ env — keep aligned with tz.rs (see CLAUDE.md SSOT).
 RUN apk add --no-cache curl tzdata
