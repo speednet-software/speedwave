@@ -310,22 +310,16 @@ jobs:
           key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-audit-
 
-      - name: npm audit (mcp-servers)
-        run: cd mcp-servers && npm audit --audit-level=high --omit=dev
-
-      - name: npm audit (desktop)
-        run: cd desktop/src && npm audit --audit-level=high --omit=dev
+      - name: npm audit (both workspaces)
+        run: make audit-mcp audit-desktop
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update
-      # only), no fixed self_update release. Keep in sync with Makefile AUDIT_IGNORE.
-      - name: cargo audit (root workspace)
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
-
-      - name: cargo audit (desktop)
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --file desktop/src-tauri/Cargo.lock
+      # Both lockfiles and the ignore list live in the Makefile target (AUDIT_IGNORE),
+      # so CI cannot drift from a local `make audit`.
+      - name: Rust audit (both lockfiles)
+        run: make audit-rust
 
   swift:
     if: github.event_name == 'pull_request'
