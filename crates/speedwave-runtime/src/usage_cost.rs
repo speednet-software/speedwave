@@ -880,7 +880,8 @@ mod tests {
 
     #[test]
     fn cache_1m_variant_uses_1m_pricing() {
-        // sonnet 1M output (22.5/MTok) differs from base (15.0/MTok).
+        // The [1m] id must resolve to the catalog's pricing_1m — billed at the
+        // standard rate on Claude 4.6+ (sonnet-4-6 output 15.0/MTok), never None.
         let e = compute_cost_with(
             &record(
                 "anthropic_apikey",
@@ -893,7 +894,7 @@ mod tests {
             &|_| None,
         );
         assert!(
-            (e.cost_usd.unwrap() - 22.5).abs() < 1e-9,
+            (e.cost_usd.unwrap() - 15.0).abs() < 1e-9,
             "got {:?}",
             e.cost_usd
         );
