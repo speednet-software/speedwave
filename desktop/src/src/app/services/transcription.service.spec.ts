@@ -1,14 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { LIVE_TRANSCRIPT_STORAGE_KEY, TranscriptionService } from './transcription.service';
+import { NEW_CONVERSATION_STREAMING } from './chat-state.service';
 import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { Segment, TranscriptSession } from '../models/transcript';
 
-/** Minimal ChatStateService stand-in — only `sendMessage` is exercised here. */
+/** Minimal ChatStateService stand-in — only the send path is exercised here. */
 class MockChatState {
-  sendMessage = vi.fn(async (_text: string, _label?: string) => undefined);
+  readonly isStreamingFromState = signal(false);
+  calls: string[] = [];
+  startNewConversation = vi.fn(async () => {
+    this.calls.push('startNewConversation');
+  });
+  sendMessage = vi.fn(async (_text: string, _label?: string) => {
+    this.calls.push('sendMessage');
+  });
 }
 
 function seg(start: number, end: number, text: string): Segment {
@@ -485,12 +494,24 @@ describe('TranscriptionService', () => {
   });
 
   describe('sendToChat', () => {
-    it('sends the transcript with a Polish summarization instruction on top', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'pl' });
+    /**
+     * Answers the two transcript reads a send performs.
+     * @param language - session language the snapshot reports.
+     */
+    function transcriptHandler(language: 'pl' | 'en') {
+      return async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language });
         if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
         return undefined;
       };
+    }
+
+    beforeEach(() => {
+      mockTauri.invokeHandler = transcriptHandler('en');
+    });
+
+    it('sends the transcript with a Polish summarization instruction on top', async () => {
+      mockTauri.invokeHandler = transcriptHandler('pl');
       await svc.sendToChat('sess-1');
       const [text, label] = mockChat.sendMessage.mock.calls[0];
       expect(label).toBe('Meeting transcript');
@@ -499,16 +520,46 @@ describe('TranscriptionService', () => {
     });
 
     it('uses the English instruction for an English session', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
       await svc.sendToChat('sess-1');
       const [text] = mockChat.sendMessage.mock.calls[0];
       expect(text).toContain('summary');
       expect(text).toContain('action item');
       expect(text.endsWith('# Meeting transcript')).toBe(true);
+    });
+
+    it('opens a new conversation before sending, by default', async () => {
+      await svc.sendToChat('sess-1');
+      expect(mockChat.calls).toEqual(['startNewConversation', 'sendMessage']);
+    });
+
+    it('appends to the active conversation when the caller asks for it', async () => {
+      await svc.sendToChat('sess-1', 'current-chat');
+      expect(mockChat.startNewConversation).not.toHaveBeenCalled();
+      expect(mockChat.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the conversation untouched when the transcript cannot be read', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'get_transcript') throw new Error('transcript gone');
+        return undefined;
+      };
+      await expect(svc.sendToChat('sess-1')).rejects.toThrow('transcript gone');
+      expect(mockChat.startNewConversation).not.toHaveBeenCalled();
+      expect(mockChat.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not send when the new conversation fails to start', async () => {
+      mockChat.startNewConversation.mockRejectedValueOnce(new Error('no session'));
+      await expect(svc.sendToChat('sess-1')).rejects.toThrow('no session');
+      expect(mockChat.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('refuses to append while the current conversation is still replying', async () => {
+      mockChat.isStreamingFromState.set(true);
+      await expect(svc.sendToChat('sess-1', 'current-chat')).rejects.toThrow(
+        NEW_CONVERSATION_STREAMING
+      );
+      expect(mockChat.sendMessage).not.toHaveBeenCalled();
     });
   });
 
