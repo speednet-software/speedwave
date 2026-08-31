@@ -47,7 +47,7 @@ ctrlc = { version = "3", features = ["termination"] }
 # JSON Schema validation for `plugin_save_settings` — refuses payloads
 # that don't match the plugin's manifest-declared `settings_schema`.
 # MIT-licensed; transitive deps already in the tree (regex, url, fancy-regex).
-jsonschema = { version = "0.49", default-features = false }
+jsonschema = { version = "0.52", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # In-process AVCaptureDevice mic-consent prompt (mic_permission_cmd.rs); the
