@@ -447,11 +447,11 @@ Breakdown by platform:
 
 **Total: 18 assets, 6 `.sig` companions.**
 
-Asset names use `assetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
+Asset names use `releaseAssetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
 
 The `publish-release` job runs three steps:
 
-1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://github.com/<repo>/releases/` prefix.
+1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://api.github.com/repos/<repo>/releases/assets/` prefix (the URL shape tauri-action >= 1.0.0 writes).
 2. **Publish:** flips the draft release to live via `gh api --method PATCH … -f draft=false`.
 3. **Post-publish safety net:** re-runs `scripts/verify-release-assets.sh` against the live release; if it fails, the workflow reverts back to draft so the broken release is not user-visible.
 
@@ -459,7 +459,7 @@ At PR time, `_tests/desktop/updater-config.bats` enforces `tauri.conf.json` upda
 
 ### Changing release artifact naming or target set
 
-When changing `bundle.targets` in `tauri.conf.json`, bumping `tauri-action`, or modifying `assetNamePattern` in `desktop-release.yml`:
+When changing `bundle.targets` in `tauri.conf.json`, bumping `tauri-action`, or modifying `releaseAssetNamePattern` in `desktop-release.yml`:
 
 1. Update the expected-asset list in `scripts/verify-release-assets.sh`.
 2. Regenerate the happy-case fixture `_tests/desktop/fixtures/verify-release-assets/assets-happy.json`.

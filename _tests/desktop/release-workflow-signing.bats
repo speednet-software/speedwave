@@ -75,6 +75,22 @@ VERIFY_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/verify-release-assets.sh"
     sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'macos-latest'"
 }
 
+@test "workflow passes releaseAssetNamePattern to tauri-action" {
+    # tauri-action >= 1.0.0 input name; the old assetNamePattern is silently ignored,
+    # dropping the arch-labeled asset names verify-release-assets.sh enumerates.
+    grep -qF 'releaseAssetNamePattern:' "$WORKFLOW"
+}
+
+@test "workflow uses no tauri-action inputs removed in 1.0.0" {
+    # Removed inputs produce only a warning, never a fail — absence must be pinned here.
+    for input in assetNamePattern includeUpdaterJson updaterJsonKeepUniversal includeRelease includeDebug; do
+        if grep -qE "^[[:space:]]+${input}:" "$WORKFLOW"; then
+            echo "ERROR: '${input}' is not an input of the pinned tauri-action version" >&2
+            return 1
+        fi
+    done
+}
+
 @test "verify-release-assets.sh enumerates macOS updater assets" {
     # Anti-removal guard: the release-gate script must enumerate macOS updater
     # archive names explicitly so a missing asset fails the release before publish.
