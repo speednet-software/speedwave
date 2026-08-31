@@ -744,8 +744,9 @@ def test_weasyprint_render_rejects_remote_resource(tmp_path: Path) -> None:
     src = tmp_path / "page.html"
     src.write_text('<html><body><img src="https://example.com/x.png"></body></html>')
     dst = tmp_path / "out.pdf"
-    # WeasyPrint surfaces the url_fetcher ValueError → the script exits non-zero.
+    # WeasyPrint itself only warns on a fetcher rejection; the script records it and fails.
     run_script_expect_fail("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+    assert not dst.exists(), "a rejected render must not leave an output PDF"
 
 
 @needs_weasyprint
