@@ -210,16 +210,12 @@ mod tests {
         // 35 chars after AIza per Google's documented key shape.
         let input = "Gemini key: AIzaSyA1234567890abcdefghijklmnopqrstu7 in use";
         let output = sanitize(input);
-        assert!(
-            !output.contains("AIzaSy"),
-            "Google API key should be redacted: {output}"
-        );
-        assert!(output.contains("***REDACTED_GOOGLE_KEY***"));
+        assert_eq!(output, "Gemini key: ***REDACTED_GOOGLE_KEY*** in use");
     }
 
     #[test]
     fn test_google_key_lookalike_not_redacted() {
-        // Too short (10 chars after AIza) — a normal identifier, not a key.
+        // Too short (9 chars after AIza) — a normal identifier, not a key.
         let input = "symbol AIzaShortName is fine";
         let output = sanitize(input);
         assert_eq!(output, input, "short AIza-prefixed words must pass through");
