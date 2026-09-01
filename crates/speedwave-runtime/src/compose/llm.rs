@@ -140,6 +140,18 @@ fn apply_llm_config_proxy(
                     "1".to_string(),
                 ),
             ]);
+            // CC auto-compacts unrecognized ids against an assumed 200K window;
+            // pin the probed real window, else restore the wait-for-the-API behavior.
+            match entry.context_tokens {
+                Some(window) => extra_env.insert(
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
+                    window.to_string(),
+                ),
+                None => extra_env.insert(
+                    "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT".to_string(),
+                    "1".to_string(),
+                ),
+            };
         }
     }
     extra_env.insert(
@@ -351,6 +363,9 @@ pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
         "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        // A local model's window must never cap or un-enforce catalog models.
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
     ]
 }
 
@@ -453,6 +468,99 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn routed_cfg(
+        kind: crate::config::LlmProviderKind,
+        context_tokens: Option<u32>,
+    ) -> crate::config::LlmConfig {
+        crate::config::LlmConfig {
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "litellm".into(),
+                kind,
+                base_url: Some("http://host.docker.internal:4000".into()),
+                model: Some("qwen3-coder-30b".into()),
+                has_api_key: false,
+                context_tokens,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "litellm".into(),
+                model: Some("qwen3-coder-30b".into()),
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        }
+    }
+
+    const CLAUDE_ENV_YAML: &str = "services:\n  claude:\n    environment: []\n";
+
+    #[test]
+    fn routed_provider_with_known_window_pins_max_context_tokens() {
+        for kind in [
+            crate::config::LlmProviderKind::Local,
+            crate::config::LlmProviderKind::OpenRouter,
+        ] {
+            let rendered = apply_llm_config_proxy(
+                CLAUDE_ENV_YAML,
+                &routed_cfg(kind, Some(131_072)),
+                "test-caller-token",
+            )
+            .unwrap();
+            assert!(
+                rendered.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072"),
+                "{kind:?}: probed window must reach CC: {rendered}"
+            );
+            assert!(
+                !rendered.contains("CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"),
+                "{kind:?}: a known window must not also disable enforcement"
+            );
+        }
+    }
+
+    #[test]
+    fn routed_provider_without_window_disables_unknown_model_enforcement() {
+        // Discovery reported no window: never substitute a made-up value —
+        // restore CC's pre-enforcement (wait-for-the-API) behavior instead.
+        let rendered = apply_llm_config_proxy(
+            CLAUDE_ENV_YAML,
+            &routed_cfg(crate::config::LlmProviderKind::Local, None),
+            "test-caller-token",
+        )
+        .unwrap();
+        assert!(
+            rendered.contains("CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"),
+            "missing enforcement kill-switch: {rendered}"
+        );
+        assert!(
+            !rendered.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            "no window value may be invented: {rendered}"
+        );
+    }
+
+    #[test]
+    fn anthropic_provider_injects_no_window_env() {
+        // Catalog models are recognized by CC — neither knob may leak there.
+        let cfg = crate::config::LlmConfig {
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".into(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("claude-sonnet-5".into()),
+                has_api_key: false,
+                context_tokens: Some(1_000_000),
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".into(),
+                model: Some("claude-sonnet-5".into()),
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        let rendered = apply_llm_config_proxy(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
+        assert!(!rendered.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+        assert!(!rendered.contains("CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"));
     }
 
     fn emptied_v2(proxy_enabled: Option<bool>) -> crate::config::LlmConfig {
