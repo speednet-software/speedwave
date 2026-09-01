@@ -286,7 +286,7 @@ if ($bridges) {
 Remove-Item -Recurse -Force "C:\Speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "$env:USERPROFILE\.speedwave" -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\speedwave-e2e" -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force "C:\cargo-build" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "C:\cb" -ErrorAction SilentlyContinue
 Remove-Item -Force "C:\speedwave-setup.exe" -ErrorAction SilentlyContinue
 
 # Remove WSL-side staging dir (in the build distro, not Speedwave distro).
@@ -457,8 +457,11 @@ function Assert-ExitCode { if ($LASTEXITCODE -ne 0) { Write-Error "Command faile
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
-$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+$env:CARGO_TARGET_DIR = 'C:\cb'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
+# Ninja for cmake-crate builds: the VS generator's nested TryCompile dies on
+# MSB6003 (node-reuse resolves the tlog dir against the outer build's cwd).
+$env:CMAKE_GENERATOR = 'Ninja'
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building CLI binary..."
@@ -479,8 +482,11 @@ $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 # whisper-rs-sys needs the pinned SDK (ADR-085); fresh ssh sessions carry stale machine env.
 $env:VULKAN_SDK = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine")
-$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+$env:CARGO_TARGET_DIR = 'C:\cb'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
+# Ninja for cmake-crate builds: the VS generator's nested TryCompile dies on
+# MSB6003 (node-reuse resolves the tlog dir against the outer build's cwd).
+$env:CMAKE_GENERATOR = 'Ninja'
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
@@ -497,7 +503,7 @@ SCRIPT
 $ErrorActionPreference = "Stop"
 Set-Location C:\speedwave-e2e
 
-$installer = Get-ChildItem "C:\cargo-build\release\bundle\nsis\*.exe" -Recurse | Select-Object -First 1
+$installer = Get-ChildItem "C:\cb\release\bundle\nsis\*.exe" -Recurse | Select-Object -First 1
 if (-not $installer) { Write-Error "NSIS installer not found"; exit 1 }
 Write-Host "Found: $($installer.FullName)"
 Copy-Item $installer.FullName "C:\speedwave-setup.exe"

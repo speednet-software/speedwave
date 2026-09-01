@@ -5,8 +5,8 @@
 set -euo pipefail
 
 # Deepest observed MSBuild-generator TryCompile scratch below the cargo target dir
-# (cmTC_*.dir\Debug\*.obj — ~214 chars measured on CI, rounded up; ninja is shallower).
-SUFFIX_BUDGET=220
+# (cmTC_*.tlog\ParallelCustomBuild.command.1.tlog — 248 chars measured live; ninja is shallower).
+SUFFIX_BUDGET=250
 MAX_PATH=259
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
