@@ -167,6 +167,13 @@ $currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
 if (-not $currentPath.Contains($linkDir)) {
     [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$linkDir", 'Machine')
 }
+# SDK bin carries rc.exe/mt.exe — without it every CMake TryCompile link step
+# dies (ninja: vs_link_exe "RC Pass 1 ... no such file"; MSBuild: MSB6003).
+$sdkBin = "$sdkBase\bin\$sdkVer\x64"
+$currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
+if (-not $currentPath.Contains($sdkBin)) {
+    [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$sdkBin", 'Machine')
+}
 [System.Environment]::SetEnvironmentVariable('INCLUDE', "$msvcDir\include;$sdkBase\Include\$sdkVer\ucrt;$sdkBase\Include\$sdkVer\um;$sdkBase\Include\$sdkVer\shared", 'Machine')
 [System.Environment]::SetEnvironmentVariable('LIB', "$msvcDir\lib\$libArch;$sdkBase\Lib\$sdkVer\ucrt\$libArch;$sdkBase\Lib\$sdkVer\um\$libArch", 'Machine')
 Write-Host "MSVC environment configured"
