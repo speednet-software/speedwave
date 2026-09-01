@@ -193,6 +193,48 @@ describe('slack client', () => {
       }
     });
 
+    it('formats an undici fetch transport failure', () => {
+      const message = formatSlackError(new TypeError('fetch failed'));
+      expect(message).toContain('Network error');
+    });
+
+    it('finds a network marker buried in the cause chain', () => {
+      const dns = Object.assign(new Error('getaddrinfo ENOTFOUND slack.com'), {
+        code: 'ENOTFOUND',
+      });
+      const fetchFailed = new TypeError('fetch failed', { cause: dns });
+      const requestError = new Error('A request error occurred: something broke', {
+        cause: fetchFailed,
+      });
+      expect(formatSlackError(requestError)).toContain('Network error');
+    });
+
+    it('finds a network marker carried only as a code on an AggregateError member', () => {
+      const member = Object.assign(new Error('connect failure'), { code: 'ECONNREFUSED' });
+      const aggregate = new AggregateError([member], 'all attempts failed');
+      const wrapped = new Error('request wrapper', { cause: aggregate });
+      expect(formatSlackError(wrapped)).toContain('Network error');
+    });
+
+    it('skips a primitive cause and falls back to the message', () => {
+      const wrapped = new Error('wrapper failure', { cause: 'ECONNREFUSED' });
+      expect(formatSlackError(wrapped)).toBe('wrapper failure');
+    });
+
+    it('does not hang on a cyclic cause chain and falls back to the message', () => {
+      const cyclic: Error & { cause?: unknown } = new Error('opaque failure');
+      cyclic.cause = cyclic;
+      expect(formatSlackError(cyclic)).toBe('opaque failure');
+    });
+
+    it('does not classify a marker below the traversal bound as a network error', () => {
+      let deep: Error = Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' });
+      for (let i = 0; i < 10; i++) {
+        deep = new Error(`wrapper ${i}`, { cause: deep });
+      }
+      expect(formatSlackError(deep)).toBe('wrapper 9');
+    });
+
     it('formats unknown Slack API errors', () => {
       const error = { data: { error: 'some_unknown_error' } };
       const message = formatSlackError(error);
