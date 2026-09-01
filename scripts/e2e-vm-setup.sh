@@ -182,6 +182,14 @@ Start-Process -Wait -FilePath "$env:TEMP\rustup-init.exe" -ArgumentList '-y'
 Remove-Item "$env:TEMP\rustup-init.exe"
 SCRIPT
 
+    echo "[windows] Adding Defender exclusions for build dirs..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+# Real-time scanning races the CMake TryCompile create/delete cycle (MSB6003
+# DirectoryNotFoundException on fresh tlog dirs); CI runners run with it off.
+Add-MpPreference -ExclusionPath 'C:\cb','C:\speedwave-e2e',"$env:USERPROFILE\.cargo","$env:USERPROFILE\.rustup"
+SCRIPT
+
     echo "[windows] Installing tauri-cli..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
