@@ -209,7 +209,10 @@ mod tests {
     fn test_google_api_key_redacted() {
         // 35 chars after AIza per Google's documented key shape; the literal is
         // split so secret scanners see no contiguous key in the source.
-        let input = concat!("Gemini key: AIza", "SyA1234567890abcdefghijklmnopqrstu7 in use");
+        let input = concat!(
+            "Gemini key: AIza",
+            "SyA1234567890abcdefghijklmnopqrstu7 in use"
+        );
         let output = sanitize(input);
         assert_eq!(output, "Gemini key: ***REDACTED_GOOGLE_KEY*** in use");
     }
@@ -955,7 +958,10 @@ mod tests {
 
     #[test]
     fn test_atlassian_token_redaction() {
-        let input = concat!("Atlassian API token: ATATT", "3xFfGF0abcdefghij1234567890KLMNOP");
+        let input = concat!(
+            "Atlassian API token: ATATT",
+            "3xFfGF0abcdefghij1234567890KLMNOP"
+        );
         let output = sanitize(input);
         assert!(
             output.contains("***REDACTED_ATLASSIAN_TOKEN***"),
