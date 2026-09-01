@@ -57,6 +57,26 @@ needs_matplotlib = pytest.mark.skipif(
 )
 
 
+def _weasyprint_loads() -> bool:
+    """WeasyPrint dlopens pango/harfbuzz/fontconfig through cffi, raising OSError, not ImportError."""
+    import contextlib
+    import io
+
+    try:
+        # The dlopen failure path prints a multi-line install hint to stdout before raising.
+        with contextlib.redirect_stdout(io.StringIO()):
+            import weasyprint  # noqa: F401
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+WEASYPRINT_OK = _weasyprint_loads()
+needs_weasyprint = pytest.mark.skipif(
+    not WEASYPRINT_OK, reason="weasyprint cannot load its native libraries (pango/harfbuzz/fontconfig)"
+)
+
+
 def _make_pdf(path: Path, pages: int) -> None:
     """Write a `pages`-page blank PDF via pypdf (no matplotlib — works on any interpreter)."""
     from pypdf import PdfWriter
@@ -710,9 +730,8 @@ def test_weasyprint_render_usage_error(tmp_path: Path) -> None:
     run_script_expect_fail("weasyprint_render.py", "only-one-arg")
 
 
-@needs_matplotlib  # weasyprint and matplotlib share the cairo/pango stack; if matplotlib renders, weasyprint can too
+@needs_weasyprint
 def test_weasyprint_render_html_to_pdf(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     src.write_text("<html><head><style>@page{size:A4;margin:18mm}</style></head><body><h1>Hi</h1></body></html>")
     dst = tmp_path / "out.pdf"
@@ -720,19 +739,18 @@ def test_weasyprint_render_html_to_pdf(tmp_path: Path) -> None:
     assert is_pdf(dst)
 
 
-@needs_matplotlib
+@needs_weasyprint
 def test_weasyprint_render_rejects_remote_resource(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     src.write_text('<html><body><img src="https://example.com/x.png"></body></html>')
     dst = tmp_path / "out.pdf"
-    # WeasyPrint surfaces the url_fetcher ValueError → the script exits non-zero.
+    # WeasyPrint itself only warns on a fetcher rejection; the script records it and fails.
     run_script_expect_fail("weasyprint_render.py", str(src), str(dst), f"file://{tmp_path}/")
+    assert not dst.exists(), "a rejected render must not leave an output PDF"
 
 
-@needs_matplotlib
+@needs_weasyprint
 def test_weasyprint_render_ignores_presentational_hint_background(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     src.write_text('<html><body background="http://presentational-hint.invalid/bg.png">hi</body></html>')
     dst = tmp_path / "out.pdf"
@@ -740,9 +758,8 @@ def test_weasyprint_render_ignores_presentational_hint_background(tmp_path: Path
     assert is_pdf(dst)
 
 
-@needs_matplotlib
+@needs_weasyprint
 def test_weasyprint_render_ignores_presentational_hint_css_injection(tmp_path: Path) -> None:
-    pytest.importorskip("weasyprint", reason="weasyprint not installed")
     src = tmp_path / "page.html"
     payload = "x);}body{background-image:url(http://presentational-hint.invalid/leak)}"
     src.write_text(f'<html><body background="{payload}">hi</body></html>')

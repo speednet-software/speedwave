@@ -1761,6 +1761,11 @@ EOF
     [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
 }
 
+@test "bundled-plugin install carries at least a 120s timeout budget" {
+    # CC ≥2.1.232 `plugin install` re-syncs the marketplace catalog before installing.
+    grep -qE 'timeout (1[2-9][0-9]|[2-9][0-9][0-9]) claude plugin install' "$ENTRYPOINT"
+}
+
 @test "a registry listing only other marketplaces does not skip the official add" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     _stub_claude_recording_all_plugin_calls

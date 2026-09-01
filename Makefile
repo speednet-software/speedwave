@@ -563,8 +563,8 @@ test-mcp-office-py:
 	"$$PY" -m venv --clear "$$VENV"; \
 	"$$VENV/bin/pip" install -q --upgrade pip; \
 	"$$VENV/bin/pip" install -q -r mcp-servers/office/requirements.txt pytest; \
-	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; \
-	rm -rf "$$VENV"
+	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
+	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
@@ -834,7 +834,10 @@ audit: audit-rust audit-mcp audit-desktop
 # quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update only,
 # parses GitHub's release feed over pinned TLS). No fixed self_update release (pins ^0.37).
 # Remove both when self_update bumps quick-xml to >=0.41.
-AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+#
+# glib unsoundness: informational, never fails cargo audit. glib 0.18.5 comes only via the
+# Linux+BSD-gated GTK stack, so it is never built for macOS/Windows. Drop at Tauri glib 0.20+.
+AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
 
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
@@ -842,12 +845,15 @@ audit-rust:
 	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
+# Shared with CI, which runs these targets rather than its own npm audit line.
+NPM_AUDIT_LEVEL := high
+
 audit-mcp:
-	cd mcp-servers && $(NPM) audit --omit=dev
+	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ MCP dependencies: no vulnerabilities"
 
 audit-desktop:
-	cd desktop/src && $(NPM) audit --omit=dev
+	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ Desktop dependencies: no vulnerabilities"
 
 # ── Full quality gate (run before push) ──────────────────────────────────────

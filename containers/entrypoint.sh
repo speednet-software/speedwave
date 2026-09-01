@@ -341,7 +341,8 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                     _diag WARN CONFIG "marketplace add ${_mp}: ${_err}"
                 fi
             fi
-            if _err="$(timeout 60 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
+            # CC ≥2.1.232 re-syncs the marketplace catalog inside install — needs headroom over 60s.
+            if _err="$(timeout 120 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
                 _diag INFO OK "${_plugin}@${_mp}"
             else
