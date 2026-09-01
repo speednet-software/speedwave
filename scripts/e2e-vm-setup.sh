@@ -203,6 +203,13 @@ Start-Process -Wait -FilePath "$env:TEMP\rustup-init.exe" -ArgumentList '-y'
 Remove-Item "$env:TEMP\rustup-init.exe"
 SCRIPT
 
+    echo "[windows] Installing Ninja (cmake-crate generator for whisper-rs-sys)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+if (Get-Command ninja -ErrorAction SilentlyContinue) { Write-Host 'Ninja already installed' }
+else { choco install ninja -y --no-progress }
+SCRIPT
+
     echo "[windows] Adding Defender exclusions for build dirs..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'

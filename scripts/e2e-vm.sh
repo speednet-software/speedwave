@@ -459,6 +459,9 @@ $env:INCLUDE = [System.Environment]::GetEnvironmentVariable("INCLUDE","Machine")
 $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cb'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
+# Ninja for cmake-crate builds: the VS generator's nested TryCompile dies on
+# MSB6003 (node-reuse resolves the tlog dir against the outer build's cwd).
+$env:CMAKE_GENERATOR = 'Ninja'
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building CLI binary..."
@@ -481,6 +484,9 @@ $env:LIB = [System.Environment]::GetEnvironmentVariable("LIB","Machine")
 $env:VULKAN_SDK = [System.Environment]::GetEnvironmentVariable("VULKAN_SDK","Machine")
 $env:CARGO_TARGET_DIR = 'C:\cb'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
+# Ninja for cmake-crate builds: the VS generator's nested TryCompile dies on
+# MSB6003 (node-reuse resolves the tlog dir against the outer build's cwd).
+$env:CMAKE_GENERATOR = 'Ninja'
 Set-Location C:\speedwave-e2e
 
 Write-Host "── Building Tauri release with NSIS bundle (e2e feature = WebDriver on :4445)..."
