@@ -24,7 +24,7 @@
   "author": "Speednet",
   "license": "Apache-2.0",
   "dependencies": {
-    "@slack/web-api": "^7.17.0",
+    "@slack/web-api": "^8.1.1",
     "@speedwave/mcp-shared": "file:../shared"
   },
   "devDependencies": {
