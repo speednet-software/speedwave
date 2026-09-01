@@ -216,6 +216,11 @@ describe('slack client', () => {
       expect(formatSlackError(wrapped)).toContain('Network error');
     });
 
+    it('skips a primitive cause and falls back to the message', () => {
+      const wrapped = new Error('wrapper failure', { cause: 'ECONNREFUSED' });
+      expect(formatSlackError(wrapped)).toBe('wrapper failure');
+    });
+
     it('does not hang on a cyclic cause chain and falls back to the message', () => {
       const cyclic: Error & { cause?: unknown } = new Error('opaque failure');
       cyclic.cause = cyclic;
