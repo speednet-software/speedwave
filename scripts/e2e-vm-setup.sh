@@ -190,7 +190,7 @@ $env:INCLUDE = [System.Environment]::GetEnvironmentVariable('INCLUDE','Machine')
 $env:LIB = [System.Environment]::GetEnvironmentVariable('LIB','Machine')
 # Use a non-temp directory for cargo builds to avoid AppLocker blocking
 # executables in %TEMP% (Windows Application Control error 4551).
-$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+$env:CARGO_TARGET_DIR = 'C:\cb'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 cargo install tauri-cli --locked
 SCRIPT
