@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.206";
+pub const CLAUDE_VERSION: &str = "2.1.252";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -57,7 +57,8 @@ pub struct AnthropicModelInfo {
     pub pricing_1m: Option<ModelPricing>,
 }
 
-// Published per-MTok rates: platform.claude.com/docs/en/pricing.
+// Published per-MTok rates: platform.claude.com/docs/en/about-claude/pricing.
+// Claude 4.6+ bills the full 1M window at standard rates — [1m] reuses the base const.
 const FABLE_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
     cached_input: 1.0,
@@ -70,17 +71,17 @@ const OPUS_PRICING: ModelPricing = ModelPricing {
     cache_write: 6.25,
     output: 25.0,
 };
-const SONNET_PRICING: ModelPricing = ModelPricing {
+const SONNET_5_PRICING: ModelPricing = ModelPricing {
+    input: 2.0,
+    cached_input: 0.2,
+    cache_write: 2.5,
+    output: 10.0,
+};
+const SONNET_46_PRICING: ModelPricing = ModelPricing {
     input: 3.0,
     cached_input: 0.3,
     cache_write: 3.75,
     output: 15.0,
-};
-const SONNET_PRICING_1M: ModelPricing = ModelPricing {
-    input: 6.0,
-    cached_input: 0.6,
-    cache_write: 7.5,
-    output: 22.5,
 };
 const HAIKU_PRICING: ModelPricing = ModelPricing {
     input: 1.0,
@@ -116,8 +117,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: true,
         premium: false,
-        pricing: SONNET_PRICING,
-        pricing_1m: Some(SONNET_PRICING_1M),
+        pricing: SONNET_5_PRICING,
+        pricing_1m: Some(SONNET_5_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
@@ -161,8 +162,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: false,
         premium: false,
-        pricing: SONNET_PRICING,
-        pricing_1m: Some(SONNET_PRICING_1M),
+        pricing: SONNET_46_PRICING,
+        pricing_1m: Some(SONNET_46_PRICING),
     },
 ];
 

@@ -92,3 +92,36 @@ fn catalog_serializes_pricing_for_the_frontend() {
         );
     }
 }
+
+#[test]
+fn million_context_variants_bill_at_standard_rates() {
+    // Claude 4.6+ includes the full 1M window at standard pricing — every catalog
+    // family is 4.6+ (platform.claude.com/docs/en/about-claude/pricing, Long context).
+    for m in ANTHROPIC_MODELS {
+        if let Some(p1m) = &m.pricing_1m {
+            assert_eq!(
+                p1m, &m.pricing,
+                "{}: the [1m] variant must bill at the base rate",
+                m.id
+            );
+        }
+    }
+}
+
+#[test]
+fn sonnet_5_is_priced_below_sonnet_46() {
+    // Sonnet 5 ($2/$10) sits below Sonnet 4.6 ($3/$15) — the launch price became
+    // the standard price (pricing page note, 2026-08). Guards against a shared const.
+    let find = |id: &str| {
+        ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from catalog"))
+    };
+    let s5 = find("claude-sonnet-5");
+    let s46 = find("claude-sonnet-4-6");
+    assert!(s5.pricing.input < s46.pricing.input);
+    assert!(s5.pricing.cached_input < s46.pricing.cached_input);
+    assert!(s5.pricing.cache_write < s46.pricing.cache_write);
+    assert!(s5.pricing.output < s46.pricing.output);
+}
