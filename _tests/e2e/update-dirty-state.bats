@@ -53,8 +53,14 @@ teardown() {
     n="${PREFIX}_${SPW_E2E_PROJECT}_${svc}"
     id=$($ENGINE_EXEC sh -c "cat $STORE/$n" | tr -d '[:space:]')
     [ -n "$id" ] && [ "$id" != "$DEAD" ]
-    run $ENGINE_EXEC nerdctl inspect --format '{{.State.Running}}' "$id"
-    assert_exit_code 0
-    assert_output_contains "true"
+    # A slow host can catch the container still in Created right after `up`
+    # (seen live on the rig) — poll for Running instead of a single read.
+    running=""
+    for _ in $(seq 1 30); do
+      running=$($ENGINE_EXEC nerdctl inspect --format '{{.State.Running}}' "$id" 2>/dev/null | tr -d '[:space:]')
+      [ "$running" = "true" ] && break
+      sleep 1
+    done
+    [ "$running" = "true" ] || { echo "container $n ($id) never reached Running=true (last: $running)"; false; }
   done
 }
