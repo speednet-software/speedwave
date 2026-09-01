@@ -79,14 +79,28 @@ $ErrorActionPreference = 'Stop'
 # whisper-rs-sys drives a real cmake.exe via the `cmake` crate (VS's bundled cmake is not on
 # PATH); install Kitware's build to `C:\Program Files\CMake\bin` on the Machine PATH. Idempotent.
 $cmakeBin = 'C:\Program Files\CMake\bin'
+$pinned = '3.31.5'
+$haveVer = ''
 if (Test-Path "$cmakeBin\cmake.exe") {
-    Write-Host "CMake already installed: $cmakeBin"
+    $haveVer = ((& "$cmakeBin\cmake.exe" --version | Select-Object -First 1) -replace '[^0-9.]', '')
+}
+if ($haveVer -eq $pinned) {
+    Write-Host "CMake $pinned already installed: $cmakeBin"
 } else {
+    # A foreign version masks the pin (a machine-resident 4.3.2 once shadowed it); replace it.
+    if ($haveVer) {
+        Write-Host "Replacing foreign CMake $haveVer with pinned $pinned..."
+        $u = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -like 'CMake*' } | Select-Object -First 1
+        if ($u -and $u.UninstallString -match '\{[0-9A-F-]+\}') {
+            Start-Process msiexec -ArgumentList '/x', $Matches[0], '/qn', '/norestart' -Wait
+        }
+    }
     $arch = $env:PROCESSOR_ARCHITECTURE
     if ($arch -eq 'ARM64') {
-        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-arm64.msi'
+        $url = "https://github.com/Kitware/CMake/releases/download/v$pinned/cmake-$pinned-windows-arm64.msi"
     } else {
-        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-x86_64.msi'
+        $url = "https://github.com/Kitware/CMake/releases/download/v$pinned/cmake-$pinned-windows-x86_64.msi"
     }
     Write-Host "Downloading $url..."
     Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\cmake-installer.msi"
