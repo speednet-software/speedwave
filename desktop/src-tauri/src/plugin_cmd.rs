@@ -609,64 +609,56 @@ pub fn save_plugin_credentials(
 
     // Verified-only: reject credential writes for an unverified plugin.
     let manifest = require_verified_with_manifest(&slug)?;
+    save_plugin_credentials_in(consts::data_dir(), &project, &manifest, &credentials)
+}
 
-    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-    let allowed_keys: Vec<&str> = manifest
-        .auth_fields
-        .iter()
-        .map(|f| f.key.as_str())
-        .collect();
-
-    let svc_dir = token_dir_for(&project, sid)?;
-    std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
-
+/// `data_dir`-parameterised core of [`save_plugin_credentials`], past the verify gate (see
+/// `plugin_oauth_expires_at_in`). Validate-all-then-write: a rejected save mutates nothing.
+fn save_plugin_credentials_in(
+    data_dir: &std::path::Path,
+    project: &str,
+    manifest: &plugin::PluginManifest,
+    credentials: &HashMap<String, String>,
+) -> Result<(), String> {
+    // Phase 1: every entry passes every check before the first filesystem touch. `credentials`
+    // iterates in hash order, so a write here would leak an order-dependent partial set.
+    let mut plain: Vec<(&str, &str)> = Vec::new();
     // OAuth fields (`oauth_flow: true`) are kept off-mount, accumulating into the seed file.
     let mut oauth_seed: HashMap<String, String> = HashMap::new();
-
-    for (key, value) in &credentials {
-        if !allowed_keys.contains(&key.as_str()) {
-            return Err(format!("field '{}' not allowed for plugin '{}'", key, slug));
-        }
-        validate_credential_field(key, value)?;
-        // Enforce the field's optional regex constraint host-side (UI `pattern` is advisory).
+    for (key, value) in credentials {
         let field = manifest
             .auth_fields
             .iter()
             .find(|f| f.key == *key)
-            .ok_or_else(|| {
-                format!("internal: '{key}' passed the allow-list but is missing from auth_fields")
-            })?;
+            .ok_or_else(|| format!("field '{}' not allowed for plugin '{}'", key, manifest.slug))?;
+        validate_credential_field(key, value)?;
+        // Enforce the field's optional regex constraint host-side (UI `pattern` is advisory).
         plugin::validate_credential_value(field, value)?;
-
         if field.oauth_flow {
             oauth_seed.insert(key.clone(), value.clone());
-            continue;
+        } else {
+            plain.push((key.as_str(), value.as_str()));
         }
+    }
 
+    // Phase 2: all validated — create the service dir, write the `/tokens` files, then the seed.
+    let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
+    let svc_dir = plugin::token_dir_in(data_dir, project, sid);
+    std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
+    for (key, value) in plain {
         let file_path = svc_dir.join(key);
         std::fs::write(&file_path, value).map_err(|e| e.to_string())?;
         speedwave_runtime::fs_perms::set_owner_only(&file_path)?;
     }
-
     if !oauth_seed.is_empty() {
         // Key the seed on `sid` (service_id ?? slug), matching the token dir.
-        write_oauth_seed(&project, sid, &oauth_seed)?;
+        write_oauth_seed_in(data_dir, project, sid, &oauth_seed)?;
     }
-
     Ok(())
 }
 
 /// Writes OAuth client credentials to the host-only pre-auth seed file
 /// (`oauth/<project>/<slug>.seed.json`, 0o600). Read by `start_plugin_oauth`; never mounted.
-fn write_oauth_seed(
-    project: &str,
-    slug: &str,
-    seed: &HashMap<String, String>,
-) -> Result<(), String> {
-    write_oauth_seed_in(speedwave_runtime::consts::data_dir(), project, slug, seed)
-}
-
-/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
 fn write_oauth_seed_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -2049,117 +2041,6 @@ mod tests {
     }
 
     #[test]
-    fn save_plugin_credentials_rejects_field_not_in_auth_fields() {
-        let manifest = plugin::PluginManifest {
-            name: "Test".to_string(),
-            service_id: Some("test-plugin".to_string()),
-            slug: "test-plugin".to_string(),
-            version: "1.0.0".to_string(),
-            description: "test".to_string(),
-            port: Some(5000),
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![plugin::AuthFieldDef {
-                key: "api_key".to_string(),
-                label: "API Key".to_string(),
-                field_type: "password".to_string(),
-                placeholder: "".to_string(),
-                is_secret: true,
-                required: true,
-                description: None,
-                validation: None,
-                oauth_flow: false,
-            }],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-            host_bridge: None,
-            instructions: None,
-            oauth: None,
-        };
-
-        let allowed_keys: Vec<&str> = manifest
-            .auth_fields
-            .iter()
-            .map(|f| f.key.as_str())
-            .collect();
-
-        // "api_key" is in the allowlist
-        assert!(allowed_keys.contains(&"api_key"));
-        // "secret_token" is NOT in the allowlist
-        assert!(
-            !allowed_keys.contains(&"secret_token"),
-            "field not in auth_fields must be rejected"
-        );
-        // "../../etc/passwd" is NOT in the allowlist
-        assert!(
-            !allowed_keys.contains(&"../../etc/passwd"),
-            "path traversal field must be rejected"
-        );
-    }
-
-    #[test]
-    fn save_credentials_enforces_field_validation_pattern() {
-        // Mirrors save_plugin_credentials: locate the AuthFieldDef by key, run the regex validator.
-        let field = plugin::AuthFieldDef {
-            key: "example_pat".to_string(),
-            label: "Example Token".to_string(),
-            field_type: "password".to_string(),
-            placeholder: "tok_...".to_string(),
-            is_secret: true,
-            required: false,
-            description: None,
-            validation: Some(plugin::AuthFieldValidation {
-                pattern: "^tok_[A-Za-z0-9_-]+$".to_string(),
-                message: Some("Personal Access Tokens start with tok_".to_string()),
-            }),
-            oauth_flow: false,
-        };
-        let manifest = plugin::PluginManifest {
-            name: "Example Plugin".to_string(),
-            service_id: Some("example-plugin".to_string()),
-            slug: "example-plugin".to_string(),
-            version: "0.1.2".to_string(),
-            description: "test".to_string(),
-            port: None,
-            image_tag: None,
-            resources: vec![],
-            token_mount: plugin::TokenMount::ReadOnly,
-            auth_fields: vec![field],
-            settings_schema: None,
-            speedwave_compat: None,
-            extra_env: None,
-            mem_limit: None,
-            cpu_limit: None,
-            requires_integrations: vec![],
-            host_bridge: None,
-            instructions: None,
-            oauth: None,
-        };
-
-        let lookup = |key: &str, value: &str| -> Result<(), String> {
-            match manifest.auth_fields.iter().find(|f| f.key == key) {
-                Some(f) => plugin::validate_credential_value(f, value),
-                None => Ok(()),
-            }
-        };
-
-        // Good value passes.
-        assert!(lookup("example_pat", "tok_abc-123_XYZ").is_ok());
-        // Wrong prefix is rejected, surfacing the author's message.
-        assert_eq!(
-            lookup("example_pat", "ghp_wrong").unwrap_err(),
-            "Personal Access Tokens start with tok_"
-        );
-        // Empty value (leave-as-is) is never rejected by the pattern.
-        assert!(lookup("example_pat", "").is_ok());
-    }
-
-    #[test]
     fn auto_enable_writes_plugin_enabled_to_active_project_config() {
         let mut cfg = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
@@ -2196,5 +2077,296 @@ mod tests {
             enabled,
             "auto-enable should write plugin_key=true to active project config"
         );
+    }
+
+    // ── save_plugin_credentials_in ──────────────────────────────────────────────────────
+
+    /// Minimal manifest for the credential-save core; `service_id` == `slug` == "test-plugin".
+    fn manifest_with_auth_fields(auth_fields: Vec<plugin::AuthFieldDef>) -> plugin::PluginManifest {
+        plugin::PluginManifest {
+            name: "Test".to_string(),
+            service_id: Some("test-plugin".to_string()),
+            slug: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            description: "test".to_string(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields,
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: None,
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        }
+    }
+
+    /// Secret auth field; `pattern` adds a regex constraint whose message names the key.
+    fn auth_field(key: &str, oauth_flow: bool, pattern: Option<&str>) -> plugin::AuthFieldDef {
+        plugin::AuthFieldDef {
+            key: key.to_string(),
+            label: key.to_string(),
+            field_type: "password".to_string(),
+            placeholder: String::new(),
+            is_secret: true,
+            required: true,
+            description: None,
+            validation: pattern.map(|p| plugin::AuthFieldValidation {
+                pattern: p.to_string(),
+                message: Some(format!("{key} has the wrong format")),
+            }),
+            oauth_flow,
+        }
+    }
+
+    fn credentials(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// Recursive `relative path → Some(bytes) | None (dir)` view of `root`, so "nothing
+    /// changed" is one equality assertion.
+    fn fs_snapshot(
+        root: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+        fn walk(
+            root: &std::path::Path,
+            dir: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                if path.is_dir() {
+                    out.insert(rel, None);
+                    walk(root, &path, out);
+                } else {
+                    out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// Owner-only file: Unix asserts mode 0o600; the Windows DACL contract is pinned by
+    /// `fs_perms`' own tests, so there only regular-file existence is checked.
+    fn assert_owner_only_file(path: &std::path::Path) {
+        let meta = std::fs::metadata(path).unwrap();
+        assert!(meta.is_file(), "{} must be a regular file", path.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "{} must be chmod 600",
+                path.display()
+            );
+        }
+    }
+
+    fn token_file_names(svc_dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(svc_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_writes_plain_fields_to_tokens_and_oauth_fields_to_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("host_url", false, Some("https://.*")),
+            auth_field("client_id", true, None),
+            auth_field("client_secret", true, None),
+        ]);
+        let creds = credentials(&[
+            ("api_key", "sk-live-123"),
+            ("host_url", "https://example.test"),
+            ("client_id", "cid-1"),
+            ("client_secret", "shh"),
+        ]);
+
+        save_plugin_credentials_in(tmp.path(), "proj", &manifest, &creds).unwrap();
+
+        let svc_dir = plugin::token_dir_in(tmp.path(), "proj", "test-plugin");
+        assert_eq!(token_file_names(&svc_dir), ["api_key", "host_url"]);
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join("api_key")).unwrap(),
+            "sk-live-123"
+        );
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join("host_url")).unwrap(),
+            "https://example.test"
+        );
+        assert_owner_only_file(&svc_dir.join("api_key"));
+        assert_owner_only_file(&svc_dir.join("host_url"));
+
+        let seed_path = plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin");
+        let seed: HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(&seed_path).unwrap()).unwrap();
+        assert_eq!(
+            seed,
+            credentials(&[("client_id", "cid-1"), ("client_secret", "shh")])
+        );
+        assert_owner_only_file(&seed_path);
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_writes_nothing_when_one_field_fails_its_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("webhook_url", false, Some("https://.*")),
+        ]);
+        let creds = credentials(&[
+            ("api_key", "sk-live-123"),
+            ("webhook_url", "http://insecure.test"),
+        ]);
+
+        let err = save_plugin_credentials_in(tmp.path(), "proj", &manifest, &creds).unwrap_err();
+
+        assert_eq!(err, "webhook_url has the wrong format");
+        assert!(
+            fs_snapshot(tmp.path()).is_empty(),
+            "a rejected save must not create the service dir or any credential file"
+        );
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_accepts_an_empty_map_and_writes_no_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("client_id", true, None),
+        ]);
+
+        save_plugin_credentials_in(tmp.path(), "proj", &manifest, &HashMap::new()).unwrap();
+
+        let svc_dir = plugin::token_dir_in(tmp.path(), "proj", "test-plugin");
+        assert!(svc_dir.is_dir(), "the service dir is created as before");
+        assert!(token_file_names(&svc_dir).is_empty());
+        assert!(
+            !plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin").exists(),
+            "an empty save must not create an OAuth seed"
+        );
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_rejects_an_undeclared_key_without_touching_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![auth_field("api_key", false, None)]);
+
+        for bad_key in ["secret_token", "../../etc/passwd"] {
+            let creds = credentials(&[("api_key", "sk-live-123"), (bad_key, "x")]);
+            let err =
+                save_plugin_credentials_in(tmp.path(), "proj", &manifest, &creds).unwrap_err();
+            assert_eq!(
+                err,
+                format!("field '{bad_key}' not allowed for plugin 'test-plugin'")
+            );
+        }
+        assert!(
+            fs_snapshot(tmp.path()).is_empty(),
+            "an undeclared key must not create anything"
+        );
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_rejects_a_null_byte_value_without_touching_disk() {
+        // The failing field is an OAuth one: neither the token dir nor the seed may appear.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("client_secret", true, None),
+        ]);
+        let creds = credentials(&[("api_key", "sk-live-123"), ("client_secret", "bad\0secret")]);
+
+        let err = save_plugin_credentials_in(tmp.path(), "proj", &manifest, &creds).unwrap_err();
+
+        assert_eq!(err, "value for 'client_secret' contains null byte");
+        assert!(fs_snapshot(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_leaves_existing_files_byte_identical_when_a_field_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("webhook_url", false, Some("https://.*")),
+            auth_field("client_id", true, None),
+        ]);
+        let planted = credentials(&[
+            ("api_key", "old-key"),
+            ("webhook_url", "https://old.test"),
+            ("client_id", "old-cid"),
+        ]);
+        save_plugin_credentials_in(tmp.path(), "proj", &manifest, &planted).unwrap();
+        let before = fs_snapshot(tmp.path());
+        assert_eq!(
+            before.values().filter(|v| v.is_some()).count(),
+            3,
+            "plant: two token files plus the OAuth seed"
+        );
+
+        let rejected = credentials(&[
+            ("api_key", "new-key"),
+            ("webhook_url", "ftp://not-https.test"),
+            ("client_id", "new-cid"),
+        ]);
+        save_plugin_credentials_in(tmp.path(), "proj", &manifest, &rejected).unwrap_err();
+
+        assert_eq!(
+            fs_snapshot(tmp.path()),
+            before,
+            "a rejected save must leave every existing file byte-identical"
+        );
+    }
+
+    #[test]
+    fn save_plugin_credentials_in_replaces_stored_values_on_a_later_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_auth_fields(vec![
+            auth_field("api_key", false, None),
+            auth_field("host_url", false, None),
+            auth_field("client_id", true, None),
+        ]);
+        let first = credentials(&[
+            ("api_key", "old-key"),
+            ("host_url", "https://old.test"),
+            ("client_id", "old-cid"),
+        ]);
+        save_plugin_credentials_in(tmp.path(), "proj", &manifest, &first).unwrap();
+
+        // A later save resubmits only some fields: those are replaced, the rest stay.
+        let second = credentials(&[("api_key", "new-key"), ("client_id", "new-cid")]);
+        save_plugin_credentials_in(tmp.path(), "proj", &manifest, &second).unwrap();
+
+        let svc_dir = plugin::token_dir_in(tmp.path(), "proj", "test-plugin");
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join("api_key")).unwrap(),
+            "new-key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join("host_url")).unwrap(),
+            "https://old.test"
+        );
+        assert_owner_only_file(&svc_dir.join("api_key"));
+        let seed_path = plugin::oauth_seed_file_in(tmp.path(), "proj", "test-plugin");
+        let seed: HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(seed_path).unwrap()).unwrap();
+        assert_eq!(seed, credentials(&[("client_id", "new-cid")]));
     }
 }
