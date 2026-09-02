@@ -1,32 +1,32 @@
 version: 2
 updates:
+  # One cargo entry for all three workspaces: shared path-dependency manifests
+  # (crates/*) otherwise yield per-directory half-PRs that leave the other lockfiles stale.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /desktop/src-tauri
+      - /containers/proxy
     target-branch: dev
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     labels:
       - dependencies
     groups:
       rust-minor-patch:
+        patterns:
+          - "*"
         update-types:
           - minor
           - patch
-
-  - package-ecosystem: cargo
-    directory: /desktop/src-tauri
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      rust-desktop-minor-patch:
+        group-by: dependency-name
+      rust-major:
+        patterns:
+          - "*"
         update-types:
-          - minor
-          - patch
+          - major
+        group-by: dependency-name
 
   - package-ecosystem: npm
     directory: /
