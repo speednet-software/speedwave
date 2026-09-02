@@ -246,19 +246,17 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
     if [ ! -e "${_dest}" ]; then
         cp "${_tmpl}" "${_dest}"
     else
-        # Merge template keys; drop a stale model disagreeing with ANTHROPIC_MODEL, or (env
-        # unset) a foreign provider/model id (ADR-073 E1). Atomic; node failure → skip.
+        # Merge template keys; on the unrouted (Anthropic) path drop a foreign provider/model
+        # id a routed session's /model left behind (ADR-073 amendment). Atomic; node failure → skip.
         node -e "
 const fs = require('fs');
 ${JS_WRITE_ATOMIC}
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
 const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
-const envModel = process.env.ANTHROPIC_MODEL;
 const foreign = typeof merged.model === 'string' && merged.model.includes('/');
-const stale = envModel ? merged.model && merged.model !== envModel : foreign;
-if (stale) {
-  console.error('entrypoint: dropping stale settings.json model ' + merged.model);
+if (!process.env.ANTHROPIC_MODEL && foreign) {
+  console.error('entrypoint: dropping foreign settings.json model ' + merged.model);
   delete merged.model;
 }
 writeAtomic('${_dest}', JSON.stringify(merged, null, 2) + '\n');

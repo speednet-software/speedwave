@@ -294,7 +294,7 @@ function classifyDiscoveryFailure(msg: string): {
                 class="mono w-full rounded border border-[var(--line)] bg-[var(--bg-1)] px-2 py-1.5 text-[12px] text-[var(--ink)]"
                 data-testid="settings-llm-model"
               >
-                <!-- Empty value = no ANTHROPIC_MODEL injected; real default is
+                <!-- Empty value = no ANTHROPIC_DEFAULT_MODEL injected; real default is
                      plan-dependent (Pro→Sonnet, Max→Opus), unseen by Speedwave. -->
                 <option value="">Default — depends on your plan (switchable via /model)</option>
                 @if (latestAnthropicModels().length > 0) {
