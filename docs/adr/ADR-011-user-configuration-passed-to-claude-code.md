@@ -3,6 +3,8 @@
 > **Status:** Accepted
 > **Context:** Different projects need different Claude Code settings (model, custom env vars, alternative LLM provider) without editing internal files.
 
+> **Amendment (2026-09-02):** The env key carrying `claude.llm.model` on the Anthropic path changed from `ANTHROPIC_MODEL` to `ANTHROPIC_DEFAULT_MODEL`; the field descriptions below are corrected in place. Rationale and the binary verification behind it: ADR-073, amendment of the same date.
+
 ## Decision
 
 Users configure per-project environment variables and an LLM provider via `~/.speedwave/config.json` (personal) and an optional `<project>/.speedwave.json` (team, committed to git). These are resolved through a three-level merge and injected into the Claude Code process at startup. Both CLI and Desktop read the same resolution path.
@@ -19,13 +21,13 @@ The two files carry a `claude` block with these fields (the `ClaudeOverrides` / 
 
 - `claude.env` — `Option<HashMap<String,String>>`, env vars injected into the Claude Code process.
 - `claude.llm.provider` — `anthropic` (default), `ollama`, `lmstudio`, `llamacpp`. Repo config cannot set it.
-- `claude.llm.model` — model id. For every provider it is injected as `ANTHROPIC_MODEL` at compose-render time by `compose::apply_llm_config_in` (no `--model` CLI flag is added); when set it overwrites any `claude.env.ANTHROPIC_MODEL` placed earlier. Repo config may suggest only `model`.
+- `claude.llm.model` — model id, injected at compose-render time by `compose::apply_llm_config_in` (no `--model` CLI flag is added). On the Anthropic path it becomes `ANTHROPIC_DEFAULT_MODEL`, the model new sessions start on, which a `/model` pick persisted in the container's `settings.json` outranks; routed providers (local, OpenRouter) get `ANTHROPIC_MODEL=<provider_id>/<model>`, which outranks a persisted pick. Either key, when set, overwrites the same key from `claude.env`. Repo config may suggest only `model`.
 - `claude.llm.base_url` — overrides the provider default; user config only (SSRF, ADR-040).
 - `claude.llm.context_tokens` — persisted context window in tokens, used by the chat footer's `used / max` ratio; zero is rejected at save time (sourcing in ADR-041).
 
 Global (top-level) fields: `active_project` (Desktop project switcher) and `selected_ide` (persisted IDE Bridge upstream — ADR-007).
 
-`ANTHROPIC_MODEL` is not set by defaults; users populate it via `claude.env.ANTHROPIC_MODEL` (any provider) or via `claude.llm.model` for the `anthropic` provider (the runtime injects it during compose render, where the LLM-derived value is written after `claude.env` and wins by key).
+Neither model key is set by defaults. `claude.env.ANTHROPIC_MODEL` stays the user's explicit hard pin for any provider (it outranks a persisted `/model` pick); `claude.llm.model` is the Settings-level default described above. Both are written after `claude.env` during compose render and win by key.
 
 ## Default flags
 

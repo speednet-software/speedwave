@@ -615,18 +615,29 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-# E1 (ADR-073): a stale /model in settings.json that disagrees with the
-# injected ANTHROPIC_MODEL is dropped, so the routed model wins on next start.
-@test "drops a stale settings.json model that disagrees with ANTHROPIC_MODEL" {
+# ADR-073 amendment: env ANTHROPIC_MODEL outranks a persisted /model pick at startup
+# (verified on CC 2.1.252), so a routed session leaves a differing settings.json model alone.
+@test "keeps a settings.json model that differs from ANTHROPIC_MODEL" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
-    printf '{"effortLevel":"low","model":"opus"}' > "${TEST_HOME}/.claude/settings.json"
+    printf '{"effortLevel":"low","model":"claude-opus-4-8"}' > "${TEST_HOME}/.claude/settings.json"
     ANTHROPIC_MODEL="openrouter/z-ai/glm-5.2" run bash "${ENTRYPOINT}" echo ok
     [ "$status" -eq 0 ]
-    # The stale "model" key is removed (Claude Code then uses the env).
-    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    # The user's pick survives; it takes effect again once the routed env pin is gone.
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='claude-opus-4-8'?0:1)"
     [ "$status" -eq 0 ]
     # Unrelated user keys are preserved.
     run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.effortLevel==='low'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps a foreign settings.json model while ANTHROPIC_MODEL routes the session" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # The foreign-id drop is scoped to the unrouted (Anthropic) path; under a routed
+    # env pin the persisted id is inert, so nothing is deleted.
+    printf '{"model":"openrouter/z-ai/glm-5.2"}' > "${TEST_HOME}/.claude/settings.json"
+    ANTHROPIC_MODEL="local/qwen3" run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='openrouter/z-ai/glm-5.2'?0:1)"
     [ "$status" -eq 0 ]
 }
 

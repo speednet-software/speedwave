@@ -88,7 +88,9 @@ fn apply_llm_config_proxy(
                     entry.id
                 );
             } else if !model.is_empty() {
-                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.clone());
+                // Startup default, not a pin: a /model pick persisted in settings.json outranks
+                // it, whereas ANTHROPIC_MODEL would override the pick (ADR-073 amendment).
+                extra_env.insert("ANTHROPIC_DEFAULT_MODEL".to_string(), model.clone());
             }
         }
         LlmProviderKind::Local | LlmProviderKind::OpenRouter => {
@@ -188,7 +190,8 @@ fn apply_llm_config_legacy_in(
                     "ignoring foreign model '{model}' on direct anthropic path — using account default"
                 );
             } else if !model.is_empty() {
-                extra_env.insert("ANTHROPIC_MODEL".to_string(), model.to_string());
+                // Same default-not-pin semantics as the proxy path (ADR-073 amendment).
+                extra_env.insert("ANTHROPIC_DEFAULT_MODEL".to_string(), model.to_string());
             }
             inject_claude_env(yaml, &extra_env)
         }
@@ -354,6 +357,7 @@ pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -427,44 +431,63 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn login_unset_keys_cover_local_proxy_env() {
-        // BASE_URL is re-exported by login; ATTRIBUTION_HEADER is OAuth-neutral
-        // (prompt-cache only) — both deliberately stay off the unset list.
-        const OAUTH_NEUTRAL: &[&str] = &["ANTHROPIC_BASE_URL", "CLAUDE_CODE_ATTRIBUTION_HEADER"];
-        let cfg = crate::config::LlmConfig {
+    fn proxy_cfg(
+        id: &str,
+        kind: crate::config::LlmProviderKind,
+        base_url: Option<&str>,
+        model: &str,
+    ) -> crate::config::LlmConfig {
+        crate::config::LlmConfig {
             providers: vec![crate::config::LlmProviderEntry {
-                id: "local".into(),
-                kind: crate::config::LlmProviderKind::Local,
-                base_url: Some("http://host.docker.internal:1234".into()),
-                model: Some("qwen".into()),
+                id: id.into(),
+                kind,
+                base_url: base_url.map(Into::into),
+                model: Some(model.into()),
                 has_api_key: false,
                 context_tokens: None,
                 has_custom_headers: false,
             }],
             active: Some(crate::config::LlmActive {
-                provider_id: "local".into(),
-                model: Some("qwen".into()),
+                provider_id: id.into(),
+                model: Some(model.into()),
             }),
             proxy_enabled: Some(true),
             ..Default::default()
-        };
-        let rendered = apply_llm_config_proxy(
-            "services:\n  claude:\n    environment: []\n",
-            &cfg,
-            "test-caller-token",
-        )
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn login_unset_keys_cover_local_and_anthropic_proxy_env() {
+        // BASE_URL is re-exported by login; ATTRIBUTION_HEADER is OAuth-neutral
+        // (prompt-cache only) — both deliberately stay off the unset list.
+        const OAUTH_NEUTRAL: &[&str] = &["ANTHROPIC_BASE_URL", "CLAUDE_CODE_ATTRIBUTION_HEADER"];
         let unset: std::collections::HashSet<&str> =
             anthropic_login_unset_keys().iter().copied().collect();
-        for line in rendered.lines() {
-            let t = line.trim().trim_start_matches('-').trim().trim_matches('"');
-            if let Some((key, _)) = t.split_once('=') {
-                let key = key.trim();
-                if (key.starts_with("ANTHROPIC_") || key.starts_with("CLAUDE_CODE_"))
-                    && !OAUTH_NEUTRAL.contains(&key)
-                {
-                    assert!(unset.contains(key), "login unset list is missing `{key}`");
+        for cfg in [
+            proxy_cfg(
+                "local",
+                crate::config::LlmProviderKind::Local,
+                Some("http://host.docker.internal:1234"),
+                "qwen",
+            ),
+            proxy_cfg(
+                "anthropic",
+                crate::config::LlmProviderKind::AnthropicOauth,
+                None,
+                "claude-sonnet-4-6",
+            ),
+        ] {
+            let rendered =
+                apply_llm_config_proxy(CLAUDE_ENV_YAML, &cfg, "test-caller-token").unwrap();
+            for line in rendered.lines() {
+                let t = line.trim().trim_start_matches('-').trim().trim_matches('"');
+                if let Some((key, _)) = t.split_once('=') {
+                    let key = key.trim();
+                    if (key.starts_with("ANTHROPIC_") || key.starts_with("CLAUDE_CODE_"))
+                        && !OAUTH_NEUTRAL.contains(&key)
+                    {
+                        assert!(unset.contains(key), "login unset list is missing `{key}`");
+                    }
                 }
             }
         }
@@ -474,23 +497,14 @@ mod tests {
         kind: crate::config::LlmProviderKind,
         context_tokens: Option<u32>,
     ) -> crate::config::LlmConfig {
-        crate::config::LlmConfig {
-            providers: vec![crate::config::LlmProviderEntry {
-                id: "litellm".into(),
-                kind,
-                base_url: Some("http://host.docker.internal:4000".into()),
-                model: Some("qwen3-coder-30b".into()),
-                has_api_key: false,
-                context_tokens,
-                has_custom_headers: false,
-            }],
-            active: Some(crate::config::LlmActive {
-                provider_id: "litellm".into(),
-                model: Some("qwen3-coder-30b".into()),
-            }),
-            proxy_enabled: Some(true),
-            ..Default::default()
-        }
+        let mut cfg = proxy_cfg(
+            "litellm",
+            kind,
+            Some("http://host.docker.internal:4000"),
+            "qwen3-coder-30b",
+        );
+        cfg.providers[0].context_tokens = context_tokens;
+        cfg
     }
 
     const CLAUDE_ENV_YAML: &str = "services:\n  claude:\n    environment: []\n";

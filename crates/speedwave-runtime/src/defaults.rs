@@ -40,7 +40,7 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
-    /// `ANTHROPIC_MODEL`.
+    /// `ANTHROPIC_DEFAULT_MODEL` (a startup default a `/model` pick outranks).
     pub id: &'static str,
     /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,
@@ -283,12 +283,13 @@ mod tests {
     #[test]
     fn base_env_does_not_set_model() {
         let env = base_env();
-        assert!(
-            !env.contains_key("ANTHROPIC_MODEL"),
-            "base_env() must not set ANTHROPIC_MODEL — the user's Claude Code model \
-             selection must not be overridden. Users who want a specific model can set \
-             claude.env.ANTHROPIC_MODEL in .speedwave.json or ~/.speedwave/config.json."
-        );
+        for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"] {
+            assert!(
+                !env.contains_key(key),
+                "base_env() must not set {key} — the model comes from the LLM provider config \
+                 (Settings default) or the user's own claude.env override, never from defaults."
+            );
+        }
     }
 
     #[test]

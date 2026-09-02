@@ -3,6 +3,8 @@
 > **Status:** Accepted — supersedes ADR-040 in part (the "no proxy" decision; the credential-handling and SSRF rules of ADR-040 are upheld and extended). An earlier draft of this ADR proposed a Python LiteLLM proxy; that approach never shipped in a release and is replaced wholesale by the first-party Rust forwarder described here.
 > **Context:** New product requirements — multi-provider choice (Anthropic subscription, Anthropic API key, local servers, OpenRouter, any backend that speaks the Anthropic Messages API), per-project usage accounting, and in-session model switching — cannot be met by direct env injection alone. They also do not require protocol translation: every backend Speedwave targets now speaks the native Anthropic Messages API.
 
+> **Amendment (2026-09-02):** On the Anthropic path the Settings model is now a startup default (`ANTHROPIC_DEFAULT_MODEL`), not a forced pin — see [Amendment: the Settings model is a default, not a pin](#amendment-2026-09-02-the-settings-model-is-a-default-not-a-pin).
+
 ## Decision
 
 Ship `proxy` — a tiny first-party Rust Anthropic-passthrough forwarder — as a per-project compose service. Claude Code's `ANTHROPIC_BASE_URL` points at it for every provider class. The forwarder receives `POST /v1/messages` (+ `count_tokens`), routes by the model prefix in the request body to the configured backend, relays the SSE stream byte-for-byte with **no translation**, sniffs usage frames, and appends one usage line per request. The pre-proxy direct-injection path remains behind the `llm.proxy_enabled` kill-switch (default on) for one release and is removed in N+2.
@@ -109,6 +111,34 @@ nerdctl's config-hash convergence only recreates services whose compose definiti
 - Auth gating: desktop `setup_wizard.rs::project_needs_anthropic_auth`
 - Per-service recreate: `runtime/mod.rs::compose_up_service` (+ Lima/WSL impls, `LockedRuntime`, mock)
 
+## Amendment (2026-09-02): the Settings model is a default, not a pin
+
+Both Anthropic branches of `compose/llm.rs` injected the Desktop Settings `default_model` as `ANTHROPIC_MODEL`. Claude Code ranks that variable above the `model` key it persists to `~/.claude/settings.json` when the user runs `/model`, so an in-session pick was overridden on every container start, and `containers/entrypoint.sh` deleted the "stale" key to hide the conflict. That drop shipped in the same release as this ADR and was cited in code comments as "ADR-073 E1" — a section that never existed here; this amendment replaces that reference.
+
+Claude Code 2.1.236 added `ANTHROPIC_DEFAULT_MODEL`: the model new sessions start on, which a `/model` pick overrides and persists across restarts, unlike `ANTHROPIC_MODEL`[^10].
+
+### Verified on the pinned binary
+
+Claude Code 2.1.252, no container: fresh `HOME` seeded the way `entrypoint.sh` seeds it, `defaults.rs::base_env()`, argv from `chat.rs::build_claude_args` plus `DEFAULT_FLAGS`, and a mock Messages API recording the `model` each request carried.
+
+| Observation                                                      | Result                                                                                                                         |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Precedence (resolver in the binary, confirmed empirically)       | `--model` > agent frontmatter > env `ANTHROPIC_MODEL` > `settings.json` `model` > env `ANTHROPIC_DEFAULT_MODEL` > plan default |
+| `ANTHROPIC_DEFAULT_MODEL` alone                                  | selects the startup model                                                                                                      |
+| `ANTHROPIC_DEFAULT_MODEL` vs a persisted `settings.json` `model` | the persisted pick wins                                                                                                        |
+| Interactive `/model <id>`                                        | writes `settings.json` `model` ("saved as your default for new sessions") and wins on the next start                           |
+| `ANTHROPIC_MODEL` vs a persisted pick                            | the env var wins; the persisted key is left untouched                                                                          |
+| `[1m]` suffix through `ANTHROPIC_DEFAULT_MODEL`                  | honoured: bare model id in the body plus the `context-1m` beta                                                                 |
+| A foreign `provider/model` id through `ANTHROPIC_DEFAULT_MODEL`  | sent verbatim, so `config::is_foreign_anthropic_model` stays load-bearing                                                      |
+| `/model` in `-p`/stream-json mode (Desktop chat)                 | "for this session only"; nothing is persisted                                                                                  |
+
+### Decisions
+
+- **Both Anthropic branches** (proxy and the legacy direct path) inject the Settings model as `ANTHROPIC_DEFAULT_MODEL` and never `ANTHROPIC_MODEL`. Settings is the project's starting model; the user's `/model` pick outranks it and survives a restart.
+- **The routed kinds (`local`, `open_router`) keep forcing `ANTHROPIC_MODEL`** — the routed `<provider_id>/<model>` id must beat any persisted pick, or the request misses its route.
+- **`entrypoint.sh` no longer drops a `settings.json` model that merely disagrees with `ANTHROPIC_MODEL`** — the env pin already wins at startup, so the deletion only destroyed the user's preference. The foreign-id drop stays for the unrouted path: a `provider/model` pick persisted by a routed session would otherwise be prefix-routed to that provider's still-rendered route, or 404 on the passthrough, silently leaving the Anthropic path.
+- **`claude.env.ANTHROPIC_MODEL` (ADR-011) remains the user's explicit hard pin.**
+
 [^1]: pip `--require-hashes` secure-installs mode (the supply-chain machinery this design retires by having no Python deps): https://pip.pypa.io/en/stable/topics/secure-installs/
 
 [^2]: OpenRouter exposes the Anthropic Messages API (`POST /messages`, "Creates a message using the Anthropic Messages API format... Supports text, images, PDFs, tools, and extended thinking"): https://openrouter.ai/openapi.json (see `paths./messages.post`)
@@ -126,3 +156,5 @@ nerdctl's config-hash convergence only recreates services whose compose definiti
 [^8]: OpenRouter exposes per-generation cost (`data.total_cost`, USD) via `GET /generation?id=<gen-id>`: https://openrouter.ai/openapi.json (see `paths./generation.get` response schema field `total_cost`)
 
 [^9]: Generation throughput excludes time-to-first-token: `TPOT = (E2E latency − TTFT) / (output tokens − 1)` (Anyscale): https://docs.anyscale.com/llm/serving/benchmarking/metrics ; "total tokens produced by generation time, excluding TTFT" (GMI Cloud): https://www.gmicloud.ai/en/blog/ttft-llm-speed-metrics . Speedwave divides by all `output tokens` (not `output − 1`) as a practical approximation for the aggregate metric over many requests; the strict per-request `−1` form differs only on very short responses.
+
+[^10]: Claude Code changelog, 2.1.236: "Added `ANTHROPIC_DEFAULT_MODEL` environment variable: sets the model new sessions start on, while a `/model` pick still overrides it and persists across restarts (unlike `ANTHROPIC_MODEL`)": https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md (the same entry ships in the binary's built-in changelog).
