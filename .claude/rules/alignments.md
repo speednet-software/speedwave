@@ -57,6 +57,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - CLI filename leaf ↔ bundle manifest + Tauri config — `windows_bundle_cli_asset_matches_filename_ssot` and `macos_bundle_cli_asset_matches_filename_ssot` (bundle.rs) assert `{WINDOWS,MACOS}_BUNDLED_ASSETS` and `tauri.{windows,macos}.conf.json` carry `cli/<cli_binary_filename(is_windows)>`. The filename SSOT is `consts::cli_binary_filename`, single-sourced from `CLI_BINARY`; `cli_install_path_for` and the `installer_hooks.rs` sweep guard both derive from it.
 - Root `[workspace.lints]` table ↔ `desktop/src-tauri/Cargo.toml` `[lints]` table ↔ `containers/proxy/Cargo.toml` `[lints]` table ↔ `crates/pii-engine/Cargo.toml` `[lints]` table (each vendored/built standalone, cannot inherit `workspace = true`) — `lint_tables_are_aligned` cross-read test.
 - No raw `Command::new` outside `binary.rs` — drift detector `tests/no_raw_command_spawn.rs` (escape hatch: `// SSOT-allow: <reason>`).
+- Standalone cargo workspaces (every dir with its own `Cargo.lock`: root, `desktop/src-tauri`, `containers/proxy`) ↔ the single `cargo` entry's `directories` in `.github/dependabot.yml`, every group `group-by: dependency-name` (one bump PR relocks all workspaces; a per-directory entry yields half-PRs) — `_tests/ci/dependabot-cargo-workspaces.bats`.
 
 ## Manual alignments — NO automated guard; update together in the same commit
 
