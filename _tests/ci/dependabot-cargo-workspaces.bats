@@ -23,14 +23,12 @@ _cargo_directories() {
     ' | sort
 }
 
-# Repo-relative directories holding a Cargo.lock (`/` for the root workspace).
+# Repo-relative directories of tracked Cargo.lock files (`/` for the root workspace);
+# tracked-only so build outputs such as the bundle build-context never count as workspaces.
 _cargo_lock_dirs() {
-    (
-        cd "$REPO_ROOT" &&
-            find . -name Cargo.lock \
-                -not -path '*/target/*' -not -path '*/node_modules/*' -not -path './.claude/*' |
-            sed 's|/Cargo.lock$||; s|^\.$|/|; s|^\./|/|' | sort
-    )
+    git -C "$REPO_ROOT" ls-files -- '*Cargo.lock' |
+        grep -E '(^|/)Cargo\.lock$' |
+        sed 's|/Cargo\.lock$||; s|^Cargo\.lock$||; s|^|/|' | sort
 }
 
 # Names of cargo groups lacking `group-by: dependency-name`.
