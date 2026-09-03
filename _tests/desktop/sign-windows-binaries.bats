@@ -101,6 +101,25 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
     [ "$count" -ge 1 ]
 }
 
+@test "SignTargets covers every self-built PE resource in tauri.windows.conf.json" {
+    # Reverse direction of the alignment pair: a new .exe/.dll resource must be signed unless it is
+    # vendor-signed (node.exe) or hash-pinned (vulkan-1.dll), which must never be re-signed.
+    local vendor_signed="nodejs/node.exe vulkan-1.dll"
+    local targets
+    targets="$(awk '/^\$SignTargets = @\(/,/^\)/' "$SCRIPT" | sed -n "s/^ *'\(.*\)'.*$/\1/p" | tr '\\' '/')"
+    local count=0
+    while IFS= read -r resource; do
+        [ -n "$resource" ] || continue
+        case " $vendor_signed " in *" $resource "*) continue ;; esac
+        count=$((count + 1))
+        if ! echo "$targets" | grep -qxF "$resource"; then
+            echo "ERROR: $resource is a self-built PE resource missing from \$SignTargets in $SCRIPT" >&2
+            return 1
+        fi
+    done < <(python3 -c "import json; print('\n'.join(k for k in json.load(open('$TAURI_WINDOWS_CONF'))['bundle']['resources'] if k.lower().endswith(('.exe', '.dll'))))")
+    [ "$count" -ge 1 ]
+}
+
 @test "tauri.windows.conf.json runs the -Bundled pass before bundling from the repo root" {
     python3 - "$TAURI_WINDOWS_CONF" <<'EOF'
 import json, sys
