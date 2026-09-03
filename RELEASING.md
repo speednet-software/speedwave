@@ -17,8 +17,19 @@ Before your first release, ensure these GitHub repository secrets are configured
 | `APPLE_ID`                           | No       | Apple ID email for notarization                                                                            |
 | `APPLE_PASSWORD`                     | No       | App-specific password for notarization                                                                     |
 | `APPLE_TEAM_ID`                      | No       | Apple Developer Team ID                                                                                    |
-| `WINDOWS_CERTIFICATE`                | No       | Windows code signing (.pfx, base64)                                                                        |
-| `WINDOWS_CERTIFICATE_PASSWORD`       | No       | Passphrase for Windows certificate                                                                         |
+
+Windows code signing uses no secret: it runs through Azure Artifact Signing with an OIDC federated credential ([ADR-086](docs/adr/ADR-086-windows-code-signing-azure-artifact-signing.md)), configured as **variables on the `release` GitHub environment**:
+
+| Variable                                     | Purpose                                                                                                         |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `AZURE_CLIENT_ID`                            | Entra app registration whose federated credential trusts `repo:speednet-software/speedwave:environment:release` |
+| `AZURE_TENANT_ID`                            | Entra tenant id                                                                                                 |
+| `AZURE_SUBSCRIPTION_ID`                      | Subscription holding the Artifact Signing account                                                               |
+| `AZURE_ARTIFACT_SIGNING_ENDPOINT`            | Regional endpoint of the account, e.g. `https://plc.codesigning.azure.net`                                      |
+| `AZURE_ARTIFACT_SIGNING_ACCOUNT`             | Artifact Signing account name                                                                                   |
+| `AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE` | Public Trust certificate profile name                                                                           |
+
+All six empty = unsigned Windows build. `AZURE_CLIENT_ID` set while any other is empty = the release job fails on purpose.
 
 Generate the Tauri signing keypair (one-time setup):
 
@@ -32,10 +43,11 @@ Store the private key as `TAURI_SIGNING_PRIVATE_KEY`. The public key is already 
 
 - `RELEASE_TOKEN` missing — release-please cannot create PRs or push to `main`. The workflow fails with a permissions error.
 - `TAURI_SIGNING_PRIVATE_KEY` missing — tauri-action produces unsigned bundles. The Tauri updater will **refuse to install** them (signature verification fails). Users cannot auto-update.
-- Apple/Windows signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open). Windows SmartScreen shows a warning.
+- Apple signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open).
+- Windows signing variables missing — builds succeed but produce unsigned binaries; Windows SmartScreen shows a warning. A partially filled set fails the release job instead (see the variables table above).
 - Entitlements plists missing — builds and notarization succeed, but binaries crash at runtime when they attempt to use restricted platform APIs (Virtualization.framework, Apple Events, EventKit for Calendars/Reminders). This is NOT caught by CI — only by manual testing. The accompanying `Info.plist` TCC usage-description keys (`NSFileProviderDomainUsageDescription`, `NSAppleEventsUsageDescription`, `NSCalendarsUsageDescription`, etc.) are equally critical — without them macOS silently blocks the API without displaying a consent dialog.
 
-The architectural rationale for signing — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md).
+The architectural rationale for signing — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md); the Windows counterpart (Azure Artifact Signing, OIDC login, in-build `signCommand`) is [ADR-086](docs/adr/ADR-086-windows-code-signing-azure-artifact-signing.md).
 
 ## How release-please Works
 
@@ -403,6 +415,9 @@ Or use `desktop-build.yml` which runs automatically on PRs to `main` or `dev` (m
 | `.github/workflows/release-please-lockfile.yml`     | Regenerates Cargo.lock on release-please PRs                   |
 | `.github/workflows/release-please-npm-lockfile.yml` | Regenerates npm package-lock.json files on release-please PRs  |
 | `.github/workflows/desktop-release.yml`             | Matrix build, code signing, CLI cross-compile, publish         |
+| `.github/actions/azure-signing-login/action.yml`    | OIDC login to Azure + `AZURE_ARTIFACT_SIGNING_*` env export    |
+| `scripts/sign-windows-binaries.ps1`                 | Windows signing script (Tauri `signCommand` + `-Bundled` pass) |
+| `desktop/src-tauri/tauri.windows.conf.json`         | Windows hooks: `beforeBundleCommand`, `signCommand`, resources |
 | `.github/workflows/desktop-build.yml`               | PR/push CI build (unsigned)                                    |
 | `.github/workflows/backmerge.yml`                   | Automated main → dev backmerge after release publish           |
 | `.github/workflows/merge-strategy-check.yml`        | Enforces conventional commit PR titles on PRs to main          |

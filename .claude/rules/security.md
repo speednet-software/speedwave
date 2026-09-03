@@ -30,6 +30,8 @@
 - DNS rebinding on user-originated URLs is an accepted residual risk — never add a codepath that lets an attacker inject URLs into config without explicit user action.
 - TLS: `rustls-tls` with bundled CA roots; switching to system roots requires an ADR.
 
-## macOS bundle integrity
+## Bundle integrity (macOS + Windows)
 
 Every bundled Mach-O in `tauri.macos.conf.json` `bundle.resources` must be in `sign-bundled-binaries.sh` `SIGN_TARGETS`, and binaries using restricted platform APIs need an entitlements plist in `desktop/src-tauri/entitlements/` (add a new plist; never relax an existing one). Coverage is test-guarded — keep the guards green.
+
+Windows (ADR-086): every PE file we build that ships via `tauri.windows.conf.json` `bundle.resources` must be in `sign-windows-binaries.ps1` `$SignTargets`; Tauri's own `signCommand` covers the app binary and installers. Signing authenticates through GitHub OIDC (federated credential bound to the `release` environment) — never introduce a stored Azure client secret or a PFX-in-secret path, and never re-sign vendor-signed or hash-pinned binaries (`node.exe`, `vulkan-1.dll`).

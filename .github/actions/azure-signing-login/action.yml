@@ -1,0 +1,65 @@
+name: 'Azure Artifact Signing login'
+description: 'OIDC-logs into Azure and exports the AZURE_ARTIFACT_SIGNING_* env that scripts/sign-windows-binaries.ps1 reads (ADR-086). Empty client-id = unsigned build; a client-id with an incomplete signing target fails the job.'
+inputs:
+  client-id:
+    description: 'Entra app (client) id carrying the GitHub federated credential; empty skips signing'
+    required: false
+    default: ''
+  tenant-id:
+    description: 'Entra tenant id'
+    required: false
+    default: ''
+  subscription-id:
+    description: 'Azure subscription holding the Artifact Signing account'
+    required: false
+    default: ''
+  endpoint:
+    description: 'Artifact Signing regional endpoint, e.g. https://plc.codesigning.azure.net'
+    required: false
+    default: ''
+  account:
+    description: 'Artifact Signing account name'
+    required: false
+    default: ''
+  certificate-profile:
+    description: 'Certificate profile name under the account'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - name: Check the signing target
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.client-id }}
+        TENANT_ID: ${{ inputs.tenant-id }}
+        SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        ACCOUNT: ${{ inputs.account }}
+        PROFILE: ${{ inputs.certificate-profile }}
+      run: |
+        if [ -z "$CLIENT_ID" ]; then
+          echo "::notice::Windows code signing skipped (no AZURE_CLIENT_ID variable on the release environment)"
+          exit 0
+        fi
+        if [ -z "$TENANT_ID" ] || [ -z "$SUBSCRIPTION_ID" ] || [ -z "$ENDPOINT" ] || [ -z "$ACCOUNT" ] || [ -z "$PROFILE" ]; then
+          echo "::error::AZURE_CLIENT_ID is set but AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID or an AZURE_ARTIFACT_SIGNING_* variable is empty; refusing to ship an unsigned release by accident"
+          exit 1
+        fi
+        {
+          echo "AZURE_ARTIFACT_SIGNING_ENDPOINT=$ENDPOINT"
+          echo "AZURE_ARTIFACT_SIGNING_ACCOUNT=$ACCOUNT"
+          echo "AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE=$PROFILE"
+        } >> "$GITHUB_ENV"
+        echo "::notice::Windows code signing configured ($ACCOUNT/$PROFILE via $ENDPOINT)"
+
+    # Federated credential, no secret: the Entra app trusts only this repo's `release`
+    # environment subject, and its signer role is scoped to the signing account.
+    - name: Log in to Azure (OIDC)
+      if: inputs.client-id != ''
+      uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c  # v3.0.2
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+        allow-no-subscriptions: true
