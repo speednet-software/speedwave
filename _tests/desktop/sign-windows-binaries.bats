@@ -37,6 +37,21 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
     grep -qF 'skipping Windows code signing' "$SCRIPT"
 }
 
+@test "script re-executes the signing path under pwsh after the no-op check" {
+    # The ArtifactSigning module is Core-only (PSEdition_Core); Windows PowerShell 5.1 cannot even
+    # find it on PSGallery. The hooks still launch 5.1 so unsigned builds need no PowerShell 7.
+    skip_line=$(grep -n "skipping Windows code signing" "$SCRIPT" | head -1 | cut -d: -f1)
+    reexec_line=$(grep -n "PSEdition -ne 'Core'" "$SCRIPT" | head -1 | cut -d: -f1)
+    import_line=$(grep -n "^Import-SigningModule" "$SCRIPT" | head -1 | cut -d: -f1)
+    [ -n "$skip_line" ]
+    [ -n "$reexec_line" ]
+    [ -n "$import_line" ]
+    [ "$skip_line" -lt "$reexec_line" ]
+    [ "$reexec_line" -lt "$import_line" ]
+    grep -qF -- '& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath' "$SCRIPT"
+    grep -qF 'exit $LASTEXITCODE' "$SCRIPT"
+}
+
 @test "script excludes the managed-identity probe but keeps the Azure CLI credential" {
     # Hosted runners have no IMDS endpoint; the probe only delays every signing call. The CLI
     # credential is how azure/login's OIDC session reaches the signer.

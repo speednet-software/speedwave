@@ -36,6 +36,17 @@ if (-not ($Endpoint -and $Account -and $CertificateProfile)) {
     exit 0
 }
 
+# The ArtifactSigning module is published for PowerShell 7 only (PSEdition_Core); the hooks
+# launch Windows PowerShell because only it exists on every host, so the signing path re-execs.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+        throw 'pwsh (PowerShell 7) is required to sign; install it or unset AZURE_ARTIFACT_SIGNING_* for an unsigned build'
+    }
+    $forward = if ($Bundled) { @('-Bundled') } else { @($File) }
+    & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath @forward
+    exit $LASTEXITCODE
+}
+
 function Import-SigningModule {
     $installed = Get-Module -ListAvailable -Name ArtifactSigning | Where-Object { $_.Version -eq [version]$ModuleVersion }
     if (-not $installed) {

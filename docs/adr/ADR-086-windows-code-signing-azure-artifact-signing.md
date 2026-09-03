@@ -44,6 +44,7 @@ Without that env the script exits 0 with a notice, so PR builds, `desktop-build.
 ## Notes
 
 - The hooks invoke `powershell` (Windows PowerShell 5.1) by name: a JSON config cannot compute the System32 path that `binary::run_powershell` uses in Rust. This is the same trust in the runner's `PATH` that every bare tool Tauri spawns (`makensis`, `candle`) already relies on.
+- The `ArtifactSigning` module is published for PowerShell 7 only (`PSEdition_Core`), so Windows PowerShell cannot find it on the gallery.[^12] The hooks still launch 5.1, the one edition present on every Windows host, and the script re-executes itself under `pwsh` only after the no-op check: an unsigned build needs no PowerShell 7, a signing host does (hosted runners ship it).
 - The `release` environment carries no protection rules today; adding required reviewers there would gate every release build, not only signing.
 - The module cache on disk belongs to the runner: hosted runners are ephemeral, the module version is pinned, and the SignTool and dlib package versions are pinned inside that module version.[^12]
 
