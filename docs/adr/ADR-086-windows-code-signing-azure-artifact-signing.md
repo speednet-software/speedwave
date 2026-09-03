@@ -45,7 +45,7 @@ Without that env the script exits 0 with a notice, so PR builds, `desktop-build.
 
 - The hooks invoke `powershell` (Windows PowerShell 5.1) by name: a JSON config cannot compute the System32 path that `binary::run_powershell` uses in Rust. This is the same trust in the runner's `PATH` that every bare tool Tauri spawns (`makensis`, `candle`) already relies on.
 - The `ArtifactSigning` module is published for PowerShell 7 only (`PSEdition_Core`), so Windows PowerShell cannot find it on the gallery.[^12] The hooks still launch 5.1, the one edition present on every Windows host, and the script re-executes itself under `pwsh` only after the no-op check: an unsigned build needs no PowerShell 7, a signing host does (hosted runners ship it).
-- The `release` environment carries no protection rules today; adding required reviewers there would gate every release build, not only signing.
+- The `release` environment has a deployment-branch policy: only runs whose ref is the `main` branch or a `v*` tag may enter it. Since the OIDC subject carries the environment name only when the job references that environment, and a job on any other ref is rejected before it starts, a collaborator cannot mint a signature from a feature branch, and a fork pull request cannot obtain a write-scoped token at all.[^5][^14] Adding required reviewers on top would gate every release build, not only signing.
 - The module cache on disk belongs to the runner: hosted runners are ephemeral, the module version is pinned, and the SignTool and dlib package versions are pinned inside that module version.[^12]
 
 [^1]: [Windows Code Signing - Tauri](https://v2.tauri.app/distribute/sign/windows/): the `certificateThumbprint` flow applies only to OV certificates acquired before June 1, 2023; `signCommand` with `%1`; the Azure Artifact Signing example uses `artifact-signing-cli`.
@@ -71,5 +71,7 @@ Without that env the script exits 0 with a notice, so PR builds, `desktop-build.
 [^11]: [Certum Standard Code Signing in the Cloud](https://shop.certum.eu/standard-code-signing-in-the-cloud.html): SimplySign Desktop emulates a card reader on the signing workstation.
 
 [^12]: [ArtifactSigning - PowerShell Gallery](https://www.powershellgallery.com/packages/ArtifactSigning): the module exporting `Invoke-ArtifactSigning`, tagged `PSEdition_Core`.
+
+[^14]: [Workflow syntax for GitHub Actions - GitHub Docs](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax): for pull requests from forks the `permissions` key cannot grant `write` access (so `id-token: write` is unavailable), and a job that references an environment is subject to that environment's protection rules and deployment branch policy.
 
 [^13]: [Artifact Signing certificate management - Microsoft Learn](https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management): all Artifact Signing Public Trust certificates contain the `1.3.6.1.4.1.311.97.1.0` EKU, in addition to the code signing EKU `1.3.6.1.5.5.7.3.3`.
