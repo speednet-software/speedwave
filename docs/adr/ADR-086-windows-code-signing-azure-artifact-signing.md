@@ -12,7 +12,7 @@ Sign every Windows PE artifact with Azure Artifact Signing (formerly Trusted Sig
 
 The `cli` release job signs the standalone Windows CLI with the same script before zipping it.
 
-The script signs through Microsoft's `ArtifactSigning` PowerShell module (pinned by `$ModuleVersion`), which fetches the pinned SignTool and dlib packages itself and authenticates with `DefaultAzureCredential`.[^3][^4] Every signature carries an RFC 3161 timestamp from `http://timestamp.acs.microsoft.com`: Artifact Signing certificates are valid for three days, so an untimestamped signature would expire with them.[^3] After each call the script re-reads the file with `Get-AuthenticodeSignature` and fails unless the status is `Valid` and a timestamper certificate is present.
+The script signs through Microsoft's `ArtifactSigning` PowerShell module (pinned by `$ModuleVersion`), which fetches the pinned SignTool and dlib packages itself and authenticates with `DefaultAzureCredential`.[^3][^4] Every signature carries an RFC 3161 timestamp from `http://timestamp.acs.microsoft.com`: Artifact Signing certificates are valid for three days, so an untimestamped signature would expire with them.[^3] After each call the script re-reads the file with `Get-AuthenticodeSignature` and fails unless the status is `Valid`, a timestamper certificate is present, and the signer certificate carries the EKU `1.3.6.1.4.1.311.97.1.0` that every Artifact Signing Public Trust certificate contains.[^13] The EKU check is what proves the signature is ours: a file that already carried another publisher's valid signature passed the first two checks in a live smoke run.
 
 CI authenticates with **OpenID Connect and no stored secret**. The `publish-tauri` and `cli` jobs run in the `release` GitHub environment with `id-token: write`; `azure/login` exchanges the job's OIDC token for an Azure session; an Entra app registration carries a federated credential whose subject is exactly `repo:speednet-software/speedwave:environment:release`.[^5][^6] That app holds only the `Artifact Signing Certificate Profile Signer` role, scoped to the signing account. The endpoint, account and profile names plus the client, tenant and subscription ids are GitHub variables on the `release` environment (none of them is a secret); `.github/actions/azure-signing-login` validates them and exports the `AZURE_ARTIFACT_SIGNING_*` env the script reads.
 
@@ -70,4 +70,6 @@ Without that env the script exits 0 with a notice, so PR builds, `desktop-build.
 
 [^11]: [Certum Standard Code Signing in the Cloud](https://shop.certum.eu/standard-code-signing-in-the-cloud.html): SimplySign Desktop emulates a card reader on the signing workstation.
 
-[^12]: [ArtifactSigning - PowerShell Gallery](https://www.powershellgallery.com/packages/ArtifactSigning): the module exporting `Invoke-ArtifactSigning`.
+[^12]: [ArtifactSigning - PowerShell Gallery](https://www.powershellgallery.com/packages/ArtifactSigning): the module exporting `Invoke-ArtifactSigning`, tagged `PSEdition_Core`.
+
+[^13]: [Artifact Signing certificate management - Microsoft Learn](https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management): all Artifact Signing Public Trust certificates contain the `1.3.6.1.4.1.311.97.1.0` EKU, in addition to the code signing EKU `1.3.6.1.5.5.7.3.3`.
