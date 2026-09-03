@@ -69,9 +69,13 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
     fi
 }
 
-@test "script verifies the signature and its timestamp after signing" {
+@test "script verifies the signature, its timestamp and the Artifact Signing EKU after signing" {
+    # Seen live: a pre-signed input passes Status=Valid with the old signer; only the EKU proves
+    # the signature was produced by our certificate profile.
     grep -qF "Get-AuthenticodeSignature" "$SCRIPT"
     grep -qF "TimeStamperCertificate" "$SCRIPT"
+    grep -qF "\$ArtifactSigningEku = '1.3.6.1.4.1.311.97.1.0'" "$SCRIPT"
+    grep -qF -- '-notcontains $ArtifactSigningEku' "$SCRIPT"
 }
 
 @test "SignTargets lists the CLI and no vendor-signed binary" {

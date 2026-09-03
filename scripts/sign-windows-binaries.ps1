@@ -12,6 +12,8 @@ $ErrorActionPreference = 'Stop'
 $ModuleVersion = '0.1.17'
 # Artifact Signing certificates live three days: a signature stays valid only via this RFC3161 TSA.
 $TimestampServer = 'http://timestamp.acs.microsoft.com'
+# EKU every Artifact Signing certificate carries; proves the signature is ours, not a pre-existing one.
+$ArtifactSigningEku = '1.3.6.1.4.1.311.97.1.0'
 
 # SRC_TAURI is overridable by tests; defaults to desktop/src-tauri (mirrors sign-bundled-binaries.sh).
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -80,6 +82,12 @@ function Test-Signature([string]$Path) {
     }
     if ($null -eq $sig.TimeStamperCertificate) {
         throw "signature on $Path carries no timestamp; it would expire with the three-day certificate"
+    }
+    $ekus = $sig.SignerCertificate.Extensions |
+        Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } |
+        ForEach-Object { $_.EnhancedKeyUsages } | ForEach-Object { $_.Value }
+    if ($ekus -notcontains $ArtifactSigningEku) {
+        throw "signature on $Path is not from Azure Artifact Signing (EKU $ArtifactSigningEku missing); signer: $($sig.SignerCertificate.Subject)"
     }
     Write-Output "  verified: $($sig.SignerCertificate.Subject)"
 }
