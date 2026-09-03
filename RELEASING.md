@@ -31,7 +31,7 @@ Windows code signing uses no secret: it runs through Azure Artifact Signing with
 
 All six empty = unsigned Windows build. `AZURE_CLIENT_ID` set while any other is empty = the release job fails on purpose.
 
-The `release` environment only admits runs whose ref is the `main` branch or a `v*` tag (deployment branch policy). The federated credential in Azure trusts only the `environment:release` OIDC subject, so no other branch, fork or manual run can obtain a signing session. A `workflow_dispatch` of `desktop-release.yml` must therefore select `main` or a release tag as the run ref; any other ref fails at the `publish-tauri` job with an environment rejection.
+The `release` environment only admits runs whose ref is the `main` branch (deployment branch policy; tags are deliberately not allowed, because tag creation is not protected). The federated credential in Azure trusts only the `environment:release` OIDC subject, so no other branch, tag, fork or manual run can obtain a signing session. A `workflow_dispatch` of `desktop-release.yml` must therefore select `main` as the run ref (the build still checks out the release tag it is given); any other ref fails at the `publish-tauri` job with an environment rejection.
 
 Generate the Tauri signing keypair (one-time setup):
 
