@@ -1338,7 +1338,7 @@ describe('slack client', () => {
       return fetchMock;
     }
 
-    it('writes a binary file under /workspace/slack-files with id-prefixed name', async () => {
+    it('writes a binary file under .speedwave/slack with id-prefixed name', async () => {
       stubInfo({
         id: 'F1',
         name: 'analiza_techniczna.pdf',
