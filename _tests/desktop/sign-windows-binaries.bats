@@ -48,8 +48,15 @@ TAURI_WINDOWS_CONF="$BATS_TEST_DIRNAME/../../desktop/src-tauri/tauri.windows.con
     [ -n "$import_line" ]
     [ "$skip_line" -lt "$reexec_line" ]
     [ "$reexec_line" -lt "$import_line" ]
-    grep -qF -- '& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath' "$SCRIPT"
+    grep -qF -- '& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Bundled' "$SCRIPT"
+    grep -qF -- '& pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath $File' "$SCRIPT"
     grep -qF 'exit $LASTEXITCODE' "$SCRIPT"
+    # An `if` used as an expression unrolls a one-element array into a string; splatting that
+    # string hands pwsh garbage arguments (seen live: "positional parameter ... argument ':'").
+    if grep -qE '@forward|\$forward' "$SCRIPT"; then
+        echo "ERROR: re-exec must pass its arguments literally, never through a splatted variable" >&2
+        return 1
+    fi
 }
 
 @test "script excludes the managed-identity probe but keeps the Azure CLI credential" {

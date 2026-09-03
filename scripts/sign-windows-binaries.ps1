@@ -42,8 +42,11 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
         throw 'pwsh (PowerShell 7) is required to sign; install it or unset AZURE_ARTIFACT_SIGNING_* for an unsigned build'
     }
-    $forward = if ($Bundled) { @('-Bundled') } else { @($File) }
-    & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath @forward
+    if ($Bundled) {
+        & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath -Bundled
+    } else {
+        & pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath $File
+    }
     exit $LASTEXITCODE
 }
 
