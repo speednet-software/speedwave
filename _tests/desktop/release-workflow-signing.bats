@@ -156,3 +156,68 @@ SIGN_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/sign-bundled-binaries.sh"
 
     grep -qF "\"$tauri_id\"" "$utilities_swift"
 }
+
+# ── Windows signing (ADR-086): OIDC login + Azure Artifact Signing ──────────────────────
+
+SIGNING_LOGIN_ACTION="$BATS_TEST_DIRNAME/../../.github/actions/azure-signing-login/action.yml"
+
+@test "workflow configures Windows signing before tauri-action" {
+    # Both beforeBundleCommand and signCommand run inside tauri-action; the login must precede it.
+    login_line=$(grep -n "name: Configure Windows code signing" "$WORKFLOW" | head -1 | cut -d: -f1)
+    tauri_line=$(grep -n "tauri-apps/tauri-action@" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$login_line" ]
+    [ -n "$tauri_line" ]
+    [ "$login_line" -lt "$tauri_line" ]
+}
+
+@test "Windows signing step gates on matrix.platform == 'windows-latest'" {
+    login_line=$(grep -n "name: Configure Windows code signing" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$login_line" ]
+    guard_line=$(awk -v start="$login_line" 'NR>start && /^        if:/ { print NR; exit }' "$WORKFLOW")
+    [ -n "$guard_line" ]
+    sed -n "${guard_line}p" "$WORKFLOW" | grep -q "matrix.platform == 'windows-latest'"
+}
+
+@test "both Windows-building jobs use the shared azure-signing-login action" {
+    [ "$(grep -c "uses: ./.github/actions/azure-signing-login" "$WORKFLOW")" -eq 2 ]
+}
+
+@test "jobs that sign grant id-token: write and run in the release environment" {
+    # OIDC needs id-token: write; the federated credential trusts only the release-environment subject.
+    [ "$(grep -c "^      id-token: write$" "$WORKFLOW")" -eq 2 ]
+    [ "$(grep -c "^    environment: release$" "$WORKFLOW")" -eq 2 ]
+}
+
+@test "cli job signs the Windows CLI before packaging it" {
+    sign_line=$(grep -n "name: Sign CLI binary (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
+    pack_line=$(grep -n "name: Package CLI (windows)" "$WORKFLOW" | head -1 | cut -d: -f1)
+    [ -n "$sign_line" ]
+    [ -n "$pack_line" ]
+    [ "$sign_line" -lt "$pack_line" ]
+    grep -qF 'sign-windows-binaries.ps1 "target\$env:TARGET\release\speedwave.exe"' "$WORKFLOW"
+}
+
+@test "no PFX-based Windows signing remains in the release workflow" {
+    # Tauri never read WINDOWS_CERTIFICATE; a leftover would look configured while signing nothing.
+    if grep -q "WINDOWS_CERTIFICATE" "$WORKFLOW"; then
+        echo "ERROR: WINDOWS_CERTIFICATE is dead config; Windows signing is Azure Artifact Signing (ADR-086)" >&2
+        return 1
+    fi
+}
+
+@test "azure-signing-login pins azure/login by commit SHA" {
+    [ -f "$SIGNING_LOGIN_ACTION" ]
+    grep -qE "uses: azure/login@[0-9a-f]{40}" "$SIGNING_LOGIN_ACTION"
+}
+
+@test "azure-signing-login exports the env the signing script reads" {
+    grep -qF "AZURE_ARTIFACT_SIGNING_ENDPOINT=" "$SIGNING_LOGIN_ACTION"
+    grep -qF "AZURE_ARTIFACT_SIGNING_ACCOUNT=" "$SIGNING_LOGIN_ACTION"
+    grep -qF "AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE=" "$SIGNING_LOGIN_ACTION"
+}
+
+@test "azure-signing-login fails loudly on a half-configured signing target" {
+    # A client id without endpoint/account/profile must not silently produce an unsigned release.
+    grep -qF "::error::" "$SIGNING_LOGIN_ACTION"
+    grep -qF "allow-no-subscriptions: true" "$SIGNING_LOGIN_ACTION"
+}

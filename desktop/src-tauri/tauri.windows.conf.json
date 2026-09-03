@@ -1,4 +1,10 @@
 {
+  "build": {
+    "beforeBundleCommand": {
+      "script": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\\sign-windows-binaries.ps1 -Bundled",
+      "cwd": "../.."
+    }
+  },
   "bundle": {
     "resources": {
       "wsl/nerdctl-full.tar.gz": "wsl/nerdctl-full.tar.gz",
@@ -15,6 +21,18 @@
       "windows/firewall.ps1": "windows/firewall.ps1"
     },
     "windows": {
+      "signCommand": {
+        "cmd": "powershell",
+        "args": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../../scripts/sign-windows-binaries.ps1",
+          "%1"
+        ]
+      },
       "nsis": {
         "installerHooks": "windows/installer-hooks.nsh"
       },

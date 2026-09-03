@@ -14,15 +14,18 @@
 #   TAURI_SIGNING_PRIVATE_KEY          — Ed25519 private key for Tauri updater signatures
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — passphrase for the signing key (can be empty string)
 #
-# Optional secrets (code signing):
+# Optional secrets (macOS code signing + notarization):
 #   APPLE_CERTIFICATE                  — base64-encoded .p12 Developer ID Application certificate
 #   APPLE_CERTIFICATE_PASSWORD         — passphrase for the .p12 certificate
 #   APPLE_SIGNING_IDENTITY             — e.g. "Developer ID Application: Your Name (TEAMID)"
 #   APPLE_ID                           — Apple ID email for notarization
 #   APPLE_PASSWORD                     — app-specific password for notarization
 #   APPLE_TEAM_ID                      — Apple Developer Team ID
-#   WINDOWS_CERTIFICATE                — base64-encoded .pfx code signing certificate
-#   WINDOWS_CERTIFICATE_PASSWORD       — passphrase for the .pfx certificate
+#
+# Optional variables on the `release` environment (Windows code signing via Azure Artifact
+# Signing, ADR-086: OIDC login, no stored secret; all empty = unsigned Windows build):
+#   AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID
+#   AZURE_ARTIFACT_SIGNING_ENDPOINT / AZURE_ARTIFACT_SIGNING_ACCOUNT / AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE
 
 name: Desktop Release
 
@@ -121,8 +124,12 @@ jobs:
   # ── Desktop app (Tauri) — official tauri-action pattern ──────────────────
   publish-tauri:
     needs: resolve
+    # `release` holds the Windows-signing variables and is the OIDC subject the Entra federated
+    # credential trusts (ADR-086); the macOS legs ignore it.
+    environment: release
     permissions:
       contents: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -259,22 +266,18 @@ jobs:
           fi
           echo "::notice::Apple signing identity imported and verified in build keychain"
 
+      # Tauri signs inside tauri-action (beforeBundleCommand + signCommand both call
+      # scripts/sign-windows-binaries.ps1), so the Azure login must land before it.
       - name: Configure Windows code signing
         if: matrix.platform == 'windows-latest'
-        env:
-          CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
-          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: bash
-        run: |
-          if [ -n "$CERT" ]; then
-            echo "::add-mask::$CERT"
-            echo "::add-mask::$CERT_PASSWORD"
-            echo "WINDOWS_CERTIFICATE=$CERT" >> "$GITHUB_ENV"
-            echo "WINDOWS_CERTIFICATE_PASSWORD=$CERT_PASSWORD" >> "$GITHUB_ENV"
-            echo "::notice::Windows code signing configured"
-          else
-            echo "::notice::Windows code signing skipped (no WINDOWS_CERTIFICATE secret)"
-          fi
+        uses: ./.github/actions/azure-signing-login
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
 
       - name: Prepare desktop bundle
         uses: ./.github/actions/prepare-desktop-bundle
@@ -304,6 +307,7 @@ jobs:
   # Runs after publish-tauri so the GitHub release already exists
   cli:
     needs: [resolve, publish-tauri]
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -321,6 +325,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -348,6 +353,25 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --target "$TARGET" -p speedwave-cli
+
+      - name: Configure Windows code signing
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/azure-signing-login
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          account: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+
+      # Same host (Windows PowerShell 5.1) and script as the Tauri hooks; no-op without the env.
+      - name: Sign CLI binary (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\sign-windows-binaries.ps1 "target\$env:TARGET\release\speedwave.exe"
 
       - name: Package CLI (unix)
         if: matrix.archive == 'tar.gz'
