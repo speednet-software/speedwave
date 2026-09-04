@@ -8,7 +8,7 @@
 Sign every Windows PE artifact with Azure Artifact Signing (formerly Trusted Signing), Microsoft's managed code-signing service, using the existing `Speednet` account in Poland Central and its `Speedwave` Public Trust certificate profile. Two hooks in `desktop/src-tauri/tauri.windows.conf.json` route all signing through one script, `scripts/sign-windows-binaries.ps1`:
 
 - `bundle.windows.signCommand` (object form): Tauri calls the script with `%1` for the main executable, the NSIS installer and uninstaller, the NSIS plugin DLLs and the MSI.[^1][^2]
-- `build.beforeBundleCommand` (Windows override, cwd `../..`): runs the script with `-Bundled`, which signs the PE files we build ourselves that Tauri copies in as plain resources (`$SignTargets`, today `cli\speedwave.exe`). This is the Windows counterpart of ADR-037's `sign-bundled-binaries.sh`.
+- `build.beforeBundleCommand` (Windows override, cwd `../..`): runs the script with `-Bundled`, which signs the PE files we build ourselves that Tauri copies in as plain resources (`$SignTargets`, today `cli\speedwave.exe`) before the bundlers run, so the inventory of what must be signed is explicit and test-guarded instead of being left to the bundler. This is the Windows counterpart of ADR-037's `sign-bundled-binaries.sh`.
 
 The `cli` release job signs the standalone Windows CLI with the same script before zipping it.
 
@@ -24,7 +24,7 @@ Without that env the script exits 0 with a notice, so PR builds, `desktop-build.
 - **The account already existed.** Poland Central is a supported region, EU organizations are eligible for Public Trust, and the company's identity validation and certificate profile were already complete.[^4]
 - **OIDC beats a client secret.** `artifact-signing-cli`, the tool Tauri's guide shows, shells out to `az login --service-principal` and therefore needs a long-lived client secret in GitHub.[^1][^7] The official dlib and PowerShell module use `DefaultAzureCredential`, which picks up the `azure/login` session, so a federated credential replaces the secret entirely.[^3][^6]
 - **Signing must happen inside `tauri build`.** `makensis` signs the uninstaller through Tauri's `!uninstfinalize` hook, and the main executable must be signed before it is packed into the installer. A post-build pass over the output folder (the `azure/artifact-signing-action` pattern) would leave the uninstaller and the embedded binary unsigned.[^2][^8]
-- **Tauri does not sign `bundle.resources`.** The bundler signs binaries, sidecars, the WebView2 loader, the NSIS plugins and the produced installers, and copies resources verbatim.[^9] The `-Bundled` pass covers that gap for the files we build; vendor-signed `node.exe` and the hash-pinned `vulkan-1.dll` are never re-signed.
+- **Resource signing stays an explicit, test-guarded inventory.** Tauri's NSIS and MSI bundlers do hand still-unsigned `.exe`/`.dll` resources to the sign command as well, gated by a `signtool verify /pa` check, but that behavior is undocumented and lives inside the bundler.[^9] The `-Bundled` pass runs first, so the files we build are signed and EKU-verified on our terms, and the bundler's later check finds them already signed and skips them. Vendor-signed `node.exe` and the hash-pinned `vulkan-1.dll` are skipped by that same check and must never be listed in `$SignTargets`.
 
 ## Where it lives in code
 
@@ -64,7 +64,7 @@ Without that env the script exits 0 with a notice, so PR builds, `desktop-build.
 
 [^8]: [Azure/artifact-signing-action - GitHub](https://github.com/Azure/artifact-signing-action): signs files under a folder after the build and installs the `ArtifactSigning` PowerShell module.
 
-[^9]: [tauri-bundler `windows/nsis/mod.rs` - GitHub](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs): `try_sign` runs on binaries, the WebView2 loader, the NSIS plugins and the produced installer; `generate_resource_data` copies `bundle.resources` without signing.
+[^9]: [tauri-bundler `windows/nsis/mod.rs` - GitHub](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs) and [`windows/msi/mod.rs`](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/msi/mod.rs): `try_sign` runs on the binaries, the WebView2 loader, the NSIS plugins, the WiX extensions and the produced installers; both `generate_resource_data` loops call `try_sign` on a resource only when `should_sign` ([`windows/sign.rs`](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/sign.rs): an `.exe`/`.dll` that `signtool verify /pa` reports as unsigned) returns true.
 
 [^10]: [SignPath Foundation terms](https://signpath.org/terms): OSI license requirement, manual approval of every release, code signing policy on the project homepage.
 
