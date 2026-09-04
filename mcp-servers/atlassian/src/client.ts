@@ -270,8 +270,7 @@ export class AtlassianClient {
     if (axios.isAxiosError(error)) {
       const status = error.response?.status;
       const data = error.response?.data as
-        | { errorMessages?: string[]; errors?: Record<string, string>; message?: string }
-        | undefined;
+        { errorMessages?: string[]; errors?: Record<string, string>; message?: string } | undefined;
       const apiMessage =
         (Array.isArray(data?.errorMessages) && data?.errorMessages.join('; ')) ||
         (data?.errors && Object.values(data.errors).join('; ')) ||

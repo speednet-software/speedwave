@@ -16,7 +16,9 @@ import {
 } from '@angular/core';
 import { Router } from '@angular/router';
 
-import { TranscriptionService } from '../../services/transcription.service';
+import { TooltipDirective } from '../../shared/tooltip.directive';
+import { ChatStateService, NEW_CONVERSATION_STREAMING } from '../../services/chat-state.service';
+import { TranscriptionService, type SendTarget } from '../../services/transcription.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 /**
@@ -37,6 +39,17 @@ function bySegmentStart(a: Segment, b: Segment): number {
   return a.start.secs - b.start.secs || a.start.nanos - b.start.nanos;
 }
 
+/**
+ * Maps linear RMS to a 0-100 meter width on a dB scale (-60..0 dBFS) — speech RMS sits around
+ * 0.005-0.15, which a linear meter would render as a near-invisible sliver.
+ * @param rms - linear RMS in 0..1.
+ */
+function rmsToPct(rms: number): number {
+  if (rms <= 0) return 0;
+  const db = 20 * Math.log10(rms);
+  return Math.round(Math.min(100, Math.max(0, ((db + 60) / 60) * 100)));
+}
+
 /** A timestamped transcript line, for rendering. */
 interface TranscriptLine {
   startLabel: string;
@@ -47,12 +60,12 @@ interface TranscriptLine {
 
 /**
  * Live transcript view (right pane): segments (offline `final_segments` if run, else
- * `live_segments`), finalize progress bar, and a "Send to chat" button behind a confirm dialog.
+ * `live_segments`), finalize progress bar, and the actions that stage the transcript for the chat composer.
  */
 @Component({
   selector: 'app-live-transcript',
   standalone: true,
-  imports: [],
+  imports: [TooltipDirective],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="flex h-full flex-col" data-testid="live-transcript">
@@ -67,6 +80,30 @@ interface TranscriptLine {
             <div class="h-full bg-[var(--accent)]" [style.width.%]="finalizePct()"></div>
           </div>
         </div>
+      }
+
+      @if (status() === 'recording' && meterBars().length > 0) {
+        <div class="mb-2 space-y-1" data-testid="audio-level-meter">
+          @for (bar of meterBars(); track bar.label) {
+            <div class="flex items-center gap-2">
+              <span class="mono w-14 shrink-0 text-[10px] text-[var(--ink-mute)]">{{
+                bar.label
+              }}</span>
+              <div class="h-1.5 flex-1 overflow-hidden rounded bg-[var(--bg-2)]">
+                <div
+                  class="h-full bg-[var(--accent)] transition-[width] duration-150"
+                  [style.width.%]="bar.pct"
+                ></div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      @if (recordOnly()) {
+        <p class="mb-2 text-[12px] text-[var(--ink-mute)]" data-testid="record-only-hint">
+          Live transcript is off — the transcript will appear after you stop recording.
+        </p>
       }
 
       <div
@@ -104,22 +141,30 @@ interface TranscriptLine {
       </div>
 
       @if (session()) {
-        <div class="mt-2 border-t border-[var(--line)] pt-2">
-          <button
-            type="button"
-            class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
-            data-testid="send-to-chat-btn"
-            [disabled]="sending() || status() === 'recording'"
-            (click)="sendToChat()"
-          >
-            {{ sending() ? 'sending…' : 'Send to chat' }}
-          </button>
-          <span class="mono ml-2 text-[10px] text-[var(--ink-mute)]">
-            @if (status() === 'recording') {
-              stop recording first
-            } @else {
-              drops the transcript into the chat and opens it
-            }
+        <div class="mt-2 flex flex-wrap items-center gap-2 border-t border-[var(--line)] pt-2">
+          <span [appTooltip]="sendBlockedReason()" placement="top">
+            <button
+              type="button"
+              class="mono rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-[var(--bg)] hover:opacity-90 disabled:pointer-events-none disabled:opacity-40"
+              data-testid="send-to-chat-btn"
+              [attr.aria-label]="ariaLabel('Send to new chat', sendBlockedReason())"
+              [disabled]="sending() || sendBlockedReason() !== ''"
+              (click)="stageForChat()"
+            >
+              {{ sending() ? 'opening…' : 'Send to new chat' }}
+            </button>
+          </span>
+          <span [appTooltip]="appendBlockedReason()" placement="top">
+            <button
+              type="button"
+              class="mono rounded px-3 py-1 text-[12px] font-medium text-[var(--ink)] ring-1 ring-[var(--line)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-40"
+              data-testid="append-to-chat-btn"
+              [attr.aria-label]="ariaLabel('Add to current chat', appendBlockedReason())"
+              [disabled]="sending() || appendBlockedReason() !== ''"
+              (click)="stageForChat('current-chat')"
+            >
+              Add to current chat
+            </button>
           </span>
         </div>
       }
@@ -132,7 +177,7 @@ export class LiveTranscriptComponent {
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
 
-  /** `true` while a "Send to chat" call is in flight. */
+  /** `true` while the staging call is in flight. */
   readonly sending = signal(false);
   /** Local error string. */
   readonly error = signal('');
@@ -165,6 +210,56 @@ export class LiveTranscriptComponent {
   readonly draft = computed(() =>
     this.status() === 'recording' ? this.transcription.liveDraft() : ''
   );
+
+  /** Record-only session: recording with no live pass — the meter is the only feedback. */
+  readonly recordOnly = computed(
+    () => this.status() === 'recording' && this.session()?.models_used.live == null
+  );
+
+  /**
+   * Why sending is blocked ('' when it is not) — the service owns every reason but
+   * the recording gate, so the disabled state matches what the send would refuse.
+   */
+  readonly sendBlockedReason = computed(() =>
+    this.status() === 'recording'
+      ? 'Stop the recording first'
+      : this.chat.newConversationBlockedReason()
+  );
+
+  /**
+   * Narrower than {@link sendBlockedReason} on purpose: an open conversation implies a
+   * ready project, and `sendMessage` waits out a session start instead of refusing.
+   */
+  readonly appendBlockedReason = computed(() => {
+    if (this.status() === 'recording') return 'Stop the recording first';
+    if (this.chat.isStreamingFromState()) return NEW_CONVERSATION_STREAMING;
+    return this.chat.hasConversation() ? '' : 'No open chat to add to';
+  });
+
+  /** Loudness bars: label per captured channel, level as 0–100 for the width binding. */
+  readonly meterBars = computed<{ label: string; pct: number }[]>(() => {
+    const kind = this.session()?.audio_source.source.kind;
+    const levels = this.transcription.audioLevels();
+    if (!levels || levels.length === 0) {
+      // Recording but no level event yet (capture still spinning up): show the
+      // expected channels at 0% — a flat bar reads "silent", a missing meter
+      // reads "broken". Channel count comes from the source shape.
+      if (this.status() !== 'recording' || !kind) return [];
+      return kind === 'mixed'
+        ? [
+            { label: 'Meeting', pct: 0 },
+            { label: 'You', pct: 0 },
+          ]
+        : [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: 0 }];
+    }
+    if (levels.length === 2) {
+      return [
+        { label: 'Meeting', pct: rmsToPct(levels[0]) },
+        { label: 'You', pct: rmsToPct(levels[1]) },
+      ];
+    }
+    return [{ label: kind === 'microphone' ? 'You' : 'Meeting', pct: rmsToPct(levels[0]) }];
+  });
   /** Finalize progress 0–100 (0 when not finalizing). */
   readonly finalizePct = computed(() => {
     const st = this.session()?.status;
@@ -172,6 +267,7 @@ export class LiveTranscriptComponent {
   });
 
   private readonly transcription = inject(TranscriptionService);
+  private readonly chat = inject(ChatStateService);
   private readonly cdr = inject(ChangeDetectorRef);
   private readonly router = inject(Router);
   private readonly injector = inject(Injector);
@@ -202,6 +298,16 @@ export class LiveTranscriptComponent {
       this.draft();
       if (this.status() === 'recording' && this.stickToBottom()) this.scrollToBottom();
     });
+  }
+
+  /**
+   * Button label carrying its blocked reason: a `disabled` button fires no hover or
+   * focus events, so the tooltip alone never reaches keyboard or screen-reader users.
+   * @param label - the visible button text.
+   * @param reason - the blocked reason, '' when the button is live.
+   */
+  ariaLabel(label: string, reason: string): string {
+    return reason ? `${label} (unavailable: ${reason})` : label;
   }
 
   /** Tracks whether the user sits at (within 50 px of) the bottom. */
@@ -237,19 +343,19 @@ export class LiveTranscriptComponent {
     );
   }
 
-  /** Confirms, drops the transcript into the chat, then opens the chat tab. */
-  async sendToChat(): Promise<void> {
+  /**
+   * Stages the transcript for the chat composer, then opens the chat tab so the user can edit
+   * the prompt before sending. Nothing leaves the machine here.
+   * @param target - `'new-chat'` (default) or `'current-chat'` to keep the active thread.
+   */
+  async stageForChat(target: SendTarget = 'new-chat'): Promise<void> {
     const s = this.session();
-    if (!s || s.status.state === 'recording') return;
-    const ok = window.confirm(
-      'This drops the transcript text into the chat (sent to your configured LLM provider). Continue?'
-    );
-    if (!ok) return;
+    const blocked = target === 'new-chat' ? this.sendBlockedReason() : this.appendBlockedReason();
+    if (!s || blocked) return;
     this.sending.set(true);
     this.error.set('');
     try {
-      await this.transcription.sendToChat(s.id);
-      // Open the chat so the user sees the message they just sent.
+      await this.transcription.stageForChat(s.id, target);
       await this.router.navigate(['/chat']);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);

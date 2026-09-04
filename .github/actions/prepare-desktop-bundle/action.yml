@@ -20,11 +20,41 @@ runs:
       if: inputs.platform == 'windows-latest'
       uses: ./.github/actions/download-wsl-resources
 
+    # Fail fast, before the SDK install: a too-deep cargo target dir dies mid-build with a
+    # bare C1083 in the ggml-vulkan shader build (ADR-085) — the gate names the fix instead.
+    - name: Check the Vulkan build path budget
+      if: inputs.platform == 'windows-latest'
+      shell: bash
+      run: bash scripts/check-vulkan-path-budget.sh
+
+    - name: Install Vulkan SDK and runtime loader
+      # The Windows whisper build carries the Vulkan backend (ADR-085): the SDK provides
+      # headers/vulkan-1.lib/glslc for the build, and the redistributable loader gets bundled
+      # next to the exe. The runner is elevated, so the pinned installer runs silently. The
+      # version pin lives only in the script; its final VULKAN_SDK=... line feeds later steps.
+      if: inputs.platform == 'windows-latest'
+      shell: pwsh
+      run: |
+        $out = scripts/install-vulkan-sdk.ps1
+        $out | Write-Output
+        ($out | Select-String -Pattern '^VULKAN_SDK=').Line | Add-Content $env:GITHUB_ENV
+
+    - name: Stage Vulkan runtime loader for bundling
+      if: inputs.platform == 'windows-latest'
+      shell: bash
+      run: bash scripts/stage-vulkan-runtime.sh
+
     - name: Download Node.js for bundling
       uses: ./.github/actions/download-nodejs
       with:
         platform: ${{ contains(inputs.platform, 'macos') && 'darwin' || 'win' }}
         arch: ${{ (contains(inputs.platform, 'macos') && contains(inputs.args, 'aarch64')) && 'arm64' || 'x64' }}
+
+    - name: Install wasm toolchain (PII engine)
+      shell: bash
+      run: |
+        rustup target add wasm32-unknown-unknown
+        npm install -g wasm-pack
 
     - name: Bundle build context and mcp-os
       shell: bash
@@ -48,12 +78,15 @@ runs:
       run: |
         # Extract --target value from matrix.args using sed (BSD-compatible)
         TARGET=$(echo "$MATRIX_ARGS" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
+        # Honour CARGO_TARGET_DIR (the Windows MAX_PATH escape) when locating the artifact.
+        TDIR="${CARGO_TARGET_DIR:-target}"
+        TDIR="${TDIR//\\//}"
         if [ -n "$TARGET" ]; then
           cargo build --release --target "$TARGET" -p speedwave-cli
-          CLI_BIN="target/$TARGET/release/speedwave"
+          CLI_BIN="$TDIR/$TARGET/release/speedwave"
         else
           cargo build --release -p speedwave-cli
-          CLI_BIN="target/release/speedwave"
+          CLI_BIN="$TDIR/release/speedwave"
         fi
         # Windows: append .exe
         if [ "$MATRIX_PLATFORM" = "windows-latest" ]; then
@@ -61,6 +94,14 @@ runs:
         fi
         mkdir -p desktop/src-tauri/cli
         cp "$CLI_BIN" desktop/src-tauri/cli/
+
+    - name: Bundle static third-party licenses
+      # Same copy as `make bundle-static-licenses` — CI builds tauri directly, not via make,
+      # and the download-* actions stage only their own licenses into the bundled dir.
+      shell: bash
+      run: |
+        mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
+        cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
 
     - name: Verify bundled runtime assets
       shell: bash

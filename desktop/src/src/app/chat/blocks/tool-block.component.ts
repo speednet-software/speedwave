@@ -78,8 +78,7 @@ const STATUS_INK: Readonly<Record<ToolUseBlock['status'], string>> = Object.free
                 data-testid="terminal-output"
                 class="mono overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[11.5px] leading-[1.6] text-[var(--ink-dim)]"
               >
-$ {{ asBash(normalized()).command }}</pre
-              >
+$ {{ asBash(normalized()).command }}</pre>
             }
             @case ('read') {
               <div data-testid="file-path" class="mono text-[11.5px] text-[var(--teal)]">
@@ -187,8 +186,7 @@ $ {{ asBash(normalized()).command }}</pre
               <pre
                 data-testid="code-block"
                 class="mono overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-3 text-[11.5px] leading-[1.5] text-[var(--ink-dim)]"
-                >{{ asGeneric(normalized()).raw_json }}</pre
-              >
+                >{{ asGeneric(normalized()).raw_json }}</pre>
             }
           }
           @if (hasResult()) {
@@ -209,8 +207,7 @@ $ {{ asBash(normalized()).command }}</pre
                 data-testid="result-content"
                 class="mono max-h-[300px] overflow-x-auto overflow-y-auto rounded border p-3 text-[11.5px] leading-[1.6]"
                 [class]="resultPaneClass()"
-                >{{ resultText() }}</pre
-              >
+                >{{ resultText() }}</pre>
             </div>
           }
         </div>

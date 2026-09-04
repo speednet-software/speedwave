@@ -5,7 +5,10 @@
 export type Language = 'pl' | 'en';
 
 /** Compiled whisper.cpp acceleration backends (build-time, not host-probe). */
-export type Backend = 'cpu' | 'metal';
+export type Backend = 'cpu' | 'metal' | 'vulkan';
+
+/** Probed host GPU class — mirrors Rust `GpuClass` (ADR-085). */
+export type GpuClass = 'none' | 'integrated' | 'discrete';
 
 /** What the host's capture backend can do. */
 export interface CaptureCapabilities {
@@ -48,6 +51,7 @@ export interface Segment {
 
 /** Which models were used for each pass of a session. */
 export interface ModelsUsed {
+  /** Live-pass model key; null = record-only for the current part (drives the record-only UI). */
   live: string | null;
   finalize: string | null;
 }
@@ -81,6 +85,7 @@ export type CaptureWarning =
   | 'system_audio_silent'
   | 'microphone_stalled'
   | 'system_audio_stalled'
+  | 'audio_dropped'
   | 'recording_part_missing';
 
 /** `request_microphone_permission` outcome — mirrors Rust `MicPermission`. */
@@ -102,12 +107,16 @@ export type TranscriptEvent =
       seq: number;
       segments: Segment[];
     }
+  | { kind: 'audio_level'; seq: number; levels: number[] }
   | { kind: 'finished'; seq: number };
 
 /** `transcription_capabilities` command return type. */
 export interface CapabilitiesAck {
   capabilities: CaptureCapabilities;
   backends: Backend[];
+  gpu_class: GpuClass;
+  /** Acceleration label computed host-side (`accel::accel_label()`) — render verbatim. */
+  accel_label: string;
 }
 
 /** `start_transcription` command return type. */
@@ -137,13 +146,22 @@ export interface ModelsAck {
   total_bytes_used: number;
 }
 
-/** `recommended_transcription_model` — the single best model for this hardware. */
-export interface RecommendedModelAck {
+/** One model the pipeline needs, with its on-disk state. */
+export interface RecommendedModelEntry {
   key: string;
   display_name: string;
   size_bytes: number;
   downloaded: boolean;
   downloading: boolean;
+}
+
+/**
+ * `recommended_transcription_model` — the live model plus the offline-pass model when this
+ * host needs a different one. Mirrors Rust `RecommendedModelAck`.
+ */
+export interface RecommendedModelAck {
+  live: RecommendedModelEntry;
+  finalize: RecommendedModelEntry | null;
   accel_label: string;
 }
 

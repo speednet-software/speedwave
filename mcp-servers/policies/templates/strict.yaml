@@ -1,0 +1,14 @@
+version: 3
+id: strict
+name: "Strict - All PII Categories"
+description: "Every built-in rule enabled; no additive rules or keywords. Matches the engine's compiled-in default."
+categories:
+  EMAIL: { tokenize: true, log: false }
+  PHONE_PL: { tokenize: true, log: false }
+  PESEL: { tokenize: true, log: false }
+  NIP: { tokenize: true, log: false }
+  IBAN: { tokenize: true, log: false }
+  CARD: { tokenize: true, log: false }
+  API_KEY: { tokenize: true, log: false }
+rules: []
+keywords: []

@@ -24,9 +24,9 @@ jobs:
     # macos/windows after ADR-059. Ubuntu would fire that error before clippy
     # ever runs. macOS-latest is the cheapest runner that satisfies the cfg.
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -34,7 +34,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -60,8 +60,21 @@ jobs:
           npm ci --ignore-scripts
           cd mcp-servers && npm ci
 
+      # policies/src/engine.ts imports the wasm-pkg artifact directly, so the `tsc` build below
+      # needs it staged first (build-wasm.sh — matches the desktop job's toolchain install).
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
+
+      # cmake builds whisper.cpp for check-clippy's audio-transcription pass (ADR-056).
+      - name: Install cmake
+        run: brew install cmake
+
+      # `make check-clippy` is the authoritative gate: --all-targets (test code,
+      # integration binaries) plus the test-support + audio-transcription feature pass.
       - name: Rust clippy
-        run: cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+        run: make check-clippy
 
       # containers/proxy is its own Cargo workspace (separate lockfile) — its
       # deny-level [lints.clippy] table needs its own clippy invocation.
@@ -77,8 +90,11 @@ jobs:
         working-directory: mcp-servers
         run: |
           (cd shared && npx tsc)
+          # hub resolves @speedwave/policy-engine types from policies/dist, so build (not noEmit).
+          (cd policies && npm run build:wasm)
+          (cd policies && npx tsc)
           # `playwright` is a Container-built bridge worker — no TS sources, no tsconfig.
-          for ws in hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
+          for ws in policies hub slack sharepoint redmine gitlab os atlassian context7 github oauth office; do
             echo "tsc --noEmit $ws"
             (cd "$ws" && npx tsc --noEmit)
           done
@@ -93,13 +109,13 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
       - name: Cache Cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -129,6 +145,14 @@ jobs:
       # for the audio-transcription feature tests below. ADR-056.
       - name: Install cmake
         run: brew install cmake
+
+      # policies/src/engine.ts imports the wasm-pkg artifact; `build-mcp` (coverage-mcp's and
+      # test-mcp-os-bundle's prerequisite) runs policies' `build:wasm` script, so it needs this
+      # toolchain present (matches the desktop job).
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
 
       - name: Rust tests (incl. transcription)
         run: make test-rust
@@ -165,7 +189,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -173,7 +197,7 @@ jobs:
           components: clippy
 
       - name: Cache Cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -189,6 +213,14 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: desktop/src/package-lock.json
+
+      # This job (not the prepare-desktop-bundle composite action) is what runs
+      # bundle-build-context.bats against the real script — `make test-desktop-build` below
+      # invokes it ~20 times, each rebuilding the PII engine wasm artifact.
+      - name: Install wasm toolchain (PII engine)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          npm install -g wasm-pack
 
       - name: Install dependencies
         working-directory: desktop/src-tauri
@@ -258,7 +290,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -269,7 +301,7 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
       - name: Cache Cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -278,29 +310,23 @@ jobs:
           key: ${{ runner.os }}-audit-${{ hashFiles('Cargo.lock', 'desktop/src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-audit-
 
-      - name: npm audit (mcp-servers)
-        run: cd mcp-servers && npm audit --audit-level=high --omit=dev
-
-      - name: npm audit (desktop)
-        run: cd desktop/src && npm audit --audit-level=high --omit=dev
+      - name: npm audit (both workspaces)
+        run: make audit-mcp audit-desktop
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update
-      # only), no fixed self_update release. Keep in sync with Makefile AUDIT_IGNORE.
-      - name: cargo audit (root workspace)
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
-
-      - name: cargo audit (desktop)
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --file desktop/src-tauri/Cargo.lock
+      # Both lockfiles and the ignore list live in the Makefile target (AUDIT_IGNORE),
+      # so CI cannot drift from a local `make audit`.
+      - name: Rust audit (both lockfiles)
+        run: make audit-rust
 
   swift:
     if: github.event_name == 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Build native macOS CLI binaries (universal)
         run: scripts/build-native-macos.sh
@@ -308,22 +334,22 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
-  # Windows behaviour the macos-latest lint/test jobs can't cover; each step below
-  # is scoped because compose/consts fixtures use POSIX paths that fail on Windows.
+  # Windows behaviour the macos-latest lint/test jobs can't cover: the full
+  # runtime + CLI suite on a real Windows filesystem/shell.
   runtime-windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
       - name: Cache Cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -333,26 +359,10 @@ jobs:
           key: ${{ runner.os }}-cargo-runtime-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-runtime-
 
-      - name: cargo test runtime::lima
-        run: cargo test -p speedwave-runtime --lib "runtime::lima::"
-
-      - name: cargo test runtime::wsl
-        run: cargo test -p speedwave-runtime --lib "runtime::wsl::"
-
-      - name: cargo test runtime build
-        shell: bash
-        run: cargo test -p speedwave-runtime --lib "build::"
-
-      - name: cargo test host_mcp_process::job_object
-        # Windows-only kill-on-close end-to-end — see ADR-048.
-        shell: bash
-        run: cargo test -p speedwave-runtime --lib "host_mcp_process::job_object"
-
-      - name: cargo test binary
-        run: cargo test -p speedwave-runtime --lib "binary::"
-
-      - name: cargo test speedwave-cli
-        run: cargo test -p speedwave-cli --bins
+      # Mirrors `make test-rust`'s cargo line (guard: _tests/ci/rust-coverage-gates.bats);
+      # audio-transcription (whisper.cpp) runs in the macOS `test` job instead.
+      - name: cargo test (full suite incl. test-support)
+        run: cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash
@@ -378,13 +388,18 @@ jobs:
     # on windows-latest with stubbed bundle resources so Windows-only compile
     # errors (e.g. cfg-gated imports of types used in cross-platform fn
     # signatures) are caught in PR CI without paying for a full Tauri bundle.
+    # The budget covers a cold whisper.cpp + ggml-vulkan shader build (ADR-085).
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
+    env:
+      # The runner's D:\a\speedwave\speedwave base plus the MSBuild TryCompile scratch of the
+      # ggml-vulkan shader build crosses MAX_PATH (C1083) — the cross-platform.md escape hatch.
+      CARGO_TARGET_DIR: D:\st
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
@@ -398,15 +413,27 @@ jobs:
         run: echo "IMAGE_VERSION=${ImageVersion:-unknown}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            desktop/src-tauri/target/
-          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+            D:\st
+          key: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ env.IMAGE_VERSION }}-cargo-desktop-check-
+
+      - name: Install Vulkan SDK
+        # The Windows whisper build carries the Vulkan backend (ADR-085); the runtime loader
+        # dir goes on PATH so `cargo test --bins` binaries (load-time vulkan-1.dll import)
+        # start on a GPU-less runner — no device is a clean CPU fallback, no loader is not.
+        shell: pwsh
+        run: |
+          $out = scripts/install-vulkan-sdk.ps1
+          $out | Write-Output
+          $root = (($out | Select-String -Pattern '^VULKAN_SDK=').Line) -replace '^VULKAN_SDK=', ''
+          "VULKAN_SDK=$root" | Add-Content $env:GITHUB_ENV
+          Join-Path $root 'runtime\x64' | Add-Content $env:GITHUB_PATH
 
       - name: Create resource stubs for Tauri build script
         run: scripts/create-desktop-stubs.sh
@@ -416,6 +443,21 @@ jobs:
         env:
           SPEEDWAVE_ALLOW_BUNDLE_STUBS: "1"
         run: cargo check --all-targets
+
+      # The runtime transcription module carries #[cfg(windows)] tests (audio_windows: WASAPI
+      # capture, drop counters) that no other job compiles — the macOS lane's
+      # `make test-transcription` skips them by target. The module filter runs every current
+      # and future windows-gated test in the module, so there is no name list to drift.
+      - name: cargo test speedwave-runtime transcription (windows)
+        # --lib: the windows-gated tests live in the lib target; without it every integration
+        # target relinks libwhisper+ggml-vulkan to run zero tests. Guard pins audio_windows.
+        run: |
+          LIST="$(cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::" -- --list)"
+          grep -q 'transcription::audio_windows' <<<"$LIST" || { echo '::error::no transcription::audio_windows tests matched the filter'; exit 1; }
+          cargo test -p speedwave-runtime --lib --features audio-transcription "transcription::"
+          # Integration targets (transcription_pipeline_e2e) must still compile with the
+          # feature — check-only, so nothing links libwhisper for zero runnable tests.
+          cargo check --tests -p speedwave-runtime --features audio-transcription
 
       # The crate's `#[cfg(windows)]` tests by name — nowhere else runs them, and
       # a bare `--bins` pulls in cross-platform POSIX-path fixtures that fail here.

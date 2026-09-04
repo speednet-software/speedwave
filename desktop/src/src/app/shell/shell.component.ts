@@ -360,7 +360,7 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   /** Retries the container lifecycle (used by the error banner). */
   retry(): void {
-    this.projectState.ensureContainersRunning();
+    void this.projectState.retry();
   }
 
   /** Retries the system check (prereqs + security) on check_failed. */

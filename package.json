@@ -1,6 +1,6 @@
 {
   "name": "speedwave",
-  "version": "0.17.0",
+  "version": "0.18.1",
   "private": true,
   "description": "AI platform connecting Claude Code with external services",
   "license": "Apache-2.0",
@@ -14,10 +14,10 @@
     "prepare": "husky"
   },
   "devDependencies": {
-    "@commitlint/cli": "^21.0.2",
+    "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21",
     "husky": "^9",
     "lint-staged": "^17",
-    "prettier": "^3.8.4"
+    "prettier": "^3.9.6"
   }
 }

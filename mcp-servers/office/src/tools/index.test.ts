@@ -199,8 +199,7 @@ describe('tool metadata', () => {
 
   it('fillPdfForm declares flattened/fieldWarnings in outputSchema, composed from the shared file-result shape', () => {
     const schema = byName.get('fillPdfForm')?.tool.outputSchema as
-      | { properties?: Record<string, unknown>; required?: string[] }
-      | undefined;
+      { properties?: Record<string, unknown>; required?: string[] } | undefined;
     expect(schema?.properties).toHaveProperty('flattened');
     expect(schema?.properties).toHaveProperty('fieldWarnings');
     expect(schema?.required).toContain('flattened');
@@ -225,8 +224,7 @@ describe('tool metadata', () => {
 
   it('documents the renderChart width/height defaults', () => {
     const specProp = byName.get('renderChart')?.tool.inputSchema.properties?.spec as
-      | { description?: string }
-      | undefined;
+      { description?: string } | undefined;
     expect(specProp?.description ?? '').toMatch(/default 8/);
     expect(specProp?.description ?? '').toMatch(/default 5/);
   });

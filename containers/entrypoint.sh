@@ -246,19 +246,17 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
     if [ ! -e "${_dest}" ]; then
         cp "${_tmpl}" "${_dest}"
     else
-        # Merge template keys; drop a stale model disagreeing with ANTHROPIC_MODEL, or (env
-        # unset) a foreign provider/model id (ADR-073 E1). Atomic; node failure → skip.
+        # Merge template keys; on the unrouted (Anthropic) path drop a foreign provider/model
+        # id a routed session's /model left behind (ADR-073 amendment). Atomic; node failure → skip.
         node -e "
 const fs = require('fs');
 ${JS_WRITE_ATOMIC}
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
 const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
-const envModel = process.env.ANTHROPIC_MODEL;
 const foreign = typeof merged.model === 'string' && merged.model.includes('/');
-const stale = envModel ? merged.model && merged.model !== envModel : foreign;
-if (stale) {
-  console.error('entrypoint: dropping stale settings.json model ' + merged.model);
+if (!process.env.ANTHROPIC_MODEL && foreign) {
+  console.error('entrypoint: dropping foreign settings.json model ' + merged.model);
   delete merged.model;
 }
 writeAtomic('${_dest}', JSON.stringify(merged, null, 2) + '\n');
@@ -307,6 +305,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
+        _mp_add_attempted=""
         # The CLI can print NOTHING with exit 0 on a cold start; blank means unknown,
         # never "everything installed" (jq 1.6's -e exits 0 on empty input).
         _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
@@ -328,7 +327,20 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                 _diag INFO SKIP "${_plugin}@${_mp} (already installed)"
                 continue
             fi
-            if _err="$(timeout 60 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
+            # CC registers the official marketplace only on interactive TTY startup —
+            # headless/CLI runs never do, so a fresh HOME must add it before installing.
+            if [ "${_mp}" = "claude-plugins-official" ] && [ -z "${_mp_add_attempted}" ] \
+                && ! jq -e --arg mp "${_mp}" '.[$mp] | type == "object"' "${HOME}/.claude/plugins/known_marketplaces.json" >/dev/null 2>&1; then
+                # One network attempt per start (deliberate latency bound) — once the
+                # registration is durable, the jq check above skips the subprocess.
+                _mp_add_attempted=1
+                if ! _err="$(timeout 150 claude plugin marketplace add "anthropics/${_mp}" 2>&1 >/dev/null)"; then
+                    echo "WARNING: failed to add plugin marketplace ${_mp}: ${_err} (continuing)" >&2
+                    _diag WARN CONFIG "marketplace add ${_mp}: ${_err}"
+                fi
+            fi
+            # CC ≥2.1.232 re-syncs the marketplace catalog inside install — needs headroom over 60s.
+            if _err="$(timeout 120 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
                 _diag INFO OK "${_plugin}@${_mp}"
             else
@@ -342,7 +354,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
             rm -f "${_new_marker}"
         fi
     fi
-    unset _mp _plugin _installed _err _all_recorded _new_marker _match
+    unset _mp _plugin _installed _err _all_recorded _new_marker _match _mp_add_attempted
 fi
 unset _bundled_marker
 

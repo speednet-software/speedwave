@@ -351,6 +351,27 @@ pub fn render_compose_in(
         &proxy::proxy_state_digest_in(data_dir, project_name),
     );
 
+    // Resolved PII policy: always written + mounted :ro into mcp-hub and proxy —
+    // absence would silently degrade both to unfiltered passthrough.
+    let pii_policy = resolved_config
+        .pii_policy
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("PII policy configuration is invalid: {e}"))?;
+    crate::pii_key::ensure_project_key_in(data_dir, project_name)?;
+    crate::pii_policy::write_policy_config_in(data_dir, project_name, pii_policy)?;
+    let policy_config_dir = crate::pii_policy::policy_config_dir_in(data_dir, project_name);
+    yaml = yaml.replace("${POLICY_CONFIG_DIR}", &to_engine_path(&policy_config_dir)?);
+    yaml = yaml.replace(
+        "${POLICY_CONFIG_DIGEST}",
+        &crate::pii_policy::policy_state_digest_in(data_dir, project_name),
+    );
+
+    // PII audit directory: mounted :rw into proxy and mcp-hub. Writers land in
+    // F3/F4 — this render only owns the directory and the mount.
+    let audit_dir = crate::audit::audit_dir_in(data_dir, project_name);
+    crate::fs_perms::ensure_owner_only_dir(&audit_dir)?;
+    yaml = yaml.replace("${AUDIT_DIR}", &to_engine_path(&audit_dir)?);
+
     yaml = yaml.replace("${HOST_GATEWAY}", &host_gateway_ip()?);
     yaml = yaml.replace("${IDE_HOST_OVERRIDE}", ide_host_override());
     yaml = yaml.replace("${CONTAINER_USER}", container_user());
@@ -659,12 +680,17 @@ pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose
 /// SSOT for compose schema/parse error fragments seen on a stale/torn virtiofs
 /// read; recognised by `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // Field-specific fragments (path + type), never bare "must be a string". See ADR-068.
+    // Field-specific fragments (path + type), never bare "must be a string". See ADR-066.
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
     "yaml:", // any yaml-go parse error: rendered YAML is always valid, so torn read
 ];
+
+/// ENOENT on a compose.yml the host just renamed into place: a stale virtiofs
+/// dentry, not a missing file. Contiguous because `open <path>:` ends in the name.
+pub(crate) const COMPOSE_FILE_ENOENT_ERROR_FRAGMENT: &str =
+    "compose.yml: no such file or directory";
 
 /// Asserts every `services.<svc>.networks: [name]` resolves to a declared top-level
 /// `networks.<name>`. Catches render bugs and torn writes with missing network entries.
@@ -1220,7 +1246,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 48;
+    const SECURITY_RULE_COUNT: usize = 52;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.
@@ -1290,6 +1316,7 @@ mod tests {
             flags: default_flags(),
             llm,
             telemetry,
+            ..Default::default()
         }
     }
 
@@ -1545,6 +1572,40 @@ mod tests {
             "render_compose must pre-create the proxy token mount source"
         );
         assert!(data_dir.path().join("claude-resources").is_dir());
+    }
+
+    /// A per-project PII policy resolution error must hard-fail `render_compose`
+    /// itself (`?`) — unlike telemetry (global, boot-check-only), the active
+    /// project's boot check does not cover every project that could later render.
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn render_compose_fails_when_pii_policy_is_unresolvable() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let project = format!("render-bad-pii-policy-{}", std::process::id());
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let mut llm = crate::config::LlmConfig::default();
+        crate::config::migrate_llm(&mut llm, crate::config::AnthropicEvidence::Oauth);
+        let resolved = ResolvedClaudeConfig {
+            env: std::collections::HashMap::new(),
+            flags: default_flags(),
+            llm,
+            pii_policy: Err("unknown PII policy id \"bogus\"".to_string()),
+            ..Default::default()
+        };
+        let err = render_compose_isolated(
+            data_dir.path(),
+            &project,
+            project_dir.to_str().unwrap(),
+            &resolved,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .expect_err("render must fail closed on an unresolvable PII policy");
+        assert!(err.to_string().contains("bogus"));
     }
 
     #[test]
@@ -1947,6 +2008,26 @@ mod tests {
         )
     }
 
+    /// Adds the mcp-hub policy mount + pinned POLICY_FILE env + audit mount that
+    /// `check_hub_policy_mount`/`check_audit_mount` require unconditionally; fixtures predate them.
+    fn with_hub_policy_and_audit_mounts(yaml: &str, data_dir: &Path, project: &str) -> String {
+        let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).unwrap();
+        let policy_dir = crate::pii_policy::policy_config_dir_in(data_dir, project);
+        add_hub_volume(
+            &mut doc,
+            &format!("{}:/policy:ro", to_engine_path(&policy_dir).unwrap()),
+        )
+        .unwrap();
+        inject_env_into(&mut doc, "mcp-hub", "POLICY_FILE", "/policy/policy.json");
+        let audit_dir = crate::audit::audit_dir_in(data_dir, project);
+        add_hub_volume(
+            &mut doc,
+            &format!("{}:/audit:rw", to_engine_path(&audit_dir).unwrap()),
+        )
+        .unwrap();
+        serde_yaml_ng::to_string(&doc).unwrap()
+    }
+
     const VALID_COMPOSE: &str = r#"
 version: "3"
 services:
@@ -2080,7 +2161,7 @@ networks:
     #[test]
     fn test_security_check_valid_compose() {
         let tmp = tempfile::tempdir().unwrap();
-        let yaml = valid_compose_yaml();
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test",
@@ -3551,15 +3632,17 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         // Expected paths must derive from the render's data_dir; compute() reads the production singleton.
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        // The mount-source checks (policy, managed-settings) compare the rendered
+        // volume against `data_dir` — must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
-            tmp.path(),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            data_dir.path(),
         );
         assert!(
             violations.is_empty(),
@@ -3593,14 +3676,16 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        // The mount-source checks (policy, audit, managed-settings) compare the
+        // rendered volume against `data_dir`: must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
-            tmp.path(),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            data_dir.path(),
         );
         assert!(
             violations.is_empty(),
@@ -3609,6 +3694,62 @@ services:
                 .iter()
                 .map(|v| format!("{}", v))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The rendered compose contains the mcp-hub policy mount + both envs, with
+    /// real substituted values (not raw placeholders).
+    #[test]
+    fn test_rendered_compose_contains_policy_mount_and_envs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm: configured_anthropic_llm(),
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let volumes = get_hub_volumes(&doc);
+        let expected_source = to_engine_path(&crate::pii_policy::policy_config_dir_in(
+            data_dir.path(),
+            "test-project",
+        ))
+        .unwrap();
+        assert!(
+            volumes
+                .iter()
+                .any(|v| v == &format!("{expected_source}:/policy:ro")),
+            "hub must mount the rendered policy dir at /policy:ro, volumes: {volumes:?}"
+        );
+
+        let env = get_hub_env_seq(&doc);
+        assert!(
+            env.iter().any(|e| e == "POLICY_FILE=/policy/policy.json"),
+            "hub env must carry POLICY_FILE, env: {env:?}"
+        );
+        let digest =
+            find_env_value(&env, "POLICY_DIGEST=").expect("hub env must carry POLICY_DIGEST");
+        assert_eq!(digest.len(), 64, "digest must be a sha256 hex string");
+        assert!(
+            !digest.contains("${"),
+            "digest placeholder must be substituted"
+        );
+
+        let key_path = crate::pii_key::project_key_path_in(data_dir.path(), "test-project");
+        assert!(
+            key_path.is_file(),
+            "render_compose must ensure the per-project tokenization key next to policy.json"
         );
     }
 
@@ -4332,9 +4473,62 @@ services:
         .unwrap();
         let env = get_claude_env(&yaml);
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
             "foreign model must not be injected on the direct anthropic path: {env:?}"
         );
+        assert_model_not_forced(&env);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_kill_switch_anthropic_model_is_a_default_on_direct_path() {
+        // Kill-switch + anthropic: the Settings model is a startup default on the legacy
+        // path too, never a forced ANTHROPIC_MODEL that would override a /model pick.
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            proxy_enabled: Some(false),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("claude-sonnet-4-6".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("claude-sonnet-4-6".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-6"),
+            "direct anthropic path must inject the Settings model as the default: {env:?}"
+        );
+        assert_model_not_forced(&env);
     }
 
     #[test]
@@ -4465,6 +4659,15 @@ services:
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
+    }
+
+    /// Anthropic kinds never force a model: in Claude Code `ANTHROPIC_MODEL` outranks a
+    /// persisted `/model` pick, `ANTHROPIC_DEFAULT_MODEL` yields to it (ADR-073 amendment).
+    fn assert_model_not_forced(env: &[String]) {
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "anthropic path must not force ANTHROPIC_MODEL, got: {env:?}"
+        );
     }
 
     /// ADR-073: proxy renders in every compose with the local image, hardened mounts (config ro,
@@ -4997,6 +5200,44 @@ services:
         );
     }
 
+    /// Cross-read: the hub (mcp-servers/hub/src/policy.ts) reads `POLICY_FILE`;
+    /// `POLICY_DIGEST` only forces recreate on change (PROXY_CONFIG_DIGEST pattern).
+    #[test]
+    fn spw_policy_env_names_appear_in_compose_template() {
+        for expected in [
+            "- POLICY_FILE=/policy/policy.json",
+            "- POLICY_DIGEST=${POLICY_CONFIG_DIGEST}",
+        ] {
+            assert!(
+                COMPOSE_TEMPLATE.lines().any(|l| l.trim() == expected),
+                "compose.template.yml must contain '{expected}' in mcp-hub's environment"
+            );
+        }
+        // Run the REAL hub env denylist against the template, not a re-typed copy.
+        let yaml =
+            apply_container_resources(COMPOSE_TEMPLATE).replace("${HOST_GATEWAY}", "127.0.0.1");
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let violations = SecurityCheck::check_no_tokens_in_hub(&doc);
+        assert!(
+            violations.is_empty(),
+            "template hub env (incl. POLICY_FILE/POLICY_DIGEST) must pass \
+             check_no_tokens_in_hub, got: {:?}",
+            violations.iter().map(|v| &v.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// The mcp-hub service must declare the `/policy:ro` mount in the template
+    /// (unconditional, unlike the MDM managed-settings mount).
+    #[test]
+    fn hub_policy_volume_appears_in_compose_template() {
+        assert!(
+            COMPOSE_TEMPLATE
+                .lines()
+                .any(|l| l.trim() == "- ${POLICY_CONFIG_DIR}:/policy:ro"),
+            "compose.template.yml must mount ${{POLICY_CONFIG_DIR}} at /policy:ro on mcp-hub"
+        );
+    }
+
     // ---- ensure_host_gateway_extra_host + per-consumer injection tests ----
 
     fn render_substituted_template() -> String {
@@ -5358,9 +5599,10 @@ services:
     }
 
     #[test]
-    fn test_anthropic_with_model_injects_anthropic_model_env() {
+    fn test_anthropic_with_model_injects_default_model_env() {
         let data_dir = tempfile::tempdir().unwrap();
-        // claude.llm.model must translate into the ANTHROPIC_MODEL env var so Claude Code respects the pick.
+        // claude.llm.model is the session's starting model (ANTHROPIC_DEFAULT_MODEL); a /model
+        // pick persisted in settings.json outranks it, so it is never forced via ANTHROPIC_MODEL.
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
@@ -5375,9 +5617,11 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
-            "Anthropic + explicit model must inject ANTHROPIC_MODEL, got: {env:?}"
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-6"),
+            "Anthropic + explicit model must inject ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
+        assert_model_not_forced(&env);
         // ADR-073: anthropic sessions route through the proxy passthrough, so
         // ANTHROPIC_BASE_URL points at it (never a foreign/local URL).
         assert!(
@@ -5388,10 +5632,10 @@ services:
     }
 
     #[test]
-    fn test_anthropic_without_model_does_not_inject_anthropic_model() {
+    fn test_anthropic_without_model_injects_no_model_default() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Empty/unset model = let Claude Code pick its default: base_env() must stay free of
-        // ANTHROPIC_MODEL (fallback path per defaults.rs::base_env_does_not_set_model).
+        // Empty/unset model = let Claude Code pick its plan default: neither model key may be
+        // set (base_env() stays model-free too, defaults.rs::base_env_does_not_set_model).
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: None,
@@ -5406,9 +5650,11 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "Anthropic + no model must not set ANTHROPIC_MODEL, got: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "Anthropic + no model must not set ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
+        assert_model_not_forced(&env);
 
         // An empty string after trim should behave the same as None — a
         // user clearing the dropdown from the UI sends "" through Tauri.
@@ -5431,15 +5677,18 @@ services:
         .unwrap();
         let env_blank = get_claude_env(&rendered_blank);
         assert!(
-            !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
+            !env_blank
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "Anthropic + whitespace-only model must not set ANTHROPIC_DEFAULT_MODEL, got: {env_blank:?}"
         );
+        assert_model_not_forced(&env_blank);
     }
 
     #[test]
     fn test_anthropic_foreign_model_falls_back_to_account_default() {
-        // Corrupted v2 config: anthropic entry + active both hold an OR id.
-        // The render-guard must drop it (no ANTHROPIC_MODEL) instead of 404ing.
+        // Corrupted v2 config: anthropic entry + active both hold an OR id. The render-guard
+        // must drop it (Claude Code sends a foreign ANTHROPIC_DEFAULT_MODEL verbatim → 404).
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -5462,9 +5711,11 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "foreign model under anthropic must NOT set ANTHROPIC_MODEL, got: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "foreign model under anthropic must NOT set ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
+        assert_model_not_forced(&env);
         assert!(
             env.iter()
                 .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
@@ -5495,11 +5746,14 @@ services:
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
+        // `[1m]` rides ANTHROPIC_DEFAULT_MODEL intact: CC 2.1.252 strips it into the
+        // `context-1m` beta and sends the bare id (verified on the binary, ADR-073 amendment).
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_MODEL=claude-opus-4-8[1m]"),
+                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-opus-4-8[1m]"),
             "valid claude model must inject verbatim: {env:?}"
         );
+        assert_model_not_forced(&env);
     }
 
     #[test]
@@ -5583,7 +5837,7 @@ services:
             "Anthropic must route through the proxy passthrough, got: {env_anthropic:?}"
         );
         // ADR-073: the proxy path sets this for every provider kind (prompt-cache only,
-        // OAuth-neutral), not just local — see login_unset_keys_cover_local_proxy_env's list.
+        // OAuth-neutral), not just local — see login_unset_keys_cover_local_and_anthropic_proxy_env.
         assert!(
             env_anthropic
                 .iter()
@@ -5839,7 +6093,10 @@ services:
             result
         );
 
-        let expected_mount = format!("{}:/secrets/os-auth-token:ro", token_path.display());
+        let expected_mount = format!(
+            "{}:/secrets/os-auth-token:ro",
+            to_engine_path(&token_path).unwrap()
+        );
         assert!(
             result.contains(&expected_mount),
             "Token file must be mounted into hub.\nExpected: {}\nGot:\n{}",
@@ -7902,10 +8159,10 @@ services:
     #[test]
     fn test_all_disabled_passes_security_check() {
         let integrations = ResolvedIntegrationsConfig::default(); // all false
-        let yaml = valid_compose_yaml();
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), tmp.path(), "test");
         let filtered =
             apply_integrations_filter(&yaml, &integrations, "speedwave_test_network", &[]).unwrap();
-        let tmp = tempfile::tempdir().unwrap();
         let violations = SecurityCheck::run_with_data_dir(
             &filtered,
             "test",
@@ -8307,9 +8564,9 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
-        let expected =
-            SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy());
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        let expected = SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir);
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
@@ -10240,6 +10497,7 @@ networks:
             apply_worker_auth_tokens_with_dir(&yaml, tmp.path(), &integrations, &[]).unwrap();
 
         let data_tmp = tempfile::tempdir().unwrap();
+        let result = with_hub_policy_and_audit_mounts(&result, data_tmp.path(), "test");
         let violations = SecurityCheck::run_with_data_dir(
             &result,
             "test",
@@ -10890,7 +11148,7 @@ services:
         std::fs::create_dir_all(&secrets_dir).unwrap();
         std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let yaml = valid_compose_yaml();
+        let yaml = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
         let violations =
             SecurityCheck::run_with_data_dir(&yaml, "test", &[], &test_expected_paths(), data_dir);
         assert!(
@@ -11755,6 +12013,85 @@ services:
     }
 
     #[test]
+    fn plugin_service_env_carries_speedwave_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("verplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let vp = fixture_verified_plugin("verplug", Some("verplug"), &plugin_dir, None);
+        let integrations = fixture_integrations_with_enabled("verplug");
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let out = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp]).unwrap();
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&out).unwrap();
+        let env = get_service_env_seq(&doc, &plugin::derive_compose_name("verplug"));
+        let expected = format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            env.iter().any(|v| v == &expected),
+            "plugin service must receive the app version. Got: {env:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_with_reserved_speedwave_version_extra_env_fails_render() {
+        // Render-time re-validation (ADR-051) rejects a manifest installed before the
+        // key became reserved — the injected value is never shadowed by a stale duplicate.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("staleplug");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("Containerfile"), b"FROM scratch").unwrap();
+        let manifest = plugin::PluginManifest {
+            name: "staleplug".into(),
+            service_id: Some("staleplug".into()),
+            slug: "staleplug".into(),
+            version: "1.0.0".into(),
+            description: "fixture".into(),
+            port: None,
+            image_tag: None,
+            resources: vec![],
+            token_mount: plugin::TokenMount::ReadOnly,
+            auth_fields: vec![],
+            settings_schema: None,
+            speedwave_compat: None,
+            extra_env: Some(std::collections::HashMap::from([(
+                "SPEEDWAVE_VERSION".to_string(),
+                "9.9.9".to_string(),
+            )])),
+            mem_limit: None,
+            cpu_limit: None,
+            requires_integrations: vec![],
+            host_bridge: None,
+            instructions: None,
+            oauth: None,
+        };
+        let vp = plugin::VerifiedPlugin::new(
+            manifest,
+            plugin_dir,
+            "f00ddeadbeefcafe0123456789abcdef".to_string(),
+        );
+        let integrations = fixture_integrations_with_enabled("staleplug");
+        let ctx = ApplyPluginsCtx {
+            project_name: "proj",
+            project_dir: "/tmp/proj",
+            integrations: &integrations,
+            network_name: "net",
+            tokens_dir: tmp.path(),
+            bridges: &Default::default(),
+        };
+        let err = apply_plugins_from_verified(VALID_COMPOSE, &ctx, &[vp])
+            .expect_err("reserved extra_env key must fail the render");
+        assert!(
+            err.to_string().contains("reserved"),
+            "expected reserved-key rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn credentials_digest_pass_sits_between_filter_and_env_hardening() {
         let source = include_str!("mod.rs");
         let filter_pos = source
@@ -12224,7 +12561,8 @@ services:
             tokens_dir: Path::new("/test/.speedwave/tokens/test"),
             bridges: &HostBridgesInfo::default(),
         };
-        let yaml = apply_plugins_from_verified(&valid_compose_yaml(), &ctx, &[plugin]).unwrap();
+        let base = with_hub_policy_and_audit_mounts(&valid_compose_yaml(), data_dir, "test");
+        let yaml = apply_plugins_from_verified(&base, &ctx, &[plugin]).unwrap();
         (yaml, manifest)
     }
 

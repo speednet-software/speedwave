@@ -31,5 +31,5 @@ Extending a Mail/Notes gate or adding a new native automation gate must keep thi
 ## Transcription
 
 - Fully local: raw audio and transcript passes never leave the machine (see security rules — this is a privacy invariant, not just a design choice).
-- One model, auto-selected from compile-time backends (`accel.rs`: CPU + Metal only on v1; CUDA/Vulkan deferred). No user model picker — do not add one.
+- Models are auto-selected per pass from the runtime GPU class (`accel.rs`: Metal on macOS, Vulkan on Windows — ADR-085; CUDA deferred). No user model picker — do not add one. macOS asserts `GpuClass::Discrete` rather than probing; a Metal init failure falls back inside whisper.cpp (visible in logs via the routed whisper hooks).
 - No speaker diarization — deliberately removed as inherently unreliable (ADR-075, which also removed sherpa-onnx and every Windows CRT workaround with it; see cross-platform rules). Do not reintroduce diarization or swap in another engine.

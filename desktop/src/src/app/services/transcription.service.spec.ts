@@ -1,14 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { TranscriptionService } from './transcription.service';
+import { signal } from '@angular/core';
+import { LIVE_TRANSCRIPT_STORAGE_KEY, TranscriptionService } from './transcription.service';
 import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { Segment, TranscriptSession } from '../models/transcript';
 
-/** Minimal ChatStateService stand-in — only `sendMessage` is exercised here. */
+/** Minimal ChatStateService stand-in — only the send path is exercised here. */
 class MockChatState {
-  sendMessage = vi.fn(async (_text: string, _label?: string) => undefined);
+  readonly isStreamingFromState = signal(false);
+  calls: string[] = [];
+  startNewConversation = vi.fn(async () => {
+    this.calls.push('startNewConversation');
+  });
+  sendMessage = vi.fn(async (_text: string, _label?: string) => {
+    this.calls.push('sendMessage');
+  });
 }
 
 function seg(start: number, end: number, text: string): Segment {
@@ -88,11 +96,12 @@ describe('TranscriptionService', () => {
       mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
       const spy = vi.spyOn(mockTauri, 'invoke');
       const mixed = { kind: 'mixed' as const, mic: null };
-      await svc.startRecording(mixed, 'pl');
+      await svc.startRecording(mixed, 'pl', true);
       expect(spy).toHaveBeenCalledWith('start_transcription', {
         params: {
           source: mixed,
           language: 'pl',
+          live: true,
         },
       });
       // The recording id is tracked at service level so it survives a remount.
@@ -115,7 +124,9 @@ describe('TranscriptionService', () => {
       mockTauri.listen = vi.fn(async () => {
         throw new Error('ipc down');
       });
-      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
+        'ipc down'
+      );
       expect(invoked).toContain('stop_transcription');
       expect(svc.recordingSessionId()).toBeNull();
       expect(svc.recordingSource()).toBeNull();
@@ -136,7 +147,9 @@ describe('TranscriptionService', () => {
       mockTauri.listen = vi.fn(async () => {
         throw new Error('ipc down');
       });
-      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl')).rejects.toThrow('ipc down');
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
+        'ipc down'
+      );
       // The backend still records; the Stop control must keep its target.
       expect(svc.recordingSessionId()).toBe('sess-1');
     });
@@ -150,7 +163,7 @@ describe('TranscriptionService', () => {
         snapshot: snapshot({ id }),
       };
       mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
-      await svc.startRecording({ kind: 'system_wide' }, 'pl');
+      await svc.startRecording({ kind: 'system_wide' }, 'pl', true);
     }
 
     it('stopRecording clears the tracked id, source, and language', async () => {
@@ -270,10 +283,14 @@ describe('TranscriptionService', () => {
   describe('recommendedModel', () => {
     it('reads the recommended model via recommended_transcription_model', async () => {
       const ack = {
-        key: 'large-v3',
-        display_name: 'Large v3',
-        size_bytes: 3_100_000_000,
-        downloaded: false,
+        live: {
+          key: 'large-v3',
+          display_name: 'Large v3',
+          size_bytes: 3_100_000_000,
+          downloaded: false,
+          downloading: false,
+        },
+        finalize: null,
         accel_label: 'Metal (GPU)',
       };
       mockTauri.invokeHandler = async (cmd) =>
@@ -411,33 +428,148 @@ describe('TranscriptionService', () => {
       // live_segments untouched (the offline pass doesn't rewrite them).
       expect(s.live_segments[0].text).toBe('live-text');
     });
+
+    it('applies audio_level and clears it when the status leaves recording', () => {
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 1,
+        levels: [0.12, 0.03],
+      });
+      expect(svc.audioLevels()).toEqual([0.12, 0.03]);
+      // Replayed/out-of-order level is dropped like any other event.
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'audio_level',
+        seq: 1,
+        levels: [0.9],
+      });
+      expect(svc.audioLevels()).toEqual([0.12, 0.03]);
+      // The meter is meaningless outside recording — status change clears it.
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 2,
+        status: { state: 'finalizing', progress: 0 },
+      });
+      expect(svc.audioLevels()).toBeNull();
+    });
   });
 
-  describe('sendToChat', () => {
-    it('sends the transcript with a Polish summarization instruction on top', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'pl' });
-        if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
-        return undefined;
-      };
-      await svc.sendToChat('sess-1');
-      const [text, label] = mockChat.sendMessage.mock.calls[0];
-      expect(label).toBe('Meeting transcript');
-      expect(text).toContain('podsumowanie');
-      expect(text.endsWith('# Meeting transcript')).toBe(true);
+  describe('live-transcript preference', () => {
+    beforeEach(() => {
+      localStorage.removeItem(LIVE_TRANSCRIPT_STORAGE_KEY);
     });
 
-    it('uses the English instruction for an English session', async () => {
-      mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
+    it('defaults from the probed GPU class when nothing is stored', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'transcription_capabilities'
+          ? { capabilities: {}, backends: ['cpu', 'vulkan'], gpu_class: 'integrated' }
+          : undefined;
+      await svc.getCapabilities();
+      expect(svc.liveTranscriptPreferred()).toBe(false);
+
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'transcription_capabilities'
+          ? { capabilities: {}, backends: ['cpu', 'metal'], gpu_class: 'discrete' }
+          : undefined;
+      await svc.getCapabilities();
+      expect(svc.liveTranscriptPreferred()).toBe(true);
+    });
+
+    it('a stored choice beats the hardware default and round-trips', async () => {
+      mockTauri.invokeHandler = async (cmd) =>
+        cmd === 'transcription_capabilities'
+          ? { capabilities: {}, backends: ['cpu'], gpu_class: 'none' }
+          : undefined;
+      await svc.getCapabilities();
+      svc.setLiveTranscriptPreferred(true);
+      expect(svc.liveTranscriptPreferred()).toBe(true);
+      expect(localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY)).toBe('on');
+      svc.setLiveTranscriptPreferred(false);
+      expect(svc.liveTranscriptPreferred()).toBe(false);
+    });
+
+    it('assumes live before any capabilities read (discrete-like default)', () => {
+      expect(svc.liveTranscriptPreferred()).toBe(true);
+    });
+  });
+
+  describe('stageForChat', () => {
+    /**
+     * Answers the two transcript reads a staging call performs.
+     * @param language - session language the snapshot reports.
+     */
+    function transcriptHandler(language: 'pl' | 'en') {
+      return async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language });
         if (cmd === 'get_transcript_markdown') return '# Meeting transcript';
         return undefined;
       };
-      await svc.sendToChat('sess-1');
-      const [text] = mockChat.sendMessage.mock.calls[0];
-      expect(text).toContain('summary');
-      expect(text).toContain('action item');
-      expect(text.endsWith('# Meeting transcript')).toBe(true);
+    }
+
+    beforeEach(() => {
+      mockTauri.invokeHandler = transcriptHandler('en');
+    });
+
+    it('stages the Polish default prompt and the transcript, sending nothing', async () => {
+      mockTauri.invokeHandler = transcriptHandler('pl');
+      await svc.stageForChat('sess-1');
+      expect(svc.chatPromptDraft()).toContain('podsumowanie');
+      expect(svc.stagedTranscript()).toBe('# Meeting transcript');
+      expect(mockChat.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('uses the English default prompt for an English session', async () => {
+      await svc.stageForChat('sess-1');
+      expect(svc.chatPromptDraft()).toContain('summary');
+      expect(svc.chatPromptDraft()).toContain('action item');
+    });
+
+    it('opens a new conversation before staging, by default', async () => {
+      await svc.stageForChat('sess-1');
+      expect(mockChat.calls).toEqual(['startNewConversation']);
+    });
+
+    it('keeps the active conversation when the caller asks for it', async () => {
+      await svc.stageForChat('sess-1', 'current-chat');
+      expect(mockChat.startNewConversation).not.toHaveBeenCalled();
+      expect(svc.stagedTranscript()).toBe('# Meeting transcript');
+    });
+
+    it('leaves the conversation untouched when the transcript cannot be read', async () => {
+      mockTauri.invokeHandler = async (cmd) => {
+        if (cmd === 'get_transcript') throw new Error('transcript gone');
+        return undefined;
+      };
+      await expect(svc.stageForChat('sess-1')).rejects.toThrow('transcript gone');
+      expect(mockChat.startNewConversation).not.toHaveBeenCalled();
+      expect(svc.stagedTranscript()).toBe('');
+      expect(svc.chatPromptDraft()).toBe('');
+    });
+
+    it('stages nothing when the new conversation fails to start', async () => {
+      mockChat.startNewConversation.mockRejectedValueOnce(new Error('no session'));
+      await expect(svc.stageForChat('sess-1')).rejects.toThrow('no session');
+      expect(svc.stagedTranscript()).toBe('');
+      expect(svc.chatPromptDraft()).toBe('');
+    });
+
+    it('clears the draft and the staged transcript independently', async () => {
+      await svc.stageForChat('sess-1');
+      svc.clearChatPromptDraft();
+      expect(svc.chatPromptDraft()).toBe('');
+      expect(svc.stagedTranscript()).toBe('# Meeting transcript');
+      svc.clearStagedTranscript();
+      expect(svc.stagedTranscript()).toBe('');
+    });
+
+    it('replaces an earlier staging with the newest transcript', async () => {
+      await svc.stageForChat('sess-1');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_transcript') return snapshot({ language: 'en' });
+        if (cmd === 'get_transcript_markdown') return '# Second meeting';
+        return undefined;
+      };
+      await svc.stageForChat('sess-1', 'current-chat');
+      expect(svc.stagedTranscript()).toBe('# Second meeting');
     });
   });
 
@@ -653,11 +785,14 @@ describe('TranscriptionService', () => {
         mockTauri.invokeHandler = async (cmd) =>
           cmd === 'recommended_transcription_model'
             ? {
-                key: 'large-v3',
-                display_name: 'Large v3',
-                size_bytes: 3_100_000_000,
-                downloaded: true,
-                downloading: false,
+                live: {
+                  key: 'large-v3',
+                  display_name: 'Large v3',
+                  size_bytes: 3_100_000_000,
+                  downloaded: true,
+                  downloading: false,
+                },
+                finalize: null,
                 accel_label: 'Metal (GPU)',
               }
             : undefined;
@@ -671,17 +806,51 @@ describe('TranscriptionService', () => {
         mockTauri.invokeHandler = async (cmd) =>
           cmd === 'recommended_transcription_model'
             ? {
-                key: 'large-v3',
-                display_name: 'Large v3',
-                size_bytes: 3_100_000_000,
-                downloaded: false,
-                downloading: true,
+                live: {
+                  key: 'large-v3',
+                  display_name: 'Large v3',
+                  size_bytes: 3_100_000_000,
+                  downloaded: false,
+                  downloading: true,
+                },
+                finalize: null,
                 accel_label: 'Metal (GPU)',
               }
             : undefined;
         await svc.resumeDownloadTracking('large-v3');
         await vi.advanceTimersByTimeAsync(2000);
         expect(svc.downloadingModelKey()).toBe('large-v3');
+      });
+
+      it('tracks a download of the offline-pass model, which is a separate ack entry', async () => {
+        // Keying only off the live entry would poll forever while the other model downloads.
+        let downloading = true;
+        mockTauri.invokeHandler = async (cmd) =>
+          cmd === 'recommended_transcription_model'
+            ? {
+                live: {
+                  key: 'small',
+                  display_name: 'Small',
+                  size_bytes: 487_601_967,
+                  downloaded: true,
+                  downloading: false,
+                },
+                accel_label: 'CPU',
+                finalize: {
+                  key: 'large-v3-turbo',
+                  display_name: 'Large v3 Turbo',
+                  size_bytes: 1_624_555_275,
+                  downloaded: !downloading,
+                  downloading,
+                },
+              }
+            : undefined;
+        await svc.resumeDownloadTracking('large-v3-turbo');
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBe('large-v3-turbo');
+        downloading = false;
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(svc.downloadingModelKey()).toBeNull();
       });
 
       it('stops polling once tracking is cleared by another path', async () => {

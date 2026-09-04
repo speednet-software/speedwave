@@ -37,8 +37,7 @@ export type PermissionDecision = 'allow_once' | 'allow_always' | 'deny';
         [id]="commandId"
         data-testid="permission-command"
         class="mono mb-3 overflow-x-auto rounded border border-[var(--line)] bg-[var(--bg-1)] p-2 text-[11.5px] text-[var(--ink-dim)]"
-        >{{ command() }}</pre
-      >
+        >{{ command() }}</pre>
 
       <div class="flex flex-wrap gap-2" role="group" aria-label="Permission decision">
         <button

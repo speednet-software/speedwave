@@ -82,6 +82,24 @@ pub struct AudioChunk {
     pub offset: Duration,
 }
 
+impl AudioChunk {
+    /// An empty idle keepalive: a bounded `next_chunk` wait returns it so the caller regains
+    /// control (and can honour its stop signal) while the source delivers nothing.
+    pub fn keepalive() -> Self {
+        Self {
+            samples: Vec::new(),
+            mic: None,
+            offset: Duration::ZERO,
+        }
+    }
+
+    /// `true` for an idle keepalive. Consumers must check this before any shape check —
+    /// a keepalive carries `mic: None` even on a two-channel stream.
+    pub fn is_keepalive(&self) -> bool {
+        self.samples.is_empty()
+    }
+}
+
 /// Errors a capture backend can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
@@ -116,6 +134,9 @@ pub enum CaptureWarning {
     MicrophoneStalled,
     /// System audio stopped delivering; recording continues with the mic only.
     SystemAudioStalled,
+    /// Captured audio was dropped before it reached the recording — that span is missing from
+    /// both the WAV and the transcript.
+    AudioDropped,
     /// A registered audio part contributed nothing to the offline pass — the
     /// finalized transcript is missing that span (resumed parts, ADR-056 Am. 10).
     RecordingPartMissing,
@@ -133,8 +154,8 @@ pub enum CaptureHealth {
 /// A live (or file-backed) stream of `AudioChunk`s. `next_chunk()` returns `Ok(None)` at end of
 /// stream (EOF for a file; a live backend ends via dropping it). `Send` for background pumping.
 pub trait AudioStream: Send {
-    /// Block for the next chunk. `Ok(None)` = stream finished. `Err(_)` = the
-    /// capture broke (the driver flips the session to `Failed`).
+    /// Block (bounded) for the next chunk. `Ok(None)` = stream finished; an empty chunk is an
+    /// idle keepalive the caller skips. `Err(_)` = capture broke (driver flips to `Failed`).
     fn next_chunk(&mut self) -> Result<Option<AudioChunk>, CaptureError>;
 
     /// Drains capture-health transitions since the last call (default: none).
@@ -494,6 +515,7 @@ mod tests {
             (CaptureWarning::SystemAudioSilent, "system_audio_silent"),
             (CaptureWarning::MicrophoneStalled, "microphone_stalled"),
             (CaptureWarning::SystemAudioStalled, "system_audio_stalled"),
+            (CaptureWarning::AudioDropped, "audio_dropped"),
             (
                 CaptureWarning::RecordingPartMissing,
                 "recording_part_missing",

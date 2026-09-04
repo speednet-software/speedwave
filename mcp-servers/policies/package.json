@@ -1,0 +1,42 @@
+{
+  "name": "@speedwave/policy-engine",
+  "version": "0.18.1",
+  "description": "Thin TS wrapper over the WASM PII tokenization engine, for the Speedwave MCP hub",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:wasm && tsc",
+    "build:wasm": "bash ../../crates/pii-engine-wasm/build-wasm.sh",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "speedwave",
+    "mcp",
+    "policy",
+    "pii",
+    "tokenization"
+  ],
+  "author": "Speednet",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@types/node": "^25.6.2",
+    "@vitest/coverage-v8": "^4.1.11",
+    "eslint": "^10.9.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-jsdoc": "^63.0.6",
+    "eslint-plugin-prettier": "^5.1.0",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0",
+    "vitest": "^4.0.16"
+  }
+}

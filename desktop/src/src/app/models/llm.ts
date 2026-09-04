@@ -3,7 +3,7 @@
  * returned by the `list_anthropic_models` Tauri command. Backend is the SSOT.
  */
 export interface AnthropicModel {
-  /** API alias passed to Claude Code via `ANTHROPIC_MODEL` (e.g. `claude-opus-4-7`). */
+  /** API alias passed to Claude Code via `ANTHROPIC_DEFAULT_MODEL` (e.g. `claude-opus-4-7`). */
   id: string;
   /** Display label for dropdowns and labels (e.g. `"Opus 4.7"`). */
   family: string;
@@ -152,13 +152,7 @@ export interface UsageSummary {
  * (snake_case serde). Kept in sync by `cost_source_ts_union_matches_rust`.
  */
 export type CostSourceKind =
-  | 'catalog'
-  | 'subscription'
-  | 'free'
-  | 'actual'
-  | 'unknown'
-  | 'deferred'
-  | 'failed';
+  'catalog' | 'subscription' | 'free' | 'actual' | 'unknown' | 'deferred' | 'failed';
 
 /**
  * Cost source that won't change on re-enrichment (mirror of Rust `CostSource::is_terminal`);

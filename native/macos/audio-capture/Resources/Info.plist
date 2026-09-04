@@ -9,9 +9,9 @@
 	<key>CFBundleName</key>
 	<string>audio-capture-cli</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.17.0</string> <!-- x-release-please-version -->
+	<string>0.18.1</string> <!-- x-release-please-version -->
 	<key>CFBundleVersion</key>
-	<string>0.17.0</string> <!-- x-release-please-version -->
+	<string>0.18.1</string> <!-- x-release-please-version -->
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Speedwave records meeting audio from apps on this Mac so Claude can transcribe and summarize it. Audio is processed locally.</string>
 	<key>NSMicrophoneUsageDescription</key>

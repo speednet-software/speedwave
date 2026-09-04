@@ -137,12 +137,10 @@ describe('withValidation', () => {
 
   describe('successful handler', () => {
     it('formats success result as JSON text', async () => {
-      const handler = withValidation(
-        async (_p: Record<string, unknown>): Promise<ToolResult> => ({
-          success: true,
-          data: { message: 'hello', count: 3 },
-        })
-      );
+      const handler = withValidation(async (_p: Record<string, unknown>): Promise<ToolResult> => ({
+        success: true,
+        data: { message: 'hello', count: 3 },
+      }));
 
       const result = await handler({ key: 'value' });
 
@@ -154,12 +152,10 @@ describe('withValidation', () => {
     });
 
     it('formats failure result as JSON text with isError flag', async () => {
-      const handler = withValidation(
-        async (_p: Record<string, unknown>): Promise<ToolResult> => ({
-          success: false,
-          error: { code: 'MY_ERROR', message: 'something went wrong' },
-        })
-      );
+      const handler = withValidation(async (_p: Record<string, unknown>): Promise<ToolResult> => ({
+        success: false,
+        error: { code: 'MY_ERROR', message: 'something went wrong' },
+      }));
 
       const result = await handler({});
 

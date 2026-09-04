@@ -9,9 +9,9 @@
 	<key>CFBundleName</key>
 	<string>notes-cli</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.17.0</string> <!-- x-release-please-version -->
+	<string>0.18.1</string> <!-- x-release-please-version -->
 	<key>CFBundleVersion</key>
-	<string>0.17.0</string> <!-- x-release-please-version -->
+	<string>0.18.1</string> <!-- x-release-please-version -->
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Speedwave needs to send Apple Events to automate Notes via Claude Code.</string>
 </dict>

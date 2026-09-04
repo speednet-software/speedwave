@@ -5,6 +5,7 @@ import type {
   AudioSource,
   CapabilitiesAck,
   AudioSourceInfo,
+  GpuClass,
   CaptureWarning,
   DownloadProgress,
   Language,
@@ -27,8 +28,14 @@ const MODEL_PROGRESS_EVENT = 'transcription_model_status';
 /** Poll interval for detecting completion of a download this webview did not itself start. */
 const RESUMED_DOWNLOAD_POLL_MS = 2000;
 
-/** Instruction prepended to a transcript sent to chat, per session language. */
-const SEND_TO_CHAT_INSTRUCTIONS: Record<Language, string> = {
+/** localStorage key for the live-transcript preference. Exported so tests assert the real key. */
+export const LIVE_TRANSCRIPT_STORAGE_KEY = 'speedwave-live-transcript';
+
+/** Where a transcript send lands: a fresh conversation, or the one on screen. */
+export type SendTarget = 'new-chat' | 'current-chat';
+
+/** Default prompt loaded into the chat composer with a staged transcript, per session language. */
+const TRANSCRIPT_PROMPT_DEFAULTS: Record<Language, string> = {
   pl:
     'Poniżej transkrypt spotkania. Przygotuj zwięzłe podsumowanie: najważniejsze wątki, ' +
     'podjęte decyzje i listę zadań (kto, co, na kiedy — jeśli padło). ' +
@@ -62,6 +69,10 @@ export class TranscriptionService {
   private readonly recordingSourceSignal = signal<AudioSource | null>(null);
   private readonly recordingLanguageSignal = signal<Language | null>(null);
   private readonly liveDraftSignal = signal<string>('');
+  private readonly audioLevelsSignal = signal<number[] | null>(null);
+  private readonly gpuClassSignal = signal<GpuClass | null>(null);
+  private readonly stagedTranscriptSignal = signal<string>('');
+  private readonly chatPromptDraftSignal = signal<string>('');
 
   /** Current session (live snapshot updated by incoming events). */
   readonly active: Signal<TranscriptSession | null> = this.activeSignal.asReadonly();
@@ -85,6 +96,15 @@ export class TranscriptionService {
   /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
   readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
 
+  /** Transcript markdown waiting to ride along with the next chat message ('' = none). */
+  readonly stagedTranscript: Signal<string> = this.stagedTranscriptSignal.asReadonly();
+
+  /** Prompt text the chat composer should load into its field ('' = nothing pending). */
+  readonly chatPromptDraft: Signal<string> = this.chatPromptDraftSignal.asReadonly();
+
+  /** Latest per-channel capture RMS ([system, mic] or one entry; null until the first `audio_level` event of a recording). */
+  readonly audioLevels: Signal<number[] | null> = this.audioLevelsSignal.asReadonly();
+
   /**
    * Download-in-flight key — service-level so it survives component remounts.
    */
@@ -94,9 +114,42 @@ export class TranscriptionService {
   readonly downloadProgress: Signal<DownloadProgress | null> =
     this.downloadProgressSignal.asReadonly();
 
-  /** Capture capabilities + compiled whisper.cpp backends for this build. */
-  getCapabilities(): Promise<CapabilitiesAck> {
-    return this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
+  /**
+   * Capabilities, compiled backends, probed `gpu_class`, and the host-computed acceleration
+   * label. Side effect: caches `gpu_class`, which `liveTranscriptPreferred()` reads (before
+   * the first call it assumes 'discrete', i.e. live on).
+   */
+  async getCapabilities(): Promise<CapabilitiesAck> {
+    const ack = await this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
+    this.gpuClassSignal.set(ack.gpu_class);
+    return ack;
+  }
+
+  /**
+   * Whether the next recording should run the live pass: the user's stored choice, else on only
+   * where a discrete GPU makes live text worth its cost (ADR-056 Am. 13).
+   */
+  liveTranscriptPreferred(): boolean {
+    try {
+      const stored = localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY);
+      if (stored === 'on') return true;
+      if (stored === 'off') return false;
+    } catch {
+      // Private mode / quota — fall through to the hardware default.
+    }
+    return (this.gpuClassSignal() ?? 'discrete') === 'discrete';
+  }
+
+  /**
+   * Persists the live-transcript choice (tolerates private-mode/quota failures).
+   * @param live - the user's pick.
+   */
+  setLiveTranscriptPreferred(live: boolean): void {
+    try {
+      localStorage.setItem(LIVE_TRANSCRIPT_STORAGE_KEY, live ? 'on' : 'off');
+    } catch {
+      // Best-effort: losing the preference only costs a default next session.
+    }
   }
 
   /** Audio sources the user can pick from (depends on host + capabilities). */
@@ -108,10 +161,11 @@ export class TranscriptionService {
    * Starts recording the given source, then subscribes to its live stream.
    * @param source - what to capture (system / mic / mixed).
    * @param language - forced PL/EN; never auto-detected.
+   * @param live - false = record-only (no live pass; transcript arrives after stop).
    */
-  async startRecording(source: AudioSource, language: Language): Promise<StartAck> {
+  async startRecording(source: AudioSource, language: Language, live: boolean): Promise<StartAck> {
     const ack = await this.tauri.invoke<StartAck>('start_transcription', {
-      params: { source, language },
+      params: { source, language, live },
     });
     return this.applyStartAck(ack, source, language);
   }
@@ -119,9 +173,10 @@ export class TranscriptionService {
   /**
    * Resumes a finished recording: a new part appends to the same transcript.
    * @param sessionId - the Done session to reopen.
+   * @param live - false = record-only (no live pass; transcript arrives after stop).
    */
-  async resumeRecording(sessionId: string): Promise<StartAck> {
-    const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId });
+  async resumeRecording(sessionId: string, live: boolean): Promise<StartAck> {
+    const ack = await this.tauri.invoke<StartAck>('resume_transcription', { sessionId, live });
     return this.applyStartAck(ack, ack.snapshot.audio_source.source, ack.snapshot.language);
   }
 
@@ -241,13 +296,28 @@ export class TranscriptionService {
   }
 
   /**
-   * Sends the transcript to Claude with a summarization instruction on top, in the session language.
-   * @param sessionId - the session to send.
+   * Stages the transcript for the chat composer: the default prompt goes into the text field, the
+   * markdown rides along with whatever the user sends next.
+   * @param sessionId - the session to stage.
+   * @param target - `'new-chat'` (default) opens a fresh conversation first; `'current-chat'` keeps the active thread.
    */
-  async sendToChat(sessionId: string): Promise<void> {
+  async stageForChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
+    // Read the transcript before touching the chat: a failed read must not wipe
+    // the conversation the user was in.
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
-    const instruction = SEND_TO_CHAT_INSTRUCTIONS[session.language];
-    await this.chatState.sendMessage(`${instruction}\n\n${md}`, 'Meeting transcript');
+    if (target === 'new-chat') await this.chatState.startNewConversation();
+    this.stagedTranscriptSignal.set(md);
+    this.chatPromptDraftSignal.set(TRANSCRIPT_PROMPT_DEFAULTS[session.language]);
+  }
+
+  /** Drops the draft once the composer has loaded it, so a later render does not overwrite edits. */
+  clearChatPromptDraft(): void {
+    this.chatPromptDraftSignal.set('');
+  }
+
+  /** Drops the staged transcript — the user unpinned it, or it went out with a message. */
+  clearStagedTranscript(): void {
+    this.stagedTranscriptSignal.set('');
   }
 
   /** The single best model for this hardware + its download state. */
@@ -300,7 +370,10 @@ export class TranscriptionService {
     }
     try {
       const ack = await this.recommendedModel();
-      if (ack.key === modelId && !ack.downloading) {
+      // The offline-pass model is a separate entry, so match `modelId` against both; keying only
+      // off the live one would poll forever while the other model downloads.
+      const entry = ack.live.key === modelId ? ack.live : ack.finalize;
+      if (entry?.key === modelId && !entry.downloading) {
         this.clearDownloadTracking();
       }
     } catch (e) {
@@ -406,11 +479,15 @@ export class TranscriptionService {
       case 'live_draft':
         this.liveDraftSignal.set(ev.text);
         break;
+      case 'audio_level':
+        this.audioLevelsSignal.set(ev.levels);
+        break;
       case 'status_changed':
         next.status = ev.status;
-        // A draft is only meaningful while recording (e.g. stale on failure).
+        // A draft/meter is only meaningful while recording (e.g. stale on failure).
         if (ev.status.state !== 'recording') {
           this.liveDraftSignal.set('');
+          this.audioLevelsSignal.set(null);
         }
         break;
       case 'finalize_progress':

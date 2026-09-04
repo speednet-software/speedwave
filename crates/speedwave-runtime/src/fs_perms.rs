@@ -13,18 +13,18 @@ const ATOMIC_WRITE_TEMP_PREFIX: &str = "write-";
 /// Restrict file permissions to owner-only access: Unix `chmod 0o600`; Windows DACL with a single
 /// `GENERIC_ALL` ACE for the current user.
 pub fn set_owner_only(path: &Path) -> Result<(), String> {
-    set_owner_only_with_mode(path, 0o600)
+    set_owner_only_with_mode(path, 0o600, false)
 }
 
 /// Restrict directory permissions to owner-only access: Unix `chmod 0o700`; Windows DACL with a
-/// single `GENERIC_ALL` ACE for the current user.
+/// single inheritable `GENERIC_ALL` ACE for the current user (contents stay owner-accessible).
 pub fn set_owner_only_dir(path: &Path) -> Result<(), String> {
-    set_owner_only_with_mode(path, 0o700)
+    set_owner_only_with_mode(path, 0o700, true)
 }
 
 /// SSOT for [`set_owner_only`] and [`set_owner_only_dir`]. Unix mode differs between files
 /// (`0o600`) and dirs (`0o700`); Windows `SE_FILE_OBJECT` handles both, so `_mode` is unused.
-fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
+fn set_owner_only_with_mode(path: &Path, _mode: u32, _dir_inheritable: bool) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -34,10 +34,16 @@ fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        set_windows_acl_owner_only(path)?;
+        set_windows_acl_owner_only_in(path, _dir_inheritable)?;
     }
 
     Ok(())
+}
+
+/// File-shaped shim (non-inheritable ACE) for the tempfile-tightening call sites.
+#[cfg(windows)]
+fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
+    set_windows_acl_owner_only_in(path, false)
 }
 
 /// Restrict a file or directory to the current user only via a Windows DACL.
@@ -47,7 +53,7 @@ fn set_owner_only_with_mode(path: &Path, _mode: u32) -> Result<(), String> {
     unsafe_code,
     reason = "Windows DACL FFI boundary; every block carries a SAFETY comment"
 )]
-fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
+fn set_windows_acl_owner_only_in(path: &Path, dir_inheritable: bool) -> Result<(), String> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL};
     use windows_sys::Win32::Security::Authorization::{
@@ -56,7 +62,8 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
     };
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE,
-        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+        PROTECTED_DACL_SECURITY_INFORMATION, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY,
+        TOKEN_USER,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -87,10 +94,17 @@ fn set_windows_acl_owner_only(path: &Path) -> Result<(), String> {
         // SAFETY: the call above succeeded, so buf holds an initialized TOKEN_USER;
         // the u64 backing satisfies its pointer alignment.
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        // Dir ACEs must be inheritable: SetNamedSecurityInfoW propagates to existing
+        // children, and a NO_INHERITANCE ACE strips theirs to an empty (deny-all) DACL.
+        let inheritance = if dir_inheritable {
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT
+        } else {
+            NO_INHERITANCE
+        };
         let ea = EXPLICIT_ACCESS_W {
             grfAccessPermissions: GENERIC_ALL,
             grfAccessMode: GRANT_ACCESS,
-            grfInheritance: NO_INHERITANCE,
+            grfInheritance: inheritance,
             Trustee: TRUSTEE_W {
                 pMultipleTrustee: std::ptr::null_mut(),
                 MultipleTrusteeOperation: 0,
@@ -240,7 +254,7 @@ pub(crate) fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
 /// Best-effort fsync of a directory so a contained rename is itself durable. Unix-only: opening a
 /// directory as a file and fsync-ing it commits the entry; Windows has no directory-fsync concept.
 #[cfg(unix)]
-fn fsync_parent_dir(dir: &Path) {
+pub(crate) fn fsync_parent_dir(dir: &Path) {
     if let Ok(handle) = std::fs::File::open(dir) {
         // Best-effort: a dir-fsync failure is non-fatal.
         let _ = rustix::fs::fsync(&handle);
@@ -248,7 +262,7 @@ fn fsync_parent_dir(dir: &Path) {
 }
 
 #[cfg(not(unix))]
-fn fsync_parent_dir(_dir: &Path) {}
+pub(crate) fn fsync_parent_dir(_dir: &Path) {}
 
 /// Writes `content` to `path` via write-then-atomic-rename, owner-only perms; destination never
 /// appears world-readable. Windows DACL failure returns `Err` (ADR-009); pre-existing dirs removed.
@@ -398,7 +412,7 @@ pub fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
 
     #[cfg(windows)]
     {
-        set_windows_acl_owner_only(path).map_err(|e| {
+        set_windows_acl_owner_only_in(path, true).map_err(|e| {
             anyhow::anyhow!("DACL tighten failed on directory {}: {}", path.display(), e)
         })?;
     }
@@ -1204,6 +1218,21 @@ mod tests {
         std::fs::write(target.join("file.txt"), b"contents").unwrap();
 
         set_owner_only_dir(&target).unwrap();
+
+        let content = std::fs::read_to_string(target.join("file.txt")).unwrap();
+        assert_eq!(content, "contents");
+    }
+
+    #[test]
+    fn ensure_owner_only_dir_keeps_existing_contents_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ensure-existing");
+        std::fs::create_dir(&target).unwrap();
+        // Re-tightening an existing dir must not lock the owner out of its
+        // contents (Windows: the inheritable-ACE propagation contract).
+        std::fs::write(target.join("file.txt"), b"contents").unwrap();
+
+        ensure_owner_only_dir(&target).unwrap();
 
         let content = std::fs::read_to_string(target.join("file.txt")).unwrap();
         assert_eq!(content, "contents");

@@ -71,17 +71,26 @@ pub const IMAGES: &[ImageDef] = &[
         context_dir: "containers",
         containerfile: "containers/Containerfile.proxy",
         build_args: &[],
-        // Everything the Containerfile COPYies lives under containers/proxy.
-        hash_inputs: &["containers/Containerfile.proxy", "containers/proxy"],
+        // Repo-root-relative; in the bundled build-context these vendored sources live under
+        // containers/, which bundle.rs::resolve_hash_input maps to when the direct path is absent.
+        hash_inputs: &[
+            "containers/Containerfile.proxy",
+            "containers/proxy",
+            "crates/pii-engine",
+            "mcp-servers/policies/rules.yaml",
+        ],
     },
     ImageDef {
         name: IMAGE_MCP_HUB,
         context_dir: "mcp-servers",
         containerfile: "mcp-servers/hub/Containerfile",
         build_args: &[],
+        // mcp-servers/policies carries the prebuilt wasm-pkg, so a pii-engine(-wasm) source
+        // change reaches this digest through the rebuilt artifact rather than the crate sources.
         hash_inputs: &[
             "mcp-servers/hub",
             "mcp-servers/shared",
+            "mcp-servers/policies",
             "mcp-servers/tsconfig.base.json",
         ],
     },
@@ -1383,10 +1392,8 @@ mod tests {
                 img.name
             );
             for input in img.hash_inputs {
-                assert!(
-                    repo_root().join(input).exists(),
-                    "{}: declared hash input '{input}' does not exist in the repo",
-                    img.name
+                crate::bundle::resolve_hash_input_for_test(&repo_root(), input).unwrap_or_else(
+                    |e| panic!("{}: hash input does not resolve in the repo: {e}", img.name),
                 );
             }
         }
@@ -1451,7 +1458,16 @@ mod tests {
                 }
                 for src in &args[..args.len() - 1] {
                     let src = src.trim_start_matches("./");
-                    sources.push(format!("{}/{src}", img.context_dir));
+                    // `crates/...` and `mcp-servers/...` sources in a `containers/`-context
+                    // image are vendored by the bundle scripts from the repo root, so they map
+                    // to a repo-root-relative hash input rather than a context_dir-prefixed one.
+                    if src.starts_with("crates/")
+                        || (img.context_dir == "containers" && src.starts_with("mcp-servers/"))
+                    {
+                        sources.push(src.to_string());
+                    } else {
+                        sources.push(format!("{}/{src}", img.context_dir));
+                    }
                 }
             }
             for src in sources {

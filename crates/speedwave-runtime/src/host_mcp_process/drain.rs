@@ -135,6 +135,7 @@ pub(crate) mod test_support {
 
     /// Spawn a `bash -c` child whose stdout emits the given lines (one
     /// per `printf '%s\n'`).
+    #[cfg(unix)]
     pub fn spawn_stdout_lines(lines: &[&str]) -> Child {
         let mut script = String::new();
         for line in lines {
@@ -145,6 +146,23 @@ pub(crate) mod test_support {
         std::process::Command::new("bash")
             .arg("-c")
             .arg(&script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Windows: `bash` resolves to System32's WSL bash.exe (CreateProcess searches
+    /// System32 before PATH), which exits instantly without a distro — use PowerShell.
+    #[cfg(windows)]
+    pub fn spawn_stdout_lines(lines: &[&str]) -> Child {
+        let mut script = String::new();
+        for line in lines {
+            let escaped = line.replace('\'', "''");
+            script.push_str(&format!("Write-Output '{escaped}';"));
+        }
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

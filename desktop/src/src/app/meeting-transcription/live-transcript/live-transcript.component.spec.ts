@@ -1,9 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
+import { TooltipDirective } from '../../shared/tooltip.directive';
 import { provideRouter, Router } from '@angular/router';
 import { LiveTranscriptComponent } from './live-transcript.component';
 import { TranscriptionService } from '../../services/transcription.service';
+import {
+  ChatStateService,
+  NEW_CONVERSATION_BUSY,
+  NEW_CONVERSATION_STREAMING,
+} from '../../services/chat-state.service';
 import type { Segment, TranscriptSession } from '../../models/transcript';
 
 function seg(start: number, text: string): Segment {
@@ -38,19 +45,32 @@ describe('LiveTranscriptComponent', () => {
   let component: LiveTranscriptComponent;
   let fixture: ComponentFixture<LiveTranscriptComponent>;
   let svc: {
-    sendToChat: ReturnType<typeof vi.fn>;
+    stageForChat: ReturnType<typeof vi.fn>;
     liveDraft: WritableSignal<string>;
+    audioLevels: WritableSignal<number[] | null>;
+  };
+  let chat: {
+    hasConversation: WritableSignal<boolean>;
+    isStreamingFromState: WritableSignal<boolean>;
+    newConversationBlockedReason: WritableSignal<string>;
   };
 
   beforeEach(async () => {
     svc = {
-      sendToChat: vi.fn(async () => undefined),
+      stageForChat: vi.fn(async () => undefined),
       liveDraft: signal(''),
+      audioLevels: signal<number[] | null>(null),
+    };
+    chat = {
+      hasConversation: signal(false),
+      isStreamingFromState: signal(false),
+      newConversationBlockedReason: signal(''),
     };
     await TestBed.configureTestingModule({
       imports: [LiveTranscriptComponent],
       providers: [
         { provide: TranscriptionService, useValue: svc },
+        { provide: ChatStateService, useValue: chat },
         provideRouter([{ path: '**', children: [] }]),
       ],
     }).compileComponents();
@@ -152,7 +172,7 @@ describe('LiveTranscriptComponent', () => {
     expect(bar.textContent).toContain('40%');
   });
 
-  it('confirms, sends, then navigates to the chat tab', async () => {
+  it('stages the transcript without a confirm dialog, then navigates to the chat tab', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput(
@@ -160,49 +180,111 @@ describe('LiveTranscriptComponent', () => {
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
-    await component.sendToChat();
-    expect(confirmSpy).toHaveBeenCalled();
-    expect(svc.sendToChat).toHaveBeenCalledWith('sess-1');
+    await component.stageForChat();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(svc.stageForChat).toHaveBeenCalledWith('sess-1', 'new-chat');
     expect(navSpy).toHaveBeenCalledWith(['/chat']);
   });
 
-  it('does not send or navigate when the confirm is dismissed', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+  it('stays on the tab (no navigation) if staging fails', async () => {
+    svc.stageForChat.mockRejectedValueOnce(new Error('chat busy'));
     const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
     fixture.componentRef.setInput(
       'session',
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
-    await component.sendToChat();
-    expect(svc.sendToChat).not.toHaveBeenCalled();
-    expect(navSpy).not.toHaveBeenCalled();
-  });
-
-  it('stays on the tab (no navigation) if sending fails', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    svc.sendToChat.mockRejectedValueOnce(new Error('chat busy'));
-    const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
-    fixture.componentRef.setInput(
-      'session',
-      session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
-    );
-    fixture.detectChanges();
-    await component.sendToChat();
+    await component.stageForChat();
     expect(navSpy).not.toHaveBeenCalled();
     expect(component.error()).toBe('chat busy');
   });
 
-  it('labels the button "Send to chat" and describes opening the chat', () => {
+  it('labels the two send targets so neither needs an explanation', () => {
     fixture.componentRef.setInput(
       'session',
       session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
     );
     fixture.detectChanges();
     const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
-    expect(btn).not.toBeNull();
-    expect(btn.textContent).toContain('Send to chat');
-    expect((fixture.nativeElement.textContent ?? '').toLowerCase()).toContain('chat');
+    expect(btn.textContent).toContain('Send to new chat');
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]').textContent
+    ).toContain('Add to current chat');
+  });
+
+  describe('append to the current chat', () => {
+    it('disables both send buttons while the chat is still replying, and says so', () => {
+      chat.hasConversation.set(true);
+      chat.isStreamingFromState.set(true);
+      chat.newConversationBlockedReason.set(NEW_CONVERSATION_STREAMING);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
+        true
+      );
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]').disabled
+      ).toBe(true);
+      expect(component.sendBlockedReason()).toBe(NEW_CONVERSATION_STREAMING);
+      expect(component.appendBlockedReason()).toBe(NEW_CONVERSATION_STREAMING);
+    });
+
+    it('disables both buttons on a refusal the chat service owns', () => {
+      chat.hasConversation.set(true);
+      chat.newConversationBlockedReason.set(NEW_CONVERSATION_BUSY);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      expect(component.sendBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
+        true
+      );
+    });
+
+    it('disables the append button and carries the reason as its tooltip when no chat is open', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
+      expect(btn.disabled).toBe(true);
+      expect(component.appendBlockedReason()).toBe('No open chat to add to');
+      // A disabled button fires no hover or focus events, so the reason must also
+      // reach the accessibility tree, not only the tooltip.
+      expect(btn.getAttribute('aria-label')).toContain('No open chat to add to');
+      expect(
+        fixture.debugElement
+          .query(By.css('[data-testid="append-to-chat-btn"]'))
+          .parent?.injector.get(TooltipDirective)
+          .label()
+      ).toBe('No open chat to add to');
+      // The new-chat path stays available: it does not need an existing conversation.
+      expect(component.sendBlockedReason()).toBe('');
+      expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
+        false
+      );
+    });
+
+    it('stages against the current chat when the append button is used', async () => {
+      const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
+      chat.hasConversation.set(true);
+      fixture.componentRef.setInput(
+        'session',
+        session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
+      );
+      fixture.detectChanges();
+      const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
+      btn.click();
+      await fixture.whenStable();
+      expect(svc.stageForChat).toHaveBeenCalledWith('sess-1', 'current-chat');
+      expect(navSpy).toHaveBeenCalledWith(['/chat']);
+    });
   });
 
   describe('auto-scroll', () => {
@@ -305,7 +387,7 @@ describe('LiveTranscriptComponent', () => {
   });
 
   describe('recording gate', () => {
-    it('disables the Send to chat button while recording', () => {
+    it('disables the send button while recording', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] })
@@ -315,21 +397,19 @@ describe('LiveTranscriptComponent', () => {
       expect(btn.disabled).toBe(true);
     });
 
-    it('sendToChat is a no-op while the session is still recording', async () => {
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    it('stageForChat is a no-op while the session is still recording', async () => {
       const navSpy = vi.spyOn(TestBed.inject(Router), 'navigate').mockResolvedValue(true);
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'recording' }, live_segments: [seg(0, 'hi')] })
       );
       fixture.detectChanges();
-      await component.sendToChat();
-      expect(confirmSpy).not.toHaveBeenCalled();
-      expect(svc.sendToChat).not.toHaveBeenCalled();
+      await component.stageForChat();
+      expect(svc.stageForChat).not.toHaveBeenCalled();
       expect(navSpy).not.toHaveBeenCalled();
     });
 
-    it('enables Send to chat once finalizing completes (status done)', () => {
+    it('enables the send button once finalizing completes (status done)', () => {
       fixture.componentRef.setInput(
         'session',
         session({ status: { state: 'done' }, live_segments: [seg(0, 'hi')] })
@@ -337,6 +417,85 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       const btn = fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]');
       expect(btn.disabled).toBe(false);
+    });
+  });
+  describe('audio level meter + record-only hint', () => {
+    it('renders labeled bars for a paired capture, on a dB scale', () => {
+      fixture.componentRef.setInput('session', session());
+      svc.audioLevels.set([0.1, 0.001]);
+      fixture.detectChanges();
+      const meter = fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]');
+      expect(meter).not.toBeNull();
+      expect(meter.textContent).toContain('Meeting');
+      expect(meter.textContent).toContain('You');
+      const bars = component.meterBars();
+      // -20 dBFS ≈ 67%, -60 dBFS floor = 0% — a linear meter would show 10% and 0.1%.
+      expect(bars[0].pct).toBeGreaterThan(60);
+      expect(bars[0].pct).toBeLessThan(75);
+      expect(bars[1].pct).toBe(0);
+    });
+
+    it('labels a mono capture from the session source and shows a flat bar before the first level', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' } })
+      );
+      svc.audioLevels.set([0.05]);
+      fixture.detectChanges();
+      expect(component.meterBars()).toEqual([{ label: 'You', pct: expect.any(Number) }]);
+
+      // Recording but no level event yet: a flat 0% bar reads "silent",
+      // a missing meter reads "broken" — the meter must not disappear.
+      svc.audioLevels.set(null);
+      fixture.detectChanges();
+      expect(component.meterBars()).toEqual([{ label: 'You', pct: 0 }]);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')
+      ).not.toBeNull();
+
+      // Not recording → no meter at all.
+      fixture.componentRef.setInput(
+        'session',
+        session({
+          status: { state: 'done' },
+          audio_source: { source: { kind: 'microphone', device: null }, label: 'Mic' },
+        })
+      );
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')).toBeNull();
+    });
+
+    it('shows both channels at 0% for a mixed capture before the first level event', () => {
+      fixture.componentRef.setInput(
+        'session',
+        session({ audio_source: { source: { kind: 'mixed', mic: null }, label: 'Meeting' } })
+      );
+      svc.audioLevels.set(null);
+      fixture.detectChanges();
+      expect(component.meterBars()).toEqual([
+        { label: 'Meeting', pct: 0 },
+        { label: 'You', pct: 0 },
+      ]);
+    });
+
+    it('shows the record-only hint only while recording without a live model', () => {
+      // Default fixture: recording, models_used.live = null → record-only.
+      fixture.componentRef.setInput('session', session());
+      fixture.detectChanges();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')
+      ).not.toBeNull();
+      // A live session (live model recorded) shows no hint.
+      fixture.componentRef.setInput(
+        'session',
+        session({ models_used: { live: 'small', finalize: null } })
+      );
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
+      // Neither does a finished record-only session.
+      fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
     });
   });
 });

@@ -42,8 +42,21 @@ PY
 }
 
 @test "static transcription licenses are present in licenses-static/" {
-    for f in whisper-cpp-LICENSE cpal-LICENSE wasapi-LICENSE transcription-models-LICENSE; do
+    for f in whisper-cpp-LICENSE cpal-LICENSE wasapi-LICENSE transcription-models-LICENSE VulkanRT-License.txt; do
         [ -f "$LICENSES_STATIC/$f" ] || { echo "Missing $LICENSES_STATIC/$f" >&2; return 1; }
+    done
+}
+
+@test "THIRD-PARTY-LICENSES ships as a bundle resource on both platforms" {
+    # Windows redistributes vulkan-1.dll (ADR-085) — its Apache-2.0 notice must ship there too.
+    for conf in "$MACOS_CONF" "$REPO_ROOT/desktop/src-tauri/tauri.windows.conf.json"; do
+        run python3 -c "
+import json
+c = json.load(open('$conf'))
+res = c.get('bundle', {}).get('resources', {})
+assert 'THIRD-PARTY-LICENSES/' in res, f'THIRD-PARTY-LICENSES/ not in resources: {list(res)}'
+"
+        [ "$status" -eq 0 ]
     done
 }
 

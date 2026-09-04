@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.206";
+pub const CLAUDE_VERSION: &str = "2.1.252";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -40,9 +40,9 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
-    /// `ANTHROPIC_MODEL`.
+    /// `ANTHROPIC_DEFAULT_MODEL` (a startup default a `/model` pick outranks).
     pub id: &'static str,
-    /// Display label shown in the dropdown ("Opus 4.8", "Sonnet 5", …).
+    /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,
     /// Context window in tokens (1_000_000 for 1M-context models).
     pub context_tokens: u32,
@@ -57,7 +57,8 @@ pub struct AnthropicModelInfo {
     pub pricing_1m: Option<ModelPricing>,
 }
 
-// Published per-MTok rates: platform.claude.com/docs/en/pricing.
+// Published per-MTok rates: platform.claude.com/docs/en/about-claude/pricing.
+// Claude 4.6+ bills the full 1M window at standard rates — [1m] reuses the base const.
 const FABLE_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
     cached_input: 1.0,
@@ -70,17 +71,17 @@ const OPUS_PRICING: ModelPricing = ModelPricing {
     cache_write: 6.25,
     output: 25.0,
 };
-const SONNET_PRICING: ModelPricing = ModelPricing {
+const SONNET_5_PRICING: ModelPricing = ModelPricing {
+    input: 2.0,
+    cached_input: 0.2,
+    cache_write: 2.5,
+    output: 10.0,
+};
+const SONNET_46_PRICING: ModelPricing = ModelPricing {
     input: 3.0,
     cached_input: 0.3,
     cache_write: 3.75,
     output: 15.0,
-};
-const SONNET_PRICING_1M: ModelPricing = ModelPricing {
-    input: 6.0,
-    cached_input: 0.6,
-    cache_write: 7.5,
-    output: 22.5,
 };
 const HAIKU_PRICING: ModelPricing = ModelPricing {
     input: 1.0,
@@ -102,8 +103,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing_1m: Some(FABLE_PRICING),
     },
     AnthropicModelInfo {
-        id: "claude-opus-4-8",
-        family: "Opus 4.8",
+        id: "claude-opus-5",
+        family: "Opus 5",
         context_tokens: 1_000_000,
         latest: true,
         premium: true,
@@ -116,8 +117,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: true,
         premium: false,
-        pricing: SONNET_PRICING,
-        pricing_1m: Some(SONNET_PRICING_1M),
+        pricing: SONNET_5_PRICING,
+        pricing_1m: Some(SONNET_5_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
@@ -127,6 +128,15 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
+    },
+    AnthropicModelInfo {
+        id: "claude-opus-4-8",
+        family: "Opus 4.8",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: true,
+        pricing: OPUS_PRICING,
+        pricing_1m: Some(OPUS_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
@@ -152,8 +162,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: false,
         premium: false,
-        pricing: SONNET_PRICING,
-        pricing_1m: Some(SONNET_PRICING_1M),
+        pricing: SONNET_46_PRICING,
+        pricing_1m: Some(SONNET_46_PRICING),
     },
 ];
 
@@ -273,12 +283,13 @@ mod tests {
     #[test]
     fn base_env_does_not_set_model() {
         let env = base_env();
-        assert!(
-            !env.contains_key("ANTHROPIC_MODEL"),
-            "base_env() must not set ANTHROPIC_MODEL — the user's Claude Code model \
-             selection must not be overridden. Users who want a specific model can set \
-             claude.env.ANTHROPIC_MODEL in .speedwave.json or ~/.speedwave/config.json."
-        );
+        for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"] {
+            assert!(
+                !env.contains_key(key),
+                "base_env() must not set {key} — the model comes from the LLM provider config \
+                 (Settings default) or the user's own claude.env override, never from defaults."
+            );
+        }
     }
 
     #[test]
@@ -485,6 +496,41 @@ mod tests {
         assert_eq!(fable.context_tokens, 1_000_000);
         assert_eq!(fable.pricing.input, 10.0);
         assert_eq!(fable.pricing.output, 50.0);
+    }
+
+    #[test]
+    fn opus_5_is_the_latest_opus_entry() {
+        // The OPUS alias pin resolves to the first `latest: true` Opus, so a new
+        // Opus release must demote its predecessor rather than sit beside it.
+        let opus_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-opus-5")
+            .expect("claude-opus-5 must be in the catalog");
+        assert!(opus_5.latest, "Opus 5 must be in the Latest group");
+        assert!(opus_5.premium);
+        assert_eq!(opus_5.context_tokens, 1_000_000);
+        assert_eq!(opus_5.pricing.input, 5.0);
+        assert_eq!(opus_5.pricing.output, 25.0);
+        assert_eq!(
+            anthropic_default_models_env().get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(&"claude-opus-5[1m]".to_string())
+        );
+    }
+
+    #[test]
+    fn at_most_one_latest_entry_per_family_tier() {
+        // Two `latest: true` entries in one tier make the alias pin order-dependent.
+        for prefix in ["Fable", "Opus", "Sonnet", "Haiku"] {
+            let latest: Vec<&str> = ANTHROPIC_MODELS
+                .iter()
+                .filter(|m| m.family.starts_with(prefix) && m.latest)
+                .map(|m| m.id)
+                .collect();
+            assert!(
+                latest.len() <= 1,
+                "{prefix} tier must expose at most one Latest entry, got {latest:?}"
+            );
+        }
     }
 
     #[test]

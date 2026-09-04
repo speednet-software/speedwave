@@ -25,6 +25,7 @@ import { SlashService, isBareSlash, type SlashCommand } from '../slash/slash.ser
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
 import { FileDropDirective } from './file-drop.directive';
+import { ResizeHandleDirective } from './resize-handle.directive';
 import {
   ImagePreprocessorService,
   ERROR_UNSUPPORTED_TYPE,
@@ -43,6 +44,12 @@ interface AttachmentRecord {
   previewUrl: string;
   preprocessed: PreprocessedImage | null;
 }
+
+/** Floor for a manually-resized composer (≈2 text rows), matching the autosize minimum. */
+const MIN_COMPOSER_HEIGHT_PX = 56;
+
+/** Manual-resize ceiling as a fraction of the viewport, so a tall field never hides the transcript. */
+const MAX_COMPOSER_HEIGHT_FRACTION = 0.6;
 
 /** Inline directive prepended to a user message when plan mode is active. */
 const PLAN_MODE_PREFIX =
@@ -63,6 +70,7 @@ const PLAN_MODE_PREFIX =
     TooltipDirective,
     AttachmentStripComponent,
     FileDropDirective,
+    ResizeHandleDirective,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'relative block min-w-0' },
@@ -89,6 +97,26 @@ const PLAN_MODE_PREFIX =
       [attachments]="attachmentViewModels()"
       (remove)="removeAttachment($event)"
     />
+    @if (transcriptAttached()) {
+      <div
+        data-testid="composer-transcript"
+        class="mono mb-2 flex items-center gap-2 rounded ring-1 ring-[var(--accent)]/40 bg-[var(--accent)]/[0.06] px-3 py-1.5 text-[11px] text-[var(--ink-dim)]"
+      >
+        <span class="text-[var(--accent)]">transcript:</span>
+        <span class="truncate"
+          >goes out with your next message, to your configured LLM provider</span
+        >
+        <button
+          type="button"
+          data-testid="composer-transcript-detach"
+          class="ml-auto rounded px-1 text-[var(--ink-mute)] hover:text-[var(--ink)]"
+          aria-label="Detach meeting transcript"
+          (click)="transcriptDetached.emit()"
+        >
+          ×
+        </button>
+      </div>
+    }
     @if (attachmentError()) {
       <div
         data-testid="composer-attachment-error"
@@ -117,22 +145,42 @@ const PLAN_MODE_PREFIX =
           Drop image to attach
         </div>
       }
-      <textarea
-        #textarea
-        data-testid="chat-input"
-        cdkTextareaAutosize
-        cdkAutosizeMinRows="2"
-        cdkAutosizeMaxRows="8"
-        cdkOverlayOrigin
-        #overlayOrigin="cdkOverlayOrigin"
-        aria-label="Compose message"
-        class="w-full resize-none border-0 bg-transparent px-3 py-2.5 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-        [placeholder]="effectivePlaceholder()"
-        [formControl]="text"
-        (keydown.enter)="onEnter($event)"
-        (input)="onInput($event)"
-        (paste)="onPaste($event)"
-      ></textarea>
+      <div
+        appResizeHandle
+        [disabled]="disabled()"
+        (resizeStart)="onResizeStart()"
+        (resizeBy)="onResizeBy($event)"
+        (resizeEnd)="onResizeEnd()"
+        (resizeReset)="onResizeReset()"
+        data-testid="composer-resize-handle"
+        aria-label="Resize message input (drag or arrow keys; double-click to auto-size)"
+        [attr.aria-valuenow]="resizeValueNow()"
+        [attr.aria-valuemin]="resizeValueNow() !== null ? minResizePx : null"
+        [attr.aria-valuemax]="resizeValueNow() !== null ? resizeValueMax() : null"
+        class="group absolute inset-x-0 top-0 z-20 flex h-1.5 cursor-ns-resize items-center justify-center rounded-t focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
+      >
+        <span
+          class="h-0.5 w-8 rounded-full bg-[var(--line-strong)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+        ></span>
+      </div>
+      <div class="px-3 py-2.5">
+        <textarea
+          #textarea
+          data-testid="chat-input"
+          cdkTextareaAutosize
+          cdkAutosizeMinRows="2"
+          cdkAutosizeMaxRows="8"
+          cdkOverlayOrigin
+          #overlayOrigin="cdkOverlayOrigin"
+          aria-label="Compose message"
+          class="block w-full resize-none border-0 bg-transparent p-0 text-[14px] leading-relaxed text-[var(--ink)] placeholder-[var(--ink-mute)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          [placeholder]="effectivePlaceholder()"
+          [formControl]="text"
+          (keydown.enter)="onEnter($event)"
+          (input)="onInput($event)"
+          (paste)="onPaste($event)"
+        ></textarea>
+      </div>
       <div
         class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]"
       >
@@ -244,6 +292,35 @@ export class ComposerComponent implements AfterViewInit {
   @ViewChild('textarea', { static: true })
   private textareaRef!: ElementRef<HTMLTextAreaElement>;
 
+  /** Autosize directive on the textarea; toggled off while a manual height is in effect. */
+  @ViewChild(CdkTextareaAutosize, { static: true })
+  private autosize?: CdkTextareaAutosize;
+
+  /** Slash-menu overlay; repositioned on resize so it stays anchored to the textarea. */
+  @ViewChild(CdkConnectedOverlay)
+  private slashOverlay?: CdkConnectedOverlay;
+
+  /** Textarea height (px) captured when a resize gesture starts. */
+  private resizeBaseHeight = 0;
+
+  /** Upper bound for the current resize gesture, computed from the viewport at gesture start. */
+  private resizeMaxHeight = 0;
+
+  /** True while a manual height overrides autosize (from first gesture until reset). */
+  private manualResizeActive = false;
+
+  /** CDK's inline max-height captured at manual-resize start, restored on return to autosize. */
+  private savedMaxHeight = '';
+
+  /** Manual-resize floor exposed to the handle for `aria-valuemin`. */
+  protected readonly minResizePx = MIN_COMPOSER_HEIGHT_PX;
+
+  /** Current manual height for `aria-valuenow`; null while autosize is in control. */
+  readonly resizeValueNow = signal<number | null>(null);
+
+  /** Manual-resize ceiling for `aria-valuemax`, set when a gesture starts. */
+  readonly resizeValueMax = signal<number>(0);
+
   /** True to disable input and prevent submits, false to enable. */
   readonly disabled = input(false);
 
@@ -262,6 +339,12 @@ export class ComposerComponent implements AfterViewInit {
   /** Context window hint (e.g. "128k") — shown next to the model on lg+. */
   readonly contextLabel = input('');
 
+  /** True when a meeting transcript rides along with the next submit. */
+  readonly transcriptAttached = input(false);
+
+  /** Text to load into the field, replacing its content once ('' = nothing to load). */
+  readonly draftText = input('');
+
   /** `attachments` are pre-saved to `<project>/.speedwave/pastes/`. */
   readonly submitted = output<{
     payload: string;
@@ -277,6 +360,12 @@ export class ComposerComponent implements AfterViewInit {
 
   /** ADR-045 — emits when the user clicks the X on the queued preview. */
   readonly queueCancelled = output<void>();
+
+  /** Emits when the user unpins the attached transcript. */
+  readonly transcriptDetached = output<void>();
+
+  /** Emits once `draftText` has been loaded into the field; the parent clears it. */
+  readonly draftApplied = output<void>();
 
   /** Emits when the user clicks the inline Stop button while streaming. */
   readonly stopRequested = output<void>();
@@ -366,6 +455,13 @@ export class ComposerComponent implements AfterViewInit {
         for (const r of current) URL.revokeObjectURL(r.previewUrl);
       });
     });
+    // Load a parent-supplied draft; the emit clears the input, so edits survive later renders.
+    effect(() => {
+      const draft = this.draftText();
+      if (!draft) return;
+      this.setText(draft);
+      this.draftApplied.emit();
+    });
   }
 
   /** Auto-focus the textarea on mount so the user can start typing immediately. */
@@ -378,7 +474,91 @@ export class ComposerComponent implements AfterViewInit {
    * actions like "new conversation" that reset state and may steal focus.
    */
   focusInput(): void {
+    // New-conversation path: drop any manual height so the fresh composer starts auto-sized.
+    this.restoreAutoSize();
     queueMicrotask(() => this.textareaRef?.nativeElement?.focus());
+  }
+
+  /**
+   * Replaces the field content and puts the caret at the end, ready to edit.
+   * @param value - the text to load.
+   */
+  setText(value: string): void {
+    this.text.setValue(value);
+    queueMicrotask(() => {
+      const ta = this.textareaRef?.nativeElement;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(value.length, value.length);
+    });
+  }
+
+  /**
+   * Freezes the current height, disables autosize, and lifts CDK's row cap so the
+   * drag can exceed `cdkAutosizeMaxRows`. `enabled = false` runs `reset()` synchronously.
+   */
+  onResizeStart(): void {
+    const ta = this.textareaRef.nativeElement;
+    const computed = parseFloat(window.getComputedStyle(ta).height);
+    this.resizeBaseHeight = Number.isFinite(computed) ? computed : ta.offsetHeight;
+    this.resizeMaxHeight = Math.max(
+      MIN_COMPOSER_HEIGHT_PX,
+      Math.round(window.innerHeight * MAX_COMPOSER_HEIGHT_FRACTION)
+    );
+    if (!this.manualResizeActive) {
+      this.manualResizeActive = true;
+      // Save CDK's row cap once, then hand height control to the manual gesture.
+      this.savedMaxHeight = ta.style.maxHeight;
+      if (this.autosize) this.autosize.enabled = false;
+    }
+    // Drop the inline max-height (cdkAutosizeMaxRows) or the field can't grow past 8 rows.
+    ta.style.maxHeight = 'none';
+    ta.style.height = `${this.resizeBaseHeight}px`;
+    this.resizeValueMax.set(this.resizeMaxHeight);
+    this.resizeValueNow.set(this.resizeBaseHeight);
+  }
+
+  /**
+   * Applies a clamped height for the current gesture and keeps the slash menu anchored.
+   * @param deltaY - Signed px offset from the gesture start (positive grows the field).
+   */
+  onResizeBy(deltaY: number): void {
+    const target = Math.min(
+      this.resizeMaxHeight,
+      Math.max(MIN_COMPOSER_HEIGHT_PX, this.resizeBaseHeight + deltaY)
+    );
+    this.textareaRef.nativeElement.style.height = `${target}px`;
+    this.resizeValueNow.set(target);
+    if (this.slashOpen()) this.slashOverlay?.overlayRef?.updatePosition();
+  }
+
+  /** Reposition once more at gesture end (drag may have finished outside a move event). */
+  onResizeEnd(): void {
+    if (this.slashOpen()) this.slashOverlay?.overlayRef?.updatePosition();
+  }
+
+  /** Double-click the handle to drop the manual height and return to automatic sizing. */
+  onResizeReset(): void {
+    this.restoreAutoSize();
+    if (this.slashOpen()) this.slashOverlay?.overlayRef?.updatePosition();
+  }
+
+  /**
+   * Clears any manual height and hands sizing back to CDK autosize, re-applying the row
+   * cap that `onResizeStart` dropped. Shared by the reset handle, submit, and new-conversation.
+   */
+  private restoreAutoSize(): void {
+    if (!this.manualResizeActive) return;
+    this.manualResizeActive = false;
+    const ta = this.textareaRef?.nativeElement;
+    if (!ta) return;
+    ta.style.height = '';
+    // Restore the exact row cap captured at resize start (no CDK internals poked).
+    ta.style.maxHeight = this.savedMaxHeight;
+    this.resizeValueNow.set(null);
+    this.resizeValueMax.set(0);
+    // enabled false→true makes the CDK setter reflow to fit content; no extra call needed.
+    if (this.autosize) this.autosize.enabled = true;
   }
 
   /** Text submits queue while streaming (ADR-045); submits with attachments don't (ADR-065). */
@@ -390,8 +570,7 @@ export class ComposerComponent implements AfterViewInit {
     const hasText = text.trim().length > 0 && !isBareSlash(text);
     const hasAttachments = this.attachments().length > 0;
     if (!hasText && !hasAttachments) return false;
-    if (hasAttachments && this.streaming()) return false;
-    return true;
+    return !(hasAttachments && this.streaming());
   }
 
   /** Truncated preview of the queued slot (single-line, max 80 chars). */
@@ -433,6 +612,7 @@ export class ComposerComponent implements AfterViewInit {
       this.submitted.emit({ payload, displayText: text, attachments });
     }
     this.text.reset('');
+    this.restoreAutoSize();
     this.clearAttachments();
     this.closeSlash();
   }
