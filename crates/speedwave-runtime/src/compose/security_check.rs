@@ -757,6 +757,8 @@ impl SecurityCheck {
                     "ANTHROPIC_API_KEY",
                     "CLAUDE_CODE_OAUTH_TOKEN",
                     "DISABLE_AUTOUPDATER",
+                    // Numeric context-window pin from compose/llm.rs, not a credential.
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
                 ];
 
                 for item in env_seq {
