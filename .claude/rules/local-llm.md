@@ -53,3 +53,4 @@ Every session routes through the per-project Rust forwarder `proxy` (port 4000, 
 - Does it touch the forwarder's deps? Bump `containers/proxy/Cargo.toml` + its `Cargo.lock` together; build `--locked`.
 - Does it surface usage numbers? Decide which source of truth (invariant 6) and document the choice.
 - Local model context windows come from the discovery probe as `context_tokens: Option<u32>`; when `None`, propagate `null` — never substitute the 200K Anthropic baseline.
+- Any new env injected into the `claude` service whose name contains `TOKEN`/`KEY`/`SECRET` (e.g. `CLAUDE_CODE_MAX_CONTEXT_TOKENS`) must be added to the `NoTokensClaude` allowlist in `compose/security_check.rs`, or the start gate rejects its own render and containers never start. Guard: `test_rendered_compose_with_routed_window_passes_security_check`.

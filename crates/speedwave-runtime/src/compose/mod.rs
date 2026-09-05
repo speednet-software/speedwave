@@ -2487,6 +2487,144 @@ services:
     }
 
     #[test]
+    fn test_security_check_allows_context_window_pin_on_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072
+"#;
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "window pin is not a token: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_check_rejects_real_token_env_on_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
+        for env in [
+            "SLACK_BOT_TOKEN=xoxb-1",
+            "GITLAB_TOKEN=glpat-1",
+            "SPEEDWAVE_SECRET=s",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS_EXTRA=1",
+        ] {
+            let yaml = format!(
+                r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - {env}
+"#
+            );
+            let violations = SecurityCheck::run_with_data_dir(
+                &yaml,
+                "test",
+                &[],
+                &test_expected_paths(),
+                data_dir.path(),
+            );
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoTokensClaude),
+                "{env} must stay forbidden on claude"
+            );
+        }
+    }
+
+    /// A routed provider with a probed window injects `CLAUDE_CODE_MAX_CONTEXT_TOKENS`;
+    /// the start gate must accept its own render (regression: containers never started).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_rendered_compose_with_routed_window_passes_security_check() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "openrouter".into(),
+                kind: crate::config::LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("openai/gpt-4o".into()),
+                has_api_key: true,
+                context_tokens: Some(131_072),
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("openai/gpt-4o".into()),
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072"),
+            "window pin must be rendered for the gate to be exercised: {yaml}"
+        );
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test-project",
+            &[],
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            data_dir.path(),
+        );
+        assert!(
+            violations.is_empty(),
+            "routed-provider render must pass the start gate. Violations: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_security_check_external_llm_keys_covers_major_providers() {
         let data_dir = tempfile::tempdir().unwrap();
         // One violation per leaked key; covers every major third-party LLM vendor.
