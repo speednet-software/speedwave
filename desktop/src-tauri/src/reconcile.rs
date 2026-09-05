@@ -3,7 +3,9 @@
 use crate::bridges::ide_bridge;
 use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
-use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
+use speedwave_runtime::compose::{
+    worker_os_url_state, HostBridgeRegistration, HostBridgesInfo, WorkerOsUrlState,
+};
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
@@ -930,22 +932,18 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             }
         };
 
-        // Check if compose already has the correct port
-        let expected_url_fragment = format!(":{current_port}");
-        if let Some(line) = compose_content
-            .lines()
-            .find(|l| l.contains("WORKER_OS_URL="))
-        {
-            if line.contains(&expected_url_fragment) {
+        match worker_os_url_state(&compose_content, current_port) {
+            WorkerOsUrlState::Current => {
                 log::debug!("compose WORKER_OS_URL already matches mcp-os port {current_port}");
                 return;
             }
-            log::info!(
+            WorkerOsUrlState::Absent => {
+                log::debug!("no WORKER_OS_URL in compose, OS integration not enabled");
+                return;
+            }
+            WorkerOsUrlState::Stale => log::info!(
                 "compose WORKER_OS_URL is stale (mcp-os port is {current_port}), regenerating"
-            );
-        } else {
-            log::debug!("no WORKER_OS_URL in compose, OS integration not enabled");
-            return;
+            ),
         }
 
         // ensure_images_ready runs outside the transaction — long-running and idempotent.
@@ -1402,6 +1400,22 @@ mod tests {
         assert!(
             ensure_pos < up_pos,
             "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    #[test]
+    fn reconcile_compose_port_decides_staleness_through_the_compose_ssot() {
+        // Exact container-facing URL match lives in the runtime; a substring probe on
+        // the compose text matched `:80` inside `:8080` and suppressed the reconcile.
+        let source = include_str!("reconcile.rs");
+        let fn_body = extract_fn_body_braced(source, "pub(crate) fn reconcile_compose_port(");
+        assert!(
+            fn_body.contains("worker_os_url_state("),
+            "reconcile_compose_port must decide staleness via compose::worker_os_url_state"
+        );
+        assert!(
+            !fn_body.contains(".contains("),
+            "reconcile_compose_port must not probe the compose text for a port substring"
         );
     }
 

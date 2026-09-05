@@ -76,7 +76,6 @@ pub use tokens::{
 pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
 // Host-side worker + integrations-filter wiring.
-pub use workers::enabled_hub_service_ids;
 pub(crate) use workers::{
     apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config, worker_gateway_url,
 };
@@ -84,6 +83,7 @@ pub(crate) use workers::{
 use workers::{
     apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
 };
+pub use workers::{enabled_hub_service_ids, worker_os_url_state, WorkerOsUrlState};
 
 // Test-only bundle build root override; thread-local for parallel test safety.
 #[cfg(test)]
