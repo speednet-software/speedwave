@@ -8,4 +8,4 @@ export SPEEDWAVE_RESOURCES_DIR="$(pwd)"
 export SPEEDWAVE_ALLOW_UNSIGNED=1
 export TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}'
 
-exec cargo tauri dev
+exec env -u PORT cargo tauri dev

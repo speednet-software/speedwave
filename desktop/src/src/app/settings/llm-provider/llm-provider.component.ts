@@ -1619,7 +1619,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const anthropicEntry = (config.providers ?? []).find((p) => p.id === 'anthropic');
       const candidate =
         anthropicEntry?.model ??
-        (config.active?.provider_id === 'anthropic' ? (config.active?.model ?? null) : null) ??
+        (config.active?.provider_id === 'anthropic' ? config.active?.model : null) ??
         // Legacy/v1 response with no providers[]: fall back to the flat model.
         (provider === 'anthropic' ? this.model() || null : null);
       this.loadedAnthropicModel = candidate && !this.isForeignModel(candidate) ? candidate : null;
