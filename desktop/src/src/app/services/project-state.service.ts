@@ -448,9 +448,9 @@ export class ProjectStateService {
       }
       return;
     }
-    // next is pre-ready (no_provider | auth_required); never downgrade a live session — opening
-    // Settings must not blank a running chat on a transient/false negative (e.g. stale config read).
-    if (this.status() === 'ready') return;
+    // next is pre-ready (no_provider | auth_required). Never downgrade a live session (a Settings
+    // probe must not blank a running chat on a false negative); a same-state re-probe is a no-op.
+    if (this.status() === 'ready' || this.status() === next) return;
     this.status.set(next);
     this.notifyChange();
   }
