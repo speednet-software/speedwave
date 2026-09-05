@@ -9,6 +9,6 @@
     "test": "echo 'mcp-playwright is tested via compose integration tests in speedwave-runtime'"
   },
   "dependencies": {
-    "@playwright/mcp": "0.0.79"
+    "@playwright/mcp": "0.0.80"
   }
 }
