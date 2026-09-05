@@ -83,7 +83,6 @@ guard-not-prod-data-dir:
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
 
-REQUIRED_NODE_MAJOR := 20
 REQUIRED_RUST_MINOR := 70
 
 setup-dev:
@@ -114,21 +113,7 @@ setup-dev:
 	\
 	echo ""; \
 	echo "── Node.js ──"; \
-	if command -v node >/dev/null 2>&1; then \
-		NODE_VER=$$(node --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'); \
-		NODE_MAJOR=$$(echo "$$NODE_VER" | cut -d. -f1); \
-		if [ "$$NODE_MAJOR" -ge $(REQUIRED_NODE_MAJOR) ]; then \
-			echo "  ✅ node $$NODE_VER"; \
-		else \
-			echo "  ❌ node $$NODE_VER (requires $(REQUIRED_NODE_MAJOR)+)"; \
-			echo "     Install: https://nodejs.org or brew install node"; \
-			FAIL=1; \
-		fi; \
-	else \
-		echo "  ❌ node not found"; \
-		echo "     Install: https://nodejs.org or brew install node"; \
-		FAIL=1; \
-	fi; \
+	bash scripts/check-node-version.sh "$(NODE_VERSION)" || FAIL=1; \
 	\
 	if command -v npm >/dev/null 2>&1; then \
 		echo "  ✅ npm $$(npm --version)"; \
@@ -636,7 +621,7 @@ test-ci:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
 	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
-	  _tests/ci/composite-action-pins.bats
+	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
@@ -918,7 +903,7 @@ clean-lima:
 
 # ── Node.js bundling (all platforms — mcp-os worker) ─────────────────────────
 
-NODE_VERSION := $(shell cat .node-version 2>/dev/null || echo 24.14.0)
+NODE_VERSION := $(shell cat .node-version)
 
 download-nodejs:
 	@NODE_BIN=desktop/src-tauri/nodejs/bin/node; \
