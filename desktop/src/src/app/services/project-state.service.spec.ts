@@ -1359,6 +1359,48 @@ describe('ProjectStateService', () => {
       expect(cb).not.toHaveBeenCalled();
     });
 
+    it('applyAuthStatus does not re-notify when already auth_required', () => {
+      service.status.set('auth_required');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('auth_required');
+      expect(cb).not.toHaveBeenCalled();
+    });
+
+    it('applyAuthStatus does not re-notify when already no_provider', () => {
+      service.status.set('no_provider');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: false,
+      });
+      expect(service.status()).toBe('no_provider');
+      expect(cb).not.toHaveBeenCalled();
+    });
+
+    it('applyAuthStatus notifies once when one pre-ready state replaces another', () => {
+      service.status.set('no_provider');
+      const cb = vi.fn();
+      service.onChange(cb);
+      service.applyAuthStatus({
+        api_key_configured: false,
+        oauth_authenticated: false,
+        needs_anthropic_auth: true,
+        provider_configured: true,
+      });
+      expect(service.status()).toBe('auth_required');
+      expect(cb).toHaveBeenCalledTimes(1);
+    });
+
     it('applyAuthStatus sets no_provider when provider_configured=false', () => {
       service.status.set('starting');
       service.applyAuthStatus({
