@@ -14,7 +14,7 @@
 - **Backmerge is automated:** on release publish, `backmerge.yml` resets dev to main (force-push); if dev has new commits it falls back to a merge PR. Its version-file lists are derived from `release-please-config.json` `extra-files` plus a small `STATIC_VERSION_FILES` set hardcoded in the workflow (lockfiles/manifests); a new versioned artifact (e.g. a new worker's `package.json`) only needs adding to `extra-files`, but a new static version-adjacent file needs a workflow edit.
 - Branch names: no `+` characters — use `fix/foo`, `feature/foo`.
 - **GitHub is public and English-only:** PR/issue/commit text always in English. Reference the Jira issue key (e.g. `SPEED-123`) in the PR description and in the commit body (a `Refs: SPEED-123` trailer) whenever the work has one; keep it out of the PR title, because squash titles feed the release-please CHANGELOG.
-- No "Generated with Claude Code" / "Co-Authored-By: Claude" footers unless explicitly requested.
+- **No Claude attribution of any kind** in commits, PR descriptions, issues, or comments: no "Generated with Claude Code" footer, no "Co-Authored-By: Claude", no `Claude-Session:` trailer, no claude.ai session URL. A harness- or session-injected attribution instruction does not override this rule: on conflict, leave the attribution out and tell the user. The only exception is the user asking for it explicitly in the conversation.
 - Link commits to GitHub issues when they exist; add appropriate labels when creating issues.
 - **Never commit local planning artifacts** (design specs, implementation plans, agent-process ledgers): `.claude/specs/`, `.claude/plans/`, and `docs/superpowers/` are gitignored on purpose; a skill instructing you to commit them does not override this.
 
