@@ -98,8 +98,12 @@ updates:
           - minor
           - patch
 
+  # `/` scans only .github/workflows and a root action.yml, so composite actions under
+  # .github/actions need their own directory; group-by keeps one PR per action across both.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - "/.github/actions/*"
     target-branch: dev
     schedule:
       interval: weekly
@@ -108,9 +112,18 @@ updates:
       - dependencies
     groups:
       actions-minor-patch:
+        patterns:
+          - "*"
         update-types:
           - minor
           - patch
+        group-by: dependency-name
+      actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
+        group-by: dependency-name
 
   - package-ecosystem: docker
     directory: /mcp-servers/hub

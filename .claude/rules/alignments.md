@@ -59,6 +59,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - Root `[workspace.lints]` table ↔ `desktop/src-tauri/Cargo.toml` `[lints]` table ↔ `containers/proxy/Cargo.toml` `[lints]` table ↔ `crates/pii-engine/Cargo.toml` `[lints]` table (each vendored/built standalone, cannot inherit `workspace = true`) — `lint_tables_are_aligned` cross-read test.
 - No raw `Command::new` outside `binary.rs` — drift detector `tests/no_raw_command_spawn.rs` (escape hatch: `// SSOT-allow: <reason>`).
 - Standalone cargo workspaces (every dir with its own `Cargo.lock`: root, `desktop/src-tauri`, `containers/proxy`) ↔ the single `cargo` entry's `directories` in `.github/dependabot.yml`, every group `group-by: dependency-name` (one bump PR relocks all workspaces; a per-directory entry yields half-PRs) — `_tests/ci/dependabot-cargo-workspaces.bats`.
+- Composite actions (`.github/actions/*/action.yml`) ↔ workflows (`.github/workflows/*.yml`): every external action pinned to ONE ref across both trees, and the `github-actions` entry's `directories` covers `/` plus `/.github/actions/*` with every group `group-by: dependency-name` (Dependabot's `/` scans workflows only; without the group-by a bump lands as per-directory half-PRs that the pin guard rejects) — `_tests/ci/composite-action-pins.bats`.
 
 ## Manual alignments — NO automated guard; update together in the same commit
 
