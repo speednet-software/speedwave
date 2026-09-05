@@ -445,10 +445,10 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                r#"{"ts":"2026-06-12T10:00:00+0200","capture":"success_event","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10,"latency_ms":900,"ttft_ms":100}"#,
-                r#"{"ts":"2026-06-12T11:00:00+0200","capture":"stream_iterator","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2,"latency_ms":300,"ttft_ms":100}"#,
+                r#"{"ts":"2026-06-12T10:00:00+0200","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10,"latency_ms":900,"ttft_ms":100}"#,
+                r#"{"ts":"2026-06-12T11:00:00+0200","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2,"latency_ms":300,"ttft_ms":100}"#,
                 // Failure with latency but no output — must NOT feed throughput.
-                r#"{"ts":"2026-06-13T09:00:00+0200","capture":"stream_iterator","status":"failure","model":"local/qwen3","prompt_tokens":5,"completion_tokens":0,"latency_ms":60000}"#,
+                r#"{"ts":"2026-06-13T09:00:00+0200","status":"failure","model":"local/qwen3","prompt_tokens":5,"completion_tokens":0,"latency_ms":60000}"#,
             ],
         );
         let s = read_usage_summary_in(dir.path(), "proj");
@@ -594,21 +594,21 @@ mod tests {
     }
 
     #[test]
-    fn dedups_by_response_id_across_captures() {
+    fn dedups_repeated_response_id_first_seen_wins() {
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
             "proj",
             &[
-                r#"{"ts":"2026-06-12T10:00:00+0200","capture":"stream_iterator","status":"success","model":"m","response_id":"msg_1","prompt_tokens":10,"completion_tokens":5}"#,
-                r#"{"ts":"2026-06-12T10:00:01+0200","capture":"success_event","status":"success","model":"m","response_id":"msg_1","cost_usd":0.01,"prompt_tokens":10,"completion_tokens":5}"#,
-                r#"{"ts":"2026-06-12T10:02:00+0200","capture":"success_event","status":"success","model":"m","response_id":"msg_2","prompt_tokens":3}"#,
+                r#"{"ts":"2026-06-12T10:00:00+0200","status":"success","model":"m","response_id":"msg_1","prompt_tokens":10,"completion_tokens":5}"#,
+                r#"{"ts":"2026-06-12T10:00:01+0200","status":"success","model":"m","response_id":"msg_1","cost_usd":0.01,"prompt_tokens":10,"completion_tokens":5}"#,
+                r#"{"ts":"2026-06-12T10:02:00+0200","status":"success","model":"m","response_id":"msg_2","prompt_tokens":3}"#,
             ],
         );
         let s = read_usage_summary_in(dir.path(), "proj");
         assert_eq!(s.totals.requests, 2, "msg_1 counted once");
         assert_eq!(s.totals.prompt_tokens, 13);
-        // First-seen (costless stream_iterator) wins; both kept records unpriced.
+        // First-seen line wins, so the later priced duplicate is dropped.
         assert!(
             s.totals.cost_usd.is_none(),
             "no priced request → None, not 0.0"
