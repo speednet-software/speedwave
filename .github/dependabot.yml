@@ -78,11 +78,22 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    # Angular packages peer-pin each other to the exact version: a single-package major can
+    # never install, so every Angular update (any level) travels in one PR.
     groups:
+      angular:
+        patterns:
+          - "@angular/*"
+          - "angular-eslint"
+          - "@angular-eslint/*"
       npm-desktop-minor-patch:
         update-types:
           - minor
           - patch
+    ignore:
+      # @angular/compiler-cli caps TypeScript (>=6.0 <6.1 for v22); lift with the next Angular major.
+      - dependency-name: "typescript"
+        versions: [">=6.1"]
 
   - package-ecosystem: npm
     directory: /desktop/e2e

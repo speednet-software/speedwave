@@ -429,7 +429,8 @@ test-desktop-build-run:
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
 	  _tests/desktop/sign-windows-binaries.bats \
 	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats
+	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
+	  _tests/desktop/dev-server-port.bats
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run: guard-not-prod-data-dir
@@ -631,7 +632,8 @@ test-desktop-build: build-angular build-mcp
 	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
 	  _tests/desktop/sign-windows-binaries.bats \
 	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats
+	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
+	  _tests/desktop/dev-server-port.bats
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
@@ -1017,7 +1019,7 @@ dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs ge
 	chmod +x desktop/src-tauri/cli/speedwave
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
 endif
 
 # ── Quick status ─────────────────────────────────────────────────────────────
