@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// One line of the callback JSONL. Unknown fields are ignored so the
+/// One line of the proxy usage JSONL. Unknown fields are ignored so the
 /// container image and the host can evolve independently.
 #[derive(Deserialize, Debug, Clone)]
 pub struct UsageRecord {
-    /// RFC3339-ish local timestamp written by the callback.
+    /// RFC3339-ish local timestamp written by the proxy.
     #[serde(default)]
     pub ts: String,
     /// `success` | `failure`.
@@ -59,7 +59,7 @@ pub struct UsageRecord {
 pub struct UsageBucket {
     /// Total requests in the bucket.
     pub requests: u64,
-    /// Requests whose callback line carried `status=failure`.
+    /// Requests whose usage line carried `status=failure`.
     pub failures: u64,
     /// Summed input tokens.
     pub prompt_tokens: u64,
@@ -84,7 +84,7 @@ pub struct UsageBucket {
 pub struct UsageSummary {
     /// `YYYY-MM-DD` → model → bucket. BTreeMap keeps days/models ordered.
     pub days: BTreeMap<String, BTreeMap<String, UsageBucket>>,
-    /// `YYYY-MM-DD` → requests per local hour (index 0–23) — the callback
+    /// `YYYY-MM-DD` → requests per local hour (index 0–23) — the proxy
     /// timestamps carry the container's TZ, which mirrors the host's.
     pub hours: BTreeMap<String, [u64; 24]>,
     /// Grand totals across all days and models.
@@ -94,7 +94,7 @@ pub struct UsageSummary {
     pub skipped_lines: u64,
 }
 
-/// Usage file as written by the container callback.
+/// Usage file as written by the proxy container.
 pub fn usage_file_in(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
         .join("usage")
@@ -259,7 +259,7 @@ pub fn session_cost_for_window_in(
 }
 
 /// Rotation threshold: past this size the live file is renamed to `.1`
-/// (replacing any previous `.1`); the callback's `open(append)` reopens fresh.
+/// (replacing any previous `.1`); the proxy's `open(append)` reopens fresh.
 pub const USAGE_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Rotates `usage.jsonl` → `usage.jsonl.1` when it exceeds the threshold.
