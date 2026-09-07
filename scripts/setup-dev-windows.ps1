@@ -35,22 +35,68 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
     }
 }
 
-# Non-obvious picks: `make` must be GNU Make 4.4 (GnuWin32 3.81 breaks $(VAR)); cmake
-# + llvm build whisper.cpp/bindgen (audio-transcription).
-Write-Host "== choco install toolchain (this is large: VS Build Tools) =="
-choco install -y git make rustup.install nodejs-lts cmake llvm `
-    visualstudio2022buildtools visualstudio2022-workload-vctools bats-core
-# $ErrorActionPreference does not cover native exit codes -- check choco explicitly.
-# (Write-Host, not Write-Error: under EAP=Stop the latter throws before `exit <code>`.)
-if ($LASTEXITCODE -eq 3010) {
-    Write-Warning "choco reports a REBOOT is required (3010). Reboot, then re-run this script."
-} elseif ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: choco install failed with exit code $LASTEXITCODE"
-    exit $LASTEXITCODE
+# --- Tool locations (static paths; version discovery runs after the installs) --
+$vsBase = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
+$msvcRoot = Join-Path $vsBase 'VC\Tools\MSVC'
+$sdkBinRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+$llvmBin = "$env:ProgramFiles\LLVM\bin"
+
+# --- Toolchain install (one guarded package at a time) -------------------------
+# A package that is unavailable, or already satisfied by a non-choco install, must never
+# strand the phases below -- MSVC env, Vulkan SDK, long paths and target-dir run regardless.
+
+function Test-GnuMake4 {
+    $make = Get-Command make -ErrorAction SilentlyContinue
+    if (-not $make) { return $false }
+    $ver = (& $make.Source --version 2>$null) -join ' '
+    if ($ver -match 'GNU Make (\d+)') { return ([int]$Matches[1] -ge 4) }
+    return $false
 }
 
-$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-            [Environment]::GetEnvironmentVariable('Path', 'User')
+# Have = capability probe re-run after the install; Hint = shown only if it still fails.
+# `make` must be GNU Make 4.x (3.81 mis-expands $(VAR)); ninja is cmake-rs's generator.
+$packages = @(
+    @{ Name = 'git'; Have = { [bool](Get-Command git -ErrorAction SilentlyContinue) } },
+    # The pre-commit hook hard-requires it; without it no commit can be made at all.
+    @{ Name = 'gitleaks'; Have = { [bool](Get-Command gitleaks -ErrorAction SilentlyContinue) } },
+    @{ Name = 'make'; Have = { Test-GnuMake4 };
+       Hint = 'GNU Make 4.x must win on PATH -- a GnuWin32 3.81 earlier in PATH shadows it.' },
+    @{ Name = 'rustup.install'; Have = { Test-Path (Join-Path $env:USERPROFILE '.cargo\bin\rustup.exe') } },
+    @{ Name = 'nodejs-lts'; Have = { [bool](Get-Command node -ErrorAction SilentlyContinue) } },
+    @{ Name = 'cmake'; Have = { [bool](Get-Command cmake -ErrorAction SilentlyContinue) } },
+    # Probed by path, not by `clang` on PATH: msvc-env.sh derives LIBCLANG_PATH from this dir.
+    @{ Name = 'llvm'; Have = { Test-Path (Join-Path $llvmBin 'clang.exe') } },
+    @{ Name = 'ninja'; Have = { [bool](Get-Command ninja -ErrorAction SilentlyContinue) } },
+    @{ Name = 'visualstudio2022buildtools'; Have = { Test-Path $vsBase } },
+    @{ Name = 'visualstudio2022-workload-vctools'; Have = { Test-Path (Join-Path $vsBase 'VC\Tools\MSVC') } }
+)
+
+function Update-ProcessPath {
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                [Environment]::GetEnvironmentVariable('Path', 'User')
+}
+
+$failedItems = @()
+$rebootPending = $false
+Write-Host "== choco install toolchain (this is large: VS Build Tools) =="
+foreach ($pkg in $packages) {
+    if (& $pkg.Have) {
+        Write-Host "  present: $($pkg.Name)"
+        continue
+    }
+    Write-Host "  installing: $($pkg.Name)"
+    choco install -y --no-progress $pkg.Name
+    $chocoExit = $LASTEXITCODE
+    # Verify by capability, never by choco's exit code: choco fails on an already-present
+    # non-choco tool and succeeds for a package that put nothing usable on PATH.
+    Update-ProcessPath
+    if (& $pkg.Have) { continue }
+    if ($chocoExit -eq 3010) { $rebootPending = $true; continue }
+    $failedItems += $pkg
+    Write-Warning "$($pkg.Name) still missing after choco install (exit $chocoExit) -- continuing."
+}
+
+Update-ProcessPath
 
 # --- Rust toolchain (from rust-toolchain.toml) + cargo-tauri -------------------
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
@@ -78,13 +124,10 @@ if (Test-Path $rustup) {
     Write-Warning "rustup not found at $rustup -- skipped toolchain + tauri-cli (re-run after reboot/PATH refresh)."
 }
 
-# --- Locate MSVC + Windows SDK -------------------------------------------------
-$vsBase = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
-$msvcRoot = Join-Path $vsBase 'VC\Tools\MSVC'
+# --- MSVC + Windows SDK versions (newest installed; paths are pinned above) ----
 $msvcVer = if (Test-Path $msvcRoot) {
     (Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
 }
-$sdkBinRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
 $sdkVer = if (Test-Path $sdkBinRoot) {
     (Get-ChildItem $sdkBinRoot -Directory -Filter '10.*' | Sort-Object Name -Descending | Select-Object -First 1).Name
 }
@@ -92,30 +135,6 @@ $sdkVer = if (Test-Path $sdkBinRoot) {
 function ConvertTo-BashPath([string]$p) {
     if ($p -match '^([A-Za-z]):\\(.*)$') { return '/' + $Matches[1].ToLower() + '/' + ($Matches[2] -replace '\\', '/') }
     return $p
-}
-
-# --- .cargo/config.toml: pin the MSVC linker (gitignored, per-machine) ---------
-# Without it, cargo on Git Bash resolves cygwin's /usr/bin/link before MSVC
-# link.exe -> LNK1146/LNK1170/LNK1206-class failures.
-if ($msvcVer) {
-    $linker = "$msvcRoot\$msvcVer\bin\HostX64\x64\link.exe"
-    $cargoDir = Join-Path $repoRoot '.cargo'
-    New-Item -ItemType Directory -Force $cargoDir | Out-Null
-    $cargoConfig = Join-Path $cargoDir 'config.toml'
-    # Never clobber a hand-written per-machine config silently -- back it up first.
-    if ((Test-Path $cargoConfig) -and
-        ((Get-Content $cargoConfig -Raw) -notmatch 'Generated by scripts/setup-dev-windows\.ps1')) {
-        Copy-Item $cargoConfig "$cargoConfig.bak" -Force
-        Write-Warning "Existing .cargo/config.toml backed up to config.toml.bak before overwrite."
-    }
-    $linkerToml = $linker -replace '\\', '\\'
-    $toml = "# Generated by scripts/setup-dev-windows.ps1 -- per-machine, gitignored.`n" +
-            "[target.x86_64-pc-windows-msvc]`n" +
-            "linker = `"$linkerToml`"`n"
-    Set-Content -Path $cargoConfig -Value $toml -Encoding ascii -NoNewline
-    Write-Host "Wrote .cargo/config.toml (MSVC $msvcVer linker)"
-} else {
-    Write-Warning "MSVC not found under $msvcRoot -- skipped .cargo/config.toml (re-run after VS Build Tools finishes/reboot)."
 }
 
 # --- ~/msvc-env.sh sourced from ~/.bashrc: INCLUDE/LIB + cl.exe/link.exe on PATH -
@@ -138,7 +157,6 @@ if ((Test-Path $vcvars) -and $msvcVer) {
     } else {
         $pathAdds = @("$msvcRoot\$msvcVer\bin\HostX64\x64")
         if ($sdkVer) { $pathAdds += "$sdkBinRoot\$sdkVer\x64" }
-        $llvmBin = "$env:ProgramFiles\LLVM\bin"
         if (Test-Path $llvmBin) { $pathAdds += $llvmBin }
         $bashPath = ($pathAdds | ForEach-Object { ConvertTo-BashPath $_ }) -join ':'
 
@@ -149,6 +167,9 @@ if ((Test-Path $vcvars) -and $msvcVer) {
         $sh += "export LIBPATH='$libpath'"
         if (Test-Path $llvmBin) { $sh += "export LIBCLANG_PATH='$llvmBin'" }
         $sh += "export PATH=`"$bashPath`:`$PATH`""
+        # cmake-rs defaults to the VS generator, which a Build Tools-only box has no
+        # registered VS instance for and whose ExternalProject TryCompile dies on MSB6003.
+        $sh += "export CMAKE_GENERATOR='Ninja'"
         $home_ = $env:USERPROFILE
         $envShWin = Join-Path $home_ 'msvc-env.sh'
         # -NoNewline + explicit LF: Set-Content would append CRLF, and a trailing CR
@@ -178,8 +199,9 @@ Write-Host "== Vulkan SDK (Windows whisper Vulkan backend, ADR-085) =="
 try {
     & (Join-Path $repoRoot 'scripts\install-vulkan-sdk.ps1')
 } catch {
-    Write-Host "ERROR: Vulkan SDK install failed: $_"
-    exit 1
+    # Recorded, not fatal here: the long-paths and target-dir phases below must still run.
+    $failedItems += @{ Name = 'Vulkan SDK'; Hint = "install-vulkan-sdk.ps1 failed: $_" }
+    Write-Warning "Vulkan SDK install failed -- continuing; reported at the end."
 }
 
 # The ggml-vulkan shader ExternalProject nests deep enough to cross MAX_PATH on typical repo
@@ -193,6 +215,43 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
 git config --system core.longpaths true
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "git config --system core.longpaths failed (exit $LASTEXITCODE) — set it manually if the whisper build hits long git paths."
+}
+
+# --- desktop/src-tauri/.cargo/config.toml: short cargo target-dir (gitignored) -
+# Mandatory on every Windows box, not a deep-clone escape hatch: the budget leaves 9 chars
+# for the whole target dir, so `<repo>\desktop\src-tauri\target` can never fit (ADR-085).
+Write-Host "== Pinning a short cargo target-dir for the desktop build (ADR-085) =="
+$tauriCargoDir = Join-Path $repoRoot 'desktop\src-tauri\.cargo'
+$tauriCargoConfig = Join-Path $tauriCargoDir 'config.toml'
+if (Test-Path $tauriCargoConfig) {
+    Write-Host "Kept existing desktop/src-tauri/.cargo/config.toml (per-machine choice)"
+} else {
+    # Forward slashes: valid TOML, and cargo accepts them on Windows -- nothing to escape.
+    $shortTargetDir = $env:SystemDrive + '/spwd'
+    New-Item -ItemType Directory -Force $tauriCargoDir | Out-Null
+    $toml = "# Generated by scripts/setup-dev-windows.ps1 -- per-machine, gitignored.`n" +
+            "# Short target-dir: scripts/check-vulkan-path-budget.sh gates this (ADR-085).`n" +
+            "[build]`n" +
+            "target-dir = `"$shortTargetDir`"`n"
+    Set-Content -Path $tauriCargoConfig -Value $toml -Encoding ascii -NoNewline
+    Write-Host "Wrote desktop/src-tauri/.cargo/config.toml (target-dir $shortTargetDir)"
+}
+
+# Everything above runs even when a package failed, so the report comes last -- and a
+# missing tool still exits non-zero: `make dev` would only fail later and less clearly.
+if ($failedItems.Count -gt 0) {
+    Write-Host ""
+    Write-Host "== Incomplete: $($failedItems.Count) item(s) missing =="
+    foreach ($item in $failedItems) {
+        Write-Host "  $($item.Name)"
+        if ($item.Hint) { Write-Host "    $($item.Hint)" }
+    }
+    if ($rebootPending) { Write-Warning "A reboot is also pending -- reboot, then re-run." }
+    Write-Host "Every other setup step completed. Install the above, then re-run this script."
+    exit 1
+}
+if ($rebootPending) {
+    Write-Warning "REBOOT required (choco 3010) before 'make dev'."
 }
 
 Write-Host ""

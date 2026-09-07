@@ -15,7 +15,8 @@
 #   - cargo-tauri CLI (cargo install tauri-cli) — for desktop dev/build
 #   - cargo-llvm-cov (cargo install cargo-llvm-cov) — for Rust coverage
 #   - cargo-audit (cargo install cargo-audit) — for dependency audit
-#   - bats-core (brew install bats-core) — for E2E tests (optional)
+#   - bats-core (brew install bats-core; macOS/CI only) — for E2E + script test suites
+#   - gitleaks (brew install gitleaks / choco install gitleaks) — required by the pre-commit hook
 #   - Swift 5.9+ (macOS only, for native OS CLI binaries)
 
 # Ensure cargo and Homebrew are in PATH even in non-interactive shells
@@ -137,7 +138,10 @@ setup-dev:
 		echo "  ✅ bats $$(bats --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
 	else \
 		echo "  ⬚  bats not found (needed for: make test-e2e)"; \
-		echo "     Install: brew install bats-core"; \
+		case "$$(uname -s 2>/dev/null)" in \
+		  MINGW*|MSYS*|CYGWIN*) echo "     Windows: not provisioned — the bats suites run on macOS + CI";; \
+		  *) echo "     Install: brew install bats-core";; \
+		esac; \
 	fi; \
 	\
 	echo ""; \
@@ -168,6 +172,41 @@ setup-dev:
 	else \
 		echo "  ⬚  skipped (not macOS)"; \
 	fi; \
+	\
+	echo ""; \
+	echo "── Windows build deps (whisper Vulkan + MSVC) ──"; \
+	case "$$(uname -s 2>/dev/null)" in \
+	  MINGW*|MSYS*|CYGWIN*) \
+		if [ -n "$$VULKAN_SDK" ] && [ -d "$$VULKAN_SDK" ]; then \
+			echo "  ✅ VULKAN_SDK $$VULKAN_SDK"; \
+		else \
+			echo "  ❌ VULKAN_SDK unset or missing (whisper-rs-sys needs it — ADR-085)"; \
+			echo "     Install: make setup-dev-windows, then open a NEW Git Bash"; \
+			FAIL=1; \
+		fi; \
+		if command -v ninja >/dev/null 2>&1; then \
+			echo "  ✅ ninja $$(ninja --version)"; \
+		else \
+			echo "  ❌ ninja not found (the cmake generator for whisper-rs-sys)"; \
+			echo "     Install: make setup-dev-windows"; \
+			FAIL=1; \
+		fi; \
+		if [ -n "$$INCLUDE" ] && [ -n "$$LIB" ] && [ "$$CMAKE_GENERATOR" = "Ninja" ]; then \
+			echo "  ✅ MSVC env + CMAKE_GENERATOR (via ~/msvc-env.sh)"; \
+		else \
+			echo "  ⬚  ~/msvc-env.sh not sourced (INCLUDE/LIB/CMAKE_GENERATOR unset)"; \
+			echo "     Open a NEW Git Bash after make setup-dev-windows (cc may still self-detect MSVC)"; \
+		fi; \
+		if out=$$(bash scripts/check-vulkan-path-budget.sh 2>&1); then \
+			echo "  ✅ desktop target-dir fits the MAX_PATH budget"; \
+		else \
+			echo "  ❌ desktop target-dir too deep for the ggml-vulkan shader build:"; \
+			echo "$$out" | sed 's/^/     /'; \
+			FAIL=1; \
+		fi; \
+		;; \
+	  *) echo "  ⬚  skipped (not Windows)";; \
+	esac; \
 	\
 	echo ""; \
 	if [ "$$FAIL" -eq 1 ]; then \
@@ -422,15 +461,18 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
+# Shared by test-desktop-build and test-desktop-build-run so the two can't drift.
+DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
+  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
+  _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
+  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
+  _tests/desktop/dev-server-port.bats
+
 test-desktop-build-run:
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/sign-windows-binaries.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
-	  _tests/desktop/dev-server-port.bats
+	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run: guard-not-prod-data-dir
@@ -627,13 +669,7 @@ test-ci:
 
 test-desktop-build: build-angular build-mcp
 	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/sign-windows-binaries.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
-	  _tests/desktop/dev-server-port.bats
+	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
