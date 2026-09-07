@@ -38,10 +38,20 @@ line_of() {
 @test "setup-dev-windows installs one package per choco invocation" {
     # A single aggregate `choco install a b c` exits non-zero when any one package fails,
     # which is what used to abort the whole setup.
-    run grep -cE '^[[:space:]]*choco install' "$SETUP_SCRIPT"
+    run grep -cE '^[[:space:]]*choco ' "$SETUP_SCRIPT"
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
-    run grep -q 'choco install -y --no-progress \$pkg\.Name' "$SETUP_SCRIPT"
+    run grep -q 'choco \$verb -y --no-progress \$pkg\.Name' "$SETUP_SCRIPT"
+    [ "$status" -eq 0 ]
+}
+
+@test "the node probe enforces the .node-version floor, not mere presence" {
+    run grep -q 'Have = { Test-PinnedNode }' "$SETUP_SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -qF "Join-Path \$repoRoot '.node-version'" "$SETUP_SCRIPT"
+    [ "$status" -eq 0 ]
+    # An outdated node is left untouched by `choco install`, so this one upgrades.
+    run grep -q "Name = 'nodejs-lts'.*Upgrade = \$true" "$SETUP_SCRIPT"
     [ "$status" -eq 0 ]
 }
 

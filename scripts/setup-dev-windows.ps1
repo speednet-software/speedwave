@@ -53,6 +53,19 @@ function Test-GnuMake4 {
     return $false
 }
 
+# `.node-version` is the pin SSOT (scripts/check-node-version.sh gates the same floor):
+# an older node on PATH satisfies a bare presence check and strands `make setup-dev`.
+function Test-PinnedNode {
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) { return $false }
+    $pinFile = Join-Path $repoRoot '.node-version'
+    if (-not (Test-Path $pinFile)) { return $true }
+    $required = (Get-Content $pinFile -TotalCount 1).Trim()
+    if ($required -notmatch '^\d+\.\d+\.\d+$') { return $true }
+    if ((& $node.Source --version 2>$null) -notmatch '(\d+\.\d+\.\d+)') { return $false }
+    return ([version]$Matches[1] -ge [version]$required)
+}
+
 # Have = capability probe re-run after the install; Hint = shown only if it still fails.
 # `make` must be GNU Make 4.x (3.81 mis-expands $(VAR)); ninja is cmake-rs's generator.
 $packages = @(
@@ -62,7 +75,10 @@ $packages = @(
     @{ Name = 'make'; Have = { Test-GnuMake4 };
        Hint = 'GNU Make 4.x must win on PATH -- a GnuWin32 3.81 earlier in PATH shadows it.' },
     @{ Name = 'rustup.install'; Have = { Test-Path (Join-Path $env:USERPROFILE '.cargo\bin\rustup.exe') } },
-    @{ Name = 'nodejs-lts'; Have = { [bool](Get-Command node -ErrorAction SilentlyContinue) } },
+    # `upgrade`, not `install`: choco install is a no-op on an already-present older node,
+    # which would leave the pin unsatisfied and be reported as a failure instead of fixed.
+    @{ Name = 'nodejs-lts'; Have = { Test-PinnedNode }; Upgrade = $true;
+       Hint = 'node must satisfy the .node-version floor -- check for a second node earlier on PATH.' },
     @{ Name = 'cmake'; Have = { [bool](Get-Command cmake -ErrorAction SilentlyContinue) } },
     # Probed by path, not by `clang` on PATH: msvc-env.sh derives LIBCLANG_PATH from this dir.
     @{ Name = 'llvm'; Have = { Test-Path (Join-Path $llvmBin 'clang.exe') } },
@@ -84,8 +100,10 @@ foreach ($pkg in $packages) {
         Write-Host "  present: $($pkg.Name)"
         continue
     }
-    Write-Host "  installing: $($pkg.Name)"
-    choco install -y --no-progress $pkg.Name
+    # `upgrade` for a repo-pinned tool, `install` otherwise (see Upgrade above).
+    $verb = if ($pkg.Upgrade) { 'upgrade' } else { 'install' }
+    Write-Host "  ${verb}: $($pkg.Name)"
+    choco $verb -y --no-progress $pkg.Name
     $chocoExit = $LASTEXITCODE
     # Verify by capability, never by choco's exit code: choco fails on an already-present
     # non-choco tool and succeeds for a package that put nothing usable on PATH.
@@ -93,7 +111,7 @@ foreach ($pkg in $packages) {
     if (& $pkg.Have) { continue }
     if ($chocoExit -eq 3010) { $rebootPending = $true; continue }
     $failedItems += $pkg
-    Write-Warning "$($pkg.Name) still missing after choco install (exit $chocoExit) -- continuing."
+    Write-Warning "$($pkg.Name) still missing after choco $verb (exit $chocoExit) -- continuing."
 }
 
 Update-ProcessPath
