@@ -35,15 +35,13 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
     }
 }
 
-# --- Tool locations (static paths; version discovery runs after the installs) --
+# --- Tool locations ----------------------------------------------------------
 $vsBase = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
 $msvcRoot = Join-Path $vsBase 'VC\Tools\MSVC'
 $sdkBinRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
 $llvmBin = "$env:ProgramFiles\LLVM\bin"
 
 # --- Toolchain install (one guarded package at a time) -------------------------
-# A package that is unavailable, or already satisfied by a non-choco install, must never
-# strand the phases below -- MSVC env, Vulkan SDK, long paths and target-dir run regardless.
 
 function Test-GnuMake4 {
     $make = Get-Command make -ErrorAction SilentlyContinue
@@ -53,8 +51,6 @@ function Test-GnuMake4 {
     return $false
 }
 
-# `.node-version` is the pin SSOT (scripts/check-node-version.sh gates the same floor):
-# an older node on PATH satisfies a bare presence check and strands `make setup-dev`.
 function Test-PinnedNode {
     $node = Get-Command node -ErrorAction SilentlyContinue
     if (-not $node) { return $false }
@@ -66,17 +62,14 @@ function Test-PinnedNode {
     return ([version]$Matches[1] -ge [version]$required)
 }
 
-# Have = capability probe re-run after the install; Hint = shown only if it still fails.
 # `make` must be GNU Make 4.x (3.81 mis-expands $(VAR)); ninja is cmake-rs's generator.
 $packages = @(
     @{ Name = 'git'; Have = { [bool](Get-Command git -ErrorAction SilentlyContinue) } },
-    # The pre-commit hook hard-requires it; without it no commit can be made at all.
     @{ Name = 'gitleaks'; Have = { [bool](Get-Command gitleaks -ErrorAction SilentlyContinue) } },
     @{ Name = 'make'; Have = { Test-GnuMake4 };
        Hint = 'GNU Make 4.x must win on PATH -- a GnuWin32 3.81 earlier in PATH shadows it.' },
     @{ Name = 'rustup.install'; Have = { Test-Path (Join-Path $env:USERPROFILE '.cargo\bin\rustup.exe') } },
-    # `upgrade`, not `install`: choco install is a no-op on an already-present older node,
-    # which would leave the pin unsatisfied and be reported as a failure instead of fixed.
+    # `upgrade`, not `install`: choco install is a no-op on an already-present older node.
     @{ Name = 'nodejs-lts'; Have = { Test-PinnedNode }; Upgrade = $true;
        Hint = 'node must satisfy the .node-version floor -- check for a second node earlier on PATH.' },
     @{ Name = 'cmake'; Have = { [bool](Get-Command cmake -ErrorAction SilentlyContinue) } },
@@ -100,13 +93,11 @@ foreach ($pkg in $packages) {
         Write-Host "  present: $($pkg.Name)"
         continue
     }
-    # `upgrade` for a repo-pinned tool, `install` otherwise (see Upgrade above).
     $verb = if ($pkg.Upgrade) { 'upgrade' } else { 'install' }
     Write-Host "  ${verb}: $($pkg.Name)"
     choco $verb -y --no-progress $pkg.Name
     $chocoExit = $LASTEXITCODE
-    # Verify by capability, never by choco's exit code: choco fails on an already-present
-    # non-choco tool and succeeds for a package that put nothing usable on PATH.
+    # Verify by capability, not by choco's exit code: it fails on already-present tools.
     Update-ProcessPath
     if (& $pkg.Have) { continue }
     if ($chocoExit -eq 3010) { $rebootPending = $true; continue }
@@ -142,7 +133,7 @@ if (Test-Path $rustup) {
     Write-Warning "rustup not found at $rustup -- skipped toolchain + tauri-cli (re-run after reboot/PATH refresh)."
 }
 
-# --- MSVC + Windows SDK versions (newest installed; paths are pinned above) ----
+# --- MSVC + Windows SDK versions ---------------------------------------------
 $msvcVer = if (Test-Path $msvcRoot) {
     (Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
 }
@@ -185,8 +176,7 @@ if ((Test-Path $vcvars) -and $msvcVer) {
         $sh += "export LIBPATH='$libpath'"
         if (Test-Path $llvmBin) { $sh += "export LIBCLANG_PATH='$llvmBin'" }
         $sh += "export PATH=`"$bashPath`:`$PATH`""
-        # cmake-rs defaults to the VS generator, which a Build Tools-only box has no
-        # registered VS instance for and whose ExternalProject TryCompile dies on MSB6003.
+        # cmake-rs would pick the VS generator, which a Build Tools-only box has no instance for.
         $sh += "export CMAKE_GENERATOR='Ninja'"
         $home_ = $env:USERPROFILE
         $envShWin = Join-Path $home_ 'msvc-env.sh'
@@ -217,7 +207,6 @@ Write-Host "== Vulkan SDK (Windows whisper Vulkan backend, ADR-085) =="
 try {
     & (Join-Path $repoRoot 'scripts\install-vulkan-sdk.ps1')
 } catch {
-    # Recorded, not fatal here: the long-paths and target-dir phases below must still run.
     $failedItems += @{ Name = 'Vulkan SDK'; Hint = "install-vulkan-sdk.ps1 failed: $_" }
     Write-Warning "Vulkan SDK install failed -- continuing; reported at the end."
 }
@@ -236,27 +225,22 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # --- desktop/src-tauri/.cargo/config.toml: short cargo target-dir (gitignored) -
-# Mandatory on every Windows box, not a deep-clone escape hatch: the budget leaves 9 chars
-# for the whole target dir, so `<repo>\desktop\src-tauri\target` can never fit (ADR-085).
+# Mandatory on every box: the budget leaves 9 chars, which the default target dir cannot fit.
 Write-Host "== Pinning a short cargo target-dir for the desktop build (ADR-085) =="
 $tauriCargoDir = Join-Path $repoRoot 'desktop\src-tauri\.cargo'
 $tauriCargoConfig = Join-Path $tauriCargoDir 'config.toml'
 if (Test-Path $tauriCargoConfig) {
     Write-Host "Kept existing desktop/src-tauri/.cargo/config.toml (per-machine choice)"
 } else {
-    # Forward slashes: valid TOML, and cargo accepts them on Windows -- nothing to escape.
     $shortTargetDir = $env:SystemDrive + '/spwd'
     New-Item -ItemType Directory -Force $tauriCargoDir | Out-Null
-    $toml = "# Generated by scripts/setup-dev-windows.ps1 -- per-machine, gitignored.`n" +
-            "# Short target-dir: scripts/check-vulkan-path-budget.sh gates this (ADR-085).`n" +
+    $toml = "# Generated by scripts/setup-dev-windows.ps1 -- per-machine, gitignored (ADR-085 path budget).`n" +
             "[build]`n" +
             "target-dir = `"$shortTargetDir`"`n"
     Set-Content -Path $tauriCargoConfig -Value $toml -Encoding ascii -NoNewline
     Write-Host "Wrote desktop/src-tauri/.cargo/config.toml (target-dir $shortTargetDir)"
 }
 
-# Everything above runs even when a package failed, so the report comes last -- and a
-# missing tool still exits non-zero: `make dev` would only fail later and less clearly.
 if ($failedItems.Count -gt 0) {
     Write-Host ""
     Write-Host "== Incomplete: $($failedItems.Count) item(s) missing =="

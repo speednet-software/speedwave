@@ -1,18 +1,14 @@
 #!/usr/bin/env bats
-# Guards scripts/setup-dev-windows.ps1: the toolchain install must not be able to strand the
-# config phases, and it must never write the committed repo-root .cargo/config.toml.
+# Guards scripts/setup-dev-windows.ps1: install-phase isolation, and every file it writes.
 
 SETUP_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/setup-dev-windows.ps1"
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 
-# Line number of the first match, so ordering assertions read as "phase A before phase B".
 line_of() {
     grep -n -- "$1" "$SETUP_SCRIPT" | head -1 | cut -d: -f1
 }
 
 @test "setup-dev-windows never writes the committed repo-root .cargo/config.toml" {
-    # That file is the bare-`cargo test` SPEEDWAVE_DATA_DIR guard (see .gitignore) — a
-    # generated overwrite would drop it and dirty the tree.
     run grep -n "Join-Path \$repoRoot '\.cargo'" "$SETUP_SCRIPT"
     [ "$status" -ne 0 ]
 }
@@ -36,8 +32,6 @@ line_of() {
 }
 
 @test "setup-dev-windows installs one package per choco invocation" {
-    # A single aggregate `choco install a b c` exits non-zero when any one package fails,
-    # which is what used to abort the whole setup.
     run grep -cE '^[[:space:]]*choco ' "$SETUP_SCRIPT"
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
@@ -50,7 +44,6 @@ line_of() {
     [ "$status" -eq 0 ]
     run grep -qF "Join-Path \$repoRoot '.node-version'" "$SETUP_SCRIPT"
     [ "$status" -eq 0 ]
-    # An outdated node is left untouched by `choco install`, so this one upgrades.
     run grep -q "Name = 'nodejs-lts'.*Upgrade = \$true" "$SETUP_SCRIPT"
     [ "$status" -eq 0 ]
 }
@@ -76,7 +69,6 @@ line_of() {
     declared="$(printf '%s\n' "$block" | grep -c "@{ Name = '")"
     probes="$(printf '%s\n' "$block" | grep -c "Have = {")"
     [ "$declared" -eq "$probes" ]
-    # The probe, not choco's exit code, decides success.
     run grep -q 'if (& \$pkg\.Have) { continue }' "$SETUP_SCRIPT"
     [ "$status" -eq 0 ]
 }
