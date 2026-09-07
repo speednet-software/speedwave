@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, type Signal } from '@angular/core';
+import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
@@ -64,7 +64,6 @@ export class TranscriptionService {
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
   private downloadUnlisten: UnlistenFn | null = null;
   private downloadPollTimer: ReturnType<typeof setInterval> | undefined;
-  private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
   private readonly recordingSessionIdSignal = signal<string | null>(null);
   private readonly recordingSourceSignal = signal<AudioSource | null>(null);
   private readonly recordingLanguageSignal = signal<Language | null>(null);
@@ -90,8 +89,10 @@ export class TranscriptionService {
   readonly recordingSource: Signal<AudioSource | null> = this.recordingSourceSignal.asReadonly();
   readonly recordingLanguage: Signal<Language | null> = this.recordingLanguageSignal.asReadonly();
 
-  /** Latest capture-health warning for the active session (null = none). */
-  readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
+  /** Capture warnings currently raised for the active session, in arrival order. */
+  readonly captureWarnings: Signal<readonly CaptureWarning[]> = computed(
+    () => this.activeSignal()?.active_warnings ?? []
+  );
 
   /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
   readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
@@ -449,7 +450,6 @@ export class TranscriptionService {
    */
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
-    this.captureWarningSignal.set(null); // warnings are per-session
     if (snapshot.id !== this.recordingSessionIdSignal()) {
       this.liveDraftSignal.set(''); // a genuinely different session starts with no draft
     }
@@ -501,14 +501,15 @@ export class TranscriptionService {
         next.status = { state: 'done' };
         this.liveDraftSignal.set('');
         break;
-      case 'capture_warning':
-        this.captureWarningSignal.set(ev.warning);
+      case 'capture_warning': {
+        // Both conditions can be live at once, and the host repeats a raise it already sent.
+        const raised = next.active_warnings ?? [];
+        next.active_warnings = raised.includes(ev.warning) ? raised : [...raised, ev.warning];
         break;
+      }
       case 'capture_warning_cleared':
         // Only the banner for the recovered warning goes away.
-        if (this.captureWarningSignal() === ev.warning) {
-          this.captureWarningSignal.set(null);
-        }
+        next.active_warnings = (next.active_warnings ?? []).filter((w) => w !== ev.warning);
         break;
     }
     this.lastSeq = ev.seq;

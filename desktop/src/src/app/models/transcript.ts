@@ -76,6 +76,8 @@ export interface TranscriptSession {
   audio_path: string | null;
   /** Extra audio parts recorded by resumes (absent on never-resumed sessions). */
   audio_parts?: string[];
+  /** Capture warnings currently raised, in arrival order (absent when none are). */
+  active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
   last_seq: number;
 }
