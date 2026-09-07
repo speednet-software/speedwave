@@ -84,7 +84,6 @@ describe('RecordingControlsComponent', () => {
       supports_microphone: false,
       note: 'Requires macOS 14.4+',
     },
-    backends: ['cpu', 'metal'],
     gpu_class: 'discrete' as const,
     accel_label: 'Metal (GPU)',
   };
@@ -221,11 +220,10 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('renders the host-computed acceleration label verbatim, never re-deriving it', async () => {
-    // The label is Rust's `accel_label()` (SSOT) — the badge must not recompute it from
-    // backends/gpu_class, so a contradictory pair changes nothing.
+    // The label is Rust's `accel_label()` (SSOT) — the badge renders it as sent, so a
+    // gpu_class that contradicts the label changes nothing.
     svc.getCapabilities.mockResolvedValueOnce({
       ...caps,
-      backends: ['cpu'],
       gpu_class: 'none' as const,
       accel_label: 'Vulkan (integrated GPU)',
     });

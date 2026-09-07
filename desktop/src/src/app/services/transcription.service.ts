@@ -115,9 +115,9 @@ export class TranscriptionService {
     this.downloadProgressSignal.asReadonly();
 
   /**
-   * Capabilities, compiled backends, probed `gpu_class`, and the host-computed acceleration
-   * label. Side effect: caches `gpu_class`, which `liveTranscriptPreferred()` reads (before
-   * the first call it assumes 'discrete', i.e. live on).
+   * Capabilities, probed `gpu_class`, and the host-computed acceleration label. Side effect:
+   * caches `gpu_class`, which `liveTranscriptPreferred()` reads (before the first call it
+   * assumes 'discrete', i.e. live on).
    */
   async getCapabilities(): Promise<CapabilitiesAck> {
     const ack = await this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
