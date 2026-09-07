@@ -1,66 +1,84 @@
 #!/usr/bin/env bats
-# Guards scripts/setup-dev-windows.ps1: install-phase isolation, and every file it writes.
+
+# Guards scripts/setup-dev-windows.ps1: the install phase must never strand the config
+# phases, and the only files it writes stay off the committed cargo config. Static checks
+# (sibling convention): the script itself only runs on a Windows host.
 
 SETUP_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/setup-dev-windows.ps1"
+BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
 REPO_ROOT="$BATS_TEST_DIRNAME/../.."
 
 line_of() {
     grep -n -- "$1" "$SETUP_SCRIPT" | head -1 | cut -d: -f1
 }
 
-@test "setup-dev-windows never writes the committed repo-root .cargo/config.toml" {
-    run grep -n "Join-Path \$repoRoot '\.cargo'" "$SETUP_SCRIPT"
-    [ "$status" -ne 0 ]
+package_loop() {
+    awk '/^foreach \(\$pkg in \$packages\) \{$/,/^\}$/' "$SETUP_SCRIPT"
 }
 
-@test "setup-dev-windows provisions only the gitignored crate-local cargo config" {
-    run grep -cF "Join-Path \$repoRoot 'desktop\\src-tauri\\.cargo'" "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
-    [ "$output" = "1" ]
+@test "script starts with a UTF-8 BOM" {
+    # Windows PowerShell reads a BOM-less .ps1 in the system locale (cross-platform rules).
+    [ "$(od -An -tx1 -N3 "$SETUP_SCRIPT" | tr -d ' \n')" = "efbbbf" ]
+}
+
+@test "the script writes only the msvc env, bashrc and the crate-local cargo config" {
+    # Spelling-independent: a re-introduced <repo>/.cargo/config.toml write would drop the
+    # SPEEDWAVE_DATA_DIR guard that keeps bare `cargo test` off the production data dir.
+    local targets
+    targets="$(grep -oE '(Set-Content|Add-Content|Out-File) -Path \$[A-Za-z_]+' "$SETUP_SCRIPT" |
+        awk '{ print $NF }' | sort -u | tr '\n' ' ')"
+    [ "$targets" = '$bashrc $envShWin $tauriCargoConfig ' ]
 }
 
 @test "desktop/src-tauri/.gitignore keeps the generated cargo config untracked" {
-    run grep -qx "/\.cargo/" "$REPO_ROOT/desktop/src-tauri/.gitignore"
-    [ "$status" -eq 0 ]
+    grep -qx "/\.cargo/" "$REPO_ROOT/desktop/src-tauri/.gitignore"
 }
 
-@test "setup-dev-windows pins a short target-dir for the ggml-vulkan path budget" {
-    run grep -q '\[build\]' "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
-    run grep -q 'target-dir = ' "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
+@test "the generated target-dir fits the budget check-vulkan-path-budget.sh enforces" {
+    local leaf len suffix maxpath
+    leaf="$(grep -oE "SystemDrive \+ '[^']+'" "$SETUP_SCRIPT" | sed "s/.*'\(.*\)'/\1/")"
+    [ -n "$leaf" ]
+    # $env:SystemDrive is "C:" — two chars on every Windows host.
+    len=$(( 2 + ${#leaf} ))
+    suffix="$(grep -oE '^SUFFIX_BUDGET=[0-9]+' "$BUDGET_SCRIPT" | cut -d= -f2)"
+    maxpath="$(grep -oE '^MAX_PATH=[0-9]+' "$BUDGET_SCRIPT" | cut -d= -f2)"
+    [ $(( len + suffix )) -le "$maxpath" ]
+}
+
+@test "the crate-local config is only kept when it actually pins a target-dir" {
+    grep -qF "(?m)^\\s*target-dir\\s*=" "$SETUP_SCRIPT"
+    grep -qF 'target-dir = `"$shortTargetDir`"' "$SETUP_SCRIPT"
 }
 
 @test "setup-dev-windows installs one package per choco invocation" {
-    run grep -cE '^[[:space:]]*choco ' "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
-    [ "$output" = "1" ]
-    run grep -q 'choco \$verb -y --no-progress \$pkg\.Name' "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
+    [ "$(grep -cE '^[[:space:]]*choco ' "$SETUP_SCRIPT")" = "1" ]
+    grep -qF 'choco $verb -y --no-progress $pkg.Name' "$SETUP_SCRIPT"
+}
+
+@test "the package loop never exits early" {
+    # An `exit` here is the original bug: one unavailable package skipped the MSVC env,
+    # the Vulkan SDK, long paths and the target-dir — everything `make dev` needs.
+    ! package_loop | grep -vE '^[[:space:]]*#' | grep -qE '(^|[[:space:]]|\{)exit([[:space:]]|$)'
+}
+
+@test "a package still missing after a 3010 reboot code stays a reported failure" {
+    ! package_loop | grep -qE '3010.*continue'
+    package_loop | grep -qF '$failedItems += @{ Name = $pkg.Name'
 }
 
 @test "the node probe enforces the .node-version floor, not mere presence" {
-    run grep -q 'Have = { Test-PinnedNode }' "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
-    run grep -qF "Join-Path \$repoRoot '.node-version'" "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
-    run grep -q "Name = 'nodejs-lts'.*Upgrade = \$true" "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
+    grep -qF 'Have = { Test-PinnedNode }' "$SETUP_SCRIPT"
+    grep -qF "Join-Path \$repoRoot '.node-version'" "$SETUP_SCRIPT"
+    grep -qE "Name = 'nodejs-lts'.*Upgrade = \\\$true" "$SETUP_SCRIPT"
 }
 
-@test "setup-dev-windows does not list bats-core (absent from the Chocolatey feed)" {
-    run grep -n 'bats' "$SETUP_SCRIPT"
-    [ "$status" -ne 0 ]
+@test "no bats package is listed (none exists on the Chocolatey feed)" {
+    ! awk '/\$packages = @\(/,/^\)$/' "$SETUP_SCRIPT" | grep -q 'bats'
 }
 
-@test "setup-dev-windows installs ninja, the cmake generator for whisper-rs-sys" {
-    run grep -q "Name = 'ninja'" "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
-}
-
-@test "setup-dev-windows exports CMAKE_GENERATOR=Ninja into msvc-env.sh" {
-    run grep -q "export CMAKE_GENERATOR='Ninja'" "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
+@test "setup-dev-windows installs ninja for the forced Ninja generator" {
+    grep -qF "Name = 'ninja'" "$SETUP_SCRIPT"
+    grep -qF "export CMAKE_GENERATOR='Ninja'" "$SETUP_SCRIPT"
 }
 
 @test "every package carries a capability probe re-checked after the install" {
@@ -69,11 +87,10 @@ line_of() {
     declared="$(printf '%s\n' "$block" | grep -c "@{ Name = '")"
     probes="$(printf '%s\n' "$block" | grep -c "Have = {")"
     [ "$declared" -eq "$probes" ]
-    run grep -q 'if (& \$pkg\.Have) { continue }' "$SETUP_SCRIPT"
-    [ "$status" -eq 0 ]
+    grep -qF 'if (& $pkg.Have) { continue }' "$SETUP_SCRIPT"
 }
 
-@test "a failed package is reported after the config phases, not before them" {
+@test "a failed item is reported after the config phases, not before them" {
     local vulkan longpaths targetdir report
     vulkan="$(line_of '== Vulkan SDK')"
     longpaths="$(line_of 'LongPathsEnabled')"
@@ -85,7 +102,7 @@ line_of() {
     [ "$targetdir" -lt "$report" ]
 }
 
-@test "a missing package still fails the script" {
+@test "a missing item still fails the script" {
     local report exit_line
     report="$(line_of '== Incomplete')"
     exit_line="$(awk -v s="$report" 'NR > s && $0 ~ /^[[:space:]]*exit 1$/ { print NR; exit }' \

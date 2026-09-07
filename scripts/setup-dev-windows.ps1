@@ -21,14 +21,18 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Write-Host "Speedwave Windows dev setup (repo: $repoRoot)"
 
+function Update-ProcessPath {
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                [Environment]::GetEnvironmentVariable('Path', 'User')
+}
+
 # --- Chocolatey ----------------------------------------------------------------
 if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
     Write-Host "== Installing Chocolatey =="
     Set-ExecutionPolicy Bypass -Scope Process -Force
     [System.Net.ServicePointManager]::SecurityProtocol = 3072
     Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                [Environment]::GetEnvironmentVariable('Path', 'User')
+    Update-ProcessPath
     if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
         Write-Host "ERROR: Chocolatey install failed (choco not on PATH afterwards)."
         exit 1
@@ -54,15 +58,12 @@ function Test-GnuMake4 {
 function Test-PinnedNode {
     $node = Get-Command node -ErrorAction SilentlyContinue
     if (-not $node) { return $false }
-    $pinFile = Join-Path $repoRoot '.node-version'
-    if (-not (Test-Path $pinFile)) { return $true }
-    $required = (Get-Content $pinFile -TotalCount 1).Trim()
-    if ($required -notmatch '^\d+\.\d+\.\d+$') { return $true }
+    $required = (Get-Content (Join-Path $repoRoot '.node-version') -TotalCount 1).Trim()
     if ((& $node.Source --version 2>$null) -notmatch '(\d+\.\d+\.\d+)') { return $false }
     return ([version]$Matches[1] -ge [version]$required)
 }
 
-# `make` must be GNU Make 4.x (3.81 mis-expands $(VAR)); ninja is cmake-rs's generator.
+# `make` must be GNU Make 4.x (3.81 mis-expands $(VAR)); ninja backs the forced Ninja generator.
 $packages = @(
     @{ Name = 'git'; Have = { [bool](Get-Command git -ErrorAction SilentlyContinue) } },
     @{ Name = 'gitleaks'; Have = { [bool](Get-Command gitleaks -ErrorAction SilentlyContinue) } },
@@ -77,13 +78,8 @@ $packages = @(
     @{ Name = 'llvm'; Have = { Test-Path (Join-Path $llvmBin 'clang.exe') } },
     @{ Name = 'ninja'; Have = { [bool](Get-Command ninja -ErrorAction SilentlyContinue) } },
     @{ Name = 'visualstudio2022buildtools'; Have = { Test-Path $vsBase } },
-    @{ Name = 'visualstudio2022-workload-vctools'; Have = { Test-Path (Join-Path $vsBase 'VC\Tools\MSVC') } }
+    @{ Name = 'visualstudio2022-workload-vctools'; Have = { Test-Path $msvcRoot } }
 )
-
-function Update-ProcessPath {
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                [Environment]::GetEnvironmentVariable('Path', 'User')
-}
 
 $failedItems = @()
 $rebootPending = $false
@@ -97,11 +93,13 @@ foreach ($pkg in $packages) {
     Write-Host "  ${verb}: $($pkg.Name)"
     choco $verb -y --no-progress $pkg.Name
     $chocoExit = $LASTEXITCODE
-    # Verify by capability, not by choco's exit code: it fails on already-present tools.
+    # Re-probe rather than trust the exit code: choco reports 0 for a package that put
+    # nothing usable on PATH, and 3010 for one that needs a reboot to become usable.
     Update-ProcessPath
     if (& $pkg.Have) { continue }
-    if ($chocoExit -eq 3010) { $rebootPending = $true; continue }
-    $failedItems += $pkg
+    if ($chocoExit -eq 3010) { $rebootPending = $true }
+    $hint = if ($pkg.Hint) { $pkg.Hint } else { "choco $verb exited $chocoExit." }
+    $failedItems += @{ Name = $pkg.Name; Hint = $hint }
     Write-Warning "$($pkg.Name) still missing after choco $verb (exit $chocoExit) -- continuing."
 }
 
@@ -118,19 +116,20 @@ if (Test-Path $rustup) {
     $rustupExit = $LASTEXITCODE
     Pop-Location
     if ($rustupExit -ne 0) {
-        Write-Host "ERROR: rustup show failed with exit code $rustupExit"
-        exit $rustupExit
+        $failedItems += @{ Name = 'rust toolchain'; Hint = "rustup show failed (exit $rustupExit) -- re-run after a reboot/PATH refresh." }
+        Write-Warning "rustup show failed (exit $rustupExit) -- continuing; reported at the end."
     }
     if ((Test-Path $cargo) -and -not (Test-Path (Join-Path $cargoBin 'cargo-tauri.exe'))) {
         Write-Host "== cargo install tauri-cli =="
         & $cargo install tauri-cli --locked
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: cargo install tauri-cli failed with exit code $LASTEXITCODE"
-            exit $LASTEXITCODE
+            $failedItems += @{ Name = 'cargo-tauri'; Hint = "cargo install tauri-cli failed (exit $LASTEXITCODE) -- 'make dev' needs it." }
+            Write-Warning "cargo install tauri-cli failed -- continuing; reported at the end."
         }
     }
 } else {
-    Write-Warning "rustup not found at $rustup -- skipped toolchain + tauri-cli (re-run after reboot/PATH refresh)."
+    $failedItems += @{ Name = 'rustup'; Hint = "not at $rustup -- skipped the pinned toolchain and tauri-cli." }
+    Write-Warning "rustup not found at $rustup -- continuing; reported at the end."
 }
 
 # --- MSVC + Windows SDK versions ---------------------------------------------
@@ -162,7 +161,8 @@ if ((Test-Path $vcvars) -and $msvcVer) {
     # success and leave later cargo builds failing cryptically. Skip (warn-and-continue,
     # like the missing-vcvars branch) rather than persisting a broken env file.
     if ([string]::IsNullOrWhiteSpace($include) -or [string]::IsNullOrWhiteSpace($lib)) {
-        Write-Warning "vcvars64.bat produced no INCLUDE/LIB (exit $LASTEXITCODE) -- skipped ~/msvc-env.sh; re-run after VS Build Tools finishes."
+        $failedItems += @{ Name = '~/msvc-env.sh'; Hint = 'vcvars64.bat produced no INCLUDE/LIB -- re-run after VS Build Tools finishes.' }
+        Write-Warning "vcvars64.bat produced no INCLUDE/LIB (exit $LASTEXITCODE) -- continuing; reported at the end."
     } else {
         $pathAdds = @("$msvcRoot\$msvcVer\bin\HostX64\x64")
         if ($sdkVer) { $pathAdds += "$sdkBinRoot\$sdkVer\x64" }
@@ -197,7 +197,8 @@ if ((Test-Path $vcvars) -and $msvcVer) {
         }
     }
 } else {
-    Write-Warning "vcvars64.bat/MSVC not found -- skipped ~/msvc-env.sh (re-run after VS Build Tools finishes/reboot)."
+    $failedItems += @{ Name = '~/msvc-env.sh'; Hint = 'vcvars64.bat/MSVC not found -- re-run after VS Build Tools finishes or a reboot.' }
+    Write-Warning "vcvars64.bat/MSVC not found -- continuing; reported at the end."
 }
 
 
@@ -226,19 +227,57 @@ if ($LASTEXITCODE -ne 0) {
 
 # --- desktop/src-tauri/.cargo/config.toml: short cargo target-dir (gitignored) -
 # Mandatory on every box: the budget leaves 9 chars, which the default target dir cannot fit.
+# One dir per machine, not per clone: 9 chars cannot carry a per-clone suffix, so parallel
+# clones/worktrees must each export their own short CARGO_TARGET_DIR instead.
 Write-Host "== Pinning a short cargo target-dir for the desktop build (ADR-085) =="
 $tauriCargoDir = Join-Path $repoRoot 'desktop\src-tauri\.cargo'
 $tauriCargoConfig = Join-Path $tauriCargoDir 'config.toml'
+$shortTargetDir = $env:SystemDrive + '/spwd'
 if (Test-Path $tauriCargoConfig) {
-    Write-Host "Kept existing desktop/src-tauri/.cargo/config.toml (per-machine choice)"
+    if ((Get-Content $tauriCargoConfig -Raw) -match '(?m)^\s*target-dir\s*=') {
+        Write-Host "Kept existing desktop/src-tauri/.cargo/config.toml (per-machine target-dir)"
+    } else {
+        $failedItems += @{ Name = 'desktop/src-tauri/.cargo/config.toml';
+                           Hint = 'exists but sets no [build] target-dir -- add one, or delete the file and re-run.' }
+        Write-Warning "Existing crate-local cargo config sets no target-dir -- the path budget will fail."
+    }
 } else {
-    $shortTargetDir = $env:SystemDrive + '/spwd'
     New-Item -ItemType Directory -Force $tauriCargoDir | Out-Null
     $toml = "# Generated by scripts/setup-dev-windows.ps1 -- per-machine, gitignored (ADR-085 path budget).`n" +
             "[build]`n" +
             "target-dir = `"$shortTargetDir`"`n"
     Set-Content -Path $tauriCargoConfig -Value $toml -Encoding ascii -NoNewline
     Write-Host "Wrote desktop/src-tauri/.cargo/config.toml (target-dir $shortTargetDir)"
+}
+
+# Create it here, elevated: the default DACL on the drive root lets any local account
+# pre-create it and keep CREATOR OWNER control over every desktop build artifact.
+$shortTargetWin = $shortTargetDir -replace '/', '\'
+if (Test-Path $shortTargetWin) {
+    $owner = (Get-Acl $shortTargetWin).Owner
+    $trusted = @("$env:USERDOMAIN\$env:USERNAME", 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')
+    if ($trusted -notcontains $owner) {
+        $failedItems += @{ Name = $shortTargetWin; Hint = "pre-existing and owned by '$owner' -- delete it or pick another target-dir." }
+        Write-Warning "$shortTargetWin is owned by '$owner', not you -- refusing to build into it."
+    }
+} else {
+    New-Item -ItemType Directory -Force $shortTargetWin | Out-Null
+    # Owned by the elevated shell, so grant the invoking user the write access cargo needs.
+    icacls $shortTargetWin /grant "${env:USERNAME}:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "icacls could not grant $env:USERNAME access to $shortTargetWin -- cargo may fail to write there."
+    }
+    Write-Host "Created $shortTargetWin"
+}
+
+# An older revision of this script overwrote the committed <repo>/.cargo/config.toml,
+# dropping the SPEEDWAVE_DATA_DIR guard that keeps bare `cargo test` off ~/.speedwave.
+$repoCargoConfig = Join-Path $repoRoot '.cargo\config.toml'
+if ((Test-Path $repoCargoConfig) -and ((Get-Content $repoCargoConfig -Raw) -notmatch 'SPEEDWAVE_DATA_DIR')) {
+    Write-Warning "$repoCargoConfig lost its SPEEDWAVE_DATA_DIR guard -- restore it: git checkout -- .cargo/config.toml"
+}
+if (Test-Path "$repoCargoConfig.bak") {
+    Write-Warning "$repoCargoConfig.bak is left over from an older setup run (not gitignored) -- delete it."
 }
 
 if ($failedItems.Count -gt 0) {
