@@ -33,12 +33,14 @@ describe('MeetingTranscriptionComponent', () => {
     recordingSessionId: typeof recordingSessionIdSig;
     recordingSource: typeof recordingSourceSig;
     recordingLanguage: typeof recordingLanguageSig;
+    recordingLive: typeof recordingLiveSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
   const captureWarningSig = signal<CaptureWarning | null>(null);
   const recordingSessionIdSig = signal<string | null>(null);
   const recordingSourceSig = signal<AudioSource | null>(null);
   const recordingLanguageSig = signal<Language | null>(null);
+  const recordingLiveSig = signal<boolean | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -59,6 +61,7 @@ describe('MeetingTranscriptionComponent', () => {
     recordingSessionIdSig.set(null);
     recordingSourceSig.set(null);
     recordingLanguageSig.set(null);
+    recordingLiveSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
@@ -86,6 +89,7 @@ describe('MeetingTranscriptionComponent', () => {
       recordingSessionId: recordingSessionIdSig,
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,
+      recordingLive: recordingLiveSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
