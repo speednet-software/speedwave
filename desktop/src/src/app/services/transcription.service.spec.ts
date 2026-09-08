@@ -461,14 +461,14 @@ describe('TranscriptionService', () => {
     it('defaults from the probed GPU class when nothing is stored', async () => {
       mockTauri.invokeHandler = async (cmd) =>
         cmd === 'transcription_capabilities'
-          ? { capabilities: {}, backends: ['cpu', 'vulkan'], gpu_class: 'integrated' }
+          ? { capabilities: {}, gpu_class: 'integrated' }
           : undefined;
       await svc.getCapabilities();
       expect(svc.liveTranscriptPreferred()).toBe(false);
 
       mockTauri.invokeHandler = async (cmd) =>
         cmd === 'transcription_capabilities'
-          ? { capabilities: {}, backends: ['cpu', 'metal'], gpu_class: 'discrete' }
+          ? { capabilities: {}, gpu_class: 'discrete' }
           : undefined;
       await svc.getCapabilities();
       expect(svc.liveTranscriptPreferred()).toBe(true);
@@ -476,9 +476,7 @@ describe('TranscriptionService', () => {
 
     it('a stored choice beats the hardware default and round-trips', async () => {
       mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'transcription_capabilities'
-          ? { capabilities: {}, backends: ['cpu'], gpu_class: 'none' }
-          : undefined;
+        cmd === 'transcription_capabilities' ? { capabilities: {}, gpu_class: 'none' } : undefined;
       await svc.getCapabilities();
       svc.setLiveTranscriptPreferred(true);
       expect(svc.liveTranscriptPreferred()).toBe(true);

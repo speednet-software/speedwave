@@ -71,7 +71,6 @@ describe('MeetingTranscriptionComponent', () => {
           supports_microphone: false,
           note: null,
         },
-        backends: ['cpu'],
         gpu_class: 'none' as const,
         accel_label: 'CPU',
       })),
