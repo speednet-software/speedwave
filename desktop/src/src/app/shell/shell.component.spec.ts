@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { signal } from '@angular/core';
+import { signal, computed } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, RouterModule } from '@angular/router';
 import { ShellComponent } from './shell.component';
@@ -9,6 +9,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { ThemeService } from '../services/theme.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { TranscriptionService } from '../services/transcription.service';
 
 describe('ShellComponent', () => {
   let component: ShellComponent;
@@ -17,9 +18,11 @@ describe('ShellComponent', () => {
   let projectState: ProjectStateService;
   // Beta on by default so the meeting-transcription nav entry is present.
   const betaEnabled = signal(true);
+  const recordingSessionId = signal<string | null>(null);
 
   beforeEach(async () => {
     betaEnabled.set(true);
+    recordingSessionId.set(null);
     mockTauri = new MockTauriService();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'list_projects')
@@ -47,6 +50,13 @@ describe('ShellComponent', () => {
       providers: [
         { provide: TauriService, useValue: mockTauri },
         { provide: BetaService, useValue: { enabled: betaEnabled.asReadonly() } },
+        {
+          provide: TranscriptionService,
+          useValue: {
+            recordingSessionId: recordingSessionId.asReadonly(),
+            recording: computed(() => recordingSessionId() !== null),
+          },
+        },
       ],
     }).compileComponents();
 
@@ -324,6 +334,82 @@ describe('ShellComponent', () => {
       'nav-settings',
       'nav-logs',
     ]);
+  });
+
+  describe('recording indicator', () => {
+    const DOT = '[data-testid="nav-recording-dot-meeting-transcription"]';
+    const SESSION = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+    function startRecording(): void {
+      recordingSessionId.set(SESSION);
+      fixture.detectChanges();
+    }
+
+    it('has no dot while recordingSessionId is null', () => {
+      expect(fixture.nativeElement.querySelector(DOT)).toBeNull();
+    });
+
+    it('shows the dot when recordingSessionId is set and drops it when it clears', () => {
+      startRecording();
+      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
+
+      recordingSessionId.set(null);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector(DOT)).toBeNull();
+    });
+
+    it('stays visible after navigating away from the transcription tab', async () => {
+      startRecording();
+
+      const router = TestBed.inject(Router);
+      await router.navigate(['/settings']);
+      fixture.detectChanges();
+
+      expect(component.activeViewId()).toBe('settings');
+      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
+    });
+
+    it('names the recording state on the entry so it is not colour-only', () => {
+      startRecording();
+
+      const entry = fixture.nativeElement.querySelector(
+        '[data-testid="nav-meeting-transcription"]'
+      );
+      expect(entry.getAttribute('aria-label')).toBe('Meeting transcription (recording)');
+    });
+
+    it('marks no other entry as recording', () => {
+      startRecording();
+
+      const dots = fixture.nativeElement.querySelectorAll('[data-testid^="nav-recording-dot-"]');
+      expect(dots.length).toBe(1);
+    });
+
+    it('keeps the entry and its dot when beta is turned off mid-recording', () => {
+      // Beta is toggleable from the tray while a driver runs; losing the entry would
+      // take the only in-window indicator and the Stop control with it.
+      startRecording();
+      betaEnabled.set(false);
+      fixture.detectChanges();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
+      ).not.toBeNull();
+      expect(fixture.nativeElement.querySelector(DOT)).not.toBeNull();
+    });
+
+    it('drops the entry again once the recording ends with beta off', () => {
+      startRecording();
+      betaEnabled.set(false);
+      fixture.detectChanges();
+
+      recordingSessionId.set(null);
+      fixture.detectChanges();
+
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="nav-meeting-transcription"]')
+      ).toBeNull();
+    });
   });
 
   describe('restart overlay', () => {

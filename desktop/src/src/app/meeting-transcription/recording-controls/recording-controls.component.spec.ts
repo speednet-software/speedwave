@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { signal } from '@angular/core';
+import { computed, signal, type Signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
@@ -68,6 +68,7 @@ describe('RecordingControlsComponent', () => {
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     recordingSessionId: typeof recordingSessionId;
+    recording: Signal<boolean>;
     recordingSource: typeof recordingSource;
     recordingLanguage: typeof recordingLanguage;
   };
@@ -154,6 +155,7 @@ describe('RecordingControlsComponent', () => {
       requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       recordingSessionId,
+      recording: computed(() => recordingSessionId() !== null),
       recordingSource,
       recordingLanguage,
     };

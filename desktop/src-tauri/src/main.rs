@@ -1111,10 +1111,10 @@ fn main() {
             )?;
             let tray_icon = tray::load_tray_icon()?;
 
-            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+            let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
                 .icon(tray_icon)
                 .icon_as_template(true)
-                .tooltip("Speedwave")
+                .tooltip(tray::TOOLTIP_IDLE)
                 .menu(&tray_menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "open" => {

@@ -15,6 +15,8 @@ export interface NavRailEntry {
   iconName: IconName;
   /** Hint shown next to the label, e.g. `⌘1`. */
   shortcut?: string;
+  /** Renders a pulsing red dot on the entry; set while its feature is capturing. */
+  recording?: boolean;
 }
 
 /** Vertical icon rail with 36×36 icon buttons; active entry gets a 2px accent bar. */
@@ -39,12 +41,19 @@ export interface NavRailEntry {
           [routerLink]="entry.route"
           [attr.data-testid]="'nav-' + entry.id"
           [attr.aria-current]="entry.id === activeId() ? 'page' : null"
-          [attr.aria-label]="entry.label"
-          [attr.title]="entry.label"
+          [attr.aria-label]="entryLabel(entry)"
+          [attr.title]="entryLabel(entry)"
           [class.active]="entry.id === activeId()"
           class="rail-btn"
         >
           <app-icon [name]="entry.iconName" class="h-[18px] w-[18px]" />
+          @if (entry.recording) {
+            <span
+              class="pointer-events-none absolute right-1 top-1 h-2 w-2 animate-record-pulse rounded-full bg-[var(--red)] ring-2 ring-[var(--bg-1)] motion-reduce:animate-none"
+              [attr.data-testid]="'nav-recording-dot-' + entry.id"
+              aria-hidden="true"
+            ></span>
+          }
         </a>
       }
     </nav>
@@ -71,4 +80,14 @@ export class NavRailComponent {
   readonly activeId = input.required<string>();
   /** Emitted when the bottom palette button is clicked. */
   readonly paletteOpened = output<void>();
+
+  /**
+   * Tooltip and accessible name for an entry; carries the recording state, which the dot
+   * itself cannot because it is `aria-hidden`.
+   * @param entry - the entry being rendered.
+   * @returns the entry label, suffixed while that entry is recording.
+   */
+  entryLabel(entry: NavRailEntry): string {
+    return entry.recording ? `${entry.label} (recording)` : entry.label;
+  }
 }

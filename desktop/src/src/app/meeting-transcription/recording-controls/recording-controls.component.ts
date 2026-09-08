@@ -230,7 +230,7 @@ export class RecordingControlsComponent implements OnInit {
    * `true` while a recording is in progress — read from the service so it
    * survives this tab being destroyed on navigation (the driver keeps going).
    */
-  readonly recording = computed(() => this.transcription.recordingSessionId() !== null);
+  readonly recording = this.transcription.recording;
 
   /** Loads backends + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {

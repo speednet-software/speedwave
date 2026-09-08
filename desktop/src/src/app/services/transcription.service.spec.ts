@@ -188,6 +188,41 @@ describe('TranscriptionService', () => {
       expect(svc.recordingSessionId()).toBeNull();
     });
 
+    it('clears the tracked recording when the driver fails on its own', async () => {
+      // The backend releases its registry slot on a self-inflicted end (a lost device), so
+      // the frontend indicators must follow without waiting for an explicit stop.
+      await startWith('sess-1');
+      expect(svc.recording()).toBe(true);
+
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'failed', reason: 'capture device lost' },
+      });
+
+      expect(svc.recording()).toBe(false);
+      expect(svc.recordingSessionId()).toBeNull();
+      expect(svc.recordingSource()).toBeNull();
+      expect(svc.recordingLanguage()).toBeNull();
+    });
+
+    it('clears the tracked recording when the session finishes', async () => {
+      await startWith('sess-1');
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 1 });
+      expect(svc.recording()).toBe(false);
+    });
+
+    it('keeps the tracked recording while the status stays recording', async () => {
+      await startWith('sess-1');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'recording' },
+      });
+      expect(svc.recordingSessionId()).toBe('sess-1');
+      expect(svc.recording()).toBe(true);
+    });
+
     it('resumeActiveRecording re-subscribes to a still-running recording', async () => {
       await startWith('sess-1');
       await svc.detach(); // simulate the record tab being destroyed

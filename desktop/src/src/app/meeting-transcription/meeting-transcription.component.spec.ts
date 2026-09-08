@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { signal } from '@angular/core';
+import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
 import type {
@@ -31,6 +31,7 @@ describe('MeetingTranscriptionComponent', () => {
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     captureWarning: typeof captureWarningSig;
     recordingSessionId: typeof recordingSessionIdSig;
+    recording: Signal<boolean>;
     recordingSource: typeof recordingSourceSig;
     recordingLanguage: typeof recordingLanguageSig;
   };
@@ -85,6 +86,7 @@ describe('MeetingTranscriptionComponent', () => {
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       captureWarning: captureWarningSig,
       recordingSessionId: recordingSessionIdSig,
+      recording: computed(() => recordingSessionIdSig() !== null),
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,
     };

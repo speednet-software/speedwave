@@ -334,6 +334,7 @@
 
   /* Animations */
   --animate-blink: blink 1s step-end infinite;
+  --animate-record-pulse: record-pulse 1.6s ease-in-out infinite;
 
   @keyframes blink {
     0%,
@@ -343,6 +344,18 @@
     51%,
     100% {
       opacity: 0;
+    }
+  }
+
+  /* Recording indicator: a soft breathe rather than a hard blink. It runs for a whole
+     meeting, so it has to stay noticeable without turning into a distraction. */
+  @keyframes record-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
     }
   }
 

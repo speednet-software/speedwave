@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, type Signal } from '@angular/core';
+import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
@@ -82,6 +82,9 @@ export class TranscriptionService {
    * record tab being destroyed on navigation (the backend driver keeps going).
    */
   readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
+
+  /** `true` while a recording is in flight: the one predicate every indicator reads. */
+  readonly recording: Signal<boolean> = computed(() => this.recordingSessionIdSignal() !== null);
 
   /**
    * Source/language of the in-progress recording — service-level so a remounted
@@ -464,6 +467,18 @@ export class TranscriptionService {
   }
 
   /**
+   * The backend releases its driver on a self-inflicted end too (a lost device), so without
+   * this the indicators would keep claiming a live microphone until the next explicit stop.
+   * @param sessionId - session whose recording ended.
+   */
+  private clearInProgressRecording(sessionId: string): void {
+    if (this.recordingSessionIdSignal() !== sessionId) return;
+    this.recordingSessionIdSignal.set(null);
+    this.recordingSourceSignal.set(null);
+    this.recordingLanguageSignal.set(null);
+  }
+
+  /**
    * Idempotent event application: ignores `seq <= lastSeq` (already captured via the snapshot path).
    * @param ev - incoming event.
    */
@@ -488,6 +503,7 @@ export class TranscriptionService {
         if (ev.status.state !== 'recording') {
           this.liveDraftSignal.set('');
           this.audioLevelsSignal.set(null);
+          this.clearInProgressRecording(cur.id);
         }
         break;
       case 'finalize_progress':
@@ -500,6 +516,7 @@ export class TranscriptionService {
       case 'finished':
         next.status = { state: 'done' };
         this.liveDraftSignal.set('');
+        this.clearInProgressRecording(cur.id);
         break;
       case 'capture_warning':
         this.captureWarningSignal.set(ev.warning);
