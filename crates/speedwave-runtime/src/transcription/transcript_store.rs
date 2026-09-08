@@ -141,6 +141,19 @@ pub struct TranscriptStore {
     sessions: Arc<DashMap<Uuid, Entry>>,
 }
 
+/// Drains the raised capture warnings into one recovery event each, starting at `next_seq` —
+/// the set retires through the stream, not just in the snapshot.
+fn drain_capture_warnings(s: &mut TranscriptSession, next_seq: u64) -> Vec<TranscriptEvent> {
+    std::mem::take(&mut s.active_warnings)
+        .into_iter()
+        .enumerate()
+        .map(|(i, warning)| TranscriptEvent::CaptureWarningCleared {
+            seq: next_seq + i as u64,
+            warning,
+        })
+        .collect()
+}
+
 impl TranscriptStore {
     /// A store rooted at `<data_dir>/transcripts/`.
     pub fn new() -> Self {
@@ -399,13 +412,27 @@ impl TranscriptStore {
         Ok(seq)
     }
 
-    /// Sets the status.
+    /// Sets the status; leaving `Recording` retires the raised capture warnings, emitting a
+    /// recovery event for each so subscribers converge on what the snapshot reports.
     pub fn set_status(&self, id: Uuid, status: TranscriptStatus) -> Result<u64, StoreError> {
         let mut seq_out = 0;
-        self.with_session(id, |s, seq| {
-            seq_out = seq;
+        self.with_session_batch(id, |s, next_seq| {
+            // Gated on the pre-transition status: a late repeat of the same transition must not
+            // wipe warnings the offline pass raised in the meantime.
+            let leaving_capture = matches!(s.status, TranscriptStatus::Recording)
+                && !matches!(status, TranscriptStatus::Recording);
+            let mut events = if leaving_capture {
+                drain_capture_warnings(s, next_seq)
+            } else {
+                Vec::new()
+            };
             s.status = status.clone();
-            TranscriptEvent::StatusChanged { seq, status }
+            seq_out = next_seq + events.len() as u64;
+            events.push(TranscriptEvent::StatusChanged {
+                seq: seq_out,
+                status,
+            });
+            events
         })?;
         Ok(seq_out)
     }
@@ -427,7 +454,9 @@ impl TranscriptStore {
                 return Vec::new();
             }
             resumable = true;
-            seq_out = seq;
+            // A resumed capture starts healthy: the previous pass's warnings (including a
+            // `RecordingPartMissing` no producer ever retracts) must not carry into it.
+            let mut events = drain_capture_warnings(s, seq);
             if let Some(finals) = s.final_segments.take() {
                 s.live_segments = finals;
             }
@@ -437,10 +466,12 @@ impl TranscriptStore {
             s.prior_live_model = s.models_used.live.take();
             s.models_used.live = live_model.clone();
             s.status = TranscriptStatus::Recording;
-            vec![TranscriptEvent::StatusChanged {
-                seq,
+            seq_out = seq + events.len() as u64;
+            events.push(TranscriptEvent::StatusChanged {
+                seq: seq_out,
                 status: TranscriptStatus::Recording,
-            }]
+            });
+            events
         })?;
         if !resumable {
             return Err(StoreError::InvalidState(
@@ -484,29 +515,33 @@ impl TranscriptStore {
         Ok(seq_out)
     }
 
-    /// Emits a capture-health warning event (session state is unchanged).
+    /// Records a raised capture-health warning on the session and emits its event.
     pub fn capture_warning(
         &self,
         id: Uuid,
         warning: crate::transcription::CaptureWarning,
     ) -> Result<u64, StoreError> {
         let mut seq_out = 0;
-        self.with_session(id, |_s, seq| {
+        self.with_session(id, |s, seq| {
             seq_out = seq;
+            if !s.active_warnings.contains(&warning) {
+                s.active_warnings.push(warning);
+            }
             TranscriptEvent::CaptureWarning { seq, warning }
         })?;
         Ok(seq_out)
     }
 
-    /// Emits a capture-health recovery event (session state is unchanged).
+    /// Clears one raised capture-health warning from the session and emits its recovery event.
     pub fn capture_warning_cleared(
         &self,
         id: Uuid,
         warning: crate::transcription::CaptureWarning,
     ) -> Result<u64, StoreError> {
         let mut seq_out = 0;
-        self.with_session(id, |_s, seq| {
+        self.with_session(id, |s, seq| {
             seq_out = seq;
+            s.active_warnings.retain(|w| *w != warning);
             TranscriptEvent::CaptureWarningCleared { seq, warning }
         })?;
         Ok(seq_out)
@@ -620,10 +655,150 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
-        // Session state is untouched apart from the persisted seq.
+        // The raise is recorded on the session so a snapshot can rebuild the banner.
         let snap = store.get(id).unwrap();
         assert_eq!(snap.last_seq, seq);
+        assert_eq!(
+            snap.active_warnings,
+            vec![crate::transcription::CaptureWarning::MicrophoneStalled]
+        );
         assert!(snap.live_segments.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_warnings_accumulate_and_clear_one_at_a_time() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+
+        store
+            .capture_warning(id, CaptureWarning::MicrophoneStalled)
+            .unwrap();
+        store
+            .capture_warning(id, CaptureWarning::AudioDropped)
+            .unwrap();
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![
+                CaptureWarning::MicrophoneStalled,
+                CaptureWarning::AudioDropped
+            ],
+            "both conditions are live at once, in arrival order"
+        );
+
+        // Re-raising an already-raised warning must not duplicate the banner.
+        store
+            .capture_warning(id, CaptureWarning::MicrophoneStalled)
+            .unwrap();
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![
+                CaptureWarning::MicrophoneStalled,
+                CaptureWarning::AudioDropped
+            ]
+        );
+
+        store
+            .capture_warning_cleared(id, CaptureWarning::AudioDropped)
+            .unwrap();
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![CaptureWarning::MicrophoneStalled],
+            "a recovery clears only its own variant"
+        );
+
+        // Clearing something never raised is a no-op, not a wipe.
+        store
+            .capture_warning_cleared(id, CaptureWarning::SystemAudioSilent)
+            .unwrap();
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![CaptureWarning::MicrophoneStalled]
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_recording_retires_the_warnings_through_the_event_stream() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .capture_warning(id, CaptureWarning::SystemAudioStalled)
+            .unwrap();
+        // A raise is persisted immediately, so a reader that never saw the event still sees it.
+        let reloaded = TranscriptStore::with_root(dir.path());
+        assert_eq!(
+            reloaded.get(id).unwrap().active_warnings,
+            vec![CaptureWarning::SystemAudioStalled]
+        );
+
+        let mut sub = store.subscribe(id).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        assert!(store.get(id).unwrap().active_warnings.is_empty());
+        // A subscriber must converge on the same state a fresh snapshot reports, so the clear
+        // rides the stream rather than only the session.
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::CaptureWarningCleared { warning, .. } => {
+                assert_eq!(warning, CaptureWarning::SystemAudioStalled);
+            }
+            other => panic!("expected the warning to be retired first, got {other:?}"),
+        }
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::StatusChanged { .. } => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_warning_raised_by_the_offline_pass_survives_to_done() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        // The offline pass raises this one after capture ended; it is the finished recording's
+        // own defect, so no later transition may retire it.
+        store
+            .capture_warning(id, CaptureWarning::RecordingPartMissing)
+            .unwrap();
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![CaptureWarning::RecordingPartMissing]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_starts_with_no_raised_warnings() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        store
+            .capture_warning(id, CaptureWarning::RecordingPartMissing)
+            .unwrap();
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+
+        store
+            .resume(
+                id,
+                dir.path().join("audio-2.wav"),
+                Some("small".to_string()),
+            )
+            .unwrap();
+        assert!(
+            store.get(id).unwrap().active_warnings.is_empty(),
+            "nothing retracts RecordingPartMissing, so a new capture would carry it forever"
+        );
     }
 
     #[cfg(unix)]
@@ -780,20 +955,19 @@ mod tests {
             .unwrap();
         let s4 = store.finalize_progress(id, 0.75).unwrap();
         let s5 = store.finish(id).unwrap();
-        // Monotonic seqs.
-        let seqs = [s1, s2, s3, s4, s5];
-        for w in seqs.windows(2) {
-            assert_eq!(
-                w[1],
-                w[0] + 1,
-                "seqs must be monotonic + dense, got {seqs:?}"
-            );
+        // Six events for five mutators: leaving `Recording` retires the warning raised
+        // above, so `set_status` emits that Cleared event ahead of its own StatusChanged.
+        let mut got = Vec::new();
+        for _ in 0..6 {
+            got.push(rx.recv().await.unwrap().seq());
         }
-        // Each event arrived on the receiver, in order.
-        for expected in seqs {
-            let ev = rx.recv().await.unwrap();
-            assert_eq!(ev.seq(), expected, "out of order: {seqs:?}");
-        }
+        assert_eq!(
+            got,
+            vec![1, 2, 3, 4, 5, 6],
+            "seqs must be dense, got {got:?}"
+        );
+        // Each mutator returned the seq of its own event.
+        assert_eq!([s1, s2, s3, s4, s5], [1, 2, 4, 5, 6]);
         // The snapshot reflects the cumulative changes (last_seq = s5).
         let snap = store.get(id).unwrap();
         assert_eq!(snap.last_seq, s5);

@@ -5,7 +5,7 @@ import { LIVE_TRANSCRIPT_STORAGE_KEY, TranscriptionService } from './transcripti
 import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-import type { Segment, TranscriptSession } from '../models/transcript';
+import type { CaptureWarning, Segment, TranscriptSession } from '../models/transcript';
 
 /** Minimal ChatStateService stand-in — only the send path is exercised here. */
 class MockChatState {
@@ -654,68 +654,86 @@ describe('TranscriptionService', () => {
   });
 
   describe('capture warnings', () => {
-    it('capture_warning events set the service signal', async () => {
+    /**
+     * Dispatches a raise/clear event on the subscribed session.
+     * @param kind - which transition to send.
+     * @param warning - the warning variant.
+     * @param seq - event sequence number.
+     */
+    function warn(
+      kind: 'capture_warning' | 'capture_warning_cleared',
+      warning: CaptureWarning,
+      seq: number
+    ): void {
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind, seq, warning });
+    }
+
+    it('capture_warning events add to the raised set', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
-      expect(svc.captureWarning()).toBeNull();
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning',
-        seq: 1,
-        warning: 'system_audio_silent',
-      });
-      expect(svc.captureWarning()).toBe('system_audio_silent');
+      expect(svc.captureWarnings()).toEqual([]);
+      warn('capture_warning', 'system_audio_silent', 1);
+      expect(svc.captureWarnings()).toEqual(['system_audio_silent']);
+    });
+
+    it('two different warnings coexist, in arrival order', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      warn('capture_warning', 'microphone_stalled', 1);
+      warn('capture_warning', 'audio_dropped', 2);
+      expect(svc.captureWarnings()).toEqual(['microphone_stalled', 'audio_dropped']);
+    });
+
+    it('re-raising the same warning does not duplicate it', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      warn('capture_warning', 'microphone_stalled', 1);
+      warn('capture_warning', 'microphone_stalled', 2);
+      expect(svc.captureWarnings()).toEqual(['microphone_stalled']);
     });
 
     it('capture_warning_cleared removes the matching banner', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning',
-        seq: 1,
-        warning: 'system_audio_silent',
-      });
-      expect(svc.captureWarning()).toBe('system_audio_silent');
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning_cleared',
-        seq: 2,
-        warning: 'system_audio_silent',
-      });
-      expect(svc.captureWarning()).toBeNull();
+      warn('capture_warning', 'system_audio_silent', 1);
+      expect(svc.captureWarnings()).toEqual(['system_audio_silent']);
+      warn('capture_warning_cleared', 'system_audio_silent', 2);
+      expect(svc.captureWarnings()).toEqual([]);
+    });
+
+    it('clearing one warning leaves the other still raised', async () => {
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      warn('capture_warning', 'microphone_stalled', 1);
+      warn('capture_warning', 'system_audio_stalled', 2);
+      warn('capture_warning_cleared', 'system_audio_stalled', 3);
+      expect(svc.captureWarnings()).toEqual(['microphone_stalled']);
     });
 
     it('capture_warning_cleared leaves a different active banner alone', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning',
-        seq: 1,
-        warning: 'microphone_stalled',
-      });
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning_cleared',
-        seq: 2,
-        warning: 'system_audio_silent',
-      });
-      expect(svc.captureWarning()).toBe('microphone_stalled');
+      warn('capture_warning', 'microphone_stalled', 1);
+      warn('capture_warning_cleared', 'system_audio_silent', 2);
+      expect(svc.captureWarnings()).toEqual(['microphone_stalled']);
     });
 
-    it('a new session snapshot clears the previous warning', async () => {
+    it('a snapshot rebuilds the raised set instead of blanking it', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning',
-        seq: 1,
-        warning: 'microphone_stalled',
-      });
-      expect(svc.captureWarning()).toBe('microphone_stalled');
+      warn('capture_warning', 'microphone_stalled', 1);
+      // A reload re-subscribes; the host reports what is still raised.
+      await subscribeWith(
+        snapshot({ last_seq: 0, active_warnings: ['audio_dropped', 'system_audio_silent'] })
+      );
+      expect(svc.captureWarnings()).toEqual(['audio_dropped', 'system_audio_silent']);
+    });
+
+    it('a snapshot without warnings clears the previous ones', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
-      expect(svc.captureWarning()).toBeNull();
+      warn('capture_warning', 'microphone_stalled', 1);
+      expect(svc.captureWarnings()).toEqual(['microphone_stalled']);
+      await subscribeWith(snapshot({ last_seq: 0 }));
+      expect(svc.captureWarnings()).toEqual([]);
     });
 
     it('ignores a stale capture_warning (seq below the snapshot)', async () => {
       await subscribeWith(snapshot({ last_seq: 5 }));
-      mockTauri.dispatchEvent('transcript_event::sess-1', {
-        kind: 'capture_warning',
-        seq: 3,
-        warning: 'system_audio_silent',
-      });
-      expect(svc.captureWarning()).toBeNull();
+      warn('capture_warning', 'system_audio_silent', 3);
+      expect(svc.captureWarnings()).toEqual([]);
     });
   });
 
