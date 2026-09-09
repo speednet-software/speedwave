@@ -143,7 +143,6 @@ impl TranscriptSession {
         s.push_str(&format!("- Language: `{}`\n", self.language.code()));
         s.push_str(&format!("- Source: {}\n", self.audio_source.label));
         s.push_str(&format!("- Status: {}\n\n", status_label(&self.status)));
-        // Live segments interleave across per-channel decode cycles — render chronologically.
         let mut segments: Vec<&Segment> = self.effective_segments().iter().collect();
         segments.sort_by_key(|seg| seg.start);
         for seg in segments {
@@ -287,7 +286,6 @@ mod tests {
         assert!(s.final_segments.is_none());
         assert_eq!(s.last_seq, 0);
         assert_eq!(s.audio_path, Some(PathBuf::from("/tmp/a.wav")));
-        // created_at parses as RFC 3339-ish (YYYY-MM-DDTHH:MM:SSZ).
         assert!(s.created_at.ends_with('Z') && s.created_at.len() == 20);
     }
 
@@ -306,7 +304,6 @@ mod tests {
             Some(PathBuf::from("/data/transcripts/x/audio.wav"))
         );
         assert!(matches!(s.status, TranscriptStatus::Recording));
-        // `new` delegates to it with a fresh id.
         let s2 = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
         assert_ne!(s2.id, id);
     }
@@ -328,7 +325,7 @@ mod tests {
         s.live_segments = vec![
             seg(0.0, 2.5, "Cześć!"),
             seg(2.5, 5.0, "Witaj."),
-            seg(5.0, 7.0, "   "), // blank → skipped
+            seg(5.0, 7.0, "   "),
         ];
         let md = s.to_markdown();
         assert!(md.starts_with("# Meeting transcript ("));
@@ -351,7 +348,6 @@ mod tests {
         let md = s.to_markdown();
         assert!(md.contains("**(00:00.00) Meeting:** Dzień dobry państwu."));
         assert!(md.contains("**(00:02.00) You:** Cześć."));
-        // An untagged segment renders exactly as before.
         assert!(md.contains("**(00:03.00)** bez kanału"));
     }
 
@@ -359,7 +355,6 @@ mod tests {
     fn to_markdown_renders_live_segments_chronologically() {
         use crate::transcription::transcriber::TranscriptSource;
         let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("/a.wav"));
-        // Cross-lane commits can land out of order in storage.
         let mut late = seg(5.0, 6.0, "później");
         late.source = Some(TranscriptSource::System);
         let mut early = seg(1.0, 2.0, "wcześniej");
@@ -409,12 +404,10 @@ mod tests {
     #[test]
     fn segment_source_serde_defaults_to_none_and_round_trips() {
         use crate::transcription::transcriber::TranscriptSource;
-        // Pre-Amendment-9 JSON (no `source` key) loads as None.
         let legacy = r#"{"start":{"secs":0,"nanos":0},"end":{"secs":1,"nanos":0},
             "text":"hej","words":[]}"#;
         let s: Segment = serde_json::from_str(legacy).unwrap();
         assert_eq!(s.source, None);
-        // None is omitted on the wire; Some round-trips.
         let mut tagged = seg(0.0, 1.0, "x");
         assert!(!serde_json::to_string(&tagged).unwrap().contains("source"));
         tagged.source = Some(TranscriptSource::Mic);
@@ -425,8 +418,6 @@ mod tests {
 
     #[test]
     fn old_transcript_json_with_speaker_fields_still_loads() {
-        // Backward compat (ADR-075): a pre-removal transcript.json carried `speaker_names`,
-        // `expected_speakers`, `speaker`, `models_used.diarization_*` — serde drops unknown keys.
         let dir = tempfile::tempdir().unwrap();
         let legacy = r#"{
             "id":"00000000-0000-4000-8000-000000000000",
@@ -450,7 +441,6 @@ mod tests {
         assert_eq!(s.live_segments[0].text, "hej");
         assert_eq!(s.models_used.live.as_deref(), Some("small"));
         assert_eq!(s.last_seq, 7);
-        // Re-saving produces the new shape with no diarization keys.
         s.save(dir.path()).unwrap();
         let body = std::fs::read_to_string(dir.path().join(TRANSCRIPT_JSON)).unwrap();
         assert!(!body.contains("speaker_names"));
@@ -465,7 +455,6 @@ mod tests {
         s.live_segments = vec![seg(0.0, 1.0, "hi")];
         s.last_seq = 42;
         s.save(dir.path()).unwrap();
-        // Only the final file remains — no leftover tmp of any naming scheme.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)
@@ -511,7 +500,6 @@ mod tests {
 
     #[test]
     fn rfc3339_now_format_sanity() {
-        // Year is plausible (post-2020) and the shape matches YYYY-MM-DDTHH:MM:SSZ.
         let s = rfc3339_now();
         assert_eq!(s.len(), 20);
         assert!(s.ends_with('Z'));
@@ -521,11 +509,8 @@ mod tests {
 
     #[test]
     fn ymd_hms_known_epochs() {
-        // 1970-01-01T00:00:00Z
         assert_eq!(secs_to_ymd_hms(0), (1970, 1, 1, 0, 0, 0));
-        // 2024-01-01T00:00:00Z = 1_704_067_200 (precomputed known epoch).
         assert_eq!(secs_to_ymd_hms(1_704_067_200), (2024, 1, 1, 0, 0, 0));
-        // 2024-12-31T23:59:59Z = 1_735_689_599.
         assert_eq!(secs_to_ymd_hms(1_735_689_599), (2024, 12, 31, 23, 59, 59));
     }
 }

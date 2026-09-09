@@ -276,13 +276,9 @@ impl WhisperCppTranscriber {
         if !model_path.is_file() {
             return Err(TranscribeError::ModelMissing(label));
         }
-        // Route whisper.cpp/ggml logs into the `log` facade once — a silent GPU-init fallback
-        // would otherwise be invisible (ADR-085).
         static LOG_HOOKS: std::sync::Once = std::sync::Once::new();
         LOG_HOOKS.call_once(whisper_rs::install_logging_hooks);
         let mut ctx_params = whisper_rs::WhisperContextParameters::default();
-        // A compiled-in GPU backend is not a usable device: keep whisper off the GPU entirely
-        // when the probe found none, instead of failing into it per decode.
         ctx_params.use_gpu(class != GpuClass::None);
         let ctx =
             whisper_rs::WhisperContext::new_with_params(model_path, ctx_params).map_err(|e| {
@@ -337,8 +333,6 @@ impl WhisperCppTranscriber {
         if pcm.is_empty() || is_silent(pcm) {
             return Ok(Vec::new());
         }
-        // VAD gate: no speech in the window = no decode. A VAD failure degrades
-        // this window to the signal-only gates and retries next window (warn once).
         let speech_spans = match self.vad.as_mut().map(|v| v.speech_spans(pcm)) {
             Some(Ok(spans)) => Some(spans),
             Some(Err(e)) => {
@@ -372,19 +366,16 @@ impl WhisperCppTranscriber {
         };
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some(opts.language.code())); // forced, never auto
+        params.set_language(Some(opts.language.code()));
         params.set_translate(opts.translate);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_n_threads(self.n_threads);
-        // Live windows are shorter than the 30 s whisper always pads to, so the encoder spends
-        // most of its time on zero-padding; a proportional audio_ctx skips it (ADR-056 Am. 12).
         if live {
             params.set_audio_ctx(live_audio_ctx(pcm.len()));
         }
-        // Anti-hallucination: no cross-window context, deterministic decoding, blank/nst suppress.
         // `no_speech_thold` is a no-op in whisper.cpp — we gate on per-segment prob below instead.
         params.set_no_context(true);
         params.set_temperature(0.0);
@@ -396,8 +387,6 @@ impl WhisperCppTranscriber {
             params.set_token_timestamps(true);
             params.set_max_len(1); // one token per segment → segment ts == word ts
         }
-        // Timing is the one diagnostic that tells a slow host from a broken one; whisper.cpp
-        // itself logs nothing here, so measure the decode we just asked for.
         let started = std::time::Instant::now();
         state
             .full(params, pcm)
@@ -419,7 +408,6 @@ impl WhisperCppTranscriber {
             };
             let no_speech = seg.no_speech_probability();
             let seg_rms = rms(segment_pcm(pcm, seg.start_timestamp(), seg.end_timestamp()));
-            // Metrics only — segment text must stay out of the logs.
             log::debug!(
                 target: "transcription::transcriber",
                 "segment {}..{}cs rms={seg_rms:.5} no_speech={no_speech:.2}",
@@ -432,8 +420,6 @@ impl WhisperCppTranscriber {
             if is_hallucinated(no_speech, seg_rms) {
                 continue;
             }
-            // A segment over a span VAD heard no speech in is a hallucination,
-            // whatever its text — drop it.
             if vad_decision(speech_spans.as_deref(), (start, end)) != VadDecision::Keep {
                 continue;
             }
@@ -574,7 +560,6 @@ impl Transcriber for MockTranscriber {
 mod tests {
     use super::*;
 
-    // `WhisperCppTranscriber` has no `Debug`, so `unwrap_err()` won't compile — pattern-match it.
     fn load_err(path: &Path, label: &str) -> TranscribeError {
         match WhisperCppTranscriber::load(path, label, GpuClass::None) {
             Ok(_) => panic!("expected load() to fail"),
@@ -603,15 +588,10 @@ mod tests {
 
     #[test]
     fn hallucination_guard_needs_both_signals_to_agree() {
-        // Model certain the span is not speech — dropped regardless of energy.
         assert!(is_hallucinated(0.7, 0.5));
-        // Model unsure AND audio below the speech floor — dropped.
         assert!(is_hallucinated(0.4, 0.001));
-        // Model unsure but the audio is loud — kept (real sound, model's call).
         assert!(!is_hallucinated(0.4, 0.05));
-        // Model confident it is speech — kept even when quiet.
         assert!(!is_hallucinated(0.1, 0.001));
-        // Thresholds are strict: exactly-at values are kept.
         assert!(!is_hallucinated(0.3, 0.001));
         assert!(!is_hallucinated(0.6, 0.0055));
     }
@@ -622,43 +602,36 @@ mod tests {
             (Duration::from_secs(1), Duration::from_secs(3)),
             (Duration::from_secs(10), Duration::from_secs(12)),
         ];
-        // Fully inside a span.
         assert!(overlaps_speech(
             &spans,
             Duration::from_millis(1500),
             Duration::from_millis(2500)
         ));
-        // Straddling a span edge.
         assert!(overlaps_speech(
             &spans,
             Duration::from_millis(2500),
             Duration::from_millis(4000)
         ));
-        // Within the 200 ms tolerance before a span starts.
         assert!(overlaps_speech(
             &spans,
             Duration::from_millis(700),
             Duration::from_millis(900)
         ));
-        // In the silence gap, farther than the tolerance from both spans.
         assert!(!overlaps_speech(
             &spans,
             Duration::from_millis(5000),
             Duration::from_millis(8000)
         ));
-        // Past the last span.
         assert!(!overlaps_speech(
             &spans,
             Duration::from_secs(20),
             Duration::from_secs(21)
         ));
-        // No spans at all never matches.
         assert!(!overlaps_speech(
             &[],
             Duration::ZERO,
             Duration::from_secs(1)
         ));
-        // A zero-length segment inside a span still matches.
         assert!(overlaps_speech(
             &spans,
             Duration::from_secs(2),
@@ -669,7 +642,6 @@ mod tests {
     #[test]
     fn vad_decision_covers_keep_drop_and_skip() {
         let spans = vec![(Duration::from_secs(1), Duration::from_secs(3))];
-        // Overlapping speech → keep.
         assert_eq!(
             vad_decision(
                 Some(&spans),
@@ -677,7 +649,6 @@ mod tests {
             ),
             VadDecision::Keep
         );
-        // Speech elsewhere, none under the span → drop.
         assert_eq!(
             vad_decision(
                 Some(&spans),
@@ -685,12 +656,10 @@ mod tests {
             ),
             VadDecision::Drop
         );
-        // No speech anywhere in the window → skip the decode entirely.
         assert_eq!(
             vad_decision(Some(&[]), (Duration::ZERO, Duration::from_secs(12))),
             VadDecision::SkipWindow
         );
-        // Gate unavailable (VAD failed/absent) → degrade to keep.
         assert_eq!(
             vad_decision(None, (Duration::from_secs(10), Duration::from_secs(12))),
             VadDecision::Keep
@@ -712,8 +681,6 @@ mod tests {
 
     #[test]
     fn transcript_source_labels_match_live_transcript_component() {
-        // The Angular live view re-derives the You/Meeting channel labels in a
-        // ternary; pin its literals to `TranscriptSource::label()` (the SSOT).
         let src = include_str!(
             "../../../../desktop/src/src/app/meeting-transcription/live-transcript/live-transcript.component.ts"
         );
@@ -755,15 +722,12 @@ mod tests {
 
     #[test]
     fn segment_pcm_maps_centiseconds_and_clamps() {
-        let pcm: Vec<f32> = (0..16_000).map(|i| i as f32).collect(); // 1 s at 16 kHz
+        let pcm: Vec<f32> = (0..16_000).map(|i| i as f32).collect();
         assert_eq!(segment_pcm(&pcm, 10, 20), &pcm[1_600..3_200]);
-        // An end past the window clamps to the window.
         assert_eq!(segment_pcm(&pcm, 90, 500), &pcm[14_400..]);
-        // Degenerate, reversed, and out-of-window spans yield an empty slice.
         assert!(segment_pcm(&pcm, 50, 50).is_empty());
         assert!(segment_pcm(&pcm, 60, 40).is_empty());
         assert!(segment_pcm(&pcm, 200, 300).is_empty());
-        // Negative timestamps clamp to the start.
         assert_eq!(segment_pcm(&pcm, -5, 10), &pcm[0..1_600]);
     }
 
@@ -771,12 +735,8 @@ mod tests {
     fn is_silent_flags_quiet_and_empty_but_not_speech() {
         assert!(is_silent(&[]));
         assert!(is_silent(&vec![0.0f32; 16_000]));
-        // A near-noise-floor level (−66 dBFS) is still silence.
         assert!(is_silent(&vec![0.0005f32; 16_000]));
-        // Quiet real speech (−54 dBFS: low OS input volume + 0.5 mix gain) must
-        // reach the decoder — Whisper's no-speech filter owns that judgement.
         assert!(!is_silent(&vec![0.002f32; 16_000]));
-        // A half-scale tone is clearly not silence.
         let tone: Vec<f32> = (0..16_000)
             .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
             .collect();
@@ -830,9 +790,9 @@ mod tests {
             text_template: "s{n}".to_string(),
         };
         let opts = TranscribeOptions::for_language(Language::Pl);
-        let pcm = vec![0.0f32; 5 * 16_000]; // 5 s
+        let pcm = vec![0.0f32; 5 * 16_000];
         let segs = t.transcribe(&pcm, &opts).unwrap();
-        assert_eq!(segs.len(), 3); // 2 + 2 + 1
+        assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].text, "s0");
         assert_eq!(segs[2].text, "s2");
         assert!((segs[1].start.as_secs_f32() - 2.0).abs() < 0.01);
@@ -869,8 +829,6 @@ mod tests {
 
     #[test]
     fn old_segment_json_with_a_speaker_field_still_deserializes() {
-        // Backward compat (ADR-075): pre-removal transcripts carried a `speaker` field on each
-        // segment; serde ignores the unknown key so existing transcript.json files still load.
         let legacy = r#"{"start":{"secs":1,"nanos":0},"end":{"secs":2,"nanos":0},
             "text":"hej","words":[],"speaker":3}"#;
         let seg: Segment = serde_json::from_str(legacy).unwrap();
@@ -878,20 +836,12 @@ mod tests {
         assert_eq!(seg.start, Duration::from_secs(1));
     }
 
-    // Real whisper.cpp inference (needs a ≥75 MiB model + the C++ engine) is an
-    // opt-in CI job, not a unit test — verified end-to-end in ADR-056 spike 0A.
-
     #[test]
     fn live_audio_ctx_scales_with_the_window_and_clamps_at_both_ends() {
-        // 12 s live window: 192000/320 = 600 positions + headroom — the whole point: pay for
-        // 12 s of encoder, not the 30 s whisper pads to.
         assert_eq!(live_audio_ctx(192_000), 616);
-        // 5 s window.
         assert_eq!(live_audio_ctx(80_000), 266);
-        // A 30 s (or longer) window uses the full model context — no truncation past the max.
         assert_eq!(live_audio_ctx(480_000), 1500);
         assert_eq!(live_audio_ctx(10_000_000), 1500);
-        // Degenerate windows sit on the floor instead of collapsing the embeddings.
         assert_eq!(live_audio_ctx(0), 128);
         assert_eq!(live_audio_ctx(3_200), 128);
     }

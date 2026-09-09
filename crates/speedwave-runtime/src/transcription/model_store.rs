@@ -179,7 +179,6 @@ impl ModelStore {
         std::fs::create_dir_all(self.whisper_dir())?;
         restrict_dir_perms(&self.whisper_dir());
         let per_model_cap = download_cap(info.approx_bytes);
-        // Total-storage check.
         let current_total = self.total_bytes_used();
         let would_be = current_total + info.approx_bytes;
         if would_be > consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES {
@@ -315,8 +314,6 @@ impl Default for ModelStore {
     }
 }
 
-// --- the HTTP downloader ---------------------------------------------------
-
 /// Model-download client: connect timeout + a generous whole-request backstop
 /// and redirects only to allowlisted hosts that pass the shared SSRF validator.
 fn build_client() -> Result<reqwest::blocking::Client, ModelStoreError> {
@@ -363,9 +360,6 @@ fn download_verified(
     cap: u64,
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<(), ModelStoreError> {
-    // The temp name is unique per attempt: the SHA256 is computed over the network
-    // stream, so a second concurrent writer on a shared temp could install a
-    // corrupt file whose hash check passed.
     static DOWNLOAD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let attempt = DOWNLOAD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
@@ -385,7 +379,6 @@ fn download_verified(
             got: hash,
         });
     }
-    // Atomic rename into place — only after the hash verified.
     std::fs::rename(&tmp, dest).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         ModelStoreError::Io(e)
@@ -481,8 +474,6 @@ fn stream_to_path(
 /// (`is_redirect()`, message buried in `source()`) so the UI can say "the model URL changed".
 fn classify_reqwest_err(e: &reqwest::Error) -> ModelStoreError {
     if e.is_redirect() {
-        // Try to pull the host out of our "disallowed redirect host: <host>"
-        // message somewhere in the source chain; fall back to the URL.
         let mut src: Option<&dyn std::error::Error> = Some(e);
         while let Some(cur) = src {
             let m = cur.to_string();
@@ -579,7 +570,6 @@ mod tests {
         let hash = stream_to_path(&url, &out, "test", 10_000, &mut |p| seen.push(p)).unwrap();
         assert_eq!(hash, sha256_hex(&body), "returned hash matches the body");
         assert_eq!(std::fs::read(&out).unwrap(), body, "file content matches");
-        // Progress was reported, monotonic, ending at the full size.
         assert!(seen.len() >= 2);
         assert_eq!(seen.first().unwrap().downloaded_bytes, 0);
         assert_eq!(seen.last().unwrap().downloaded_bytes, body.len() as u64);
@@ -608,7 +598,6 @@ mod tests {
 
     #[test]
     fn stream_to_path_aborts_and_cleans_up_when_body_exceeds_cap_mid_stream() {
-        // Server lies: no content-length, but body is bigger than the cap.
         let mut server = mockito::Server::new();
         let url = format!("{}/m.bin", server.url());
         let big = vec![7u8; 200_000];
@@ -661,8 +650,6 @@ mod tests {
 
     #[test]
     fn concurrent_downloads_to_the_same_dest_never_share_a_temp_file() {
-        // Two writers on one temp path could install a corrupt file whose
-        // stream-hash check passed — unique temps make both installs valid.
         let body = b"model-bytes".repeat(400);
         let expected = sha256_hex(&body);
         let (_srv, url) = serve_bytes(&body);
@@ -723,8 +710,6 @@ mod tests {
 
     #[test]
     fn redirect_ssrf_guard_blocks_private_and_reserved_targets() {
-        // The redirect policy follows a target only if allowlisted AND SSRF-validated;
-        // the validator rejects loopback, the cloud-metadata link-local endpoint, and private IPs.
         for u in [
             "http://127.0.0.1/m.bin",
             "http://169.254.169.254/latest/meta-data/",
@@ -736,13 +721,11 @@ mod tests {
                 "SSRF guard must reject {u}"
             );
         }
-        // A normal public CDN host passes.
         assert!(crate::url_validation::validate_url("https://cas-bridge.xethub.hf.co/y").is_ok());
     }
 
     #[test]
     fn redirect_to_a_non_allowlisted_host_is_refused() {
-        // First server redirects to a second, non-allowlisted, server.
         let mut target = mockito::Server::new();
         target
             .mock("GET", "/m.bin")
@@ -768,7 +751,6 @@ mod tests {
             ),
             "expected DisallowedRedirect (or an Http error wrapping it), got {err:?}"
         );
-        // Be stricter: it should specifically be the disallowed-redirect classification.
         assert!(
             matches!(err, ModelStoreError::DisallowedRedirect(_)),
             "expected DisallowedRedirect, got {err:?}"
@@ -868,8 +850,6 @@ mod tests {
 
     #[test]
     fn ensure_model_storage_cap_arithmetic_blocks_overflow() {
-        // Can't fill 12 GiB of disk in a unit test, so assert the property the `total + approx
-        // > MAX` check relies on: the dome exceeds any single model's size.
         let biggest = crate::transcription::model_catalog::WHISPER_MODELS
             .iter()
             .map(|m| m.approx_bytes)
@@ -879,8 +859,6 @@ mod tests {
             biggest < consts::MAX_TOTAL_TRANSCRIPTION_MODELS_BYTES,
             "the dome must exceed the largest model, else ensure_model could never download it"
         );
-        // A store summing over the dome would block a new download: `total_bytes_used` is
-        // plain `dir_size` (exercised elsewhere), and the check is `current + approx > MAX`.
     }
 
     #[test]
@@ -890,8 +868,6 @@ mod tests {
         let info = whisper_model("tiny").unwrap();
         std::fs::create_dir_all(store.whisper_dir()).unwrap();
         let path = store.whisper_path(info);
-        // tiny's approx_bytes (~78 MiB) is too big to write in a unit test, so verify the
-        // *negative* side (not present) + delete-noop instead:
         assert!(
             !store
                 .whisper_status()
@@ -900,20 +876,15 @@ mod tests {
                 .unwrap()
                 .downloaded
         );
-        // delete on a not-present model is a no-op, not an error:
         store.delete_model("tiny").unwrap();
-        // delete on unknown key errors:
         let err = store.delete_model("nope").unwrap_err();
         assert!(matches!(err, ModelStoreError::UnknownModel(_)));
-        // a tiny file that's the *wrong* size is correctly reported as not-present:
         std::fs::write(&path, b"too small").unwrap();
         assert!(
             !store.whisper_is_present(info),
             "wrong-sized file isn't 'present'"
         );
-        // and total_bytes_used counts it anyway:
         assert!(store.total_bytes_used() >= 9);
-        // delete removes it:
         store.delete_model("tiny").unwrap();
         assert!(!path.exists());
     }
@@ -933,18 +904,15 @@ mod tests {
             f.set_len(len).unwrap();
         };
 
-        // Exactly the estimate → present.
         write_sparse(info.approx_bytes);
         assert!(store.whisper_is_present(info), "exact size must be present");
 
-        // Larger than the estimate (the real-world large-v3 case) → present.
         write_sparse(info.approx_bytes + 409_792);
         assert!(
             store.whisper_is_present(info),
             "a complete file larger than the estimate must be present"
         );
 
-        // Just above the 90% floor → present; just below → not.
         write_sparse(info.approx_bytes / 10 * 9 + 1);
         assert!(
             store.whisper_is_present(info),
@@ -956,7 +924,6 @@ mod tests {
             "a clearly-truncated file (<90%) is not present"
         );
 
-        // At the +5% ceiling → present; clearly above it (corrupt/oversized) → not.
         let ceil = info.approx_bytes + info.approx_bytes / 20 + 1024;
         write_sparse(ceil);
         assert!(
@@ -984,7 +951,6 @@ mod tests {
         };
         write_sparse(VAD_MODEL.approx_bytes);
         assert!(store.vad_is_present(), "exact size is present");
-        // Present → ensure returns the path without touching the network.
         let p = store.ensure_vad_model().unwrap();
         assert_eq!(p, store.vad_path());
 

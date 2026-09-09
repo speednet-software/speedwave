@@ -56,8 +56,6 @@ struct StreamHeader {
 
 impl AudioCapture for MacOsAudioCapture {
     fn capabilities(&self) -> CaptureCapabilities {
-        // The CLI enforces macOS 14.4 and surfaces a clean error on older
-        // systems (ADR-056 decision 2/3 for the permission model).
         CaptureCapabilities {
             supports_system_audio: true,
             supports_microphone: true,
@@ -69,8 +67,6 @@ impl AudioCapture for MacOsAudioCapture {
     }
 
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
-        // Three curated sources: "Whole meeting" (system + mic, the product
-        // default), system-only, then one entry per real input device.
         let mut sources = vec![
             AudioSourceInfo {
                 source: AudioSource::Mixed { mic: None },
@@ -81,7 +77,6 @@ impl AudioCapture for MacOsAudioCapture {
                 label: "System (everything)".to_string(),
             },
         ];
-        // Named input devices (default flagged); generic fallback if it fails.
         match list_microphones() {
             Ok(mics) if !mics.is_empty() => {
                 for m in mics {
@@ -127,14 +122,11 @@ impl AudioCapture for MacOsAudioCapture {
         let stderr = super::audio::drain_child_stderr(&mut child, CLI_NAME);
 
         let mut reader = BufReader::new(stdout);
-        // First: the JSON header line.
         let mut header_line = String::new();
         let n = reader
             .read_line(&mut header_line)
             .map_err(|e| CaptureError::Failed(format!("read capture header: {e}")))?;
         if n == 0 {
-            // CLI exited before emitting anything — usually permission denial
-            // or old OS. Reap it to read the exit code, then classify.
             let code = child.wait().ok().and_then(|s| s.code());
             let detail = stderr.wait_snapshot(Duration::from_millis(300));
             return Err(classify_early_exit(code, &detail));
@@ -153,15 +145,12 @@ impl AudioCapture for MacOsAudioCapture {
             )));
         }
         let raw = CliRawReader::new(child, reader)?;
-        // `["app","mic"]` → the CLI is emitting two streams to be summed; any
-        // single-stream layout (`["app"]`, `["mic"]`) is passed through as-is.
         if header.streams.len() > 1 {
             Ok(Box::new(MixedCliStream {
                 raw,
                 mix: MixBuffer::new(),
             }))
         } else {
-            // Zero-detect only when the single stream is system audio ("app").
             let is_system = header.streams.first().is_some_and(|s| s == "app");
             Ok(Box::new(PassthroughCliStream {
                 raw,
@@ -214,8 +203,6 @@ impl CliRawReader {
             .name("capture-cli-reader".to_string())
             .spawn(move || reader_thread(reader, &tx))
         {
-            // No `Self` exists yet, so its Drop can't reap the CLI — it would keep
-            // the CoreAudio tap and the microphone until the process exits.
             super::audio::kill_child_gracefully(&mut child);
             return Err(CaptureError::Failed(format!(
                 "spawn capture reader thread: {e}"
@@ -296,7 +283,7 @@ fn read_exact_or_eof(reader: &mut impl Read, buf: &mut [u8]) -> Result<bool, Cap
             .map_err(|e| CaptureError::Failed(format!("read capture chunk: {e}")))?;
         if n == 0 {
             if filled == 0 {
-                return Ok(false); // clean EOF on a frame boundary
+                return Ok(false);
             }
             return Err(CaptureError::Failed(
                 "capture stream ended mid-chunk".to_string(),
@@ -341,8 +328,6 @@ fn read_frame_blocking(
 
 impl Drop for CliRawReader {
     fn drop(&mut self) {
-        // CLI's own SIGTERM handler does the graceful CoreAudio teardown;
-        // SIGKILL only if it didn't exit on its own.
         super::audio::kill_child_gracefully(&mut self.child);
     }
 }
@@ -363,7 +348,6 @@ impl AudioStream for PassthroughCliStream {
         }
         loop {
             match self.raw.read_frame()? {
-                // Alive but silent — keepalive keeps the ingest loop's stop check responsive.
                 RawRead::Pending => return Ok(Some(AudioChunk::keepalive())),
                 RawRead::Eof => {
                     self.raw.reap_at_eof()?;
@@ -417,8 +401,6 @@ impl AudioStream for MixedCliStream {
             }
             match self.raw.read_frame()? {
                 RawRead::Pending => {
-                    // A CLI that stopped emitting without closing stdout must not leave the
-                    // session in Recording forever — same give-up as the Windows mixed path.
                     if self.mix.stalled_for() >= STALL_GIVE_UP {
                         return Err(CaptureError::Failed(
                             "audio capture stalled — the capture CLI stopped emitting without a clean end-of-stream"
@@ -545,11 +527,9 @@ mod tests {
 
     #[test]
     fn mixed_system_plus_mic_maps_to_source_and_mic_args() {
-        // Mixed + default mic → ("all", "default").
         let (s, m) = source_to_cli_args(&AudioSource::Mixed { mic: None }).unwrap();
         assert_eq!(s, "all");
         assert_eq!(m, "default");
-        // Mixed + a named mic → ("all", "<uid>").
         let (s2, m2) = source_to_cli_args(&AudioSource::Mixed {
             mic: Some("BuiltInMic".to_string()),
         })
@@ -610,15 +590,18 @@ mod tests {
         );
     }
 
-    // --- Framing / stream tests over a synthetic stdout -----------------------
+    fn frame_header(stream: u32, nframes: u32, offset_ns: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&stream.to_le_bytes());
+        out.extend_from_slice(&nframes.to_le_bytes());
+        out.extend_from_slice(&offset_ns.to_le_bytes());
+        out
+    }
 
     /// Frames one `(stream, nframes, offset_ns, samples)` chunk into the wire
     /// format the CLI emits.
     fn frame(stream: u32, offset_ns: u64, samples: &[f32]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&stream.to_le_bytes());
-        out.extend_from_slice(&(samples.len() as u32).to_le_bytes());
-        out.extend_from_slice(&offset_ns.to_le_bytes());
+        let mut out = frame_header(stream, samples.len() as u32, offset_ns);
         for &s in samples {
             out.extend_from_slice(&s.to_le_bytes());
         }
@@ -635,8 +618,6 @@ mod tests {
             .unwrap()
             .write_all(bytes)
             .unwrap();
-        // Keep the tempdir alive for the child's lifetime by leaking it — the
-        // process exits at end of test, the OS reclaims it.
         std::mem::forget(dir);
         let mut child = std::process::Command::new("cat")
             .arg(&path)
@@ -677,7 +658,6 @@ mod tests {
             health: Vec::new(),
         };
         assert!(next_real_chunk(&mut s).unwrap().is_none());
-        // The `done` latch holds: later polls stay ended instead of re-reaping.
         assert!(s.next_chunk().unwrap().is_none());
     }
 
@@ -747,33 +727,22 @@ mod tests {
             panic!("expected the second frame");
         };
         assert_eq!((idx, off, s), (1, 1_000_000, vec![3.0]));
-        // Clean EOF on a frame boundary.
         assert!(matches!(read_settled(&mut r).unwrap(), RawRead::Eof));
     }
 
     #[test]
     fn read_frame_yields_pending_while_the_cli_is_alive_but_silent() {
         let mut r = raw_reader_silent();
-        // Bounded: returns Pending after the keepalive window instead of blocking on the pipe.
         assert!(matches!(r.read_frame().unwrap(), RawRead::Pending));
     }
 
     #[test]
     fn read_frame_rejects_an_implausible_frame() {
-        // A header claiming a billion samples — well past MAX_FRAME_SAMPLES.
-        let mut hdr = Vec::new();
-        hdr.extend_from_slice(&0u32.to_le_bytes()); // stream
-        hdr.extend_from_slice(&1_000_000_000u32.to_le_bytes()); // nframes
-        hdr.extend_from_slice(&0u64.to_le_bytes()); // offset_ns
-        let mut r = raw_reader_over(&hdr);
+        let mut r = raw_reader_over(&frame_header(0, 1_000_000_000, 0));
         let err = read_settled(&mut r).unwrap_err();
         assert!(matches!(err, CaptureError::Failed(_)));
         assert!(r.done);
-        // An offset past MAX_SESSION_NS (>24 h) is also rejected.
-        let mut hdr2 = Vec::new();
-        hdr2.extend_from_slice(&0u32.to_le_bytes());
-        hdr2.extend_from_slice(&1u32.to_le_bytes());
-        hdr2.extend_from_slice(&(48u64 * 3600 * 1_000_000_000).to_le_bytes());
+        let mut hdr2 = frame_header(0, 1, 48 * 3600 * 1_000_000_000);
         hdr2.extend_from_slice(&1.0f32.to_le_bytes());
         let mut r2 = raw_reader_over(&hdr2);
         assert!(matches!(
@@ -784,13 +753,9 @@ mod tests {
 
     #[test]
     fn read_frame_errors_on_a_truncated_payload() {
-        // Header says 4 samples (16 bytes) but only 8 bytes follow.
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&4u32.to_le_bytes());
-        bytes.extend_from_slice(&0u64.to_le_bytes());
+        let mut bytes = frame_header(0, 4, 0);
         bytes.extend_from_slice(&1.0f32.to_le_bytes());
-        bytes.extend_from_slice(&2.0f32.to_le_bytes()); // only 2 of 4 samples
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
         let mut r = raw_reader_over(&bytes);
         let err = read_settled(&mut r).unwrap_err();
         assert!(matches!(err, CaptureError::Failed(_)));
@@ -799,9 +764,9 @@ mod tests {
 
     #[test]
     fn passthrough_stream_forwards_stream_0_and_skips_others() {
-        let mut bytes = frame(1, 0, &[9.9]); // a stray stream-1 frame — ignored
+        let mut bytes = frame(1, 0, &[9.9]);
         bytes.extend_from_slice(&frame(0, 100, &[1.0, 2.0]));
-        bytes.extend_from_slice(&frame(2, 200, &[8.8])); // stray stream-2 — ignored
+        bytes.extend_from_slice(&frame(2, 200, &[8.8]));
         bytes.extend_from_slice(&frame(0, 300, &[3.0]));
         let mut stream = PassthroughCliStream {
             raw: raw_reader_over(&bytes),
@@ -814,7 +779,6 @@ mod tests {
         let c2 = next_real_chunk(&mut stream).unwrap().unwrap();
         assert_eq!(c2.samples, vec![3.0]);
         assert!(next_real_chunk(&mut stream).unwrap().is_none());
-        // Subsequent calls keep returning None.
         assert!(stream.next_chunk().unwrap().is_none());
     }
 
@@ -825,7 +789,6 @@ mod tests {
             zero: None,
             health: Vec::new(),
         };
-        // Bounded next_chunk: an empty keepalive hands control back so stop stays honoured.
         let c = stream.next_chunk().unwrap().unwrap();
         assert!(c.samples.is_empty());
     }
@@ -836,8 +799,6 @@ mod tests {
             raw: raw_reader_silent(),
             mix: MixBuffer::new(),
         };
-        // Keepalives while inside the give-up window, then a hard error — the session
-        // must flip to Failed instead of sitting in Recording forever.
         let deadline = std::time::Instant::now() + STALL_GIVE_UP + Duration::from_secs(5);
         loop {
             match stream.next_chunk() {
@@ -896,7 +857,6 @@ mod tests {
 
     #[test]
     fn passthrough_system_stream_warns_after_sustained_silence() {
-        // > 15 s of all-zero system audio in one frame batch (5 s frames × 4).
         let zeros = vec![0.0f32; super::super::audio::SAMPLE_RATE_HZ as usize * 5];
         let mut bytes = Vec::new();
         for i in 0..4u64 {
@@ -921,28 +881,23 @@ mod tests {
 
     #[test]
     fn mixed_stream_pairs_stream_0_and_stream_1_then_drains_at_eof() {
-        // Two equal-length runs at offset 0 → an aligned (system, mic) pair.
         let mut bytes = frame(0, 0, &[1.0; 4]);
         bytes.extend_from_slice(&frame(1, 0, &[1.0; 4]));
-        // A tail on the system side only — drained at EOF with a zero-padded mic.
-        bytes.extend_from_slice(&frame(0, 250_000, &[0.6; 4])); // 250µs → index 4
+        bytes.extend_from_slice(&frame(0, 250_000, &[0.6; 4]));
         let mut stream = MixedCliStream {
             raw: raw_reader_over(&bytes),
             mix: MixBuffer::new(),
         };
-        // First chunk: the aligned 4 samples on each channel, unmixed.
         let c1 = next_real_chunk(&mut stream).unwrap().unwrap();
         assert_eq!(c1.samples.len(), 4);
         assert!(c1.samples.iter().all(|&s| (s - 1.0).abs() < 1e-5));
-        // Paired capture always carries the mic channel.
         let mic1 = c1.mic.unwrap();
         assert!(mic1.iter().all(|&s| (s - 1.0).abs() < 1e-5));
         assert_eq!(c1.offset, Duration::from_nanos(0));
-        // Next: EOF → finish() → drains the system-only tail; mic pads as zeros.
         let c2 = next_real_chunk(&mut stream).unwrap().unwrap();
         assert_eq!(c2.samples.len(), 4);
         assert!(c2.samples.iter().all(|&s| (s - 0.6).abs() < 1e-5));
-        let mic2 = c2.mic.unwrap(); // present even when zero-padded
+        let mic2 = c2.mic.unwrap();
         assert!(mic2.iter().all(|&s| s.abs() < 1e-6));
         assert!(next_real_chunk(&mut stream).unwrap().is_none());
     }

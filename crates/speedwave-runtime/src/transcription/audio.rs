@@ -234,8 +234,6 @@ pub trait AudioCapture: Send + Sync {
     fn start(&self, source: AudioSource) -> Result<Box<dyn AudioStream>, CaptureError>;
 }
 
-// --- FileAudioCapture: the dev/test backend ---------------------------------
-
 /// "Captures" from a WAV file by streaming it back in [`CHUNK_DURATION`] chunks (file path at
 /// construction or via `Microphone{device:Some("<path>")}`); any rate/format converts to 16 kHz.
 pub struct FileAudioCapture {
@@ -284,7 +282,6 @@ impl AudioCapture for FileAudioCapture {
     }
 
     fn enumerate_sources(&self) -> Result<Vec<AudioSourceInfo>, CaptureError> {
-        // The only "source" is the configured file, if any.
         Ok(self
             .default_path
             .iter()
@@ -421,7 +418,6 @@ pub fn drain_child_stderr(child: &mut std::process::Child, target: &'static str)
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                // Denials must be visible in logs, not buried at debug.
                 if line.to_ascii_lowercase().contains("denied") {
                     log::warn!(target: "transcription::capture", "{target}: {line}");
                 } else {
@@ -550,8 +546,7 @@ mod tests {
             z.feed(&five_secs),
             Some(CaptureHealth::Raised(CaptureWarning::SystemAudioSilent))
         );
-        assert_eq!(z.feed(&five_secs), None); // one-shot
-                                              // Any non-zero sample disarms it for good.
+        assert_eq!(z.feed(&five_secs), None);
         let mut z2 = ZeroStreakDetector::default();
         assert_eq!(z2.feed(&[0.0, 0.001]), None);
         assert_eq!(
@@ -568,7 +563,6 @@ mod tests {
         for _ in 0..3 {
             let _ = z.feed(&five_secs);
         }
-        // Warned already; the first real sample recovers the banner exactly once.
         assert_eq!(
             z.feed(&[0.0, 0.2]),
             Some(CaptureHealth::Cleared(CaptureWarning::SystemAudioSilent))
@@ -611,7 +605,7 @@ mod tests {
 
     #[test]
     fn file_capture_streams_a_16k_mono_wav_in_chunks() {
-        let samples = sine(16_000, 16_000, 220.0); // exactly 1 s
+        let samples = sine(16_000, 16_000, 220.0);
         let (_guard, path) = write_temp_wav(&samples, 16_000, 1);
         let cap = FileAudioCapture::for_file(&path);
         assert_eq!(
@@ -643,7 +637,6 @@ mod tests {
 
     #[test]
     fn file_capture_downmixes_stereo_and_resamples() {
-        // 48 kHz stereo, 0.5 s → expect ~8000 frames of 16 kHz mono.
         let samples = sine(24_000, 48_000, 440.0);
         let (_guard, path) = write_temp_wav(&samples, 48_000, 2);
         let cap = FileAudioCapture::for_file(&path);
@@ -655,7 +648,7 @@ mod tests {
             }
             total += c.samples.len();
         }
-        let expected = 16_000 / 2; // 0.5 s @ 16 kHz
+        let expected = 16_000 / 2;
         assert!(
             (total as i64 - expected as i64).abs() <= 8,
             "resampled length ~{expected}, got {total}"
@@ -664,10 +657,9 @@ mod tests {
 
     #[test]
     fn file_capture_can_take_the_path_via_the_source_argument() {
-        let samples = sine(8_000, 16_000, 330.0); // 0.5 s
+        let samples = sine(8_000, 16_000, 330.0);
         let (_guard, path) = write_temp_wav(&samples, 16_000, 1);
-        let cap = FileAudioCapture::new(); // no fixed path
-                                           // enumerate_sources is empty when there's no fixed path
+        let cap = FileAudioCapture::new();
         assert!(cap.enumerate_sources().unwrap().is_empty());
         let mut stream = cap
             .start(AudioSource::Microphone {
@@ -736,19 +728,24 @@ mod tests {
     /// Hand-crafts a minimal 16-bit mono PCM WAV so headers hound's writer
     /// refuses (e.g. a zero sample rate) can still be planted.
     fn write_raw_wav(path: &Path, rate: u32, frames: u32) {
+        const FORMAT_PCM: u16 = 1;
+        const CHANNELS_MONO: u16 = 1;
+        const BLOCK_ALIGN: u16 = 2;
+        const BITS_PER_SAMPLE: u16 = 16;
         let data_len = frames * 2;
+        let byte_rate = rate.saturating_mul(2);
         let mut b = Vec::new();
         b.extend_from_slice(b"RIFF");
         b.extend_from_slice(&(36 + data_len).to_le_bytes());
         b.extend_from_slice(b"WAVE");
         b.extend_from_slice(b"fmt ");
         b.extend_from_slice(&16u32.to_le_bytes());
-        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&FORMAT_PCM.to_le_bytes());
+        b.extend_from_slice(&CHANNELS_MONO.to_le_bytes());
         b.extend_from_slice(&rate.to_le_bytes());
-        b.extend_from_slice(&rate.saturating_mul(2).to_le_bytes()); // byte rate
-        b.extend_from_slice(&2u16.to_le_bytes()); // block align
-        b.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        b.extend_from_slice(&byte_rate.to_le_bytes());
+        b.extend_from_slice(&BLOCK_ALIGN.to_le_bytes());
+        b.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
         b.extend_from_slice(b"data");
         b.extend_from_slice(&data_len.to_le_bytes());
         b.resize(b.len() + data_len as usize, 0);
@@ -757,12 +754,10 @@ mod tests {
 
     #[test]
     fn wav_duration_reads_the_header_of_a_valid_file() {
-        // 0.5 s mono at 16 kHz, and 0.25 s stereo (duration is per channel).
         let (_g1, mono) = write_temp_wav(&vec![0.1f32; 8_000], 16_000, 1);
         assert_eq!(wav_duration(&mono), Some(Duration::from_millis(500)));
         let (_g2, stereo) = write_temp_wav(&vec![0.1f32; 4_000], 16_000, 2);
         assert_eq!(wav_duration(&stereo), Some(Duration::from_millis(250)));
-        // A header-only WAV is a valid zero-length recording.
         let (_g3, empty) = write_temp_wav(&[], 16_000, 1);
         assert_eq!(wav_duration(&empty), Some(Duration::ZERO));
     }
@@ -773,7 +768,6 @@ mod tests {
         let path = dir.path().join("zero-rate.wav");
         write_raw_wav(&path, 0, 100);
         assert_eq!(wav_duration(&path), None, "rate 0 must never divide");
-        // Sanity: the same raw shape with a real rate parses.
         let ok = dir.path().join("ok.wav");
         write_raw_wav(&ok, 16_000, 8_000);
         assert_eq!(wav_duration(&ok), Some(Duration::from_millis(500)));
@@ -790,7 +784,6 @@ mod tests {
 
     #[test]
     fn bytes_to_f32_decodes_le_and_drops_a_trailing_partial_sample() {
-        // 2 full f32s + 3 trailing bytes — chunks_exact drops the partial.
         let mut raw = Vec::new();
         raw.extend_from_slice(&1.0f32.to_le_bytes());
         raw.extend_from_slice(&(-0.5f32).to_le_bytes());
@@ -824,14 +817,11 @@ mod tests {
             let back: AudioSource = serde_json::from_str(&j).unwrap();
             assert_eq!(back, c, "round-trip failed for {c:?} (json: {j})");
         }
-        // Backward compat: an old Mixed with the retired `system` field still
-        // loads (serde ignores the unknown key) into the new shape.
         let old = r#"{"kind":"mixed","system":{"kind":"system_wide"},"mic":null}"#;
         assert_eq!(
             serde_json::from_str::<AudioSource>(old).unwrap(),
             AudioSource::Mixed { mic: None }
         );
-        // Spot-check the wire shape so a frontend mirroring this type knows it.
         let j = serde_json::to_value(AudioSource::Microphone { device: None }).unwrap();
         assert_eq!(j["kind"], "microphone");
     }

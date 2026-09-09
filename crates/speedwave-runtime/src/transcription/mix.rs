@@ -47,8 +47,6 @@ impl LevelBalancer {
             Some(est) => (LEVEL_TARGET_RMS / est).clamp(1.0, LEVEL_MAX_BOOST),
             None => 1.0,
         };
-        // Peak limit: never boost a chunk past full scale — a boosted transient
-        // would otherwise hard-clip at the pop-side clamp (audible distortion).
         let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         if peak > 0.0 {
             boost.min((1.0 / peak).max(1.0))
@@ -186,18 +184,15 @@ impl MixBuffer {
         }
         let start = Self::index_of(offset_ns);
         let end = start.saturating_add(samples.len() as u64);
-        // Index of the first sample we still keep.
         let keep_from = start.max(self.base);
         let skip = (keep_from - start) as usize;
         if skip >= samples.len() {
-            // Entirely in the past, but advance watermark to avoid false stall detection.
             self.bump_filled(source, end);
             return;
         }
-        let rel = (keep_from - self.base) as usize; // offset into sys/mic Vec
+        let rel = (keep_from - self.base) as usize;
         let needed = rel + (samples.len() - skip);
         if needed > MAX_BUFFERED_SAMPLES {
-            // Consumer too far behind or timestamp bogus; drop payload but record watermark.
             log::warn!(
                 target: "transcription::mix",
                 "{source:?} push at offset {offset_ns}ns would buffer {needed} samples (cap {MAX_BUFFERED_SAMPLES}) — dropped"
@@ -210,15 +205,11 @@ impl MixBuffer {
             self.bump_filled(source, end);
             return;
         }
-        // Feed the silence detector only the samples actually kept — a discarded (stale or
-        // over-cap) push must not skew the all-zero streak either way.
         if source == MixSource::System {
             if let Some(t) = self.zero.feed(&samples[skip..]) {
                 self.pending_health.push(t);
             }
         }
-        // Past the drop checks: the balancer only ever adapts to audio that
-        // actually lands in the mix.
         let gain = match source {
             MixSource::System => self.sys_level.gain(&samples[skip..]),
             MixSource::Mic => self.mic_level.gain(&samples[skip..]),
@@ -231,10 +222,8 @@ impl MixBuffer {
             buf.resize(needed, 0.0);
         }
         for (i, &s) in samples[skip..].iter().enumerate() {
-            buf[rel + i] += s * gain; // additive so overlapping pushes within a stream sum
+            buf[rel + i] += s * gain;
         }
-        // Only audio that actually lands feeds the stall detector: a source emitting nothing
-        // but rejected (stale / over-cap) chunks must still time out after STALL_GIVE_UP.
         self.last_delivery = std::time::Instant::now();
         self.bump_filled(source, end);
     }
@@ -258,7 +247,6 @@ impl MixBuffer {
         };
         let now_lagging = (gap > DEAD_GAP_SAMPLES)
             .then_some(lagging_side)
-            // A never-delivering system side is a quiet start (idle loopback), not a stall.
             .filter(|s| !(*s == MixSource::System && self.sys_filled == 0));
         if now_lagging == self.lagging {
             return;
@@ -293,8 +281,6 @@ impl MixBuffer {
         if self.finished {
             return self.base + self.sys.len().max(self.mic.len()) as u64;
         }
-        // A never-delivering system side is a quiet start (idle loopback), not a slow
-        // starter — gating on it would silence the mix and meter for the whole dead gap.
         if self.sys_filled == 0 {
             return self.mic_filled;
         }
@@ -353,7 +339,6 @@ pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, C
             Ok(mut b) => {
                 let start_ns = b.offset_ns();
                 let stalled_for = b.stalled_for();
-                // On stall, drain tail first so it isn't lost.
                 let chunk = b.pop_pair(want, want).or_else(|| {
                     (stalled_for >= STALL_GIVE_UP)
                         .then(|| b.pop_pair(1, want))
@@ -366,14 +351,12 @@ pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, C
                         offset: Duration::from_nanos(start_ns),
                     }));
                 }
-                // Empty + finished = clean end of stream.
                 if b.is_finished_and_empty() {
                     return Ok(None);
                 }
                 stalled_for
             }
             Err(_) => {
-                // Reader thread panicked; treat capture as dead.
                 log::warn!(target: "transcription::mix", "mix buffer poisoned — capture stopped");
                 return Err(CaptureError::Failed("mix buffer poisoned".to_string()));
             }
@@ -384,8 +367,6 @@ pub fn poll_paired_chunk(buf: &Mutex<MixBuffer>) -> Result<Option<AudioChunk>, C
                     .to_string(),
             ));
         }
-        // Alive but gated (e.g. quiet system side inside the dead-gap window):
-        // hand the ingest loop a keepalive instead of blocking here.
         if blocked >= KEEPALIVE_AFTER {
             return Ok(Some(AudioChunk::keepalive()));
         }
@@ -411,16 +392,13 @@ mod tests {
 
     #[test]
     fn chunk_samples_is_one_chunk_duration_at_16khz() {
-        // 16 kHz × 200 ms = 3200 samples.
         assert_eq!(CHUNK_SAMPLES, 3_200);
     }
 
     #[test]
     fn pop_pair_waits_for_both_streams_then_pairs() {
         let mut b = MixBuffer::new();
-        // 16 samples = 1 ms at 16 kHz. Push 1 ms of system at offset 0.
         b.push(MixSource::System, 0, &[1.0; 16]);
-        // Mic hasn't caught up — nothing ready.
         assert_eq!(b.pop_pair(1, 1000), None);
         b.push(MixSource::Mic, 0, &[1.0; 16]);
         let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
@@ -428,8 +406,8 @@ mod tests {
         assert_eq!(mic.len(), 16);
         assert!(sys.iter().all(|&s| (s - 1.0).abs() < 1e-6));
         assert!(mic.iter().all(|&s| (s - 1.0).abs() < 1e-6));
-        assert_eq!(b.pop_pair(1, 1000), None); // drained
-        assert_eq!(b.offset_ns(), 1_000_000); // 16 samples → 1 ms
+        assert_eq!(b.pop_pair(1, 1000), None);
+        assert_eq!(b.offset_ns(), 1_000_000);
     }
 
     #[test]
@@ -440,7 +418,6 @@ mod tests {
         let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys, vec![1.0, 0.5, -0.5, 0.0]);
         assert_eq!(mic, vec![1.0, 0.5, 0.5, 0.0]);
-        // Boundary clamp: -1.0 on each side stays -1.0.
         let mut b2 = MixBuffer::new();
         b2.push(MixSource::System, 0, &[-1.0]);
         b2.push(MixSource::Mic, 0, &[-1.0]);
@@ -455,7 +432,6 @@ mod tests {
     #[test]
     fn pop_zero_pads_a_shorter_side() {
         let mut b = MixBuffer::new();
-        // System 3 samples of 1.0, mic 1 sample of 1.0, then mic EOF.
         b.push(MixSource::System, 0, &[1.0; 3]);
         b.push(MixSource::Mic, 0, &[1.0]);
         b.finish();
@@ -469,8 +445,8 @@ mod tests {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[0.2; 100]);
         b.push(MixSource::Mic, 0, &[0.0; 100]);
-        assert_eq!(b.pop_pair(200, 1000), None); // min not met (only 100 available)
-        let PairedPcm { system: sys, .. } = b.pop_pair(30, 30).unwrap(); // min met, capped at 30
+        assert_eq!(b.pop_pair(200, 1000), None);
+        let PairedPcm { system: sys, .. } = b.pop_pair(30, 30).unwrap();
         assert_eq!(sys.len(), 30);
         let PairedPcm { system: sys2, .. } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys2.len(), 70);
@@ -480,7 +456,7 @@ mod tests {
     fn finish_drains_remaining_without_waiting_for_the_other_side() {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[0.5; 10]);
-        assert_eq!(b.pop_pair(1, 1000), None); // mic never arrives → nothing pops
+        assert_eq!(b.pop_pair(1, 1000), None);
         b.finish();
         let PairedPcm { system: sys, mic } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys.len(), 10);
@@ -495,16 +471,13 @@ mod tests {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[1.0; 32]);
         b.push(MixSource::Mic, 0, &[0.0; 32]);
-        let _ = b.pop_pair(1, 32).unwrap(); // base now 32
-                                            // Late buffer at offset 0 — dropped; watermark bumped.
+        let _ = b.pop_pair(1, 32).unwrap();
         b.push(MixSource::System, 0, &[9.9; 16]);
         assert_eq!(b.pop_pair(1, 1000), None);
-        // A fresh in-future buffer (offset 2 ms = index 32) pops normally.
         b.push(MixSource::System, 2_000_000, &[0.4; 16]);
         b.push(MixSource::Mic, 2_000_000, &[0.0; 16]);
         let PairedPcm { system: sys, .. } = b.pop_pair(1, 1000).unwrap();
         assert_eq!(sys.len(), 16);
-        // 0.4 RMS > LEVEL_TARGET_RMS (0.1) → gain 1.0.
         assert!(sys.iter().all(|&s| (s - 0.4).abs() < 1e-6));
     }
 
@@ -513,17 +486,14 @@ mod tests {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[1.0; 32]);
         b.push(MixSource::Mic, 0, &[0.0; 32]);
-        let _ = b.pop_pair(1, 32).unwrap(); // base now 32
+        let _ = b.pop_pair(1, 32).unwrap();
         let stalled = std::time::Instant::now() - STALL_GIVE_UP;
-        // Entirely-in-the-past push: dropped — must not look like a delivery.
         b.last_delivery = stalled;
         b.push(MixSource::System, 0, &[9.9; 16]);
         assert!(b.last_delivery.elapsed() >= STALL_GIVE_UP);
-        // Over-cap push: dropped — same rule.
         b.last_delivery = stalled;
         b.push(MixSource::System, 3600 * 1_000_000_000, &[1.0; 16]);
         assert!(b.last_delivery.elapsed() >= STALL_GIVE_UP);
-        // A landing push is a real delivery and resets the detector.
         b.last_delivery = stalled;
         b.push(MixSource::System, 2_000_000, &[0.4; 16]);
         assert!(b.last_delivery.elapsed() < STALL_GIVE_UP);
@@ -532,13 +502,10 @@ mod tests {
     #[test]
     fn push_over_the_cap_is_dropped() {
         let mut b = MixBuffer::new();
-        // An offset of 1 hour ≫ the 1-minute cap → the payload is dropped.
         let one_hour_ns: u64 = 3600 * 1_000_000_000;
         b.push(MixSource::System, one_hour_ns, &[1.0; 16]);
-        // Nothing buffered; the side's vec stays empty.
         b.finish();
         assert_eq!(b.pop_pair(1, 1000), None);
-        // A within-cap push still works.
         let mut b2 = MixBuffer::new();
         b2.push(MixSource::System, 0, &[1.0; 16]);
         b2.push(MixSource::Mic, 0, &[0.0; 16]);
@@ -548,15 +515,11 @@ mod tests {
     #[test]
     fn dropped_pushes_do_not_adapt_the_level_estimate() {
         let mut b = MixBuffer::new();
-        // A loud over-cap push is dropped — it must not seed the balancer.
         let one_hour_ns: u64 = 3600 * 1_000_000_000;
         b.push(MixSource::System, one_hour_ns, &[0.5; 16]);
-        // The first kept chunk (quiet but active) seeds the estimate fresh and
-        // gets the full boost, as if the dropped chunk never existed.
         b.push(MixSource::System, 0, &[0.01; 16]);
         b.push(MixSource::Mic, 0, &[0.0; 16]);
         let PairedPcm { system: sys, .. } = b.pop_pair(1, 16).unwrap();
-        // Estimate seeds at 0.01 → wants 10×, clamps to 8×; 0.01·8 = 0.08.
         assert!(sys.iter().all(|&s| (s - 0.08).abs() < 1e-6));
     }
 
@@ -564,7 +527,7 @@ mod tests {
     fn overlapping_pushes_within_a_stream_sum() {
         let mut b = MixBuffer::new();
         b.push(MixSource::System, 0, &[0.1; 16]);
-        b.push(MixSource::System, 0, &[0.2; 16]); // same range → 0.3
+        b.push(MixSource::System, 0, &[0.2; 16]);
         b.push(MixSource::Mic, 0, &[0.0; 16]);
         let PairedPcm { system: sys, .. } = b.pop_pair(1, 16).unwrap();
         assert!(sys.iter().all(|&s| (s - 0.3).abs() < 1e-6));
@@ -574,21 +537,19 @@ mod tests {
     fn offset_ns_tracks_popped_samples() {
         let mut b = MixBuffer::new();
         assert_eq!(b.offset_ns(), 0);
-        b.push(MixSource::System, 0, &[0.0; 16_000]); // 1 s
+        b.push(MixSource::System, 0, &[0.0; 16_000]);
         b.push(MixSource::Mic, 0, &[0.0; 16_000]);
         let _ = b.pop_pair(1, 8_000).unwrap();
-        assert_eq!(b.offset_ns(), 500_000_000); // 8000 / 16000 s
+        assert_eq!(b.offset_ns(), 500_000_000);
     }
 
     #[test]
     fn a_dead_side_stops_gating_after_the_gap_and_warns_once() {
         let mut b = MixBuffer::new();
-        // Mic never delivers; system pushes 6 s (> 5 s gap) of audio.
         let six_secs = SAMPLE_RATE_HZ as usize * 6;
         b.push(MixSource::System, 0, &vec![0.8; six_secs]);
         let PairedPcm { system: sys, mic } =
             b.pop_pair(1, six_secs).expect("mix flows without the mic");
-        // ready = 6s − 5s gap = 1s; mic side pads as zeros.
         assert_eq!(sys.len(), SAMPLE_RATE_HZ as usize);
         assert!(sys.iter().all(|&s| (s - 0.8).abs() < 1e-6));
         assert!(mic.iter().all(|&s| s == 0.0));
@@ -596,13 +557,12 @@ mod tests {
             b.take_health(),
             vec![CaptureHealth::Raised(CaptureWarning::MicrophoneStalled)]
         );
-        assert_eq!(b.take_health(), vec![]); // drained — one-shot
+        assert_eq!(b.take_health(), vec![]);
     }
 
     #[test]
     fn a_dead_system_side_warns_with_the_system_variant() {
         let mut b = MixBuffer::new();
-        // System delivered 1 s, then died; mic runs on to 7 s (gap > 5 s).
         b.push(MixSource::System, 0, &vec![0.8; SAMPLE_RATE_HZ as usize]);
         let seven_secs = SAMPLE_RATE_HZ as usize * 7;
         b.push(MixSource::Mic, 0, &vec![0.8; seven_secs]);
@@ -616,8 +576,6 @@ mod tests {
     #[test]
     fn a_system_side_that_never_started_is_a_quiet_start_not_a_stall() {
         let mut b = MixBuffer::new();
-        // Idle Windows loopback (no system packets): mix must flow from the mic immediately,
-        // feeding the loudness meter, without a spurious SystemAudioStalled warning.
         b.push(MixSource::Mic, 0, &[0.8; 16]);
         let PairedPcm { system: sys, mic } = b.pop_pair(1, 16).expect("mic flows immediately");
         assert_eq!(mic.len(), 16);
@@ -632,16 +590,12 @@ mod tests {
         b.push(MixSource::System, 0, &vec![0.8; six_secs]);
         let _ = b.pop_pair(1, six_secs).unwrap();
         let _ = b.take_health();
-        // Mic revives at the current offset (6 s): gap closes, min-gating returns
-        // and the stall banner is recovered.
         b.push(MixSource::Mic, 6_000_000_000, &[0.8; 16]);
         assert_eq!(
             b.take_health(),
             vec![CaptureHealth::Cleared(CaptureWarning::MicrophoneStalled)]
         );
-        // 6s+16 samples on mic vs 6s on sys → gap 16 ≪ DEAD_GAP → gate = min.
         let PairedPcm { system: sys, mic } = b.pop_pair(1, usize::MAX).unwrap();
-        // Drains up to sys_filled (6 s) minus already-popped base (1 s) = 5 s.
         assert_eq!(sys.len(), SAMPLE_RATE_HZ as usize * 5);
         assert!(sys.iter().all(|&s| (s - 0.8).abs() < 1e-6));
         assert!(mic.iter().all(|&s| s == 0.0));
@@ -658,7 +612,7 @@ mod tests {
     #[test]
     fn all_zero_system_audio_warns_once_after_the_threshold() {
         let mut b = MixBuffer::new();
-        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize]; // 1 s
+        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize];
         for i in 0..16u64 {
             b.push(MixSource::System, i * 1_000_000_000, &chunk);
             b.push(MixSource::Mic, i * 1_000_000_000, &chunk);
@@ -669,7 +623,6 @@ mod tests {
             w,
             vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
         );
-        // More zeros never re-trigger the one-shot.
         b.push(MixSource::System, 17_000_000_000, &chunk);
         assert_eq!(b.take_health(), vec![]);
     }
@@ -678,7 +631,7 @@ mod tests {
     fn nonzero_system_audio_never_warns_silent() {
         let mut b = MixBuffer::new();
         let mut chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize];
-        chunk[7] = 0.01; // any single non-zero sample counts as signal
+        chunk[7] = 0.01;
         b.push(MixSource::System, 0, &chunk);
         let zeros = vec![0.0f32; SAMPLE_RATE_HZ as usize];
         for i in 1..17u64 {
@@ -692,14 +645,12 @@ mod tests {
     #[test]
     fn a_stale_duplicate_zero_push_does_not_count_toward_the_silence_streak() {
         let mut b = MixBuffer::new();
-        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize]; // 1 s
+        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize];
         for i in 0..14u64 {
             b.push(MixSource::System, i * 1_000_000_000, &chunk);
             b.push(MixSource::Mic, i * 1_000_000_000, &chunk);
             let _ = b.pop_pair(1, usize::MAX);
         }
-        // Re-push an already-popped (entirely stale) range many times — a re-anchor
-        // or retry replaying old offsets must not advance the streak at all.
         for _ in 0..10 {
             b.push(MixSource::System, 0, &chunk);
         }
@@ -713,11 +664,9 @@ mod tests {
     #[test]
     fn a_quiet_source_is_boosted_toward_the_target() {
         let mut b = MixBuffer::new();
-        // Mic speech at RMS 0.02 (under LEVEL_TARGET_RMS) → 5× boost.
         b.push(MixSource::Mic, 0, &[0.02; 1600]);
         b.push(MixSource::System, 0, &[0.0; 1600]);
         let PairedPcm { mic, .. } = b.pop_pair(1, 1600).unwrap();
-        // 0.02 × 5 (boost) = 0.1
         assert!(
             mic.iter().all(|&s| (s - 0.1).abs() < 1e-4),
             "got {:?}",
@@ -728,7 +677,7 @@ mod tests {
     #[test]
     fn an_over_cap_dropped_nonzero_push_does_not_clear_an_active_silence_warning() {
         let mut b = MixBuffer::new();
-        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize]; // 1 s
+        let chunk = vec![0.0f32; SAMPLE_RATE_HZ as usize];
         for i in 0..16u64 {
             b.push(MixSource::System, i * 1_000_000_000, &chunk);
             b.push(MixSource::Mic, i * 1_000_000_000, &chunk);
@@ -738,8 +687,6 @@ mod tests {
             b.take_health(),
             vec![CaptureHealth::Raised(CaptureWarning::SystemAudioSilent)]
         );
-        // A non-zero push landing past the buffering cap is dropped — it must not read as
-        // "signal arrived" and clear the warning (only Cleared matters here).
         let one_hour_ns: u64 = 3600 * 1_000_000_000;
         b.push(MixSource::System, one_hour_ns, &[1.0; 16]);
         let health = b.take_health();
@@ -765,11 +712,9 @@ mod tests {
     #[test]
     fn boost_is_capped_at_the_maximum() {
         let mut b = MixBuffer::new();
-        // RMS 0.005 wants a 20× boost — clamps to LEVEL_MAX_BOOST (8×).
         b.push(MixSource::Mic, 0, &[0.005; 1600]);
         b.push(MixSource::System, 0, &[0.0; 1600]);
         let PairedPcm { mic, .. } = b.pop_pair(1, 1600).unwrap();
-        // 0.005 × 8 = 0.04
         assert!(
             mic.iter().all(|&s| (s - 0.04).abs() < 1e-4),
             "got {:?}",
@@ -783,7 +728,6 @@ mod tests {
         b.push(MixSource::Mic, 0, &[0.4; 1600]);
         b.push(MixSource::System, 0, &[0.0; 1600]);
         let PairedPcm { mic, .. } = b.pop_pair(1, 1600).unwrap();
-        // Gain clamps at 1.0 from below: 0.4 × 1 = 0.4.
         assert!(
             mic.iter().all(|&s| (s - 0.4).abs() < 1e-4),
             "got {:?}",
@@ -794,23 +738,18 @@ mod tests {
     #[test]
     fn a_near_full_scale_transient_limits_the_boost_instead_of_clipping() {
         let mut b = MixBuffer::new();
-        // Quiet speech seeds a 5x boost.
         b.push(MixSource::Mic, 0, &[0.02; 1600]);
-        // Next chunk carries a 0.9 transient — boosting 5x would clip at ±1.
         let mut transient = [0.02f32; 1600];
         transient[100] = 0.9;
         b.push(MixSource::Mic, 100_000_000, &transient);
         b.push(MixSource::System, 0, &[0.0; 3200]);
         let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
         assert!(mic.iter().all(|&s| s.abs() <= 1.0));
-        // The whole chunk's gain is peak-limited to 1/0.9 ≈ 1.11, not 5x:
-        // the transient lands just under full scale, unclipped.
         assert!(
             (mic[1700] - 0.9 * (1.0 / 0.9)).abs() < 2e-3,
             "got {}",
             mic[1700]
         );
-        // A quiet sample of the same chunk shares the limited gain.
         assert!(
             (mic[1701] - 0.02 * (1.0 / 0.9)).abs() < 2e-3,
             "got {}",
@@ -825,13 +764,11 @@ mod tests {
     #[test]
     fn noise_below_the_activity_floor_never_drives_the_boost() {
         let mut b = MixBuffer::new();
-        // A -60 dBFS noise floor stays below LEVEL_ACTIVITY_FLOOR over many chunks.
         for i in 0..20u64 {
             b.push(MixSource::Mic, i * 100_000_000, &[0.001; 1600]);
             b.push(MixSource::System, i * 100_000_000, &[0.0; 1600]);
         }
         let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
-        // No estimate formed → unity gain: 0.001.
         assert!(
             mic.iter().all(|&s| (s - 0.001).abs() < 1e-5),
             "got {:?}",
@@ -843,11 +780,10 @@ mod tests {
     fn gain_holds_through_silence_between_utterances() {
         let mut b = MixBuffer::new();
         b.push(MixSource::Mic, 0, &[0.02; 1600]);
-        b.push(MixSource::Mic, 100_000_000, &[0.0; 1600]); // pause
-        b.push(MixSource::Mic, 200_000_000, &[0.02; 1600]); // same level again
+        b.push(MixSource::Mic, 100_000_000, &[0.0; 1600]);
+        b.push(MixSource::Mic, 200_000_000, &[0.02; 1600]);
         b.push(MixSource::System, 0, &[0.0; 4800]);
         let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
-        // Both utterances get the held 5× boost; the pause stays zero.
         assert!(mic[..1600].iter().all(|&s| (s - 0.1).abs() < 1e-4));
         assert!(mic[1600..3200].iter().all(|&s| s.abs() < 1e-6));
         assert!(mic[3200..].iter().all(|&s| (s - 0.1).abs() < 1e-4));
@@ -856,18 +792,15 @@ mod tests {
     #[test]
     fn the_estimate_adapts_when_the_source_gets_louder() {
         let mut b = MixBuffer::new();
-        b.push(MixSource::Mic, 0, &[0.02; 16_000]); // 1 s at RMS 0.02 → est 0.02
+        b.push(MixSource::Mic, 0, &[0.02; 16_000]);
         for i in 1..9u64 {
-            // 8 s at RMS 0.1 pull the estimate up; gain decays toward 1×.
             b.push(MixSource::Mic, i * 1_000_000_000, &[0.1; 16_000]);
         }
         b.push(MixSource::System, 0, &[0.0; 16_000 * 9]);
         let PairedPcm { mic, .. } = b.pop_pair(1, usize::MAX).unwrap();
-        let first = mic[0]; // 0.02 × 5 = 0.1
+        let first = mic[0];
         let last = mic[mic.len() - 1];
         assert!((first - 0.1).abs() < 1e-4, "first {first}");
-        // After ~8 s of louder audio the boost has decayed close to unity:
-        // 0.1 × gain with gain ≈ 1.03 → just above 0.1.
         assert!(last > 0.098 && last < 0.112, "last {last}");
     }
 
@@ -875,7 +808,6 @@ mod tests {
     fn poll_paired_chunk_returns_a_chunk_once_both_sides_are_ready() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
         let want = CHUNK_SAMPLES;
-        // A feeder thread pushes one full chunk on each side after a beat.
         let feeder = {
             let buf = Arc::clone(&buf);
             thread::spawn(move || {
@@ -899,17 +831,13 @@ mod tests {
     #[test]
     fn poll_paired_chunk_returns_none_on_clean_eof() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // No data ever pushed; one side immediately marks finished.
         buf.lock().unwrap().finish();
-        // First poll: empty + finished → Ok(None) right away.
         assert!(poll_paired_chunk(&buf).unwrap().is_none());
     }
 
     #[test]
     fn poll_paired_chunk_drains_the_tail_then_errors_on_stall() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // A sub-chunk tail, never finished, no more data: keepalives while the stall window
-        // runs, the tail drains once it elapses, then the next poll errors (no clean EOF).
         {
             let mut b = buf.lock().unwrap();
             b.push(MixSource::System, 0, &[1.0; 8]);
@@ -917,7 +845,7 @@ mod tests {
         }
         let tail = loop {
             match poll_paired_chunk(&buf).unwrap() {
-                Some(c) if c.samples.is_empty() => continue, // keepalive — stall window still open
+                Some(c) if c.samples.is_empty() => continue,
                 Some(c) => break c,
                 None => panic!("unexpected clean EOF"),
             }
@@ -934,8 +862,6 @@ mod tests {
     #[test]
     fn poll_paired_chunk_keeps_alive_while_one_side_delivers() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // System delivered once then went idle while the mic keeps delivering: the
-        // gated pair must yield keepalives past STALL_GIVE_UP, never a stall error.
         buf.lock().unwrap().push(MixSource::System, 0, &[1.0; 16]);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let feeder = {
@@ -947,12 +873,11 @@ mod tests {
                     buf.lock()
                         .unwrap()
                         .push(MixSource::Mic, off_ns, &[0.5; 320]);
-                    off_ns += 20_000_000; // 320 samples = 20 ms at 16 kHz
+                    off_ns += 20_000_000;
                     thread::sleep(Duration::from_millis(5));
                 }
             })
         };
-        // Keepalives (or, once the mic outruns the dead gap, real chunks) — never an error.
         let deadline = std::time::Instant::now() + STALL_GIVE_UP + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
             let _ = poll_paired_chunk(&buf)
@@ -966,7 +891,6 @@ mod tests {
     #[test]
     fn poll_paired_chunk_errors_on_a_poisoned_buffer() {
         let buf = Arc::new(Mutex::new(MixBuffer::new()));
-        // Poison the mutex by panicking while holding the lock.
         let b2 = Arc::clone(&buf);
         let _ = thread::spawn(move || {
             let _g = b2.lock().unwrap();
@@ -980,15 +904,12 @@ mod tests {
     #[test]
     fn an_over_cap_push_is_dropped_with_a_health_warning_not_in_silence() {
         let mut b = MixBuffer::new();
-        // An offset past the per-side cap cannot be buffered. The payload goes, but the user has
-        // to learn the recording has a hole instead of wondering where the words went.
         let far_ns = (MAX_BUFFERED_SAMPLES as u64 + 1) * 1_000_000_000 / SAMPLE_RATE_HZ as u64;
         b.push(MixSource::Mic, far_ns, &[0.5; 16]);
         assert_eq!(
             b.take_health(),
             vec![CaptureHealth::Raised(CaptureWarning::AudioDropped)]
         );
-        // One-shot, like every other health latch: a second over-cap push stays quiet.
         b.push(MixSource::Mic, far_ns, &[0.5; 16]);
         assert!(b.take_health().is_empty());
     }
