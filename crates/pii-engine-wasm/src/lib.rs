@@ -169,8 +169,6 @@ mod tests {
 
     #[test]
     fn tokenize_seals_a_keyword_inside_a_pii_value_before_the_keyword_pass() {
-        // Order matters (proxy §7.3 mirror): a keyword only occurring inside an email local
-        // part is sealed by tokenization first; the keyword pass must find nothing.
         let engine = keyword_engine();
         let email = format!("{}@example.com", "coca-cola");
         let input = serde_json::json!({ "contact": email }).to_string();

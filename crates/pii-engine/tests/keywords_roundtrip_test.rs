@@ -37,9 +37,6 @@ fn case_insensitive_alias_unalias_roundtrip_across_case_patterns() {
 
 #[test]
 fn multiple_keywords_mask_and_unmask_in_sequence() {
-    // Mirrors how a caller with several configured keywords applies them
-    // (proxy's `mask_keywords`/`unmask_keywords_text`): one alias_text/unalias_text
-    // pass per keyword, in policy order.
     let keywords = vec![
         CompiledKeyword {
             match_text: "Coca-Cola".to_string(),
