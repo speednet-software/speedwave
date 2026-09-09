@@ -83,9 +83,7 @@ fn run_loop(project_dir: &Path, stop: &AtomicBool) {
                     last_hash = Some(h);
                 }
             }
-            Err(arboard::Error::ContentNotAvailable) => {
-                // No image in clipboard — keep the last file (or absence) as is.
-            }
+            Err(arboard::Error::ContentNotAvailable) => {}
             Err(e) => {
                 log::trace!("failed to get clipboard image: {e}");
             }
@@ -118,7 +116,6 @@ fn write_png(target: &Path, img: &arboard::ImageData<'_>) -> Result<()> {
             )
             .context("png encode")?;
     }
-    // Owner-only perm BEFORE rename so the final inode never appears world-readable.
     restrict_paste_perms(&tmp)?;
     std::fs::rename(&tmp, target).with_context(|| format!("rename → {}", target.display()))?;
     Ok(())
@@ -149,7 +146,6 @@ mod tests {
     #[test]
     fn clip_path_is_under_project_pastes_dir() {
         let p = clip_path(Path::new("/tmp/proj"));
-        // Join-built on both sides — a formatted literal diverges on Windows separators.
         assert_eq!(
             p,
             Path::new("/tmp/proj")
