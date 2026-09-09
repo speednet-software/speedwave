@@ -93,8 +93,6 @@ pub fn drain_and_read_port(
                                 write_log_line(&mut log_file, "STDOUT", &line);
                                 continue;
                             }
-                            // Fail fast: waiting out the timeout would mask the real
-                            // cause (worker bound a misdetected host address).
                             PortAnnouncement::Invalid(raw) => {
                                 let _ = tx.send(Err(anyhow::anyhow!(
                                     "{tag} announced unusable port {raw} — its listen \
@@ -139,7 +137,6 @@ pub(crate) mod test_support {
     pub fn spawn_stdout_lines(lines: &[&str]) -> Child {
         let mut script = String::new();
         for line in lines {
-            // The newline must survive shell quoting — `printf '%s\n' "..."`.
             let escaped = line.replace('\'', "'\\''");
             script.push_str(&format!("printf '%s\\n' '{escaped}';"));
         }
@@ -329,11 +326,8 @@ mod tests {
             .contains("exited without announcing a port"));
     }
 
-    // ── test_support smoke tests ──────────────────────────────────
-
     #[test]
     fn fake_worker_js_announces_a_port_and_is_picked_up_by_drain() {
-        // Skips when Node is not on PATH (e.g. a stripped CI image).
         if std::process::Command::new("node")
             .arg("--version")
             .output()
@@ -354,7 +348,6 @@ mod tests {
         let log = dir.path().join("audit.log");
         let result = drain_and_read_port(&mut child, &log, "test-worker");
 
-        // Always kill the child before asserting so we don't leak Node processes.
         let _ = child.kill();
         let _ = child.wait();
 
@@ -364,7 +357,6 @@ mod tests {
 
     #[test]
     fn wait_for_node_comm_returns_quickly_for_definitely_not_node_pid() {
-        // PID 1 is never node; this confirms it returns without hanging.
         super::test_support::wait_for_node_comm(1);
     }
 }

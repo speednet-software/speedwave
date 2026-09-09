@@ -86,7 +86,6 @@ mod tests {
 
     #[test]
     fn is_pid_alive_false_for_definitely_dead_pid() {
-        // Just verify the function does not panic for an unlikely PID.
         let _ = is_pid_alive(999_999);
     }
 

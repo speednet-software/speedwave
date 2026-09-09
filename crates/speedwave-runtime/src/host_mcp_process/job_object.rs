@@ -2,7 +2,6 @@
 //! See ADR-048 ("PRE-INSTALL orphan worker sweep") for rationale and the TOCTOU known-limitation.
 
 #[cfg(target_os = "windows")]
-// FFI boundary — `unsafe_code` is allowed only here; each block carries SAFETY docs.
 #[expect(
     unsafe_code,
     reason = "Job Object FFI boundary; every block carries a SAFETY comment"
@@ -18,7 +17,6 @@ mod imp {
 
     /// Owns a Job Object HANDLE. Dropping closes the job, terminating
     /// every process in it (KILL_ON_JOB_CLOSE).
-    // `!Sync` intentional — raw HANDLE is not safe to share across threads.
     pub struct JobHandle(HANDLE);
 
     // SAFETY: HANDLE is owned by this struct (created once, closed in Drop),
@@ -38,7 +36,6 @@ mod imp {
         }
     }
 
-    // Guard the `as u32` cast in SetInformationJobObject below.
     const _: () =
         assert!(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() <= u32::MAX as usize);
 
@@ -52,11 +49,9 @@ mod imp {
             );
             return None;
         }
-        // From here on the handle is owned by `JobHandle`.
         let handle = JobHandle(job);
 
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        // KILL_ON_JOB_CLOSE + BREAKAWAY_OK — see ADR-048 for rationale.
         info.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 
@@ -77,13 +72,11 @@ mod imp {
             return None;
         }
 
-        // Use the existing handle from std (avoids OpenProcess + DuplicateHandle dance).
         let child_handle = child.as_raw_handle() as HANDLE;
         // SAFETY: live process handle owned by std::process::Child; job just created.
         let ok = unsafe { AssignProcessToJobObject(job, child_handle) };
         if ok == 0 {
             let err = std::io::Error::last_os_error();
-            // ACCESS_DENIED = nested non-breakaway parent job; see ADR-048.
             if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
                 log::error!(
                     "Job Object: AssignProcessToJobObject denied — Speedwave.exe appears to be \
@@ -108,7 +101,6 @@ mod imp {
     use std::cell::Cell;
     use std::marker::PhantomData;
 
-    // PhantomData<Cell<()>> mirrors Windows variant: Send but !Sync.
     pub struct JobHandle(PhantomData<Cell<()>>);
 
     pub fn attach_to_kill_on_close_job(_child: &std::process::Child) -> Option<JobHandle> {
@@ -126,7 +118,6 @@ mod tests {
     #[test]
     #[expect(clippy::unwrap_used, reason = "test fixture spawn/wait")]
     fn stub_returns_none_without_panic() {
-        // `/bin/sh -c "exit 0"` works under minimal/sandboxed PATH.
         // SSOT-allow: test fixture spawn
         let child = std::process::Command::new("/bin/sh")
             .args(["-c", "exit 0"])
@@ -156,7 +147,6 @@ mod tests {
         let job = match attach_to_kill_on_close_job(&child) {
             Some(j) => j,
             None => {
-                // Skip when inside a non-breakaway parent job (CI / MSIX / debugger).
                 let _ = child.kill();
                 let _ = child.wait();
                 eprintln!("skipping: attach_to_kill_on_close_job returned None (likely a non-breakaway parent job)");
@@ -165,7 +155,6 @@ mod tests {
         };
         drop(job);
 
-        // Child must die within 2 s of dropping the job; assert "no longer running".
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             match child.try_wait() {

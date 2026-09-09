@@ -12,7 +12,6 @@ use std::process::Command;
 /// Decodes raw `wsl.exe` output (UTF-16LE with/without BOM, falling back to UTF-8).
 /// `wsl.exe --list` defaults to UTF-16LE on Windows.
 pub fn decode_wsl_output(bytes: &[u8]) -> String {
-    // UTF-16LE with BOM
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         let u16s: Vec<u16> = bytes[2..]
             .chunks_exact(2)
@@ -20,7 +19,6 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
-    // UTF-16LE-without-BOM heuristic: even length + null byte in an odd position.
     if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
         let has_null_high_bytes = bytes.iter().skip(1).step_by(2).any(|&b| b == 0x00);
         if has_null_high_bytes {
@@ -110,8 +108,6 @@ impl WslRuntime {
     /// Flushes the stale CNI iptables chains / bridges named in `err`, as root in the
     /// distro. Best-effort; see [`super::cni_cleanup_command`].
     fn cleanup_stale_cni(&self, err: &anyhow::Error) -> anyhow::Result<()> {
-        // run_in_distro already wraps in `sh -c` and the payload crosses the WSL
-        // default-shell reparse; base64 keeps the script quote-free through both.
         self.run_in_distro(&["sh", "-c", &super::cni_cleanup_command(err)], true)
             .map(|_| ())
     }
@@ -171,8 +167,6 @@ impl WslRuntime {
             res
         };
         let _ = run_root("mkdir", &["mkdir", "-p", &nested]);
-        // Fast path: only root ever creates at the mount targets (home root +
-        // deepest nested target), so correct owners there mean no -R needed.
         let owned = run_root("stat", &["stat", "-c", "%u:%g", &path, &nested]).is_ok_and(|out| {
             let lines: Vec<&str> = out.lines().map(str::trim).collect();
             lines.len() == 2 && lines.iter().all(|l| *l == uidgid)
@@ -204,12 +198,10 @@ impl WslRuntime {
         let mut args = vec!["-d", distro, "--"];
         args.extend_from_slice(check_cmd);
 
-        // Fast path: service already running
         if self.runner.run("wsl.exe", &args).is_ok() {
             return Ok(());
         }
 
-        // Try starting the service, preserve error for diagnostics
         let start_err = self
             .runner
             .run(
@@ -225,7 +217,6 @@ impl WslRuntime {
         let mut last_check_err = None;
 
         for attempt in 1..=max {
-            // Check first, sleep after — avoids unnecessary wait when service is already up
             match self.runner.run("wsl.exe", &args) {
                 Ok(_) => {
                     log::info!("{service_name} ready after {attempt} attempt(s)");
@@ -239,7 +230,6 @@ impl WslRuntime {
             std::thread::sleep(self.retry_delay);
         }
 
-        // Build diagnostic error with both start and check errors
         let mut msg = format!(
             "{service_name} is not running inside WSL2 distribution '{distro}' after {max} attempts."
         );
@@ -295,7 +285,6 @@ pub fn is_root_path(p: &Path) -> bool {
 /// SSOT parser for the WSL UNC prefix: strips `\\?\UNC\` (UNC segment case-insensitive)
 /// or `\\`, returning the remainder; `None` if no UNC marker.
 fn strip_unc_prefix(s: &str) -> Option<&str> {
-    // `\\?\UNC\`: bytes 0..4 (`\\?\`) case-stable, 4..7 (`UNC`) case-insensitive, byte 7 `\`.
     let bytes = s.as_bytes();
     if bytes.len() >= 8
         && &bytes[0..4] == br"\\?\"
@@ -304,7 +293,6 @@ fn strip_unc_prefix(s: &str) -> Option<&str> {
         && bytes[6].eq_ignore_ascii_case(&b'C')
         && bytes[7] == b'\\'
     {
-        // Safe: first 8 bytes are all ASCII.
         return Some(&s[8..]);
     }
     s.strip_prefix(r"\\")
@@ -319,27 +307,21 @@ fn is_wsl_server(server: &str) -> bool {
 /// Recognizes WSL UNC paths in all four forms Windows emits (`\\wsl.localhost\<distro>\<rest>`,
 /// `\\wsl$\<distro>\<rest>`, and `\\?\UNC\...` variants). `None` for network UNC/drive/Unix paths.
 pub fn is_wsl_unc_path(s: &str) -> Option<WslUncInfo> {
-    // Strip `\\?\UNC\` / `\\?\unc\` / `\\` (shared SSOT — see `strip_unc_prefix`).
     let after_double_backslash = strip_unc_prefix(s)?;
 
-    // Split on backslash: server, distro, rest...
     let mut parts = after_double_backslash.splitn(3, '\\');
     let server = parts.next()?;
     let distro = parts.next()?;
 
-    // Server must be a WSL UNC server (shared SSOT — see `is_wsl_server`).
     if !is_wsl_server(server) {
         return None;
     }
 
-    // Distro must be non-empty.
     if distro.is_empty() {
         return None;
     }
 
-    // Rest may be missing (bare root: `\\wsl.localhost\Speedwave` or `\\wsl.localhost\Speedwave\`).
     let rest = parts.next().unwrap_or("").replace('\\', "/");
-    // Strip trailing slash from bare-root variants to normalize "" and "/" into "".
     let rest = rest.trim_end_matches('/').to_string();
 
     Some(WslUncInfo {
@@ -363,13 +345,11 @@ pub fn looks_like_wsl_unc_prefix(s: &str) -> bool {
 
 /// Converts a Windows path (`C:\foo`, `C:/foo`, `\\?\C:\...`) to a WSL mount path (`/mnt/c/foo`);
 /// passes Unix paths through. WSL UNC: runtime distro → `/<rest>`; other → error; network UNC → error.
-// Internal primitive of `engine_path::to_engine_path` — the one public SSOT.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
     let s = path.to_string_lossy();
     let bytes = s.as_bytes();
 
-    // Handle extended-length prefix: \\?\C:\... → strip prefix and recurse
     if bytes.len() >= 6
         && bytes[0] == b'\\'
         && bytes[1] == b'\\'
@@ -378,23 +358,16 @@ pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
         && bytes[4].is_ascii_alphabetic()
         && bytes[5] == b':'
     {
-        // Safe: first 4 bytes are ASCII (`\\?\`), remainder is a normal path
         return windows_to_wsl_path(Path::new(&s[4..]));
     }
 
-    // WSL UNC paths: match own distro → /<rest>; mismatch → helpful error.
-    // Pure parsing is in `is_wsl_unc_path`; covers all 4 forms including \\?\UNC\.
     if let Some(info) = is_wsl_unc_path(&s) {
         if info.is_runtime_distro() {
-            // Bare root (rest == "") returns "/" — pure path translator.
-            // Rejection of "/" as a project dir is enforced in project::add_project.
             return Ok(PathBuf::from(format!("/{}", info.rest)));
         }
         anyhow::bail!(consts::wsl_other_distro_msg(&info.distro));
     }
 
-    // Malformed WSL UNC (e.g. `\\wsl.localhost\` with no distro): surface a precise error
-    // instead of the generic "Network UNC" reject, which would mislead WSL-path typists.
     if looks_like_wsl_unc_prefix(&s) {
         anyhow::bail!(
             "Malformed WSL UNC path '{}': expected \\\\wsl.localhost\\<distro>\\<path> or \
@@ -403,7 +376,6 @@ pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
         );
     }
 
-    // Reject true network UNC paths (\\server\share) — not WSL, not mappable.
     if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\' {
         anyhow::bail!(
             "Network UNC path '{}' is not supported. Move your project under a drive-letter path \
@@ -414,19 +386,16 @@ pub(crate) fn windows_to_wsl_path(path: &Path) -> anyhow::Result<PathBuf> {
         );
     }
 
-    // Match drive letter patterns: `C:\...`, `C:/...`, `c:\...`, `c:/...`
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
         let drive = (bytes[0] as char).to_ascii_lowercase();
-        // Safe: bytes 0-2 are ASCII (drive letter + ':' + separator)
         let rest = s[3..].replace('\\', "/");
         return Ok(PathBuf::from(format!("/mnt/{}/{}", drive, rest)));
     }
 
-    // Already a Unix path or relative — pass through
     Ok(path.to_path_buf())
 }
 
@@ -442,7 +411,6 @@ fn wsl_compose_file_path(project: &str) -> anyhow::Result<String> {
 impl ContainerRuntime for WslRuntime {
     fn compose_up(&self, project: &str) -> anyhow::Result<()> {
         let compose_file = wsl_compose_file_path(project)?;
-        // BEFORE up: the uid-1000 entrypoint races a post-up chown (ADR-052).
         self.ensure_claude_home_writable(project);
         let up = || {
             self.run_in_distro(
@@ -462,7 +430,6 @@ impl ContainerRuntime for WslRuntime {
             .map(|_| ())
         };
         let result = self.up_with_heal(project, up);
-        // AFTER up (even a failed one): hand back anything nerdctl root-created.
         self.ensure_claude_home_writable(project);
         result
     }
@@ -470,8 +437,6 @@ impl ContainerRuntime for WslRuntime {
     fn compose_down(&self, project: &str) -> anyhow::Result<()> {
         let distro = self.distro();
         let compose_file = wsl_compose_file_path(project)?;
-        // No compose.yml → compose can't run, but labelled leftovers and dead
-        // name-store reservations may persist — reap those instead of skipping.
         if super::compose_down_is_noop(&super::compose_file_path(project)?) {
             log::info!("no compose.yml for '{project}' — removing leftovers without compose down");
             let nerdctl_prefix = ["-d", distro, "--", "nerdctl"];
@@ -533,11 +498,8 @@ impl ContainerRuntime for WslRuntime {
     }
 
     fn container_exec(&self, container: &str, cmd: &[&str]) -> Command {
-        // wsl.exe runs the post-`--` argv through bash, so every token must be POSIX-quoted (see `super::shell_quote_argv`).
         let distro = self.distro();
         let path_env = format!("PATH={}", consts::CONTAINER_PATH);
-        // Propagate the host's real TERM so Claude Code can negotiate the
-        // keyboard protocol (Shift+Enter) instead of seeing a forced xterm.
         let term_env = super::resolved_term_env();
         let nerdctl_argv: Vec<&str> = [
             "nerdctl",
@@ -860,13 +822,10 @@ impl ContainerRuntime for WslRuntime {
         use std::time::Duration;
         let distro = self.distro();
 
-        // Canonical System32 path avoids PATH-based binary substitution: host-side commands
-        // must not be resolvable via a user-controlled PATH entry.
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
         let wsl = format!("{system_root}\\System32\\wsl.exe");
         let wsl = wsl.as_str();
 
-        // Best-effort terminate first so --unregister doesn't fight a running VM.
         if let Err(e) =
             self.runner
                 .run_with_timeout(wsl, &["--terminate", distro], Duration::from_secs(10))
@@ -904,7 +863,6 @@ impl ContainerRuntime for WslRuntime {
 #[cfg(any(target_os = "windows", test))]
 impl WslRuntime {
     fn ensure_ready_inner(&self) -> anyhow::Result<()> {
-        // OS prerequisite check (SSOT: os_prereqs module)
         let violations = crate::os_prereqs::check_os_prereqs();
         if let Some(v) = violations.first() {
             anyhow::bail!("{v}");
@@ -933,11 +891,8 @@ impl WslRuntime {
             );
         }
 
-        // Windows invariants (nerdctl pin ADR-072 + metadata automount
-        // ADR-052) before the probes — a nerdctl reinstall stops the daemons.
         crate::provision::ensure_windows_invariants();
 
-        // Verify containerd and buildkitd are running inside the WSL distro.
         self.check_service(distro, &["nerdctl", "info"], "containerd", "containerd")?;
         self.check_service(
             distro,
@@ -986,7 +941,6 @@ mod tests {
 
     #[test]
     fn test_is_available_handles_utf16le_output() {
-        // Real wsl.exe outputs UTF-16LE: "Speedwave\r\n" with each char as 2 bytes
         let text = format!("Ubuntu\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
@@ -1000,7 +954,7 @@ mod tests {
     #[test]
     fn test_is_available_handles_utf16le_with_bom() {
         let text = format!("{}\r\n", consts::wsl_distro_name());
-        let mut bytes: Vec<u8> = vec![0xFF, 0xFE]; // BOM
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
         }
@@ -1021,9 +975,7 @@ mod tests {
 
     #[test]
     fn test_is_available_utf16le_non_ascii_distro_before_speedwave() {
-        // Non-ASCII distro name before Speedwave — verifies that
-        // UTF-16LE is detected even when the first bytes aren't ASCII
-        let text = format!("\u{5F00}\u{53D1}\r\n{}\r\n", consts::wsl_distro_name()); // "开发\r\n<distro>\r\n"
+        let text = format!("\u{5F00}\u{53D1}\r\n{}\r\n", consts::wsl_distro_name());
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
             bytes.extend_from_slice(&ch.to_le_bytes());
@@ -1070,8 +1022,6 @@ mod tests {
         let result = rt.ensure_ready();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        // On Windows: os_prereqs catches missing WSL → "WSL2 check failed"
-        // On macOS/Linux: os_prereqs returns empty, mock fails on --list → distro not found
         if cfg!(target_os = "windows") {
             assert!(
                 err.contains("WSL2"),
@@ -1141,7 +1091,6 @@ mod tests {
             err.contains("buildkitd"),
             "error should mention buildkitd, got: {err}"
         );
-        // Verify correct systemd unit name is used (buildkit, not buildkitd)
         assert!(
             err.contains("systemctl start buildkit"),
             "error hint should use systemd unit 'buildkit', got: {err}"
@@ -1215,8 +1164,6 @@ mod tests {
             remote_cmd.contains("test_container"),
             "remote_cmd should include container name, got: {remote_cmd}"
         );
-        // Anchor on the literal "nerdctl exec -it -e" prefix — `shlex` leaves alphanumeric
-        // tokens unquoted, so it appears verbatim and the match is precise.
         assert!(
             remote_cmd.contains("nerdctl exec -it -e"),
             "remote_cmd should start the nerdctl invocation with -it, got: {remote_cmd}"
@@ -1250,8 +1197,6 @@ mod tests {
             remote_cmd.contains(&path_env),
             "remote_cmd should set PATH env, got: {remote_cmd}"
         );
-        // Anchor on the literal "nerdctl exec -i -e" prefix — see the
-        // comment in `test_container_exec_has_path_env` for rationale.
         assert!(
             remote_cmd.contains("nerdctl exec -i -e"),
             "remote_cmd should start the nerdctl invocation with -i (no TTY), got: {remote_cmd}"
@@ -1283,8 +1228,6 @@ mod tests {
             &["sh", "-c", r#"echo "hello \"world\"""#],
         ];
 
-        // Pin TERM so the interactive prefix is deterministic — container_exec
-        // now propagates the host's real TERM. Guard restores it on drop.
         let _term_guard = crate::runtime::TermGuard::set("xterm-256color");
         let term_env = crate::runtime::resolved_term_env();
 
@@ -1352,7 +1295,6 @@ mod tests {
 
     #[test]
     fn test_compose_down_includes_remove_orphans() {
-        // Use `wsl_compose_file_path` (production's helper) so the mock key matches the `/mnt/c/...` translation on Windows.
         let distro = consts::wsl_distro_name();
         let compose_file = wsl_compose_file_path("wsl-cleanup-test").unwrap();
         let expected_key = format!(
@@ -1470,7 +1412,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_extended_length_temp_path() {
-        // Regression: Windows GetTempPath/canonicalize can return \\?\C:\Users\...
         let result = windows_to_wsl_path(Path::new(
             r"\\?\C:\Users\User\AppData\Local\Temp\speedwave-e2e-project",
         ))
@@ -1483,8 +1424,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_rejects_unc_without_drive() {
-        // \\?\UNC\server\share — true network UNC after extended-prefix strip,
-        // should still be rejected as Network UNC (not WSL UNC).
         let result = windows_to_wsl_path(Path::new(r"\\?\UNC\server\share"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1494,8 +1433,6 @@ mod tests {
             err
         );
     }
-
-    // ── WSL UNC path support tests ──────────────────────────────────────────
 
     #[test]
     fn test_is_wsl_unc_path_modern_form() {
@@ -1531,7 +1468,6 @@ mod tests {
 
     #[test]
     fn test_is_wsl_unc_path_extended_lowercase_unc() {
-        // \\?\unc\... lowercase variant.
         let info = is_wsl_unc_path(r"\\?\unc\wsl.localhost\Speedwave\foo").unwrap();
         assert_eq!(info.rest, "foo");
     }
@@ -1582,7 +1518,6 @@ mod tests {
 
     #[test]
     fn test_is_wsl_unc_path_returns_none_for_empty_distro() {
-        // \\wsl.localhost\\foo — missing distro segment.
         assert!(is_wsl_unc_path(r"\\wsl.localhost\\foo").is_none());
     }
 
@@ -1606,7 +1541,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_canonicalized_wsl_unc() {
-        // \\?\UNC\wsl.localhost\<distro>\foo (what canonicalize() may return on Windows)
         let distro = consts::wsl_distro_name();
         let result =
             windows_to_wsl_path(Path::new(&format!(r"\\?\UNC\wsl.localhost\{distro}\foo")))
@@ -1624,7 +1558,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_case_insensitive_distro() {
-        // Lowercased distro name must still match the runtime distro.
         let distro = consts::wsl_distro_name().to_lowercase();
         let result =
             windows_to_wsl_path(Path::new(&format!(r"\\wsl.localhost\{distro}\foo"))).unwrap();
@@ -1633,8 +1566,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_mixed_slashes_in_rest() {
-        // After splitting on backslash for distro extraction, mixed slashes
-        // within the rest must still normalize to forward slashes.
         let distro = consts::wsl_distro_name();
         let result =
             windows_to_wsl_path(Path::new(&format!(r"\\wsl.localhost\{distro}\foo\bar"))).unwrap();
@@ -1643,8 +1574,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_wsl_localhost_bare_root_returns_slash() {
-        // Pure path translator returns "/" for bare root distro paths.
-        // Rejection of "/" as a project dir is enforced in project::add_project.
         let distro = consts::wsl_distro_name();
         let result =
             windows_to_wsl_path(Path::new(&format!(r"\\wsl.localhost\{distro}\"))).unwrap();
@@ -1666,19 +1595,16 @@ mod tests {
             "error should mention runtime distro 'Speedwave', got: {}",
             err
         );
-        // Option 1: PowerShell Copy-Item (recommended path).
         assert!(
             err.contains("Copy-Item"),
             "error should suggest PowerShell Copy-Item, got: {}",
             err
         );
-        // Option 2: move to /mnt/c/.
         assert!(
             err.contains("/mnt/c/"),
             "error should suggest moving to /mnt/c/, got: {}",
             err
         );
-        // Option 3: native Claude Code without Speedwave.
         assert!(
             err.contains("native") && err.contains("Claude Code"),
             "error should mention native Claude Code as a fallback option, got: {}",
@@ -1701,8 +1627,6 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Ubuntu"));
     }
-
-    // ── Malformed WSL UNC — must surface a precise error, not "Network UNC" ──
 
     #[test]
     fn test_windows_to_wsl_path_malformed_wsl_unc_missing_distro() {
@@ -1737,28 +1661,20 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_empty_after_extended_strip() {
-        // `\\?\UNC\` alone (no server/distro) → no panic, Err or pass-through.
         let result = windows_to_wsl_path(Path::new(r"\\?\UNC\"));
-        // Err or pass-through Ok both acceptable; must not panic or mis-map.
         if let Ok(p) = result {
-            // If pass-through, the result must not be misleading (must not be /)
             assert_ne!(p, PathBuf::from("/"), "empty UNC must not map to root");
         }
     }
 
     #[test]
     fn test_windows_to_wsl_path_bare_double_backslash() {
-        // \\ alone — no server, no distro.
         let result = windows_to_wsl_path(Path::new(r"\\"));
-        // Should be rejected (Network UNC branch catches it as bytes[0..2] == \\\\).
         assert!(result.is_err());
     }
 
-    // ── is_root_path helper tests ───────────────────────────────────────────
-
     #[test]
     fn test_is_root_path_accepts_root_variants() {
-        // Empty, "/", "//" (trailing), "/.", "/./" all collapse to root.
         assert!(is_root_path(Path::new("/")));
         assert!(is_root_path(Path::new("")));
         assert!(is_root_path(Path::new("/.")));
@@ -1767,10 +1683,8 @@ mod tests {
 
     #[test]
     fn test_is_root_path_accepts_parent_dir_collapsing_to_root() {
-        // /foo/.. and /foo/bar/../.. both pop back to root.
         assert!(is_root_path(Path::new("/foo/..")));
         assert!(is_root_path(Path::new("/foo/bar/../..")));
-        // Excess `..` clamps at root, never below.
         assert!(is_root_path(Path::new("/../..")));
     }
 
@@ -1778,11 +1692,8 @@ mod tests {
     fn test_is_root_path_rejects_subdirs() {
         assert!(!is_root_path(Path::new("/projects/foo")));
         assert!(!is_root_path(Path::new("/workspace")));
-        // /foo/bar/.. → /foo, not root.
         assert!(!is_root_path(Path::new("/foo/bar/..")));
     }
-
-    // ── looks_like_wsl_unc_prefix — used to surface "Malformed WSL UNC" error ──
 
     #[test]
     fn test_looks_like_wsl_unc_prefix_modern() {
@@ -1812,8 +1723,6 @@ mod tests {
         assert!(!looks_like_wsl_unc_prefix(r"C:\foo"));
         assert!(!looks_like_wsl_unc_prefix("/home/user"));
     }
-
-    // ── Direct tests for SSOT helpers `strip_unc_prefix` and `is_wsl_server` ──
 
     #[test]
     fn test_strip_unc_prefix_modern_double_backslash() {
@@ -1848,7 +1757,6 @@ mod tests {
 
     #[test]
     fn test_strip_unc_prefix_single_backslash_returns_none() {
-        // Single `\` is not a UNC marker.
         assert_eq!(strip_unc_prefix(r"\foo"), None);
     }
 
@@ -1872,12 +1780,8 @@ mod tests {
 
     #[test]
     fn test_strip_unc_prefix_extended_takes_priority_over_double_backslash() {
-        // The `\\?\UNC\` branch MUST be tried before the plain `\\` branch, or
-        // `\\?\UNC\wsl...` matches `\\` first, leaving the bogus server `?\UNC\wsl...`.
         let result = strip_unc_prefix(r"\\?\UNC\wsl.localhost\Speedwave\foo");
         assert_eq!(result, Some(r"wsl.localhost\Speedwave\foo"));
-        // Negative: result must NOT contain the `?\UNC\` fragment that the
-        // wrong order would produce.
         assert!(!result.unwrap().contains("?"));
         assert!(!result.unwrap().contains("UNC"));
     }
@@ -1904,11 +1808,8 @@ mod tests {
         assert!(!is_wsl_server("fileserver"));
     }
 
-    // ── Defense-in-depth: Unicode distros, typosquats, empty-distro classification ──
-
     #[test]
     fn test_is_wsl_unc_path_accepts_unicode_distro_safely() {
-        // Parser captures Unicode distro verbatim; `is_runtime_distro` folds only ASCII, so no collision with "Speedwave".
         let info = is_wsl_unc_path(r"\\wsl.localhost\日本語\foo").unwrap();
         assert_eq!(info.distro, "日本語");
         assert_eq!(info.rest, "foo");
@@ -1920,15 +1821,12 @@ mod tests {
 
     #[test]
     fn test_is_wsl_unc_path_rejects_typosquat_server() {
-        // Server `wsl.localhost.evil.com` is NOT `wsl.localhost` (even case-insensitively).
         assert!(is_wsl_unc_path(r"\\wsl.localhost.evil.com\Speedwave\foo").is_none());
-        // Bare-word "wsl" without the `.localhost` or `$` suffix is also rejected.
         assert!(is_wsl_unc_path(r"\\wsl\Speedwave\foo").is_none());
     }
 
     #[test]
     fn test_windows_to_wsl_path_typosquat_server_is_network_unc() {
-        // Typosquat server → generic Network UNC reject, not the WSL message.
         let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost.evil.com\Speedwave\foo"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1940,7 +1838,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_empty_distro_segment_e2e() {
-        // `\\wsl.localhost\\foo` (empty distro) → "Malformed WSL UNC", not generic Network UNC.
         let result = windows_to_wsl_path(Path::new(r"\\wsl.localhost\\foo"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1956,7 +1853,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_canonicalized_empty_distro_e2e() {
-        // Same as above but after extended-length canonicalization.
         let result = windows_to_wsl_path(Path::new(r"\\?\UNC\wsl.localhost\\foo"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -2052,7 +1948,6 @@ mod tests {
 
     #[test]
     fn test_remove_images_empty_tags_is_noop() {
-        // No runner responses set — any run() call would fail with "unexpected command"
         let runner = MockRunner::new();
         let rt = WslRuntime::with_runner(Box::new(runner));
         assert!(
@@ -2083,7 +1978,6 @@ mod tests {
             "no such image",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
-        // rmi failure must not propagate — just warn and return Ok
         assert!(
             rt.remove_images(&tags, false).is_ok(),
             "rmi failure should not propagate"
@@ -2098,8 +1992,6 @@ mod tests {
             "",
         );
         let rt = WslRuntime::with_runner(Box::new(runner));
-        // force=true must add --force to the rmi args so nerdctl removes images still
-        // referenced by a running container (the explicit-uninstall path).
         assert!(rt.remove_images(&tags, true).is_ok());
     }
 
@@ -2137,12 +2029,8 @@ mod tests {
         );
     }
 
-    // ── wsl_compose_file_path tests ────────────────────────────────────
-
     #[test]
     fn test_wsl_compose_file_path_returns_unix_path() {
-        // On macOS/Linux, compose_file_path already returns a Unix path,
-        // so wsl_compose_file_path passes it through unchanged.
         let result = wsl_compose_file_path("test-project").unwrap();
         assert!(
             result.contains("/compose/test-project/compose.yml"),
@@ -2158,7 +2046,6 @@ mod tests {
 
     #[test]
     fn test_windows_to_wsl_path_converts_compose_file() {
-        // Simulates what happens on Windows: compose_file_path returns a Windows path
         let win_path = Path::new(r"C:\Users\jakub\.speedwave\compose\e2e-test\compose.yml");
         let wsl = windows_to_wsl_path(win_path).unwrap();
         assert_eq!(
@@ -2166,8 +2053,6 @@ mod tests {
             PathBuf::from("/mnt/c/Users/jakub/.speedwave/compose/e2e-test/compose.yml")
         );
     }
-
-    // ── ensure_ready UTF-16LE tests ─────────────────────────────────────
 
     #[test]
     fn test_ensure_ready_handles_utf16le_output() {
@@ -2206,8 +2091,6 @@ mod tests {
         assert!(err.contains("Speedwave"));
         assert!(err.contains("setup wizard"));
     }
-
-    // ── decode_wsl_output unit tests ────────────────────────────────────
 
     #[test]
     fn test_decode_wsl_output_handles_utf8() {
@@ -2300,14 +2183,13 @@ mod tests {
 
     #[test]
     fn test_decode_wsl_output_odd_length_treated_as_utf8() {
-        let input = b"AB\0CD\0E"; // 7 bytes — odd length
+        let input = b"AB\0CD\0E";
         let result = decode_wsl_output(input);
         assert_eq!(result, "AB\0CD\0E");
     }
 
     #[test]
     fn test_decode_wsl_output_control_chars_fall_back_to_utf8() {
-        // Even-length input whose UTF-16LE decode hits a control char (NUL), triggering UTF-8 fallback.
         let input: &[u8] = &[0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x00, 0x57, 0x6F, 0x72, 0x64];
         let result = decode_wsl_output(input);
         assert!(
@@ -2318,7 +2200,6 @@ mod tests {
 
     #[test]
     fn test_decode_wsl_output_non_ascii_utf16le() {
-        // "开发\r\nSpeedwave\r\n" encoded as UTF-16LE without BOM
         let text = "\u{5F00}\u{53D1}\r\nSpeedwave\r\n";
         let mut bytes: Vec<u8> = Vec::new();
         for ch in text.encode_utf16() {
@@ -2334,9 +2215,6 @@ mod tests {
             "should preserve non-ASCII chars, got: {decoded:?}"
         );
     }
-
-    // ── KeyedSequentialMockRunner for retry tests ─────────────────────────
-    // Keys responses by "cmd args..." so interleaved distinct commands pop from their own queue.
 
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
@@ -2379,32 +2257,24 @@ mod tests {
         }
     }
 
-    // ── Retry tests ──────────────────────────────────────────────────────
-
     #[test]
     fn test_ensure_ready_recovers_buildkit_after_retries() {
         let distro = consts::wsl_distro_name();
-        // buildctl: fast-path fails, then 3 retry failures, then succeeds on 4th retry
         let runner = KeyedSequentialMockRunner::new()
             .with_responses("wsl.exe --list --quiet", vec![Ok(format!("{distro}\n"))])
-            // containerd: fast-path OK
             .with_responses(
                 &format!("wsl.exe -d {distro} -- nerdctl info"),
                 vec![Ok("containerd running".to_string())],
             )
             .with_responses(&format!("wsl.exe -d {distro} -- buildctl debug workers"), {
                 let mut v: Vec<anyhow::Result<String>> = Vec::new();
-                // Fast-path check fails
                 v.push(Err(anyhow::anyhow!("connection refused")));
-                // Retry checks: 3 failures then success
                 for _ in 0..3 {
                     v.push(Err(anyhow::anyhow!("connection refused")));
                 }
                 v.push(Ok("buildkit ready".to_string()));
                 v
             })
-            // systemctl start uses unit name "buildkit" (not "buildkitd") — a "buildkitd"
-            // regression would miss this mock and panic with "unexpected command".
             .with_responses(
                 &format!("wsl.exe -d {distro} -- systemctl start buildkit"),
                 vec![Ok(String::new())],
@@ -2424,7 +2294,6 @@ mod tests {
         let distro = consts::wsl_distro_name();
         let runner = KeyedSequentialMockRunner::new()
             .with_responses("wsl.exe --list --quiet", vec![Ok(format!("{distro}\n"))])
-            // containerd: fast-path fails, start succeeds, 1st retry fails, 2nd retry OK
             .with_responses(
                 &format!("wsl.exe -d {distro} -- nerdctl info"),
                 vec![
@@ -2437,7 +2306,6 @@ mod tests {
                 &format!("wsl.exe -d {distro} -- systemctl start containerd"),
                 vec![Ok(String::new())],
             )
-            // buildkitd: fast-path OK
             .with_responses(
                 &format!("wsl.exe -d {distro} -- buildctl debug workers"),
                 vec![Ok("buildkit ready".to_string())],
@@ -2457,11 +2325,8 @@ mod tests {
         let distro = consts::wsl_distro_name();
         let max = consts::WSL_SERVICE_CHECK_MAX_RETRIES;
 
-        // buildctl fails on all attempts (fast-path + max retries)
         let mut buildctl_responses: Vec<anyhow::Result<String>> = Vec::new();
-        // Fast-path check
         buildctl_responses.push(Err(anyhow::anyhow!("connection refused")));
-        // All retry checks
         for _ in 0..max {
             buildctl_responses.push(Err(anyhow::anyhow!("still refused")));
         }
@@ -2491,7 +2356,6 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
 
-        // Verify diagnostic error contains all expected information
         assert!(
             err.contains("buildkitd"),
             "error should mention service display name 'buildkitd', got: {err}"
@@ -2704,9 +2568,8 @@ mod tests {
 
         #[test]
         fn compose_up_chowns_claude_home_before_and_after_up() {
-            // Full pass BEFORE up (entrypoint must not race it), fast pass after.
             let mut responses = unowned_pass();
-            responses.push(Ok("".into())); // up
+            responses.push(Ok("".into()));
             responses.extend(owned_pass());
             let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
@@ -2727,7 +2590,7 @@ mod tests {
         #[test]
         fn chown_fast_path_skips_recursive_pass_when_already_owned() {
             let mut responses = owned_pass();
-            responses.push(Ok("".into())); // up
+            responses.push(Ok("".into()));
             responses.extend(owned_pass());
             let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
@@ -2747,13 +2610,12 @@ mod tests {
 
         #[test]
         fn chown_full_pass_when_probe_fails() {
-            // stat error (e.g. path vanished) must fall back to the full pass.
             let responses = vec![
                 Ok("".into()),
                 Err(anyhow::anyhow!("stat: cannot stat")),
                 Ok("".into()),
                 Ok("".into()),
-                Ok("".into()), // up
+                Ok("".into()),
                 Ok("".into()),
                 Ok(format!("{u}\n{u}", u = uidgid())),
             ];
@@ -2799,8 +2661,6 @@ mod tests {
 
         #[test]
         fn compose_up_survives_chown_failure_fail_open() {
-            // A chown hiccup must not fail the up (matches the previous
-            // provision::ensure_claude_home_owner fail-open contract).
             let mock = SequentialMockRunner::new(vec![
                 Err(anyhow::anyhow!("mkdir: I/O error")),
                 Err(anyhow::anyhow!("stat: I/O error")),
@@ -2818,7 +2678,6 @@ mod tests {
 
         #[test]
         fn compose_up_failure_still_runs_post_up_chown() {
-            // A partial up may already have root-created dirs — hand them back.
             let mut responses = unowned_pass();
             responses.push(Err(anyhow::anyhow!("compose up failed")));
             responses.extend(owned_pass());
@@ -2832,14 +2691,12 @@ mod tests {
 
         #[test]
         fn compose_up_self_heals_stale_cni_and_retries_to_success() {
-            // Pre-up chown (fast pass) → up FAILS with a stale-CNI collision →
-            // cleanup runs → up retries and succeeds → post-up chown (fast pass).
             let mut responses = owned_pass();
             responses.push(Err(anyhow::anyhow!(
                 "running [/usr/sbin/iptables -t nat -N CNI-abc123 --wait]: iptables: Chain already exists"
             )));
-            responses.push(Ok("".into())); // cleanup
-            responses.push(Ok("".into())); // up retry succeeds
+            responses.push(Ok("".into()));
+            responses.push(Ok("".into()));
             responses.extend(owned_pass());
             let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
@@ -2876,8 +2733,8 @@ mod tests {
         fn compose_up_recreate_self_heals_stale_name_store_and_retries() {
             let mut responses = owned_pass();
             responses.push(Err(anyhow::anyhow!("{}", name_store_conflict_msg())));
-            responses.push(Ok("".into())); // heal payload
-            responses.push(Ok("".into())); // up retry succeeds
+            responses.push(Ok("".into()));
+            responses.push(Ok("".into()));
             responses.extend(owned_pass());
             let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
@@ -2913,8 +2770,8 @@ mod tests {
         fn compose_up_service_self_heals_stale_name_store_and_retries() {
             let mut responses = owned_pass();
             responses.push(Err(anyhow::anyhow!("{}", name_store_conflict_msg())));
-            responses.push(Ok("".into())); // heal payload
-            responses.push(Ok("".into())); // up retry succeeds
+            responses.push(Ok("".into()));
+            responses.push(Ok("".into()));
             responses.extend(owned_pass());
             let mock = Arc::new(SequentialMockRunner::new(responses));
             let mock_clone = Arc::clone(&mock);
@@ -2959,8 +2816,6 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
-        // Thin Arc wrapper so tests can hold a shared reference to the mock
-        // while also passing ownership into the runtime.
         struct ArcRunner(Arc<SequentialMockRunner>);
         impl crate::runtime::CommandRunner for ArcRunner {
             fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<String> {
@@ -2995,7 +2850,6 @@ mod tests {
             assert!(rt.reset_vm().is_ok());
             let calls = mock_clone.calls.lock().unwrap();
             assert_eq!(calls.len(), 2);
-            // cmd is the absolute System32 path; ends_with covers cross-platform tests
             assert!(
                 calls[0].0.ends_with("wsl.exe"),
                 "expected wsl.exe path, got: {}",

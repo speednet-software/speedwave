@@ -60,14 +60,12 @@ mod tests {
 
     #[test]
     fn is_node_process_returns_false_for_pid_1() {
-        // PID 1 is init/launchd on every Unix and System on Windows.
         assert!(!is_node_process(1));
     }
 
     #[cfg(unix)]
     #[test]
     fn is_node_process_returns_false_for_nonexistent_pid() {
-        // Almost certainly not a node process (PID this high is rare).
         assert!(!is_node_process(u32::MAX - 1));
     }
 }
