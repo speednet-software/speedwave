@@ -1049,4 +1049,66 @@ mod tests {
         buffer.push_chunk(&bytes);
         assert!(buffer.finish(&[], &key).is_err());
     }
+
+    #[test]
+    fn scan_request_preserves_cache_breakpoints_and_produces_a_stable_prefix() {
+        let (policy, key) = test_policy_and_key();
+        let tools = json!([{
+            "name": "send_mail",
+            "description": "sends mail",
+            "input_schema": {"type": "object", "properties": {}},
+            "cache_control": {"type": "ephemeral"}
+        }]);
+        let body_for = || {
+            json!({
+                "model": "claude-x",
+                "tools": tools.clone(),
+                "system": [
+                    {"type": "text", "text": "you are helpful"},
+                    {"type": "text", "text": "reach me at fixture@example.invalid",
+                     "cache_control": {"type": "ephemeral"}}
+                ],
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "mail fixture@example.invalid",
+                                 "cache_control": {"type": "ephemeral"}}]
+                }]
+            })
+        };
+
+        let mut first = body_for();
+        scan_request(&policy, &key, &mut first).unwrap();
+
+        assert_eq!(
+            first["tools"], tools,
+            "tool definitions must survive the scan untouched"
+        );
+        assert_eq!(
+            first["system"][1]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "a system breakpoint marker must survive the scan"
+        );
+        assert_eq!(
+            first["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
+            "a message breakpoint marker must survive the scan"
+        );
+        assert_eq!(first["system"].as_array().unwrap().len(), 2);
+        assert_eq!(first["system"][0]["text"], json!("you are helpful"));
+        assert_eq!(first["messages"][0]["content"][0]["type"], json!("text"));
+
+        let system_text = first["system"][1]["text"].as_str().unwrap();
+        assert!(
+            !system_text.contains("fixture@example.invalid"),
+            "the address must be sealed: {system_text}"
+        );
+
+        let mut second = body_for();
+        scan_request(&policy, &key, &mut second).unwrap();
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap(),
+            "a repeated prefix must scan to identical bytes or every turn is a cache miss"
+        );
+    }
 }
