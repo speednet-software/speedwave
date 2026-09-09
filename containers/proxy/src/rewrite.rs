@@ -206,7 +206,6 @@ impl SseRewriter {
         key: &EngineKey,
     ) -> Result<Vec<u8>, RewriteError> {
         let mut out = Vec::new();
-        // EOF terminates an unterminated final line, and an event missing its blank line.
         if !self.line_buf.is_empty() {
             let mut last = std::mem::take(&mut self.line_buf);
             last.push(b'\n');
@@ -287,8 +286,6 @@ impl SseRewriter {
                         self.rewrite_delta(index, kind, &frame, out, keywords, key)?;
                     }
                     None => {
-                        // Unknown delta kind (e.g. signature_delta): flush our held text so
-                        // in-block ordering survives, then pass the event through verbatim.
                         self.flush_block(index, out, keywords, key)?;
                         out.extend_from_slice(&raw);
                     }
@@ -324,8 +321,6 @@ impl SseRewriter {
                 "delta payload is not a string",
             ))?;
         if self.blocks.get(&index).is_some_and(|b| b.kind != kind) {
-            // A kind change inside one block is not a real protocol state, but never mix
-            // buffered text across transforms — flush the old kind first.
             self.flush_block(index, out, keywords, key)?;
             self.blocks.remove(&index);
         }
@@ -524,7 +519,6 @@ mod tests {
 
     #[test]
     fn sse_span_split_across_multiple_delta_events_detokenizes() {
-        // The production failure: a token span streamed as tiny text_delta fragments.
         let (policy, key) = default_policy_and_key();
         let token = token_for(&policy, &key, "user.813b4c5c4a@example.com");
         let stream = format!(
@@ -779,7 +773,6 @@ mod tests {
     fn sse_finish_flushes_unterminated_event_and_blocks() {
         let (policy, key) = default_policy_and_key();
         let token = token_for(&policy, &key, "user.7880093b09@example.com");
-        // No trailing blank line and no stop event: EOF must terminate and flush.
         let event = delta_event(0, "text_delta", "text", &format!("end {token}"), true);
         let stream = event.trim_end_matches('\n');
 

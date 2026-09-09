@@ -113,9 +113,7 @@ mod tests {
             Some("or-REALKEY"),
             "key must be read from /tokens/<id>_api_key and trimmed"
         );
-        // Absent file → None (provider answers 401, surfaced by the swap-leg warn).
         assert!(provider_key_for_env_name_in(dir.path(), "SPW_KEY_MISSING").is_none());
-        // Tampered/invalid name never touches the filesystem.
         assert!(provider_key_for_env_name_in(dir.path(), "SPW_KEY_9BAD").is_none());
     }
 
@@ -130,8 +128,6 @@ mod tests {
 
     #[test]
     fn round_trips_with_host_forward_normalisation() {
-        // reverse(forward(id)) == id for every valid slug; a host normalisation
-        // change trips this (and the spw_key_env_name SSOT-alignment note).
         for id in [
             "openrouter",
             "local",

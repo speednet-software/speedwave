@@ -85,7 +85,6 @@ fn resolve_audit_dir() -> Option<PathBuf> {
     std::env::var("AUDIT_DIR").ok().map(PathBuf::from)
 }
 
-// Manual Debug: `caller_token` is a per-project secret and must never reach logs.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -263,13 +262,11 @@ mod tests {
 
     #[test]
     fn build_forward_client_succeeds_on_primary_path() {
-        // Reaching a Client proves the primary build() attempt succeeded.
         let _client = build_forward_client();
     }
 
     #[test]
     fn build_forward_client_no_proxy_fallback_chain_builds() {
-        // Same builder chain as the retry branch's no_proxy() fallback.
         let build = || {
             reqwest::Client::builder()
                 .use_rustls_tls()

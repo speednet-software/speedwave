@@ -210,8 +210,6 @@ fn floor_char_boundary(s: &str, at: usize) -> usize {
 pub fn safe_prefix_len(text: &str, keywords: &[CompiledKeyword]) -> usize {
     let mut safe = text.len();
     if let Some(start) = incomplete_token_span_start(text) {
-        // A pseudo-span tail longer than the practical bound is treated as plain text so a
-        // bracket-heavy stream cannot pin the buffer forever.
         if text.len() - start <= MAX_TOKEN_SPAN_LEN {
             safe = safe.min(start);
         }
@@ -369,7 +367,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("policy.json");
         std::fs::write(&path, default_policy_json()).unwrap();
-        // No sibling "key" file written.
         assert!(matches!(load_from_file(&path), PiiEngineState::Failed(_)));
     }
 
@@ -466,7 +463,6 @@ mod tests {
         let first_detections = scan_request(&policy, &key, &mut first).unwrap();
         assert_eq!(first_detections.len(), 1);
 
-        // Reuse the already-tokenized turn as history, add a new message with fresh PII.
         let mut second = json!({
             "messages": [
                 first["messages"][0].clone(),
@@ -543,8 +539,6 @@ mod tests {
 
     #[test]
     fn scan_request_tokenizes_newline_separated_pesels_without_phone_overlap() {
-        // Regression: PHONE_PL used to glue "48"+digits across a line break, so two PESELs
-        // escaped their own rule and leaked digit fragments in cleartext.
         let (policy, key) = test_policy_and_key();
         let list = (0..4).map(generated_pesel).collect::<Vec<_>>().join("\n");
         let mut body = json!({"messages": [{"role": "user", "content": list}]});
@@ -564,8 +558,6 @@ mod tests {
             );
         }
     }
-
-    // ── keyword masking: applied by scan_request after PII tokenization ──
 
     fn policy_with_keyword(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledPolicy {
         let json = format!(
@@ -681,9 +673,6 @@ mod tests {
 
     #[test]
     fn scan_request_does_not_mask_keywords_in_protocol_fields() {
-        // "model" and "role" are never scanned for PII either (see
-        // scan_request_tokenizes_system_and_message_content); a keyword whose match text
-        // happens to equal a protocol value must not touch it.
         let policy = policy_with_keyword("claude-x", "REDACTED", true);
         let key = EngineKey::from_bytes([9u8; 32]);
         let mut body = json!({
@@ -698,9 +687,6 @@ mod tests {
 
     #[test]
     fn scan_request_protects_keyword_already_sealed_inside_a_tokenized_pii_value() {
-        // Sequence matters (design doc §7.3): PII tokenization runs first, so a keyword
-        // that only appears as a substring of an already-tokenized PII value must not
-        // survive in cleartext, and the alias substitution must find no cleartext match.
         let policy = policy_with_email_rule_and_keyword("secretco", "Vendor", true);
         let key = EngineKey::from_bytes([9u8; 32]);
         let mut body = json!({"system": "Contact admin@secretco.com about the merger"});
@@ -727,8 +713,6 @@ mod tests {
         scan_request(&policy, &key, &mut body).unwrap();
         assert_eq!(body["system"], "Use Coca-Cola with Sprite");
     }
-
-    // ── unmask_keywords_text / unmask_and_detokenize_response: inbound response rewrite ──
 
     fn email_token(policy: &CompiledPolicy, key: &EngineKey, value: &str) -> String {
         speedwave_pii_engine::scan_text(policy, key, value)
@@ -779,8 +763,6 @@ mod tests {
 
     #[test]
     fn unmask_keywords_text_skips_a_pii_token_spans_ciphertext() {
-        // The keyword alias never legitimately appears inside a token's base64 payload, but
-        // the mechanism must not corrupt the span even if it coincidentally did (§7.2).
         let policy = policy_with_email_rule_and_keyword("Coca-Cola", "Brandex", true);
         let key = EngineKey::from_bytes([9u8; 32]);
         let token = email_token(&policy, &key, "bob@example.com");
@@ -799,8 +781,6 @@ mod tests {
 
     #[test]
     fn unmask_and_detokenize_response_reverses_scan_request_end_to_end() {
-        // Round-trip symmetry (design doc §7.3): mask+tokenize outbound the way scan_request
-        // does, then unmask+detokenize inbound must recover the exact original text.
         let policy = policy_with_email_rule_and_keyword("Coca-Cola", "Brandex", true);
         let key = EngineKey::from_bytes([9u8; 32]);
         let mut body = json!({"system": "Contact bob@example.com at Coca-Cola"});
@@ -826,8 +806,6 @@ mod tests {
 
         assert!(unmask_and_detokenize_response(&corrupted, &[], &key).is_err());
     }
-
-    // ── safe_prefix_len: emit-boundary computation for the streaming rewriter ──
 
     fn kw(match_text: &str, alias: &str, case_sensitive: bool) -> CompiledKeyword {
         CompiledKeyword {
@@ -859,7 +837,6 @@ mod tests {
             safe_prefix_len(text, &[kw("Coca-Cola", "Brandex", false)]),
             4
         );
-        // Case-sensitive keyword: a wrong-case tail can never grow into the alias.
         assert_eq!(
             safe_prefix_len(text, &[kw("Coca-Cola", "Brandex", true)]),
             text.len()
@@ -890,8 +867,6 @@ mod tests {
         let text = format!("[EMAIL:TOKEN_{}", "a".repeat(MAX_TOKEN_SPAN_LEN + 10));
         assert_eq!(safe_prefix_len(&text, &[]), text.len());
     }
-
-    // ── unmask_and_detokenize_json_fragment: replacements escaped for serialized JSON ──
 
     fn policy_with_secret_rule() -> CompiledPolicy {
         let json = r#"{
@@ -943,8 +918,6 @@ mod tests {
         );
     }
 
-    // ── ResponseRewriteBuffer: whole-body buffer for non-SSE responses ──
-
     #[test]
     fn buffer_accumulates_chunks_and_emits_only_at_finish() {
         let mut buffer = ResponseRewriteBuffer::new();
@@ -985,8 +958,6 @@ mod tests {
 
     #[test]
     fn buffer_detokenizes_token_straddling_the_old_rolling_boundary() {
-        // Regression: the retired rolling emit cut the buffer at len-MAX_TOKEN_SPAN_LEN and
-        // transformed only the prefix, splitting a match that crossed the cut.
         let (policy, key) = test_policy_and_key();
         let token = email_token(&policy, &key, "straddle.bob@example.com");
         let (first_half, second_half) = token.split_at(token.len() / 2);

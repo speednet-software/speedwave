@@ -115,13 +115,11 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
         "message_delta" => {
             if let Some(usage) = frame.get("usage") {
                 acc.saw_usage = true;
-                // input_tokens on a delta overrides the message_start value (vLLM/bridged case).
                 if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
                     if v > 0 {
                         acc.prompt_tokens = v;
                     }
                 }
-                // Guard >0: a trailing 0 must not wipe a message_start value.
                 if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
                     if v > 0 {
                         acc.completion_tokens = v;
@@ -267,7 +265,6 @@ mod tests {
             &mut a,
         );
         assert_eq!(a.gen_id.unwrap(), "gen-xyz");
-        // The `msg_…` id is still the response id, not the gen id.
         assert_eq!(a.response_id.unwrap(), "msg_3");
     }
 
@@ -357,8 +354,6 @@ mod tests {
 
     #[test]
     fn cross_aggregator_round_trip_bytes_match() {
-        // Write a UsageLine and verify the bytes the host aggregator would parse.
-        // Field names and types must match UsageRecord in speedwave-runtime/src/usage.rs.
         let line = UsageLine {
             ts: "2026-06-12T10:00:00.000+02:00".to_string(),
             status: "success".to_string(),
@@ -380,7 +375,6 @@ mod tests {
         append_usage(&path, &line);
         let written = std::fs::read_to_string(&path).unwrap();
         let trimmed = written.trim_end_matches('\n');
-        // Must round-trip through serde_json as a valid object with required fields.
         let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
         assert_eq!(parsed["ts"], "2026-06-12T10:00:00.000+02:00");
         assert_eq!(parsed["status"], "success");
@@ -396,16 +390,12 @@ mod tests {
         assert_eq!(parsed["cache_write"], 0);
         assert_eq!(parsed["provider_kind"], "anthropic_oauth");
         assert_eq!(parsed["provider_id"], "anthropic");
-        // gen_id must be absent for non-OpenRouter (skip_serializing_if None).
         assert!(parsed.get("gen_id").is_none(), "gen_id must be absent");
-        // cost_usd must be absent (skip_serializing_if None).
         assert!(parsed.get("cost_usd").is_none(), "cost_usd must be absent");
-        // ttft_ms must be absent when None (skip_serializing_if).
         assert!(
             parsed.get("ttft_ms").is_none(),
             "ttft_ms must be absent when None"
         );
-        // Each line is a single terminated append (json + '\n', one write_all).
         assert!(written.ends_with('\n'));
     }
 
@@ -506,7 +496,6 @@ mod tests {
 
     #[test]
     fn zero_output_delta_does_not_wipe_message_start_output() {
-        // A trailing message_delta with output_tokens:0 must keep message_start's value.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{"output_tokens":42}}}),
@@ -533,7 +522,6 @@ mod tests {
 
     #[test]
     fn zero_cache_delta_does_not_wipe_message_start_cache() {
-        // A delta re-sending cache fields as 0 must keep the message_start values.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{
@@ -567,7 +555,6 @@ mod tests {
 
     #[test]
     fn nonzero_cache_delta_still_overrides() {
-        // A delta with a real (>0) cache value still updates the accumulator.
         let mut a = UsageAcc::default();
         sniff(
             &json!({"type":"message_start","message":{"id":"x","usage":{"cache_read_input_tokens":40}}}),
@@ -617,7 +604,6 @@ mod tests {
     #[test]
     fn append_usage_swallows_bad_path() {
         let line = fixture_line();
-        // Non-existent directory — must not panic.
         append_usage(
             Path::new("/nonexistent/dir/that/cannot/exist/usage.jsonl"),
             &line,
@@ -695,7 +681,6 @@ mod tests {
         use std::time::Instant;
         let mut acc = UsageAcc::default();
         let start = Instant::now();
-        // Non-text / empty frames before the first token must NOT set ttft.
         note_first_text_delta(&json!({"type":"message_start"}), start, &mut acc);
         note_first_text_delta(
             &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":""}}),
@@ -706,7 +691,6 @@ mod tests {
             acc.ttft_ms.is_none(),
             "empty/other frames must not set ttft"
         );
-        // First non-empty text_delta sets it.
         note_first_text_delta(
             &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}),
             start,
@@ -714,7 +698,6 @@ mod tests {
         );
         let first = acc.ttft_ms;
         assert!(first.is_some(), "first text_delta must set ttft");
-        // A later text_delta must NOT overwrite it.
         note_first_text_delta(
             &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"!"}}),
             start,
