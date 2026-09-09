@@ -2,7 +2,13 @@
 
 ```bash
 make setup-dev         # first-time: prerequisites + all dependencies
-make setup-dev-windows # Windows only: Chocolatey toolchain, one guarded package at a time (a missing item -- package, Vulkan SDK, MSVC env -- is reported at the end, never aborts the config phases) + pinned Vulkan SDK (machine-wide VULKAN_SDK); enables long paths machine-wide (registry + system git config), writes ~/msvc-env.sh (MSVC env + CMAKE_GENERATOR=Ninja) and the gitignored desktop/src-tauri/.cargo/config.toml short target-dir. Never touches the committed <repo>/.cargo/config.toml. Needs admin; self-elevates
+make setup-dev-windows # Windows only dev setup (requires admin, self-elevates):
+                       # - Installs Chocolatey toolchain and pinned Vulkan SDK (machine-wide VULKAN_SDK).
+                       # - Reports missing items at the end without aborting configuration early.
+                       # - Enables long paths machine-wide (registry and system Git config).
+                       # - Writes ~/msvc-env.sh (MSVC env + CMAKE_GENERATOR=Ninja).
+                       # - Writes gitignored desktop/src-tauri/.cargo/config.toml with short target-dir.
+                       # - Never modifies committed <repo>/.cargo/config.toml.
 make test           # all tests (Rust + Angular + MCP + entrypoint + desktop + proxy) — optional locally; CI runs it
 make check-fmt      # fmt (root + desktop + proxy) + prettier — the pre-push hook gate, no builds/tests
 make check          # lint + clippy + type-check + format — thorough local pass; CI runs the same checks as separate steps
