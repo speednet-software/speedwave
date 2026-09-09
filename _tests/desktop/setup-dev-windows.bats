@@ -1,8 +1,7 @@
 #!/usr/bin/env bats
 
 # Guards scripts/setup-dev-windows.ps1: the install phase must never strand the config
-# phases, and the only files it writes stay off the committed cargo config. Static checks
-# (sibling convention): the script itself only runs on a Windows host.
+# phases, and the only files it writes stay off the committed cargo config.
 
 SETUP_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/setup-dev-windows.ps1"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
@@ -64,6 +63,31 @@ package_loop() {
 @test "a package still missing after a 3010 reboot code stays a reported failure" {
     ! package_loop | grep -qE '3010.*continue'
     package_loop | grep -qF '$failedItems += @{ Name = $pkg.Name'
+}
+
+@test "a 3010 reboot signal is captured before the success-path continue" {
+    # Recording it after the re-probe swallows the reboot for a package that already works.
+    local code reboot have
+    code="$(package_loop | grep -vE '^[[:space:]]*#')"
+    reboot="$(printf '%s\n' "$code" | grep -n '3010' | head -1 | cut -d: -f1)"
+    have="$(printf '%s\n' "$code" | grep -nF 'if (& $pkg.Have) { continue }' | head -1 | cut -d: -f1)"
+    [ -n "$reboot" ]
+    [ "$reboot" -lt "$have" ]
+}
+
+@test "an existing crate-local config's own target-dir is the one managed" {
+    # Reading only "is a target-dir set?" would create and ACL a directory nothing builds into.
+    grep -qF '$shortTargetDir = $Matches[1]' "$SETUP_SCRIPT"
+    grep -qF 'IsPathRooted($shortTargetDir)' "$SETUP_SCRIPT"
+}
+
+@test "the short target-dir is created here, and a foreign owner is refused" {
+    # A drive-root DACL lets any local account pre-create it and keep CREATOR OWNER over
+    # every desktop build artifact, including the exe sign-windows-binaries.ps1 signs.
+    grep -qF '(Get-Acl $shortTargetWin).Owner' "$SETUP_SCRIPT"
+    grep -qF "'BUILTIN\\Administrators', 'NT AUTHORITY\\SYSTEM'" "$SETUP_SCRIPT"
+    grep -qF '$failedItems += @{ Name = $shortTargetWin' "$SETUP_SCRIPT"
+    grep -qF 'icacls $shortTargetWin /grant' "$SETUP_SCRIPT"
 }
 
 @test "the node probe enforces the .node-version floor, not mere presence" {

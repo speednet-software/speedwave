@@ -94,10 +94,10 @@ foreach ($pkg in $packages) {
     choco $verb -y --no-progress $pkg.Name
     $chocoExit = $LASTEXITCODE
     # Re-probe rather than trust the exit code: choco reports 0 for a package that put
-    # nothing usable on PATH, and 3010 for one that needs a reboot to become usable.
+    # nothing usable on PATH, and 3010 for one whose install needs a reboot to finish.
     Update-ProcessPath
-    if (& $pkg.Have) { continue }
     if ($chocoExit -eq 3010) { $rebootPending = $true }
+    if (& $pkg.Have) { continue }
     $hint = if ($pkg.Hint) { $pkg.Hint } else { "choco $verb exited $chocoExit." }
     $failedItems += @{ Name = $pkg.Name; Hint = $hint }
     Write-Warning "$($pkg.Name) still missing after choco $verb (exit $chocoExit) -- continuing."
@@ -226,17 +226,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # --- desktop/src-tauri/.cargo/config.toml: short cargo target-dir (gitignored) -
-# Mandatory on every box: the budget leaves 9 chars, which the default target dir cannot fit.
-# One dir per machine, not per clone: 9 chars cannot carry a per-clone suffix, so parallel
-# clones/worktrees must each export their own short CARGO_TARGET_DIR instead.
+# Mandatory on every box: the budget leaves 9 chars, which the default target dir cannot
+# fit. One dir per machine -- 9 chars carry no per-clone suffix (cross-platform rules).
 Write-Host "== Pinning a short cargo target-dir for the desktop build (ADR-085) =="
 $tauriCargoDir = Join-Path $repoRoot 'desktop\src-tauri\.cargo'
 $tauriCargoConfig = Join-Path $tauriCargoDir 'config.toml'
 $shortTargetDir = $env:SystemDrive + '/spwd'
 if (Test-Path $tauriCargoConfig) {
-    if ((Get-Content $tauriCargoConfig -Raw) -match '(?m)^\s*target-dir\s*=') {
-        Write-Host "Kept existing desktop/src-tauri/.cargo/config.toml (per-machine target-dir)"
+    if ((Get-Content $tauriCargoConfig -Raw) -match '(?m)^\s*target-dir\s*=\s*["'']([^"'']+)["'']') {
+        $shortTargetDir = $Matches[1]
+        Write-Host "Kept existing desktop/src-tauri/.cargo/config.toml (target-dir $shortTargetDir)"
     } else {
+        $shortTargetDir = $null
         $failedItems += @{ Name = 'desktop/src-tauri/.cargo/config.toml';
                            Hint = 'exists but sets no [build] target-dir -- add one, or delete the file and re-run.' }
         Write-Warning "Existing crate-local cargo config sets no target-dir -- the path budget will fail."
@@ -250,28 +251,30 @@ if (Test-Path $tauriCargoConfig) {
     Write-Host "Wrote desktop/src-tauri/.cargo/config.toml (target-dir $shortTargetDir)"
 }
 
-# Create it here, elevated: the default DACL on the drive root lets any local account
-# pre-create it and keep CREATOR OWNER control over every desktop build artifact.
-$shortTargetWin = $shortTargetDir -replace '/', '\'
-if (Test-Path $shortTargetWin) {
-    $owner = (Get-Acl $shortTargetWin).Owner
-    $trusted = @("$env:USERDOMAIN\$env:USERNAME", 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')
-    if ($trusted -notcontains $owner) {
-        $failedItems += @{ Name = $shortTargetWin; Hint = "pre-existing and owned by '$owner' -- delete it or pick another target-dir." }
-        Write-Warning "$shortTargetWin is owned by '$owner', not you -- refusing to build into it."
+# Own the creation: the default DACL on a drive root lets any local account pre-create the
+# dir and keep CREATOR OWNER control over every desktop build artifact we later sign.
+if ($shortTargetDir -and [System.IO.Path]::IsPathRooted($shortTargetDir)) {
+    $shortTargetWin = $shortTargetDir -replace '/', '\'
+    if (Test-Path $shortTargetWin) {
+        $owner = (Get-Acl $shortTargetWin).Owner
+        $trusted = @("$env:USERDOMAIN\$env:USERNAME", 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')
+        if ($trusted -notcontains $owner) {
+            $failedItems += @{ Name = $shortTargetWin; Hint = "pre-existing and owned by '$owner' -- delete it or pick another target-dir." }
+            Write-Warning "$shortTargetWin is owned by '$owner', not you -- refusing to build into it."
+        }
+    } else {
+        New-Item -ItemType Directory -Force $shortTargetWin | Out-Null
+        # Owned by the elevated shell, so grant the invoking user the write access cargo needs.
+        icacls $shortTargetWin /grant "${env:USERNAME}:(OI)(CI)F" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "icacls could not grant $env:USERNAME access to $shortTargetWin -- cargo may fail to write there."
+        }
+        Write-Host "Created $shortTargetWin"
     }
-} else {
-    New-Item -ItemType Directory -Force $shortTargetWin | Out-Null
-    # Owned by the elevated shell, so grant the invoking user the write access cargo needs.
-    icacls $shortTargetWin /grant "${env:USERNAME}:(OI)(CI)F" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "icacls could not grant $env:USERNAME access to $shortTargetWin -- cargo may fail to write there."
-    }
-    Write-Host "Created $shortTargetWin"
 }
 
-# An older revision of this script overwrote the committed <repo>/.cargo/config.toml,
-# dropping the SPEEDWAVE_DATA_DIR guard that keeps bare `cargo test` off ~/.speedwave.
+# Repo policy: the committed <repo>/.cargo/config.toml must keep its SPEEDWAVE_DATA_DIR
+# guard, which holds bare `cargo test` off the production ~/.speedwave.
 $repoCargoConfig = Join-Path $repoRoot '.cargo\config.toml'
 if ((Test-Path $repoCargoConfig) -and ((Get-Content $repoCargoConfig -Raw) -notmatch 'SPEEDWAVE_DATA_DIR')) {
     Write-Warning "$repoCargoConfig lost its SPEEDWAVE_DATA_DIR guard -- restore it: git checkout -- .cargo/config.toml"

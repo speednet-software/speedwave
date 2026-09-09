@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Reports the Windows-only desktop build prerequisites (ADR-085). Advisory by design: the
-# hard gates live in `make dev` (stage-vulkan-windows) and whisper-rs-sys's own build script,
-# so CLI-only work is never blocked on the Vulkan toolchain.
+# Reports the Windows-only desktop build prerequisites (ADR-085). Advisory: the hard gates
+# are `make dev`'s stage-vulkan-windows and whisper-rs-sys's own build script.
 
 set -uo pipefail
 
