@@ -35,22 +35,18 @@ fn snapshot(path: &std::path::Path) -> Option<SystemTime> {
 fn representative_smoke_does_not_touch_prod_data_dir() {
     let prod = dirs::home_dir().expect("home dir").join(consts::DATA_DIR);
 
-    // Record production state before the smoke (missing, or mtime fallback).
     let before_exists = prod.exists();
     let before_mtime = snapshot(&prod);
 
     let (_outer, tmp_data_dir) = regex_valid_data_dir();
 
-    // Defense-in-depth: routes any transitive bare-`data_dir()` into the tempdir.
     std::env::set_var(consts::DATA_DIR_ENV, &tmp_data_dir);
 
-    // Representative smoke: a data-dir-rooted write plus a path-resolution op.
     let project = "prod-untouched-smoke";
     compose::save_compose_in(&tmp_data_dir, project, VALID_YAML).expect("save_compose_in");
     let compose_path =
         compose::compose_output_path_in(&tmp_data_dir, project).expect("compose_output_path_in");
 
-    // The smoke must have written under the tempdir, never under production.
     assert!(
         compose_path.starts_with(&tmp_data_dir),
         "compose path {compose_path:?} escaped the tempdir {tmp_data_dir:?}"
@@ -60,7 +56,6 @@ fn representative_smoke_does_not_touch_prod_data_dir() {
         "smoke did not write the compose file at {compose_path:?}"
     );
 
-    // Production must be untouched: still absent, or mtime unchanged.
     let after_exists = prod.exists();
     let after_mtime = snapshot(&prod);
 

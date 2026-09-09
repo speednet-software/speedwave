@@ -21,7 +21,6 @@ fn cleanup_project_dirs_in(project: &str, data_dir: &Path) {
         "snapshots",
         "usage",
         crate::consts::OAUTH_SUBDIR,
-        // Legacy: retired host_exec state (pre-removal releases) goes with the project.
         crate::legacy_token_cleanup::LEGACY_HOST_EXEC_SUBDIR,
     ] {
         let dir = data_dir.join(sub).join(project);
@@ -48,7 +47,6 @@ fn init_project_dirs_in(project: &str, data_dir: &Path) -> anyhow::Result<()> {
             .join(crate::consts::CLAUDE_HOME_SUBDIR)
             .join(project),
     ];
-    // One token dir per credential-bearing service, derived from the SSOT in consts.rs.
     for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
         if !svc.credential_files.is_empty() {
             dirs_to_create.push(tokens_root.join(svc.config_key));
@@ -97,25 +95,19 @@ fn add_project_inner(name: &str, dir: &str) -> anyhow::Result<()> {
 /// Core implementation of project registration, parameterized by `data_dir` so tests can redirect
 /// all I/O to a temporary directory without modifying process-global state (e.g. `HOME`).
 fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::Result<()> {
-    // ── Phase 1a: dir-class validation (canonical path + existence check) ──
-
     validation::validate_project_name(name)?;
 
     let dir_path = Path::new(dir);
     if !dir_path.is_absolute() {
         anyhow::bail!("Project directory must be an absolute path: {}", dir);
     }
-    // A newline/CR/NUL in the path would inject extra volume entries when the
-    // path is spliced into the unquoted compose scalar (macOS allows them).
     validation::reject_control_chars(dir, "Project directory")?;
 
-    // WSL UNC: bypass canonicalize (undocumented behavior on Windows — see ADR-064).
     let (canonical, canonical_str) = match runtime::wsl::is_wsl_unc_path(dir) {
         Some(info) => {
             if !info.is_runtime_distro() {
                 anyhow::bail!(crate::consts::wsl_other_distro_msg(&info.distro));
             }
-            // Reject the distro root via the dedicated helper.
             let translated = format!("/{}", info.rest);
             if runtime::wsl::is_root_path(Path::new(&translated)) {
                 anyhow::bail!(
@@ -144,7 +136,6 @@ fn add_project_with_data_dir(name: &str, dir: &str, data_dir: &Path) -> anyhow::
                     canonical.display()
                 );
             }
-            // Store without `\\?\`: config.json feeds UI/scripts, not just the engine.
             let lossy = canonical.to_string_lossy();
             let canonical_str =
                 crate::engine_path::strip_extended_length_prefix(&lossy).to_string();
@@ -166,13 +157,10 @@ fn add_project_with_validated_dir(
     let config_path = data_dir.join("config.json");
     let mut user_config = config::load_user_config_from(&config_path)?;
 
-    // Duplicate name check
     if user_config.find_project(name).is_some() {
         anyhow::bail!("Project '{}' already exists", name);
     }
 
-    // Duplicate path check: exact-string fast path (the only comparison for WSL UNC
-    // paths — canonicalize on them is undefined), canonicalize fallback otherwise.
     if let Some(existing) = user_config.projects.iter().find(|p| {
         if p.dir == canonical_str {
             return true;
@@ -190,11 +178,8 @@ fn add_project_with_validated_dir(
         );
     }
 
-    // Dirs left by a pre-fix removal or crash must not leak into a re-added
-    // project of the same name (stale usage/costs, stale OAuth credentials).
     cleanup_project_dirs_in(name, data_dir);
 
-    // Build new entry
     let entry = config::ProjectUserEntry {
         name: name.to_string(),
         dir: canonical_str.clone(),
@@ -207,8 +192,6 @@ fn add_project_with_validated_dir(
     user_config.projects.push(entry);
     user_config.active_project = Some(name.to_string());
 
-    // Resolve config and render compose (no I/O yet). A brand-new project has no LLM provider yet —
-    // a valid state (Desktop "no_provider" screen); `start_containers` re-renders once chosen.
     let (resolved, integrations) = config::resolve_project_config(&canonical, &user_config, name);
     let yaml = if resolved.llm.is_unconfigured() {
         None
@@ -216,8 +199,6 @@ fn add_project_with_validated_dir(
         let rt = runtime::detect_runtime();
         let rt_ref: Option<&runtime::LockedRuntime> =
             if rt.is_available() { Some(&rt) } else { None };
-        // Reconstruct host-bridge env from disk (ADR-074) so project-add never
-        // renders a worker without an already-configured bridge's env vars.
         let host_bridges = compose::host_bridges_from_disk();
         Some(compose::render_compose(
             name,
@@ -228,8 +209,6 @@ fn add_project_with_validated_dir(
             &host_bridges,
         )?)
     };
-
-    // ── Phase 2: commit (all writes) ─────────────────────────────────────
 
     init_project_dirs_in(name, data_dir)?;
 
@@ -279,14 +258,10 @@ fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<(
 
     user_config.projects.remove(pos);
 
-    // Cleanup before save: a crash here leaves an entry without dirs (benign,
-    // reconcile-tolerated), never credential dirs without an entry.
     cleanup_project_dirs_in(name, data_dir);
     config::save_user_config_to(&user_config, &config_path)?;
     Ok(())
 }
-
-// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
@@ -300,11 +275,7 @@ mod tests {
 
     #[test]
     fn add_project_reconstructs_host_bridges() {
-        // Structural guard (ADR-074): project-add must feed disk-reconstructed
-        // host bridges into render_compose, not an empty list.
         let source = include_str!("project.rs");
-        // Anchor on the inner fn that holds the calls, not the outer wrapper,
-        // else the slice passes by file-order accident and misses a regression.
         let fn_start = source
             .find("fn add_project_with_validated_dir(")
             .expect("add_project_with_validated_dir must exist in project.rs");
@@ -322,8 +293,6 @@ mod tests {
             !fn_body[..render_pos].contains(&empty_default),
             "add_project_with_validated_dir must not pass an empty HostBridgesInfo to render_compose"
         );
-        // Also assert the call site actually receives &host_bridges as its
-        // argument (guards a default passed *inside* the render_compose args).
         let call = &fn_body[render_pos..];
         let call_end = call
             .find(';')
@@ -368,7 +337,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        // Base must be platform-absolute or the absolute-path bail fires first.
         let base = tmp.path().join("project").display().to_string();
         for injected in [
             format!("{base}\n      - /:/host:ro\n      - /tmp/payload"),
@@ -435,7 +403,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        // Should not panic or error even when dirs don't exist
         cleanup_project_dirs_in("nonexistent-test-project-xyz", &data_dir);
     }
 
@@ -459,8 +426,6 @@ mod tests {
                 .join(crate::consts::CLAUDE_HOME_SUBDIR)
                 .join("modecheck"),
         ];
-        // One token dir per credential-bearing service — same SSOT-derived set as
-        // init_project_dirs_in. (At minimum: slack, sharepoint, redmine, gitlab, github, atlassian.)
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             if !svc.credential_files.is_empty() {
                 dirs.push(
@@ -503,7 +468,6 @@ mod tests {
         std::fs::create_dir_all(&parent).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        // Re-running create_dir_all_secure on an existing dir is a no-op for permissions.
         create_dir_all_secure(&parent).unwrap();
         let mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
         assert_eq!(
@@ -516,12 +480,10 @@ mod tests {
     fn duplicate_name_detected() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Register a project dir
         let project_dir = tmp.path().join("existing-dir");
         std::fs::create_dir_all(&project_dir).unwrap();
         let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
 
-        // Seed config with a project named "existing"
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let config = SpeedwaveUserConfig {
@@ -540,7 +502,6 @@ mod tests {
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
-        // Use a different dir for the duplicate-name attempt
         let other_dir = tmp.path().join("other-dir");
         std::fs::create_dir_all(&other_dir).unwrap();
         let canonical_other = std::fs::canonicalize(&other_dir).unwrap();
@@ -567,7 +528,6 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        // Seed stale artifacts left by a pre-fix removal or crash for this name.
         let usage_file = data_dir
             .join("usage")
             .join("stale-project")
@@ -620,7 +580,6 @@ mod tests {
         };
         save_user_config_to(&config, &data_dir.join("config.json")).unwrap();
 
-        // Seed artifacts belonging to the ALREADY-registered project "existing".
         let usage_file = data_dir
             .join("usage")
             .join("existing")
@@ -662,18 +621,14 @@ mod tests {
     fn duplicate_path_detected() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Register a project dir
         let project_dir = tmp.path().join("shared-dir");
         std::fs::create_dir_all(&project_dir).unwrap();
-        // Seed the product-stored shape: canonicalized WITHOUT the `\\?\` prefix
-        // (add_project strips it before storing; a raw seed never string-matches).
         let canonical_raw = std::fs::canonicalize(&project_dir).unwrap();
         let canonical_lossy = canonical_raw.to_string_lossy();
         let canonical_dir = std::path::PathBuf::from(
             crate::engine_path::strip_extended_length_prefix(&canonical_lossy),
         );
 
-        // Seed config with a project at that path
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let config = SpeedwaveUserConfig {
@@ -739,19 +694,15 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
 
-        // Create a project directory
         let project_dir = tmp.path().join("myproject-dir");
         std::fs::create_dir_all(&project_dir).unwrap();
         let canonical_dir = std::fs::canonicalize(&project_dir).unwrap();
 
-        // A read-only data_dir blocks save_user_config_to's atomic write, exercising the rollback path.
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         for sub in &["compose", "context", crate::consts::CLAUDE_HOME_SUBDIR] {
             std::fs::create_dir_all(data_dir.join(sub)).unwrap();
         }
-        // Token dirs nest one level deeper (tokens/<project>/<svc>); pre-create
-        // through the project level so only the service leaf is created inside.
         std::fs::create_dir_all(data_dir.join("tokens").join("rollback-test")).unwrap();
 
         let mut perms = std::fs::metadata(&data_dir).unwrap().permissions();
@@ -761,7 +712,6 @@ mod tests {
         let result =
             add_project_with_data_dir("rollback-test", &canonical_dir.to_string_lossy(), &data_dir);
 
-        // Restore write perms so cleanup/asserts and tempdir drop can proceed.
         let mut restore = std::fs::metadata(&data_dir).unwrap().permissions();
         restore.set_mode(0o755);
         std::fs::set_permissions(&data_dir, restore).unwrap();
@@ -771,8 +721,6 @@ mod tests {
             "should fail because config write is blocked"
         );
 
-        // Verify rollback: per-project directories should have been cleaned up
-        // (their writable parents survive — only the <project> leaf is removed).
         for sub in &[
             "tokens",
             "compose",
@@ -819,9 +767,6 @@ mod tests {
         assert_eq!(final_val, 2, "both threads should have incremented");
     }
 
-    // ── WSL UNC path handling (Windows-only branch in add_project_with_data_dir) ──
-    // `Path::is_absolute` is false for `\\...` on Unix, true on Windows for `\\wsl.localhost\...`
-
     #[cfg(target_os = "windows")]
     #[test]
     fn rejects_wsl_unc_other_distro_with_helpful_message() {
@@ -855,8 +800,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        // The runtime distro name derives from the process data dir (test env net),
-        // so build the UNC from it — a literal would hit the other-distro branch.
         let unc = format!(r"\\wsl.localhost\{}\", crate::consts::wsl_distro_name());
         let result = add_project_with_data_dir("myproject", &unc, &data_dir);
         assert!(result.is_err());
@@ -886,8 +829,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
-        // Runtime distro but the subdirectory does not exist — metadata()
-        // returns Err, our branch bails with "does not exist".
         let unc = format!(
             r"\\wsl.localhost\{}\projects\definitely-not-a-real-folder-xyz",
             crate::consts::wsl_distro_name()
@@ -920,8 +861,6 @@ mod tests {
             err.contains("absolute path"),
             "expected 'absolute path' bail on Unix for UNC input, got: {err}"
         );
-        // The UNC dispatch must NOT have fired (no "WSL distribution" or "Malformed WSL UNC" in the
-        // error — that would mean we reached the UNC branch on a non-Windows host).
         assert!(
             !err.contains("WSL distribution"),
             "UNC dispatch must not fire on Unix, got: {err}"
@@ -951,8 +890,6 @@ mod tests {
             err.contains("does not exist or is not a directory"),
             "expected UNC-branch 'does not exist' bail, got: {err}"
         );
-        // The UNC branch echoes the raw `dir` argument verbatim in the bail
-        // message (canonicalize branch would print a canonicalized form).
         assert!(
             err.contains(&unc_input),
             "error should echo the raw UNC input (proving canonicalize was \
@@ -968,8 +905,6 @@ mod tests {
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
         let canonical = std::fs::canonicalize(&project_dir).unwrap();
-        // Use a synthetic UNC-style string for the stored `dir` field — this
-        // is what we'd persist on Windows for `\\wsl.localhost\Speedwave\projects\foo`.
         let unc_canonical_str = format!(
             r"\\wsl.localhost\{}\projects\foo",
             crate::consts::wsl_distro_name()
@@ -984,12 +919,10 @@ mod tests {
             unc_canonical_str.clone(),
             &data_dir,
         );
-        // Avoid `{result:?}`: anyhow chains may carry upstream strings CodeQL flags as cleartext logging.
         if let Err(e) = &result {
             panic!("registration must succeed: {}", e);
         }
 
-        // Verify config persisted with the UNC-style dir string.
         let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
         let entry = cfg
             .find_project("luke-helm")
@@ -997,8 +930,6 @@ mod tests {
         assert_eq!(entry.dir, unc_canonical_str);
         assert_eq!(cfg.active_project.as_deref(), Some("luke-helm"));
 
-        // No LLM provider was ever chosen for this fixture — compose.yml is deferred to
-        // `start_containers` (a fresh project is a valid, provider-less state).
         let compose_path = data_dir
             .join("compose")
             .join("luke-helm")
@@ -1008,15 +939,12 @@ mod tests {
             "compose.yml must not be written before a provider is chosen, found {compose_path:?}"
         );
 
-        // Verify project dirs initialized (compose dir + claude-home dir).
         assert!(data_dir.join("compose").join("luke-helm").is_dir());
         assert!(data_dir
             .join(crate::consts::CLAUDE_HOME_SUBDIR)
             .join("luke-helm")
             .is_dir());
     }
-
-    // -- remove_project tests --
 
     #[test]
     fn remove_project_happy_path() {
@@ -1045,7 +973,6 @@ mod tests {
         )
         .unwrap();
 
-        // Seed long-lived per-project dirs alongside the ones add_project created.
         for sub in &[
             "secrets",
             "snapshots",
@@ -1122,8 +1049,6 @@ mod tests {
 
     #[test]
     fn remove_project_removes_legacy_host_exec_dir_preserving_siblings() {
-        // Cleanup must scope to <project> even for the legacy host-exec tree:
-        // another project's leftovers stay behind for the startup sweep.
         let tmp = tempfile::tempdir().unwrap();
         let dir_a = tmp.path().join("a");
         let dir_b = tmp.path().join("b");
@@ -1201,8 +1126,6 @@ mod tests {
 
     #[test]
     fn remove_project_missing_errors() {
-        // Exercises the "populated config, name not in list" branch — distinct
-        // from "missing config.json" which load_user_config_from treats as default.
         let tmp = tempfile::tempdir().unwrap();
         let pd = tmp.path().join("real");
         std::fs::create_dir_all(&pd).unwrap();
@@ -1224,7 +1147,6 @@ mod tests {
             err.contains("not found"),
             "expected 'not found', got: {err}"
         );
-        // Sanity: the real project must remain untouched.
         let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
         assert!(cfg.find_project("real").is_some());
     }
@@ -1255,11 +1177,9 @@ mod tests {
             &data_dir,
         )
         .unwrap();
-        // After two adds, `second` is active.
         let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
         assert_eq!(cfg.active_project.as_deref(), Some("second"));
 
-        // Removing the non-active project must leave active_project intact.
         remove_project_with_data_dir("first", &data_dir).unwrap();
         let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
         assert!(cfg.find_project("first").is_none());
@@ -1269,8 +1189,6 @@ mod tests {
 
     #[test]
     fn remove_project_cleans_dirs_before_saving_config() {
-        // Structural guard: a crash between the two ops must leave orphaned config entries
-        // (harmless, reconcile-tolerated), never orphaned credential dirs with no config entry.
         let source = include_str!("project.rs");
         let fn_start = source
             .find("fn remove_project_with_data_dir(")
@@ -1308,8 +1226,6 @@ mod tests {
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
 
-        // Active-project check requires a different active project so removal
-        // of "victim" is not rejected outright.
         add_project_with_validated_dir(
             "victim",
             canonical.clone(),
@@ -1329,14 +1245,12 @@ mod tests {
         std::fs::create_dir_all(&tokens_dir).unwrap();
         std::fs::write(tokens_dir.join("secret"), b"tok").unwrap();
 
-        // Block save_user_config_to's atomic write by making the data_dir read-only.
         let mut perms = std::fs::metadata(&data_dir).unwrap().permissions();
         perms.set_mode(0o500);
         std::fs::set_permissions(&data_dir, perms).unwrap();
 
         let result = remove_project_with_data_dir("victim", &data_dir);
 
-        // Restore write perms so asserts/reload/tempdir drop can proceed.
         let mut restore = std::fs::metadata(&data_dir).unwrap().permissions();
         restore.set_mode(0o700);
         std::fs::set_permissions(&data_dir, restore).unwrap();
@@ -1360,7 +1274,6 @@ mod tests {
 
     #[test]
     fn duplicate_unc_path_detected_via_exact_string() {
-        // Covers the exact-string fast path for UNC paths, which canonicalize cannot resolve.
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -1373,14 +1286,12 @@ mod tests {
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
 
-        // First registration must succeed.
         if let Err(e) =
             add_project_with_validated_dir("first", canonical.clone(), unc_str.clone(), &data_dir)
         {
             panic!("first registration must succeed: {e}");
         }
 
-        // Second registration with the same UNC string must hit the fast path.
         let result = add_project_with_validated_dir("second", canonical, unc_str, &data_dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

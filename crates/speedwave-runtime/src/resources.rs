@@ -54,8 +54,6 @@ pub const STANDARD_WORKER_RESOURCES: ContainerResources = ContainerResources {
     shm_mib: None,
 };
 
-// ── Host RAM detection ─────────────────────────────────────────────────────
-
 /// Converts raw bytes to GiB using floor division (never over-reports host RAM).
 #[cfg(any(target_os = "macos", test))]
 fn bytes_to_gib(bytes: u64) -> u32 {
@@ -69,7 +67,6 @@ pub fn host_total_memory_gib() -> u32 {
 
 #[cfg(target_os = "macos")]
 fn host_total_memory_gib_impl() -> Option<u32> {
-    // Shell out to sysctl(1) to avoid `unsafe` blocks (forbidden by project lints).
     let output = crate::binary::system_command("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
@@ -88,11 +85,8 @@ fn host_total_memory_gib_impl() -> Option<u32> {
 
 #[cfg(target_os = "windows")]
 fn host_total_memory_gib_impl() -> Option<u32> {
-    // Windows: RAM detection not implemented — falls back to 16 GiB.
     None
 }
-
-// ── Scaling formulas (pure functions — testable on any platform) ──────────
 
 /// Minimum supported host RAM; SSOT for the `check_low_memory` warn threshold
 /// and the always-on fit test. See ADR-068.
@@ -126,8 +120,6 @@ fn always_on_memory_mib() -> u32 {
     one(&CLAUDE_RESOURCES) + one(&HUB_RESOURCES)
 }
 
-// ── OOM detection ──────────────────────────────────────────────────────────
-
 /// Returns `true` if the exit status likely indicates an OOM kill: code 137 or
 /// signal 9. Heuristic only (also from host-side `kill -9`); see ADR-068.
 pub fn is_oom_exit(status: &ExitStatus) -> bool {
@@ -158,8 +150,6 @@ pub const OOM_MESSAGE: &str = "\
     If this persists, please report at \
     https://github.com/speednet-software/speedwave/issues";
 
-// ── Tests ───────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -170,8 +160,6 @@ mod tests {
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
-    // -- bytes_to_gib (floor) -----------------------------------------------
-
     #[test]
     fn bytes_to_gib_zero() {
         assert_eq!(bytes_to_gib(0), 0);
@@ -179,7 +167,6 @@ mod tests {
 
     #[test]
     fn bytes_to_gib_just_below_16() {
-        // 15.7 GiB → floor → 15
         let bytes = (15.7 * GIB as f64) as u64;
         assert_eq!(bytes_to_gib(bytes), 15);
     }
@@ -194,19 +181,15 @@ mod tests {
         assert_eq!(bytes_to_gib(128 * GIB), 128);
     }
 
-    // -- desired_vm_memory_gib ----------------------------------------------
-
     #[test]
     fn vm_memory_small_hosts() {
-        // Floor never exceeds host/2: an 8 GiB host keeps its v0.13.3 4 GiB VM.
         assert_eq!(desired_vm_memory_gib(8), 4);
-        assert_eq!(desired_vm_memory_gib(6), 4); // absolute floor 4
-        assert_eq!(desired_vm_memory_gib(0), 4); // absolute floor 4
+        assert_eq!(desired_vm_memory_gib(6), 4);
+        assert_eq!(desired_vm_memory_gib(0), 4);
     }
 
     #[test]
     fn vm_memory_host_table() {
-        // Host-size table: 8/16/32/64 GiB hosts.
         for (host, vm) in [(8u32, 4u32), (16, 8), (32, 16), (64, 32)] {
             assert_eq!(desired_vm_memory_gib(host), vm, "host {host} GiB");
         }
@@ -214,7 +197,6 @@ mod tests {
 
     #[test]
     fn vm_memory_never_exceeds_half_host() {
-        // A VM sized above host/2 starves macOS (swap-bound 8 GiB Macs).
         for host in [8u32, 10, 12, 14, 16, 24, 32, 64, 128] {
             assert!(
                 desired_vm_memory_gib(host) <= (host / 2).max(4),
@@ -233,54 +215,46 @@ mod tests {
     fn vm_memory_large_hosts() {
         assert_eq!(desired_vm_memory_gib(32), 16);
         assert_eq!(desired_vm_memory_gib(48), 24);
-        assert_eq!(desired_vm_memory_gib(64), 32); // cap
-        assert_eq!(desired_vm_memory_gib(128), 32); // cap
+        assert_eq!(desired_vm_memory_gib(64), 32);
+        assert_eq!(desired_vm_memory_gib(128), 32);
     }
-
-    // -- desired_vm_cpus ----------------------------------------------------
 
     #[test]
     fn vm_cpus_small_hosts_floor_at_4() {
-        // Small hosts keep today's value — no regression, never below 4.
-        assert_eq!(desired_vm_cpus(4), 4); // floor (4/2=2→4)
+        assert_eq!(desired_vm_cpus(4), 4);
         assert_eq!(desired_vm_cpus(8), 4);
-        assert_eq!(desired_vm_cpus(2), 4); // floor
-        assert_eq!(desired_vm_cpus(0), 4); // floor
+        assert_eq!(desired_vm_cpus(2), 4);
+        assert_eq!(desired_vm_cpus(0), 4);
     }
 
     #[test]
     fn vm_cpus_scales_with_host() {
         assert_eq!(desired_vm_cpus(10), 5);
         assert_eq!(desired_vm_cpus(12), 6);
-        assert_eq!(desired_vm_cpus(16), 8); // cap
+        assert_eq!(desired_vm_cpus(16), 8);
     }
 
     #[test]
     fn vm_cpus_caps_at_8() {
-        assert_eq!(desired_vm_cpus(24), 8); // cap
-        assert_eq!(desired_vm_cpus(64), 8); // cap
+        assert_eq!(desired_vm_cpus(24), 8);
+        assert_eq!(desired_vm_cpus(64), 8);
     }
 
     #[test]
     fn vm_cpus_never_exceeds_host() {
-        // host/2 ≤ host always, so VZ never gets more vCPUs than host cores.
         for cores in [4u32, 6, 8, 12, 16, 32] {
             assert!(desired_vm_cpus(cores) <= cores);
         }
     }
 
-    // -- claude memory (fixed cap) ------------------------------------------
-
     #[test]
     fn claude_memory_is_fixed_6_everywhere() {
-        // Independent of host size — the whole point of the fixed cap.
         assert_eq!(CLAUDE_MEMORY_GIB, 6);
         assert_eq!(CLAUDE_RESOURCES.mem_mib, 6 * 1024);
     }
 
     #[test]
     fn proxy_resources_match_measured_envelope() {
-        // ~3.5x the measured ~37 MiB peak; the forwarder writes nothing to /tmp.
         assert_eq!(PROXY_RESOURCES.mem_mib, 128);
         assert_eq!(PROXY_RESOURCES.cpus, 0.5);
         assert_eq!(PROXY_RESOURCES.tmpfs_mib, 32);
@@ -289,7 +263,6 @@ mod tests {
 
     #[test]
     fn builtin_resources_stay_within_plugin_caps() {
-        // Built-in worker limits must stay within the plugin envelope.
         let cap_mib = crate::consts::PLUGIN_MEM_LIMIT_MAX_MIB as u32;
         for svc in crate::consts::TOGGLEABLE_MCP_SERVICES {
             assert!(
@@ -304,7 +277,6 @@ mod tests {
                 svc.config_key,
                 svc.resources.cpus
             );
-            // tmpfs is RAM-backed, so it must not exceed the worker's mem limit.
             assert!(
                 svc.resources.tmpfs_mib <= svc.resources.mem_mib,
                 "{}: tmpfs {} MiB exceeds the worker's own mem limit {} MiB",
@@ -317,10 +289,8 @@ mod tests {
 
     #[test]
     fn all_resources_are_positive() {
-        // A zeroed mem/cpus/tmpfs renders invalid compose and fails at create.
         let check = |r: &ContainerResources, who: &str| {
             assert!(r.mem_mib > 0, "{who}: mem_mib must be > 0");
-            // NaN slips past a bare `> 0.0` yet renders "NaN" into YAML.
             assert!(
                 r.cpus.is_finite() && r.cpus > 0.0,
                 "{who}: cpus must be finite and > 0"
@@ -337,11 +307,8 @@ mod tests {
         }
     }
 
-    // -- always_on_memory_mib -----------------------------------------------
-
     #[test]
     fn always_on_fits_smallest_supported_vm() {
-        // Always-on (claude+hub) must fit the smallest supported VM.
         let vm_mib = desired_vm_memory_gib(MIN_SUPPORTED_HOST_GIB) * 1024;
         assert!(
             always_on_memory_mib() < vm_mib,
@@ -352,8 +319,6 @@ mod tests {
         );
     }
 
-    // -- host_total_memory_gib (integration) --------------------------------
-
     #[test]
     fn host_total_memory_is_sane() {
         let gib = host_total_memory_gib();
@@ -363,11 +328,8 @@ mod tests {
 
     #[test]
     fn host_logical_cpus_is_sane() {
-        // > 0 so desired_vm_cpus never silently clamps a zero to the floor.
         assert!(host_logical_cpus() > 0);
     }
-
-    // -- format_oom_message -------------------------------------------------
 
     #[test]
     fn oom_message_contains_key_info() {
@@ -377,7 +339,6 @@ mod tests {
 
     #[test]
     fn oom_message_does_not_assert_oom_as_certain() {
-        // 137 also comes from a host-side kill -9, so OOM must not be asserted.
         assert!(
             !OOM_MESSAGE.contains("killed due to insufficient memory"),
             "must not assert OOM as the certain cause"
@@ -386,7 +347,6 @@ mod tests {
             OOM_MESSAGE.contains("most common cause") || OOM_MESSAGE.contains("can also"),
             "must use non-definitive wording"
         );
-        // Pin against the SSOT log marker, not a free literal.
         assert!(
             OOM_MESSAGE.contains(crate::host_mcp_process::KILL_STALE_LOG_MARKER),
             "OOM_MESSAGE grep hint must match the real kill log marker '{}'",
@@ -394,11 +354,8 @@ mod tests {
         );
     }
 
-    // -- is_oom_exit --------------------------------------------------------
-
     #[test]
     fn is_oom_exit_code_137() {
-        // Spawn a process that exits with code 137.
         // SSOT-allow: test fixture spawn
         let status = std::process::Command::new("sh")
             .args(["-c", "exit 137"])
@@ -432,9 +389,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn is_oom_exit_signal_other() {
+    fn is_oom_exit_signal_15_sigterm() {
         use std::os::unix::process::ExitStatusExt;
-        // SIGTERM (15) should NOT be detected as OOM.
         let status = ExitStatus::from_raw(15);
         assert!(!is_oom_exit(&status));
     }

@@ -162,7 +162,6 @@ pub fn oauth_json_key_for(key: &str) -> &str {
         "client_id" => "clientId",
         "tenant_id" => "tenantId",
         "refresh_token" => "refreshToken",
-        // Never interpolate `other` — may carry caller-supplied values (CodeQL false positive).
         other => {
             debug_assert!(
                 !other.contains('_'),
@@ -245,7 +244,6 @@ mod tests {
 
     #[test]
     fn migrates_legacy_complete_top_level_identity() {
-        // The `.speedwave-dev/speedwave` shape: full state, identity top-level.
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "speedwave");
         write(
@@ -268,10 +266,8 @@ mod tests {
         let j = read_json(&path);
         assert_eq!(j["providerData"]["clientId"], "cid-1");
         assert_eq!(j["providerData"]["tenantId"], "tid-1");
-        // Top-level identity removed.
         assert!(j.get("clientId").is_none());
         assert!(j.get("tenantId").is_none());
-        // Everything else preserved verbatim.
         assert_eq!(j["provider"], "microsoft");
         assert_eq!(j["refreshToken"], "rt-secret");
         assert_eq!(j["scopes"], serde_json::json!(["a", "b"]));
@@ -282,7 +278,6 @@ mod tests {
 
     #[test]
     fn migrates_partial_identity_without_refresh_token() {
-        // The `presales` shape: only identity, no refreshToken (fabricate nothing).
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "presales");
         write(
@@ -318,7 +313,6 @@ mod tests {
 
         let n = run_with_data_dir(tmp.path());
         assert_eq!(n, 0);
-        // Byte-identical — not rewritten.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
@@ -394,7 +388,6 @@ mod tests {
 
     #[test]
     fn leaves_file_with_no_recoverable_identity_untouched() {
-        // providerData absent and no top-level identity: must not touch it.
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "p");
         let original = r#"{"provider": "microsoft", "refreshToken": "rt"}"#;
@@ -407,7 +400,6 @@ mod tests {
 
     #[test]
     fn ignores_non_string_top_level_identity() {
-        // A numeric clientId is not a recoverable identity string.
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "p");
         let original = r#"{"provider": "microsoft", "clientId": 123}"#;
@@ -421,18 +413,15 @@ mod tests {
     #[test]
     fn migrates_multiple_projects_in_one_pass() {
         let tmp = tempfile::tempdir().unwrap();
-        // legacy → migrated
         write(
-            &sp_path(tmp.path(), "a"),
+            &sp_path(tmp.path(), "legacy-top-level-identity"),
             r#"{"provider": "microsoft", "clientId": "c", "tenantId": "t"}"#,
         );
-        // already good → no-op
         write(
-            &sp_path(tmp.path(), "b"),
+            &sp_path(tmp.path(), "already-nested"),
             r#"{"provider": "microsoft", "providerData": {"clientId": "c"}}"#,
         );
-        // corrupt → no-op
-        write(&sp_path(tmp.path(), "c"), "garbage");
+        write(&sp_path(tmp.path(), "corrupt-json"), "garbage");
 
         let n = run_with_data_dir(tmp.path());
         assert_eq!(n, 1);
@@ -440,7 +429,6 @@ mod tests {
 
     #[test]
     fn migrates_non_sharepoint_service_json() {
-        // The shape rule is provider-agnostic, not SharePoint-specific.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp
             .path()
@@ -458,14 +446,13 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_json_files() {
+    fn ignores_bearer_map_json_without_identity_and_non_json_files() {
         let tmp = tempfile::tempdir().unwrap();
         let bm = tmp
             .path()
             .join(consts::OAUTH_SUBDIR)
             .join("p")
             .join(".bearer-map.json");
-        // .bearer-map.json IS .json but has no identity keys → untouched.
         write(&bm, r#"{"bearer-abc": "sharepoint"}"#);
         let audit = tmp
             .path()
@@ -511,7 +498,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn does_not_crash_on_read_only_project_dir() {
-        // A read-only project dir blocks the rewrite: migration must log + skip, not panic.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = sp_path(tmp.path(), "ro");
@@ -522,7 +508,6 @@ mod tests {
         let parent = path.parent().unwrap();
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-        // Must not panic.
         let _ = run_with_data_dir(tmp.path());
 
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();

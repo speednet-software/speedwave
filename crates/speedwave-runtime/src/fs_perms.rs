@@ -219,7 +219,6 @@ pub(crate) fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use rustix::io::Errno;
-        // `F_FULLFSYNC` unsupported on this fs/device → fall back to `fsync`.
         let fcntl_unsupported = |e: &Errno| {
             matches!(
                 *e,
@@ -233,7 +232,6 @@ pub(crate) fn fsync_file_durable(file: &std::fs::File) -> std::io::Result<()> {
             Ok(()) => Ok(()),
             Err(e) if fcntl_unsupported(&e) => match rustix::fs::fsync(file) {
                 Ok(()) => Ok(()),
-                // Neither supported (some network FS): best-effort, don't fail.
                 Err(e2) if fsync_unsupported(&e2) => Ok(()),
                 Err(e2) => Err(std::io::Error::from(e2)),
             },
@@ -256,7 +254,6 @@ pub(crate) fn fsync_file_durable(_file: &std::fs::File) -> std::io::Result<()> {
 #[cfg(unix)]
 pub(crate) fn fsync_parent_dir(dir: &Path) {
     if let Ok(handle) = std::fs::File::open(dir) {
-        // Best-effort: a dir-fsync failure is non-fatal.
         let _ = rustix::fs::fsync(&handle);
     }
 }
@@ -267,7 +264,6 @@ pub(crate) fn fsync_parent_dir(_dir: &Path) {}
 /// Writes `content` to `path` via write-then-atomic-rename, owner-only perms; destination never
 /// appears world-readable. Windows DACL failure returns `Err` (ADR-009); pre-existing dirs removed.
 pub fn write_restricted_file(path: &Path, content: &str) -> anyhow::Result<()> {
-    // Direct callers: `path` is the final name, so commit its directory entry.
     write_restricted_file_synced(path, content, true)
 }
 
@@ -306,7 +302,6 @@ fn write_restricted_file_synced(
 
     #[cfg(windows)]
     {
-        // Tighten the DACL on the tempfile before rename (atomic delivery with restricted perms).
         set_windows_acl_owner_only(tmp.path()).map_err(|e| {
             anyhow::anyhow!(
                 "DACL tighten failed on tempfile for {}: {} — refusing to leave a world-readable secret",
@@ -332,11 +327,9 @@ fn write_restricted_file_synced(
         )
     })?;
 
-    // Atomic rename. On error `tmp` is dropped, never appearing as `path`.
     tmp.persist(path)
         .map_err(|e| anyhow::anyhow!("failed to persist tempfile to {}: {}", path.display(), e))?;
 
-    // fsync parent dir so the rename is durable (skipped for the atomic variant).
     if sync_parent_dir {
         fsync_parent_dir(parent);
     }
@@ -354,13 +347,11 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("path has no file name: {}", path.display()))?;
-    // Atomic counter makes the tmp name unique per call (pid collides across threads).
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{}.tmp.{}.{}", file_name, std::process::id(), seq));
 
-    // `false`: the inner dir fsync is wasted — we rename `tmp` away next line.
     write_restricted_file_synced(&tmp, content, false).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
@@ -370,7 +361,6 @@ pub fn write_restricted_file_atomic(path: &Path, content: &str) -> anyhow::Resul
         anyhow::bail!("rename {} -> {}: {}", tmp.display(), path.display(), e);
     }
 
-    // fsync parent dir once for the final name (data already fsynced by the inner write).
     fsync_parent_dir(parent);
 
     Ok(())
@@ -490,7 +480,6 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot open {}: {e}", path.display())),
     };
-    // Confirm regular file via the OPEN HANDLE (no path re-resolution).
     let meta = file
         .metadata()
         .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
@@ -523,8 +512,6 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Option<String>, String
 mod tests {
     use super::*;
 
-    // Unix: root bypasses mode 0o000, so this test relies on CI running unprivileged;
-    // we deliberately don't gate it — revisit if a root-run flake ever appears.
     #[test]
     fn make_unreadable_for_test_actually_blocks_reads() {
         let tmp = tempfile::tempdir().unwrap();
@@ -587,7 +574,6 @@ mod tests {
             .status()
             .expect("cmd /C mklink /J must spawn");
         assert!(status.success(), "junction creation must succeed");
-        // Assert the plant: the junction is a name-surrogate reparse point.
         let planted = std::fs::symlink_metadata(&junction).expect("junction must exist");
         assert!(
             planted.file_type().is_symlink(),
@@ -635,7 +621,6 @@ mod tests {
         use std::os::unix::fs::FileTypeExt;
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("log.txt");
-        // Skip if mkfifo is unavailable; assert the type check when present.
         if std::process::Command::new("mkfifo")
             .arg(&fifo)
             .status()
@@ -750,7 +735,6 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
-        // Pre-existing world-readable file (simulates a pre-PR1 token file).
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let before = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -785,8 +769,6 @@ mod tests {
         }
     }
 
-    // ── write_restricted_file (atomic via NamedTempFile::persist) ───────
-
     /// TOCTOU regression guard: tempfile must be 0o600 before persist so the
     /// destination cannot be world-readable.
     #[cfg(unix)]
@@ -794,7 +776,6 @@ mod tests {
     fn tempfile_is_0o600_before_persist() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        // Mimic the production path: tempfile lives in same parent as destination.
         let tmp = tempfile::NamedTempFile::with_prefix_in("write-", dir.path()).unwrap();
         let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(
@@ -814,11 +795,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
 
-        // Pre-existing file with world-readable mode (simulates pre-PR1 layout).
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        // Overwrite — must end with 0o600 and new content.
         write_restricted_file(&path, "new").unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -833,12 +812,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("token");
 
-        // Exercises the `with_prefix_in(parent)` code path.
         write_restricted_file(&path, "x").unwrap();
         assert!(path.exists());
     }
-
-    // ── write_restricted_file_atomic ─────────────────────────────────────
 
     #[test]
     fn atomic_writes_content() {
@@ -896,10 +872,8 @@ mod tests {
 
     #[test]
     fn atomic_recovers_when_stale_tmp_exists() {
-        // A stale `.tmp.<pid>.<seq>` orphan must not affect the next call.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
-        // Manual orphan with a legacy shape that won't collide with the next call.
         let stale_tmp = dir
             .path()
             .join(format!(".secret.tmp.{}.legacy", std::process::id()));
@@ -925,11 +899,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
 
-        // Pre-existing destination with known content.
         write_restricted_file_atomic(&path, "old-content").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old-content");
 
-        // Simulate a crash: orphaned `.tmp` with the rename never happening.
         let crashed_tmp = dir.path().join(format!(
             ".secret.tmp.{}.simulated-crash",
             std::process::id()
@@ -941,7 +913,6 @@ mod tests {
             "destination must be untouched while tmp orphan exists"
         );
 
-        // Subsequent write replaces the destination cleanly despite the orphan.
         write_restricted_file_atomic(&path, "fresh").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
     }
@@ -955,7 +926,6 @@ mod tests {
         let path_a = path.clone();
         let path_b = path.clone();
 
-        // Two concurrent writers; `path` must end up with one writer's value.
         let (a, b) = tokio::join!(
             tokio::task::spawn_blocking(move || {
                 write_restricted_file_atomic(&path_a, "writer-a")
@@ -973,7 +943,6 @@ mod tests {
             "destination must hold exactly one writer's content, got: {content:?}"
         );
 
-        // No orphaned .tmp files left on disk.
         let stragglers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(Result::ok)
@@ -984,8 +953,6 @@ mod tests {
             "no .tmp files should remain after both writes: {stragglers:?}"
         );
     }
-
-    // ── ensure_owner_only_dir ────────────────────────────────────────────
 
     #[test]
     fn ensure_dir_creates_missing() {
@@ -1035,8 +1002,6 @@ mod tests {
 
         assert!(target.is_dir());
     }
-
-    // ── durability fsync ─────────────────────────────────────────────────
 
     /// Happy path: fsync of a real, open file succeeds. On macOS this exercises
     /// the `F_FULLFSYNC` branch; on other Unix the `fsync` branch.
@@ -1092,7 +1057,6 @@ mod tests {
     fn fsync_parent_dir_is_best_effort_on_missing_dir() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
-        // Must be a silent no-op — no panic, returns ().
         fsync_parent_dir(&missing);
     }
 
@@ -1117,8 +1081,6 @@ mod tests {
             "fsync_file_durable must run BEFORE tmp.persist — reordering reintroduces the torn-write bug"
         );
     }
-
-    // ── set_owner_only (file) / set_owner_only_dir ───────────────────────
 
     #[test]
     fn set_owner_only_sets_600_on_regular_file() {
@@ -1214,7 +1176,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("existing");
         std::fs::create_dir(&target).unwrap();
-        // Place a file inside — perms change on dir must not affect contents.
         std::fs::write(target.join("file.txt"), b"contents").unwrap();
 
         set_owner_only_dir(&target).unwrap();
@@ -1228,8 +1189,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("ensure-existing");
         std::fs::create_dir(&target).unwrap();
-        // Re-tightening an existing dir must not lock the owner out of its
-        // contents (Windows: the inheritable-ACE propagation contract).
         std::fs::write(target.join("file.txt"), b"contents").unwrap();
 
         ensure_owner_only_dir(&target).unwrap();
@@ -1255,7 +1214,6 @@ mod tests {
         let path = dir.path().join("loose.txt");
         std::fs::write(&path, "open").unwrap();
 
-        // Start with 0o644 (world-readable).
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         set_owner_only(&path).unwrap();
@@ -1266,8 +1224,6 @@ mod tests {
             "expected 0o600 after tightening, got 0o{mode:o}"
         );
     }
-
-    // ── sweep_stale_atomic_write_temp_files ──────────────────────────────
 
     /// Backdates a file's mtime by `age` so an age-based sweep sees it as stale.
     fn backdate(path: &Path, age: std::time::Duration) {
@@ -1327,8 +1283,6 @@ mod tests {
 
     #[test]
     fn sweep_leaves_a_persisted_atomic_write_output_untouched() {
-        // The final file from write_shared_file_atomic has no "write-" prefix —
-        // confirms the sweep only ever targets orphaned tempfiles, never real data.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-teardowns");
         write_shared_file_atomic(&path, "proj-a").unwrap();

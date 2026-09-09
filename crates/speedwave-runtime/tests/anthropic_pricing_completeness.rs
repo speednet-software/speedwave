@@ -35,7 +35,6 @@ fn assert_priced(model_id: &str, label: &str, p: &ModelPricing) {
 
 #[test]
 fn every_catalog_entry_is_priced() {
-    // Guard the base rate of every catalog id.
     assert!(
         !ANTHROPIC_MODELS.is_empty(),
         "catalog must not be empty — the cost meter has nothing to price"
@@ -47,7 +46,6 @@ fn every_catalog_entry_is_priced() {
 
 #[test]
 fn million_context_entries_have_a_priced_1m_variant() {
-    // Require `pricing_1m` exactly when the family is 1M-context.
     for m in ANTHROPIC_MODELS {
         let is_million = m.context_tokens >= 1_000_000;
         match (&m.pricing_1m, is_million) {
@@ -67,7 +65,6 @@ fn million_context_entries_have_a_priced_1m_variant() {
 
 #[test]
 fn catalog_serializes_pricing_for_the_frontend() {
-    // Wire form must carry `input`/`output` under `pricing` (and `pricing_1m` for 1M families).
     let value =
         serde_json::to_value(ANTHROPIC_MODELS).expect("catalog must serialize for the frontend");
     let entries = value.as_array().expect("catalog serializes as an array");
@@ -110,8 +107,6 @@ fn million_context_variants_bill_at_standard_rates() {
 
 #[test]
 fn sonnet_5_is_priced_below_sonnet_46() {
-    // Sonnet 5 ($2/$10) sits below Sonnet 4.6 ($3/$15) — the launch price became
-    // the standard price (pricing page note, 2026-08). Guards against a shared const.
     let find = |id: &str| {
         ANTHROPIC_MODELS
             .iter()

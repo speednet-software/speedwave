@@ -33,7 +33,6 @@ pub fn ensure_project_key_in(data_dir: &Path, project: &str) -> anyhow::Result<(
         }
     };
 
-    // Best-effort cleanup on any failure after file creation.
     if let Err(e) = write_and_sync_key(&mut file, &path) {
         let _ = std::fs::remove_file(&path);
         return Err(e);
@@ -58,7 +57,6 @@ fn write_and_sync_key(file: &mut std::fs::File, path: &std::path::Path) -> anyho
     file.flush()?;
     crate::fs_perms::fsync_file_durable(file)?;
 
-    // Ensure the directory entry is durable.
     if let Some(parent) = path.parent() {
         crate::fs_perms::fsync_parent_dir(parent);
     }

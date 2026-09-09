@@ -464,9 +464,7 @@ fn read_bridge_token_at(path: &Path) -> Option<String> {
     }
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        // Absent file is the expected "Desktop has not minted it yet" path.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        // Anything else is unexpected — leave a breadcrumb, don't degrade silently.
         Err(e) => {
             log::warn!("bridge token unreadable at {}: {e}", path.display());
             return None;
@@ -474,7 +472,6 @@ fn read_bridge_token_at(path: &Path) -> Option<String> {
     };
     let token = raw.trim();
     if token.is_empty() {
-        // Present-but-empty is anomalous: the writer mints a UUID or nothing.
         log::warn!("bridge token at {} is empty; ignoring", path.display());
         return None;
     }
@@ -748,14 +745,10 @@ fn write_token_files(token_dir: &Path, tokens: &HashMap<String, String>) -> anyh
     {
         use std::os::unix::fs::PermissionsExt;
         let mode_700 = std::fs::Permissions::from_mode(0o700);
-        // token_dir = <data_dir>/tokens/<project>/<service>
-        // See also: setup_wizard.rs:write_tokens() — identical pattern (2 of 3, Rule of Three)
         std::fs::set_permissions(token_dir, mode_700.clone())?;
         if let Some(project_dir) = token_dir.parent() {
-            // project_dir = <data_dir>/tokens/<project>
             std::fs::set_permissions(project_dir, mode_700.clone())?;
             if let Some(tokens_dir) = project_dir.parent() {
-                // tokens_dir = <data_dir>/tokens — stop here, don't go to data_dir
                 std::fs::set_permissions(tokens_dir, mode_700)?;
             }
         }
@@ -896,8 +889,6 @@ pub(crate) fn validate_manifest(
     validate_slug(&manifest.slug)?;
     validate_speedwave_compat(manifest.speedwave_compat.as_deref())?;
 
-    // Bound the optional long-form instructions text (rendered on the Dashboard); caps in-memory
-    // `PluginStatusEntry` size and what a manifest can wedge into the webview.
     if let Some(instructions) = &manifest.instructions {
         if instructions.len() > consts::PLUGIN_INSTRUCTIONS_MAX_BYTES {
             anyhow::bail!(
@@ -907,7 +898,6 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // If service_id present, slug must equal service_id
     if let Some(ref sid) = manifest.service_id {
         if manifest.slug != *sid {
             anyhow::bail!(
@@ -918,7 +908,6 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // Slug must not collide with built-in service IDs
     if consts::BUILT_IN_SERVICE_IDS.contains(&manifest.slug.as_str()) {
         anyhow::bail!(
             "Plugin slug '{}' conflicts with a built-in service ID",
@@ -926,8 +915,6 @@ pub(crate) fn validate_manifest(
         );
     }
 
-    // Slug must not collide with built-in compose names: derived `mcp-<slug>` (e.g. "hub" →
-    // "mcp-hub") or the bare slug (e.g. "claude"); a mapping insert would silently overwrite it.
     let derived_compose = derive_compose_name(&manifest.slug);
     if consts::BUILT_IN_SERVICES.contains(&derived_compose.as_str()) {
         anyhow::bail!(
@@ -943,7 +930,6 @@ pub(crate) fn validate_manifest(
         );
     }
 
-    // If service_id present, Containerfile must exist
     if manifest.service_id.is_some() && !plugin_dir.join("Containerfile").exists() {
         anyhow::bail!(
             "MCP plugins (service_id='{}') must include a Containerfile",
@@ -951,7 +937,6 @@ pub(crate) fn validate_manifest(
         );
     }
 
-    // Validate mem_limit: format AND upper bound (DoS prevention).
     if let Some(ref limit) = manifest.mem_limit {
         let mib = parse_mem_limit_to_mib(limit)?;
         if mib > consts::PLUGIN_MEM_LIMIT_MAX_MIB {
@@ -964,7 +949,6 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // Validate cpu_limit: format AND upper bound.
     if let Some(ref limit) = manifest.cpu_limit {
         let cores: f32 = limit.parse().map_err(|_| {
             anyhow::anyhow!("Invalid cpu_limit '{}': must be a positive number", limit)
@@ -984,8 +968,6 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // One charset gate for every tag-feeding field (image_tag AND version) —
-    // an out-of-charset value would corrupt the OCI tag (or panic truncate).
     fn tag_charset_re() -> anyhow::Result<&'static regex::Regex> {
         static RE: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
             std::sync::OnceLock::new();
@@ -1008,7 +990,6 @@ pub(crate) fn validate_manifest(
         );
     }
 
-    // Validate auth_fields keys are safe filesystem names and field_type is known
     for field in &manifest.auth_fields {
         if field.key.contains('/')
             || field.key.contains('\\')
@@ -1021,7 +1002,6 @@ pub(crate) fn validate_manifest(
                 field.key
             );
         }
-        // The settings file shares the token dir with credential files — reserve its name.
         if field.key == consts::PLUGIN_SETTINGS_FILE {
             anyhow::bail!(
                 "auth_field key '{}' is reserved for the plugin settings file",
@@ -1036,15 +1016,12 @@ pub(crate) fn validate_manifest(
                 ALLOWED_AUTH_FIELD_TYPES
             );
         }
-        // Reject broken/oversized regex constraints at install time via the
-        // single `compile_anchored_pattern` gate.
         if let Some(validation) = &field.validation {
             compile_anchored_pattern(&validation.pattern)
                 .map_err(|e| anyhow::anyhow!("auth_field '{}' {e}", field.key))?;
         }
     }
 
-    // Validate requires_integrations entries are known built-in service IDs
     for req in &manifest.requires_integrations {
         if !consts::BUILT_IN_SERVICE_IDS.contains(&req.as_str()) {
             anyhow::bail!(
@@ -1055,8 +1032,6 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // Validate extra_env keys/values have no newlines/null bytes (YAML injection defense).
-    // Reserved keys (PORT, LD_PRELOAD/NODE_OPTIONS) from `RESERVED_ENV_KEYS`, case-insensitive.
     if let Some(ref env) = manifest.extra_env {
         for (k, v) in env {
             if consts::RESERVED_ENV_KEYS
@@ -1086,8 +1061,6 @@ pub(crate) fn validate_manifest(
         }
     }
 
-    // token_mount: rw is reserved for built-ins (ADR-009, currently SharePoint only); built-in
-    // slugs are blocked earlier by BUILT_IN_SERVICE_IDS, so `ReadWrite` here is unauthorised.
     if matches!(manifest.token_mount, TokenMount::ReadWrite { .. }) {
         anyhow::bail!(
             "token_mount: read_write is reserved for built-in services (ADR-009). \
@@ -1095,8 +1068,6 @@ pub(crate) fn validate_manifest(
         );
     }
 
-    // settings_schema shape gate (full Draft-7 lives in Desktop's plugin_save_settings); reject
-    // obviously-bad shapes here so a malformed schema is an install error, not a broken UI.
     if let Some(ref schema) = manifest.settings_schema {
         if !schema.is_object() {
             anyhow::bail!(
@@ -1111,8 +1082,6 @@ pub(crate) fn validate_manifest(
                 }
             );
         }
-        // Cap the schema size — a 1 MiB schema is either a mistake or a DoS payload; also guards
-        // against a manifest bloating user_config.json indirectly.
         let serialised = serde_json::to_vec(schema)
             .map_err(|e| anyhow::anyhow!("settings_schema serialises to invalid JSON: {e}"))?;
         if serialised.len() > consts::PLUGIN_SETTINGS_MAX_BYTES {
@@ -1162,8 +1131,6 @@ fn validate_oauth_spec(
         );
     }
 
-    // Endpoints are either static URLs or derived from base_url_field + suffix
-    // (resolved + SSRF-validated at authorize time). Mutually exclusive.
     let derived = spec.base_url_field.is_some();
     if let Some(base_field) = spec.base_url_field.as_deref() {
         if !auth_fields.iter().any(|f| f.key == base_field) {
@@ -1187,8 +1154,6 @@ fn validate_oauth_spec(
 
     validate_grant_endpoints(spec, derived)?;
 
-    // A fixed loopback redirect port must be a non-privileged user port; 0 is
-    // reserved to mean "ephemeral" (omit the field for that).
     if let Some(port) = spec.redirect_port {
         if port < 1024 {
             anyhow::bail!(
@@ -1263,7 +1228,7 @@ fn validate_grant_endpoints(spec: &PluginOAuthSpec, derived: bool) -> anyhow::Re
                 );
             }
         }
-        OAuthGrantType::AuthorizationCode => {} // derived: suffix checked by caller
+        OAuthGrantType::AuthorizationCode => {}
     }
     Ok(())
 }
@@ -1536,8 +1501,6 @@ fn install_plugin_with_base(
 
     std::fs::create_dir_all(plugins_dir)?;
 
-    // Serialize concurrent installs — without this, two `install_plugin` calls for the same slug
-    // could both `remove_dir_all` + `rename`, leaving a half-A/half-B tree. Lock file is reused.
     let lock_path = plugins_dir.join(".install.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -1549,22 +1512,16 @@ fn install_plugin_with_base(
     // The lock is held for the rest of this scope. `fs2`'s lock is
     // released on file drop.
 
-    // Phase: verifying — signature check
     emit("verifying", "Verifying signature");
 
-    // Extract ZIP to a temp dir on the *same filesystem* as `plugins_dir` so the final rename is
-    // atomic; `tempfile::tempdir_in` (0o700, drop-cleaned) avoids the old prefix-TOCTOU.
     let tmp = tempfile::tempdir_in(plugins_dir)?;
     let tmp_dir = tmp.path().to_path_buf();
     extract_zip(zip_path, &tmp_dir)?;
 
-    // Zip Slip protection
     validate_extracted_paths(&tmp_dir)?;
 
-    // Find the extracted plugin directory (ZIP may contain a top-level dir)
     let plugin_src = find_plugin_dir(&tmp_dir)?;
 
-    // Verify signature before doing anything else
     if let Err(e) = signing::verify_plugin_signature(&plugin_src) {
         on_progress(PluginInstallProgress {
             phase: "failed".to_string(),
@@ -1574,14 +1531,12 @@ fn install_plugin_with_base(
         return Err(e);
     }
 
-    // Read and validate manifest
     let manifest_path = plugin_src.join("plugin.json");
     let content = std::fs::read_to_string(&manifest_path)?;
     let manifest: PluginManifest = serde_json::from_str(&content)?;
 
     validate_manifest(&manifest, &plugin_src)?;
 
-    // Reject duplicate service_id or port among already-installed plugins
     let existing = list_installed_from_dir(plugins_dir)?;
     if let Some(ref sid) = manifest.service_id {
         for existing_manifest in &existing {
@@ -1597,8 +1552,6 @@ fn install_plugin_with_base(
         }
     }
 
-    // Phase: extracting — atomic-install: copy into `.installing.<uuid>` staging (filtered by
-    // `list_*`), rename into place; existing `dest` → `.removing.<uuid>`, crash-recoverable.
     emit("extracting", "Extracting archive");
     let dest = plugins_dir.join(&manifest.slug);
     let staging_name = format!("{}.installing.{}", manifest.slug, uuid::Uuid::new_v4());
@@ -1615,8 +1568,6 @@ fn install_plugin_with_base(
     };
 
     if let Err(e) = std::fs::rename(&staging, &dest) {
-        // Roll back: try to restore the old plugin so the user isn't left
-        // with nothing on disk after a failed swap.
         if let Some(ref old_path) = removed_old {
             let _ = std::fs::rename(old_path, &dest);
         }
@@ -1626,8 +1577,6 @@ fn install_plugin_with_base(
             manifest.slug
         ));
     }
-    // Verified-cache may hold a verdict for the *previous* version of
-    // this plugin. Drop it before any verify-on-load path runs again.
     signing::invalidate_cache(&dest);
     if let Some(old_path) = removed_old {
         if let Err(e) = std::fs::remove_dir_all(&old_path) {
@@ -1638,18 +1587,13 @@ fn install_plugin_with_base(
         }
     }
 
-    // Mark pending image build for MCP plugins. Stored OUTSIDE the signed tree
-    // (`plugin_state_base_for`) so creating the marker doesn't invalidate the plugin's digest.
     if manifest.service_id.is_some() {
         mark_image_pending_for(plugins_dir, &manifest.slug)?;
 
-        // Build immediately if runtime is available
         if let Some(rt) = runtime {
             emit("building", "Building container image (may take 2-5 min)");
             match build_single_plugin_image(rt, &manifest, &dest) {
-                Ok(()) => {
-                    // .image_pending was removed by build_single_plugin_image on success
-                }
+                Ok(()) => {}
                 Err(e) => {
                     log::warn!("Deferred build for plugin '{}': {e}", manifest.slug);
                     on_progress(PluginInstallProgress {
@@ -1669,8 +1613,6 @@ fn install_plugin_with_base(
                 }
             }
         } else {
-            // No runtime available — image not built. Treat as deferred so callers (CLI, Tauri
-            // auto-enable) don't enable an MCP plugin whose worker can't start; retries next boot.
             on_progress(PluginInstallProgress {
                 phase: "done_with_pending_build".to_string(),
                 message: "Plugin installed; image build deferred to next launch".to_string(),
@@ -1681,7 +1623,6 @@ fn install_plugin_with_base(
         }
     }
 
-    // Legacy addon migration warning
     warn_legacy_addons();
 
     emit("done", "Plugin installed");
@@ -1711,8 +1652,6 @@ fn remove_plugin_with_base(
         anyhow::bail!("Plugin '{}' not found", slug);
     }
 
-    // Read the manifest BEFORE removing files so we can compute the image tag for cleanup;
-    // tolerate a missing/corrupt manifest — the file delete still proceeds.
     let manifest_for_image = if runtime.is_some() {
         std::fs::read_to_string(plugin_dir.join("plugin.json"))
             .ok()
@@ -1720,8 +1659,6 @@ fn remove_plugin_with_base(
     } else {
         None
     };
-    // Content-addressed tags (ADR-072): collect BOTH the current-tree-derived tag and the
-    // last-built tag from plugin-state — they can differ after a reinstall without a rebuild.
     let mut tags_for_removal: Vec<String> = Vec::new();
     if let Some(ref manifest) = manifest_for_image {
         if manifest.service_id.is_some() {
@@ -1752,12 +1689,8 @@ fn remove_plugin_with_base(
         }
     }
 
-    // Drop the cached signature verdict BEFORE removing the dir — `invalidate_cache` resolves
-    // its key via `canonicalize`, which fails once gone. Install mirrors this on `dest`.
     signing::invalidate_cache(&plugin_dir);
     std::fs::remove_dir_all(&plugin_dir)?;
-    // Mutable state lives outside the signed tree — wipe it too, so a reinstall starts clean and
-    // we don't leak a stale `image_pending` marker for a plugin that no longer exists.
     let state_dir = plugin_state_dir_for(plugins_dir, slug);
     if state_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&state_dir) {
@@ -1790,8 +1723,6 @@ fn remove_plugin_with_base(
 /// is included so callers never reconstruct via `plugins_base.join(slug)`, defeating enforcement.
 #[derive(Debug)]
 pub struct VerifiedPlugin {
-    // Private so the ONLY construction path is `new`, called after full verification in
-    // `verify_one_plugin_dir` (ADR-051): elsewhere could fabricate a "verified" pair unchecked.
     manifest: PluginManifest,
     dir: PathBuf,
     digest_hex: String,
@@ -1927,7 +1858,6 @@ pub fn list_installed_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<PluginM
 
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
-    // Sort by slug — non-deterministic readdir order flips SPW_PLUGIN_DIGESTS across renders.
     entries.sort_by_key(|e| e.file_name());
 
     let mut plugins = Vec::new();
@@ -1970,8 +1900,6 @@ pub(crate) fn list_verified_from_dir(plugins_dir: &Path) -> anyhow::Result<Vec<V
         return Ok(vec![]);
     }
     let mut out = Vec::new();
-    // Sorted: SPEEDWAVE_PLUGINS and service insertion order must be
-    // deterministic or the rendered YAML (and config-hash) flaps per run.
     let mut entries: Vec<std::fs::DirEntry> =
         std::fs::read_dir(plugins_dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
@@ -2053,8 +1981,6 @@ pub(crate) fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
         let entry = match item {
             Ok(e) => e,
             Err(e) => {
-                // A directory entry we can't read — surface it as an unverified entry so the UI
-                // shows *something* rather than silently presenting a shorter list than reality.
                 out.push(PluginListEntry::failed(
                     "<unreadable-entry>".into(),
                     plugins_dir.to_path_buf(),
@@ -2074,8 +2000,6 @@ pub(crate) fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
             continue;
         }
         let plugin_dir = entry.path();
-        // The UI lister is intentionally read-only; legacy `.image_pending` migration happens in
-        // `verify_one_plugin_dir` before any UI list — a race self-heals on next launch's audit.
         let entry_record = classify_plugin_for_ui(&plugin_dir, &dir_name);
         out.push(entry_record);
     }
@@ -2083,8 +2007,6 @@ pub(crate) fn list_for_ui_from_dir(plugins_dir: &Path) -> Vec<PluginListEntry> {
 }
 
 fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry {
-    // Try to parse the manifest first so even rejected plugins surface
-    // their `name`/`description` to the UI when possible.
     let manifest_path = plugin_dir.join("plugin.json");
     let manifest: Option<PluginManifest> = std::fs::read_to_string(&manifest_path)
         .ok()
@@ -2108,8 +2030,6 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
         let mismatch_err = format!("directory name does not match manifest slug '{}'", m.slug);
         return failed(VerificationStatus::DirSlugMismatch, mismatch_err, Some(m));
     }
-    // Delegate to verify_plugin_signature first — it honors the debug-only SPEEDWAVE_ALLOW_UNSIGNED
-    // bypass and returns Ok without touching SIGNATURE. A pre-check here would break that bypass.
     if let Err(e) = signing::verify_plugin_signature(plugin_dir) {
         let status = if !plugin_dir.join("SIGNATURE").exists() {
             VerificationStatus::MissingSignature
@@ -2125,8 +2045,6 @@ fn classify_plugin_for_ui(plugin_dir: &Path, dir_name: &str) -> PluginListEntry 
     if let Err(e) = validate_manifest(&m, plugin_dir) {
         return failed(VerificationStatus::ManifestInvalid, e.to_string(), Some(m));
     }
-    // Read the changelog here — inside the same verify-then-read pass as the
-    // manifest — so the surfaced bytes are the verified tree's bytes.
     let changelog = read_changelog_for_ui(plugin_dir);
     PluginListEntry::verified(slug, dir, m, changelog)
 }
@@ -2161,8 +2079,6 @@ fn read_changelog_for_ui(plugin_dir: &Path) -> Option<String> {
             return None;
         }
     };
-    // Bounded read: at most cap+1 bytes ever enter memory, and the cap check
-    // sees the bytes actually read — no stat-then-read window.
     let mut buf = Vec::new();
     let cap = consts::PLUGIN_CHANGELOG_MAX_BYTES;
     if let Err(e) = file.take(cap as u64 + 1).read_to_end(&mut buf) {
@@ -2208,8 +2124,6 @@ pub(crate) fn audit_all_in_dir(plugins_dir: &Path) -> Result<(), Vec<(String, St
         Err(e) => return Err(vec![("<plugins-base>".into(), e.to_string())]),
     };
     for item in read_dir {
-        // A directory entry that can't be read is itself an audit failure — never silently
-        // skipped, else an attacker forcing a `DirEntry` I/O error escapes the audit.
         let entry = match item {
             Ok(e) => e,
             Err(e) => {
@@ -2263,11 +2177,8 @@ fn ensure_plugin_images_from_dir(
         return Ok(());
     }
 
-    // First: build any pending (newly-installed) images for enabled plugins.
     build_pending_from_dir(runtime, Some(enabled_service_ids), plugins_dir)?;
 
-    // Second: check image existence and rebuild any missing. Use the fail-closed verified loader
-    // — `image_tag` decides "already exists, skip"; a tampered tree must not reach this loop.
     let plugins = list_verified_from_dir(plugins_dir)?;
     let mut errors: Vec<String> = Vec::new();
 
@@ -2275,11 +2186,11 @@ fn ensure_plugin_images_from_dir(
         let manifest = vp.manifest();
         let sid = match manifest.service_id.as_deref() {
             Some(s) => s,
-            None => continue, // resource-only plugin, no image
+            None => continue,
         };
 
         if !enabled_service_ids.contains(&sid) {
-            continue; // not enabled for this project
+            continue;
         }
 
         let plugin_dir = vp.dir();
@@ -2293,7 +2204,6 @@ fn ensure_plugin_images_from_dir(
 
         let tag = plugin_image_tag(manifest, vp.tree_digest_hex());
         if runtime.image_exists(&tag).unwrap_or(false) {
-            // Content-addressed image present — drop any stale fallback marker.
             clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
             continue;
         }
@@ -2306,8 +2216,6 @@ fn ensure_plugin_images_from_dir(
             Ok(()) => continue,
             Err(e) => e,
         };
-        // Rebuild failed (e.g. offline right after the ADR-072 retag). Fall back
-        // to a surviving previously-built image; the rebuild retries next start.
         match usable_fallback_tag(runtime, plugins_dir, manifest, &tag) {
             Some(fallback) => {
                 match write_image_fallback_tag_for(plugins_dir, &manifest.slug, &fallback) {
@@ -2393,8 +2301,6 @@ fn build_pending_from_dir(
             continue;
         }
         let plugin_dir = entry.path();
-        // Pending markers may live in two places: the state directory (current installs) or,
-        // for older releases, the legacy in-tree `.image_pending`. Check both.
         if !has_pending_image_build_for(plugins_dir, &plugin_dir, &slug) {
             continue;
         }
@@ -2443,8 +2349,6 @@ fn build_single_plugin_image(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
-    // ADR-072: every image build + tag prune is serialised by build.lock — the single choke
-    // point for install/ensure/pending paths; callers must not already hold it (not reentrant).
     crate::build::with_build_lock(|| {
         build_single_plugin_image_locked(runtime, manifest, plugin_dir)
     })
@@ -2455,8 +2359,6 @@ fn build_single_plugin_image_locked(
     manifest: &PluginManifest,
     plugin_dir: &Path,
 ) -> anyhow::Result<()> {
-    // Move any legacy in-tree pending marker out FIRST — it is not part of
-    // the signed tree and must not perturb the content-addressed tag.
     if let Some(plugins_dir) = plugin_dir.parent() {
         migrate_legacy_image_pending(plugins_dir, plugin_dir, &manifest.slug);
     }
@@ -2469,8 +2371,6 @@ fn build_single_plugin_image_locked(
     let digest_hex = signing::plugin_tree_digest_hex(plugin_dir)?;
     let tag = plugin_image_tag(manifest, &digest_hex);
     let vm_root = runtime.prepare_build_context(plugin_dir)?;
-    // vm_root is a VM-side path (on Windows a WSL `/mnt/c/...` path); join with
-    // `vm_path_join`, never `PathBuf::join` which mangles it on Windows.
     let root_str = vm_root.to_string_lossy();
     let containerfile = crate::engine_path::vm_path_join(&root_str, "Containerfile");
 
@@ -2484,8 +2384,6 @@ fn build_single_plugin_image_locked(
         runtime.build_image(&tag, build_target, &containerfile, &[])
     })?;
 
-    // Remove the pending marker on success — both the state-dir and legacy in-tree location, so
-    // an older-release plugin stops re-triggering. `plugin_dir` is `<plugins_dir>/<slug>/`.
     record_applied_image_tag_and_prune(
         runtime,
         plugin_dir,
@@ -2495,18 +2393,14 @@ fn build_single_plugin_image_locked(
     );
     if let Some(plugins_dir) = plugin_dir.parent() {
         clear_image_pending_for(plugins_dir, plugin_dir, &manifest.slug);
-        // Successful rebuild ends any fallback-image period (ADR-072).
         clear_image_rebuild_pending_for(plugins_dir, &manifest.slug);
     } else {
-        // Unreachable: a plugin dir always has a parent. Don't touch the signed tree here as a
-        // "fallback" — that's exactly what the mutable-state relocation removed.
         log::warn!(
             "plugin dir {} has no parent — skipping image_pending cleanup",
             plugin_dir.display()
         );
     }
 
-    // Clean up temporary build context if it differs from plugin_dir
     if vm_root != plugin_dir && vm_root.exists() {
         if let Err(e) = std::fs::remove_dir_all(&vm_root) {
             log::warn!(
@@ -2577,7 +2471,6 @@ fn record_applied_image_tag_and_prune(
             }
         }
         _ => {
-            // Pre-marker install (old tag scheme) — queue the legacy tag once.
             if legacy_tag != tag {
                 pending.push(legacy_tag.to_string());
             }
@@ -2654,7 +2547,6 @@ pub fn generate_plugin_service(
         "mcp",
         sid.replace('-', "_")
     );
-    // All workers use a single internal port — see ADR-038.
     let port = consts::PORT_WORKER;
 
     let token_mount_mode = match &manifest.token_mount {
@@ -2662,8 +2554,6 @@ pub fn generate_plugin_service(
         TokenMount::ReadWrite { .. } => "rw",
     };
 
-    // Convert first, then '/'-join: a native join before conversion emits a
-    // platform-dependent separator for the engine-side path.
     let tokens_path =
         crate::engine_path::vm_path_join(&crate::engine_path::to_engine_path(tokens_dir)?, sid);
     let workspace_path = crate::engine_path::to_engine_path(Path::new(project_dir))?;
@@ -2677,8 +2567,6 @@ pub fn generate_plugin_service(
         .unwrap_or(consts::PLUGIN_DEFAULT_CPU);
     let user = container_user();
 
-    // SPEEDWAVE_VERSION lets plugin tools record which app version produced their
-    // output; the runtime crate version is the release-please-managed app version.
     let mut env_lines = format!(
         "  - PORT={port}\n  - SPEEDWAVE_VERSION={}",
         env!("CARGO_PKG_VERSION")
@@ -2735,8 +2623,6 @@ deploy:
     Ok(value)
 }
 
-// --- Helper functions ---
-
 /// YAML-safe quoting for `KEY=VALUE` env entries embedded via `format!()`. If the entry contains
 /// YAML-special chars, wraps it in single quotes (only the quote itself needs escaping, as `''`).
 fn yaml_quote_entry(entry: &str) -> String {
@@ -2789,7 +2675,6 @@ fn extract_zip_with_limits(
         );
     }
 
-    // Pre-validate: reject dangerous entries and ZIP bombs before writing to disk.
     let mut total_uncompressed: u64 = 0;
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
@@ -2839,8 +2724,6 @@ fn validate_dir_recursive(canonical_base: &Path, dir: &Path) -> anyhow::Result<(
         let path = entry.path();
         let canonical = path.canonicalize()?;
         if !canonical.starts_with(canonical_base) {
-            // No manual cleanup needed: TmpDirGuard owns the parent directory
-            // and will remove it on drop when the error propagates.
             anyhow::bail!(
                 "Zip Slip detected: path {:?} escapes plugin directory {:?}",
                 canonical,
@@ -2856,11 +2739,9 @@ fn validate_dir_recursive(canonical_base: &Path, dir: &Path) -> anyhow::Result<(
 
 /// Find the plugin directory inside the extraction. Handles ZIPs with a top-level dir.
 fn find_plugin_dir(extract_dir: &Path) -> anyhow::Result<PathBuf> {
-    // If plugin.json exists at the top level, use it directly
     if extract_dir.join("plugin.json").exists() {
         return Ok(extract_dir.to_path_buf());
     }
-    // Otherwise look for a single subdirectory containing plugin.json
     for entry in std::fs::read_dir(extract_dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() && entry.path().join("plugin.json").exists() {
@@ -2875,8 +2756,6 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dest.join(entry.file_name());
-        // symlink_metadata so symlinks are observed *as symlinks*, not followed — same no-symlinks
-        // invariant as `compute_plugin_digest`, kept as defence-in-depth beyond `extract_zip`.
         let file_type = std::fs::symlink_metadata(entry.path())?.file_type();
         if file_type.is_symlink() {
             anyhow::bail!(
@@ -2924,8 +2803,6 @@ mod tests {
 
     #[test]
     fn bridge_token_filename_is_stable_on_disk_contract() {
-        // Writer (Desktop) and reader (CLI) address the same on-disk file; a rename compiles
-        // cleanly but orphans every persisted token — pin the literal so renaming is deliberate.
         assert_eq!(BRIDGE_TOKEN_FILENAME, "bridge-token");
     }
 
@@ -2935,17 +2812,13 @@ mod tests {
         let plugins_dir = dir.path().join("plugins");
         let slug = "example-plugin";
 
-        // Missing file → None.
         assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
 
-        // A token in the WRONG (in-signed-tree) location must be ignored: the
-        // reader resolves under plugin-state/<slug>/, never plugins/<slug>/.
         let wrong = plugins_dir.join(slug);
         std::fs::create_dir_all(&wrong).unwrap();
         std::fs::write(wrong.join(BRIDGE_TOKEN_FILENAME), FIXTURE_UUID).unwrap();
         assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
 
-        // Correct location, valid UUID with trailing newline → trimmed token.
         let state = plugin_state_dir_for(&plugins_dir, slug);
         std::fs::create_dir_all(&state).unwrap();
         let token_path = state.join(BRIDGE_TOKEN_FILENAME);
@@ -2955,20 +2828,15 @@ mod tests {
             Some(FIXTURE_UUID)
         );
 
-        // Empty / whitespace-only → None.
         std::fs::write(&token_path, "   \n").unwrap();
         assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
 
-        // Non-UUID content → None; also blocks a crafted multi-line value
-        // from reaching compose env injection.
         std::fs::write(&token_path, "not-a-uuid\ninjected: value").unwrap();
         assert_eq!(read_persistent_bridge_token_from(&plugins_dir, slug), None);
     }
 
     #[test]
     fn bridge_token_reader_returns_none_on_non_notfound_error() {
-        // A directory sitting at the token path is an unexpected (non-NotFound)
-        // error; the reader degrades to None (and warns) rather than panicking.
         let dir = tempfile::tempdir().unwrap();
         let plugins_dir = dir.path().join("plugins");
         let state = plugin_state_dir_for(&plugins_dir, "example-plugin");
@@ -2982,8 +2850,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bridge_token_reader_rejects_symlink() {
-        // A symlink at the token path is ignored even when its target holds a
-        // valid UUID.
         let dir = tempfile::tempdir().unwrap();
         let plugins_dir = dir.path().join("plugins");
         let state = plugin_state_dir_for(&plugins_dir, "example-plugin");
@@ -2995,7 +2861,6 @@ mod tests {
             read_persistent_bridge_token_from(&plugins_dir, "example-plugin"),
             None
         );
-        // Same content read directly stays valid — the rejection targets the symlink.
         assert_eq!(read_bridge_token_at(&target).as_deref(), Some(FIXTURE_UUID));
     }
 
@@ -3207,7 +3072,6 @@ mod tests {
             oauth: None,
         };
         let tmp = tempfile::tempdir().unwrap();
-        // No Containerfile created
         let result = validate_manifest(&manifest, tmp.path());
         assert!(
             result.is_err(),
@@ -3302,7 +3166,6 @@ mod tests {
 
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
 
-        // Verify key properties
         assert!(
             yaml.contains("speedwave-mcp-example-plugin:1.2.0"),
             "image tag: {yaml}"
@@ -3325,14 +3188,11 @@ mod tests {
             yaml.contains("/tmp:noexec,nosuid,size=512m"),
             "default tmpfs from PLUGIN_DEFAULT_TMPFS: {yaml}"
         );
-        // Full engine-side source: '/'-joined on every host (a native join
-        // before conversion would emit '\' on Windows).
         assert!(
             yaml.contains("/home/user/.speedwave/tokens/myproject/example-plugin:/tokens:ro"),
             "token mount: {yaml}"
         );
         assert!(yaml.contains("/workspace:rw"), "workspace mount: {yaml}");
-        // ADR-038: every worker — including plugins — uses PORT_WORKER (3000).
         assert!(yaml.contains("PORT=3000"), "PORT env: {yaml}");
         assert!(
             yaml.contains(&format!("SPEEDWAVE_VERSION={}", env!("CARGO_PKG_VERSION"))),
@@ -3343,8 +3203,6 @@ mod tests {
             "network: {yaml}"
         );
         assert!(yaml.contains("speedwave.plugin-service"), "label: {yaml}");
-        // Reference the SSOT constants, not literals — a bump of either default
-        // must not silently leave this test asserting the old value.
         assert!(
             yaml.contains(&format!("memory: {}", consts::PLUGIN_DEFAULT_MEM)),
             "mem limit: {yaml}"
@@ -3476,7 +3334,6 @@ mod tests {
     fn test_list_installed_from_dir_skips_invalid_manifest() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Valid plugin
         let valid_dir = tmp.path().join("good-plugin");
         std::fs::create_dir_all(&valid_dir).unwrap();
         std::fs::write(
@@ -3485,7 +3342,6 @@ mod tests {
         )
         .unwrap();
 
-        // Invalid manifest (missing required fields)
         let bad_dir = tmp.path().join("bad-plugin");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join("plugin.json"), r#"{"not_a_manifest": true}"#).unwrap();
@@ -3501,8 +3357,6 @@ mod tests {
 
     #[test]
     fn test_list_installed_from_dir_sorted_by_slug() {
-        // Non-deterministic readdir order causes compose volumes and SPW_PLUGIN_DIGESTS to change
-        // between renders, triggering spurious recreates — always return ascending slug order.
         let tmp = tempfile::tempdir().unwrap();
         for slug in ["zebra-plugin", "alpha-plugin", "middle-plugin"] {
             let dir = tmp.path().join(slug);
@@ -3660,8 +3514,6 @@ mod tests {
         );
     }
 
-    // --- token-layout tests (via the _with_base test helpers) ---
-
     #[test]
     fn test_configure_plugin_tokens_creates_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3723,7 +3575,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
-        // Create token files
         let token_dir = home
             .join(consts::DATA_DIR)
             .join("tokens")
@@ -3798,7 +3649,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
-        // Create only one of two required token files
         let token_dir = home
             .join(consts::DATA_DIR)
             .join("tokens")
@@ -3806,7 +3656,6 @@ mod tests {
             .join("test-svc");
         std::fs::create_dir_all(&token_dir).unwrap();
         std::fs::write(token_dir.join("api_key"), "sk-123").unwrap();
-        // "token" file intentionally missing
 
         let manifest = PluginManifest {
             name: "Test".to_string(),
@@ -3945,7 +3794,6 @@ mod tests {
             .join("proj")
             .join("test-svc");
         std::fs::create_dir_all(&token_dir).unwrap();
-        // Write an empty file — should be treated as missing
         std::fs::write(token_dir.join("api_key"), "").unwrap();
 
         let manifest = PluginManifest {
@@ -3989,12 +3837,8 @@ mod tests {
         );
     }
 
-    // --- ALL_PLUGIN_INSTALL_PHASES parity ---
-
     #[test]
     fn test_all_plugin_install_phases_lists_expected_strings() {
-        // SSOT for the IPC contract; mirror in models/plugin.ts::PLUGIN_INSTALL_PHASES —
-        // adding/removing/renaming a phase here requires the same change there.
         assert_eq!(
             ALL_PLUGIN_INSTALL_PHASES,
             &[
@@ -4007,8 +3851,6 @@ mod tests {
             ]
         );
     }
-
-    // --- peek_plugin_manifest tests ---
 
     /// Builds a minimal valid signed-bypass plugin ZIP for tests.
     /// Caller must set SPEEDWAVE_ALLOW_UNSIGNED to skip signature verification.
@@ -4133,14 +3975,10 @@ mod tests {
 
     #[test]
     fn test_peek_plugin_manifest_does_not_install() {
-        // Verifies peek does not write into the plugins base dir — `peek_plugin_manifest` only
-        // extracts into `std::env::temp_dir()`. Probe by counting entries in a fresh tempdir.
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("plugin.zip");
         build_test_plugin_zip(&zip, "side-effect-test", true);
 
-        // Mark the tempdir as the "would-be" plugins dir so we can detect
-        // any rogue writes. peek_plugin_manifest should leave it untouched.
         let probe_dir = tmp.path().join("would-be-plugins");
         std::fs::create_dir_all(&probe_dir).unwrap();
 
@@ -4156,8 +3994,6 @@ mod tests {
             "peek must not write into any plugins-like directory"
         );
     }
-
-    // --- install_plugin progress callback tests ---
 
     /// Progress collector for install_plugin tests.
     fn collect_progress(
@@ -4184,7 +4020,6 @@ mod tests {
         let plugins = tmp.path().join("plugins");
         let plugin_dir = plugins.join("legacy-slug");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        // Only a legacy in-tree marker — no state-dir marker.
         std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
 
         assert!(
@@ -4289,7 +4124,6 @@ mod tests {
             r#"{"name":"x","slug":"pasted","version":"1.0.0","description":"x"}"#,
         )
         .unwrap();
-        // No SIGNATURE.
 
         let entries = list_for_ui_from_dir(&plugins);
         assert_eq!(entries.len(), 1);
@@ -4300,10 +4134,8 @@ mod tests {
             "unsigned plugin must be flagged, not treated as verified"
         );
 
-        // Fail-closed loader rejects the whole set.
         list_verified_from_dir(&plugins)
             .expect_err("list_verified must reject when any plugin is unsigned");
-        // Audit reports it.
         let failures =
             audit_all_in_dir(&plugins).expect_err("audit must report the unsigned plugin");
         assert!(failures.iter().any(|(slug, _)| slug == "pasted"));
@@ -4323,12 +4155,9 @@ mod tests {
             r#"{"name":"x","slug":"devplugin","version":"1.0.0","description":"x"}"#,
         )
         .unwrap();
-        // No SIGNATURE — bypass must accept it anyway.
         signing::invalidate_cache(&plugin_dir);
 
         let entries = list_for_ui_from_dir(&plugins);
-        // The fail-closed loader yields a VerifiedPlugin under the bypass;
-        // assert it before clearing the env so the accessors see it.
         let verified = list_verified_from_dir(&plugins)
             .expect("bypass must let the fail-closed loader accept the unsigned plugin");
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
@@ -4340,8 +4169,6 @@ mod tests {
             "SPEEDWAVE_ALLOW_UNSIGNED must let an unsigned plugin list as Verified"
         );
 
-        // The only construction path is the verifying `new`; the private
-        // fields are reachable solely via the accessors (ADR-051 invariant).
         assert_eq!(verified.len(), 1);
         assert_eq!(verified[0].manifest().slug, "devplugin");
         assert_eq!(verified[0].dir(), plugin_dir.as_path());
@@ -4365,7 +4192,6 @@ mod tests {
         .unwrap();
         let (priv_key, _pub_key) = generate_keypair();
         sign_plugin(&plugin_dir, &priv_key).unwrap();
-        // Wrong signing key → SIGNATURE present, but production verify fails.
         signing::invalidate_cache(&plugin_dir);
 
         let entries = list_for_ui_from_dir(&plugins);
@@ -4381,7 +4207,6 @@ mod tests {
             "InvalidSignature must carry a diagnostic"
         );
 
-        // Fail-closed loader rejects the whole set.
         list_verified_from_dir(&plugins)
             .expect_err("list_verified must reject when any plugin's signature is invalid");
     }
@@ -4392,11 +4217,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         std::fs::create_dir_all(&plugins).unwrap();
-        // Real plugin
         make_resource_only_plugin_dir(&plugins, "okplugin", "1.0.0");
-        // In-flight install staging
         std::fs::create_dir_all(plugins.join("okplugin.installing.abc123")).unwrap();
-        // In-flight removal
         std::fs::create_dir_all(plugins.join("okplugin.removing.def456")).unwrap();
 
         let entries = list_for_ui_from_dir(&plugins);
@@ -4411,14 +4233,12 @@ mod tests {
     #[test]
     fn read_changelog_for_ui_reads_within_cap_and_withholds_over_cap() {
         let dir = tempfile::tempdir().unwrap();
-        // Absent file → None (a plugin without a changelog is normal).
         assert_eq!(read_changelog_for_ui(dir.path()), None);
 
         let body = "# Changelog\n\n## 1.0.0 (2026-07-06)\n- initial release\n";
         std::fs::write(dir.path().join(consts::PLUGIN_CHANGELOG_FILE), body).unwrap();
         assert_eq!(read_changelog_for_ui(dir.path()).as_deref(), Some(body));
 
-        // Exactly at cap → passes (cap is inclusive); one over → withheld.
         let at_cap = "a".repeat(consts::PLUGIN_CHANGELOG_MAX_BYTES);
         std::fs::write(dir.path().join(consts::PLUGIN_CHANGELOG_FILE), &at_cap).unwrap();
         assert!(read_changelog_for_ui(dir.path()).is_some());
@@ -4440,8 +4260,6 @@ mod tests {
 
     #[test]
     fn read_changelog_for_ui_rejects_non_regular_file() {
-        // A directory at the changelog path is a non-regular file on every
-        // platform — must be withheld, never opened as if it were the changelog.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(consts::PLUGIN_CHANGELOG_FILE)).unwrap();
         assert_eq!(read_changelog_for_ui(dir.path()), None);
@@ -4450,8 +4268,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_changelog_for_ui_skips_fifo_without_blocking() {
-        // A FIFO with no writer blocks File::open indefinitely if opened
-        // unconditionally; the file-type stat must reject it first.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(consts::PLUGIN_CHANGELOG_FILE);
         let status = std::process::Command::new("mkfifo")
@@ -4509,7 +4325,6 @@ mod tests {
             "## 1.0.0\n- attacker-authored markdown\n",
         )
         .unwrap();
-        // No SIGNATURE → MissingSignature.
 
         let entries = list_for_ui_from_dir(&plugins);
         assert_eq!(entries.len(), 1);
@@ -4529,11 +4344,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         std::fs::create_dir_all(&plugins).unwrap();
-        // One good resource-only plugin (no signature, but bypass active)
         make_resource_only_plugin_dir(&plugins, "good", "1.0.0");
-        // One mismatched slug — failure
         make_dir_with_mismatched_slug(&plugins, "bad", "different");
-        // One missing manifest entirely — failure
         std::fs::create_dir_all(plugins.join("broken")).unwrap();
 
         let failures = audit_all_in_dir(&plugins).expect_err("audit must report failures");
@@ -4554,10 +4366,8 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
 
         let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
-        // First install
         install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir)
             .expect("first install must succeed");
-        // Re-install same slug (simulates upgrade)
         install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir)
             .expect("reinstall must succeed");
 
@@ -4592,7 +4402,6 @@ mod tests {
         sign_plugin(&plugin_dir, &priv_key).unwrap();
         let pub_key: [u8; 32] = pub_key.try_into().unwrap();
 
-        // Simulate a legacy install: marker dumped into the signed tree.
         std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
         verify_plugin_signature_with_key(&plugin_dir, &pub_key).expect_err(
             "sanity: legacy marker must break verification, else the test proves nothing",
@@ -4622,8 +4431,6 @@ mod tests {
         .unwrap();
         std::fs::write(plugin_dir.join(".image_pending"), b"").unwrap();
 
-        // Bypass is active so the (non-prod-key) plugin doesn't fail signature verification —
-        // we're only checking that the audit pass invokes the migration.
         let _ = audit_all_in_dir(&plugins);
 
         assert!(!plugin_dir.join(".image_pending").exists());
@@ -4644,8 +4451,6 @@ mod tests {
 
         migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
 
-        // Symlink stays put — verifier will still fail (which is what
-        // we want for a tampered tree).
         assert!(plugin_dir.join(".image_pending").is_symlink());
         assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
     }
@@ -4659,8 +4464,6 @@ mod tests {
         let plugins = tmp.path().join("plugins");
         let plugin_dir = plugins.join("evil-legacy");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        // A file outside the plugin tree that the attacker would like
-        // `migrate_legacy_image_pending` to move for them.
         let decoy = tmp.path().join("decoy.txt");
         std::fs::write(&decoy, b"do not touch").unwrap();
         let marker = plugin_dir.join(".image_pending");
@@ -4668,8 +4471,6 @@ mod tests {
 
         migrate_legacy_image_pending(&plugins, &plugin_dir, "evil-legacy");
 
-        // Hardlinked marker stays put; the decoy is untouched; nothing
-        // was relocated into the state dir.
         assert!(marker.exists());
         assert_eq!(std::fs::read(&decoy).unwrap(), b"do not touch");
         assert!(!image_pending_marker_for(&plugins, "evil-legacy").exists());
@@ -4679,11 +4480,7 @@ mod tests {
     /// `install_plugin_with_base`'s exclusive flock serialises stage-then-rename per call.
     #[test]
     fn test_install_concurrent_no_corruption() {
-        // Without a barrier, thread A typically finishes before B starts, degenerating to two
-        // sequential installs, never exercising the flock. `Barrier::new(2)` forces both together.
         use std::sync::Barrier;
-        // SPEEDWAVE_ALLOW_UNSIGNED is process-global; hold the unsigned-env lock for both threads
-        // via the guard *outside* the spawned threads — they inherit the env.
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("plugin.zip");
@@ -4712,12 +4509,9 @@ mod tests {
 
         let r_a = t_a.join().expect("thread A panicked");
         let r_b = t_b.join().expect("thread B panicked");
-        // Both must succeed (lock serialises them; second install is a
-        // legal upgrade-in-place).
         r_a.expect("install A");
         r_b.expect("install B");
 
-        // No leftover staging or removing dirs.
         let leftovers: Vec<String> = std::fs::read_dir(&plugins_dir)
             .unwrap()
             .flatten()
@@ -4729,7 +4523,6 @@ mod tests {
             "lock+rename must leave no transient dirs after concurrent installs: {leftovers:?}"
         );
 
-        // Final state is a single, consistent plugin tree.
         let final_dir = plugins_dir.join("race-target");
         assert!(final_dir.join("plugin.json").is_file());
     }
@@ -4752,15 +4545,12 @@ mod tests {
         }
         #[cfg(not(unix))]
         {
-            // On non-Unix we don't create the symlink; just assert it works.
             result.expect("copy must succeed without symlinks");
         }
     }
 
     #[test]
     fn test_install_plugin_resource_only_emits_verifying_extracting_done() {
-        // SPEEDWAVE_ALLOW_UNSIGNED is process-global; serialize tests that
-        // touch it so concurrent runs cannot see partial state.
         let _guard = unsigned_env_lock();
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let tmp = tempfile::tempdir().unwrap();
@@ -4794,15 +4584,11 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
 
         let progresses = std::sync::Mutex::new(Vec::<PluginInstallProgress>::new());
-        // runtime=None for MCP plugin: .image_pending marker created, no build emitted, outcome
-        // PendingBuild so callers don't auto-enable an MCP worker whose image is absent.
         let result =
             install_plugin_with_base(&zip, None, &mut collect_progress(&progresses), &plugins_dir);
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let dest = plugins_dir.join("phases-no-runtime");
-        // Marker now lives in the state directory (sibling of plugins_dir), never in the signed
-        // plugin tree — the plugin tree must stay bit-for-bit identical to what was installed.
         let state_marker_existed =
             image_pending_marker_for(&plugins_dir, "phases-no-runtime").exists();
         let in_tree_marker = dest.join(".image_pending").exists();
@@ -4826,7 +4612,6 @@ mod tests {
             .iter()
             .map(|p| p.phase.clone())
             .collect();
-        // building skipped (no runtime); terminal phase is done_with_pending_build.
         assert_eq!(
             phases,
             vec!["verifying", "extracting", "done_with_pending_build"]
@@ -4835,7 +4620,6 @@ mod tests {
 
     #[test]
     fn test_install_plugin_emits_failed_with_sanitized_error() {
-        // Build error containing a credential — must be sanitized before emission.
         let _guard = unsigned_env_lock();
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let tmp = tempfile::tempdir().unwrap();
@@ -4890,7 +4674,6 @@ mod tests {
             ]
         );
 
-        // Security: the emitted error must NOT contain the credential.
         let failed = progresses.iter().find(|p| p.phase == "failed").unwrap();
         let err_text = failed.error.as_ref().expect("failed phase carries error");
         assert!(!err_text.contains("tok"), "credential leaked: {err_text}");
@@ -4899,8 +4682,6 @@ mod tests {
             "expected redacted marker in: {err_text}"
         );
     }
-
-    // --- remove_plugin image cleanup tests ---
 
     /// Helper: install a plugin into `plugins_dir` so we have something to remove.
     fn write_plugin_dir(plugins_dir: &Path, slug: &str, with_service_id: bool) {
@@ -4924,18 +4705,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "img-cleanup", true);
-        // Compute the expected content-addressed tag BEFORE removal deletes the tree.
         let expected_tag = expected_tag_for(&plugins_dir, "img-cleanup");
 
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         remove_plugin_with_base("img-cleanup", &plugins_dir, Some(&rt)).unwrap();
 
-        // Plugin dir is gone.
         assert!(!plugins_dir.join("img-cleanup").exists());
-        // remove_images called once with the expected tag AND force=true
-        // (uninstall is an explicit user request — no waiting for prune).
         let calls = handles.remove_images_calls.lock().unwrap().clone();
-        // Current content-addressed tag + the legacy version-only tag.
         assert_eq!(
             calls,
             vec![
@@ -4954,7 +4730,6 @@ mod tests {
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         remove_plugin_with_base("skills-only", &plugins_dir, Some(&rt)).unwrap();
 
-        // remove_images NOT called for plugins without a service_id.
         assert!(handles.remove_images_calls.lock().unwrap().is_empty());
     }
 
@@ -4964,7 +4739,6 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "no-runtime", true);
 
-        // No runtime — files removed, image cleanup skipped (legacy path).
         remove_plugin_with_base("no-runtime", &plugins_dir, None).unwrap();
         assert!(!plugins_dir.join("no-runtime").exists());
     }
@@ -4975,15 +4749,12 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "rmi-fails", true);
 
-        // Best-effort: image removal failure logs a warning but does not fail.
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_remove_images_error("simulated nerdctl rmi failure")
             .build();
         let result = remove_plugin_with_base("rmi-fails", &plugins_dir, Some(&rt));
         assert!(result.is_ok(), "remove_plugin must not fail on rmi error");
         assert!(!plugins_dir.join("rmi-fails").exists());
-        // remove_images was attempted with force=true even on the error path
-        // — the uninstall caller never silently downgrades to non-force rmi.
         let calls = handles.remove_images_calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 2, "current + legacy tag, both attempted");
         assert!(
@@ -4992,17 +4763,11 @@ mod tests {
         );
     }
 
-    // --- Task 2: duplicate service_id detection test ---
-
     #[test]
     fn test_install_plugin_rejects_duplicate_service_id() {
-        // install_plugin() needs a signed ZIP and dirs::home_dir(), impractical here; test the
-        // duplicate-detection logic by checking existing plugins for a matching service_id.
-
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Create an "existing" plugin with service_id "example-plugin"
         let existing_dir = plugins_dir.join("example-plugin");
         std::fs::create_dir_all(&existing_dir).unwrap();
         std::fs::write(
@@ -5018,7 +4783,6 @@ mod tests {
         )
         .unwrap();
 
-        // Simulate listing installed plugins from the temp dir
         let mut existing_plugins = Vec::new();
         for entry in std::fs::read_dir(plugins_dir).unwrap() {
             let entry = entry.unwrap();
@@ -5032,11 +4796,10 @@ mod tests {
             }
         }
 
-        // New plugin with the same service_id but different slug
         let new_manifest = PluginManifest {
             name: "Example Plugin Clone".to_string(),
             service_id: Some("example-plugin".to_string()),
-            slug: "example-plugin".to_string(), // slug == service_id (required by validation)
+            slug: "example-plugin".to_string(),
             version: "2.0.0".to_string(),
             description: "A clone".to_string(),
             port: None,
@@ -5055,7 +4818,6 @@ mod tests {
             oauth: None,
         };
 
-        // Replicate the duplicate check from install_plugin
         let duplicate_found = if let Some(ref sid) = new_manifest.service_id {
             existing_plugins.iter().any(|existing| {
                 existing.service_id.as_deref() == Some(sid.as_str())
@@ -5065,13 +4827,11 @@ mod tests {
             false
         };
 
-        // Same slug means an upgrade (allowed), not a duplicate
         assert!(
             !duplicate_found,
             "Same slug with same service_id should be allowed (upgrade scenario)"
         );
 
-        // Now test with a DIFFERENT slug but same service_id
         let conflict_manifest = PluginManifest {
             name: "Example Plugin Fork".to_string(),
             service_id: Some("example-plugin".to_string()),
@@ -5108,8 +4868,6 @@ mod tests {
             "Different slug with same service_id should be rejected as duplicate"
         );
     }
-
-    // --- Task 3: YAML special characters in extra_env ---
 
     #[test]
     fn test_generate_plugin_service_extra_env_special_chars() {
@@ -5156,10 +4914,8 @@ mod tests {
         )
         .unwrap();
 
-        // Verify it parses back as valid YAML
         let yaml = serde_yaml_ng::to_string(&result).unwrap();
 
-        // Re-parse to ensure round-trip works
         let reparsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
         let env_list = reparsed
             .get("environment")
@@ -5168,13 +4924,11 @@ mod tests {
             .as_sequence()
             .expect("environment must be a sequence");
 
-        // Collect all env entries as strings
         let env_strings: Vec<String> = env_seq
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
 
-        // Verify all values survive the YAML round-trip intact
         assert!(
             env_strings
                 .iter()
@@ -5232,8 +4986,6 @@ mod tests {
 
     #[test]
     fn test_mcp_plugin_without_port_is_accepted() {
-        // Since ADR-038, manifest.port is deprecated/ignored — a missing port
-        // must NOT cause validate_manifest to fail.
         let manifest = PluginManifest {
             name: "test".to_string(),
             service_id: Some("test-mcp".to_string()),
@@ -5758,7 +5510,6 @@ mod tests {
         }"#;
         let field: AuthFieldDef = serde_json::from_str(json).unwrap();
         assert_eq!(field.description, None);
-        // required also defaults to true when omitted (regression guard)
         assert!(field.required);
     }
 
@@ -5781,8 +5532,6 @@ mod tests {
 
     #[test]
     fn auth_field_description_empty_string_is_preserved_not_none() {
-        // An explicit empty string must round-trip as Some(""), not be
-        // coerced to None — the author chose to render nothing deliberately.
         let json = r#"{
             "key": "example_pat",
             "label": "Token",
@@ -5795,15 +5544,11 @@ mod tests {
         assert_eq!(field.description.as_deref(), Some(""));
     }
 
-    // ── #5: auth_field validation (regex pattern + message) ────────────────
-
     /// Builds a minimal valid manifest carrying a single secret auth field
     /// with the supplied optional validation, for `validate_manifest` tests.
     fn manifest_with_validation(validation: Option<AuthFieldValidation>) -> PluginManifest {
         PluginManifest {
             name: "Test".to_string(),
-            // service_id: None so validate_manifest doesn't require a
-            // Containerfile on disk — the pattern check runs regardless.
             service_id: None,
             slug: "test-plugin".to_string(),
             version: "1.0.0".to_string(),
@@ -5918,7 +5663,6 @@ mod tests {
 
     #[test]
     fn validate_manifest_rejects_uncompilable_pattern() {
-        // Unbalanced group — invalid in the Rust regex crate.
         let m = manifest_with_validation(Some(AuthFieldValidation {
             pattern: "^(tok_".to_string(),
             message: None,
@@ -5964,7 +5708,6 @@ mod tests {
         }
     }
 
-    // Happy path: oauth_flow field + matching oauth block passes.
     #[test]
     fn validate_oauth_spec_accepts_valid() {
         assert!(validate_oauth_spec(Some(&valid_oauth_spec()), &oauth_auth_fields()).is_ok());
@@ -5972,8 +5715,6 @@ mod tests {
 
     #[test]
     fn supported_grant_types_are_known_variants() {
-        // Every gated grant string must round-trip to an OAuthGrantType, so the
-        // install gate can't admit a grant the enum / host flow doesn't model.
         for g in consts::SUPPORTED_OAUTH_GRANT_TYPES {
             let parsed: OAuthGrantType =
                 serde_json::from_value(serde_json::Value::String((*g).to_string()))
@@ -6002,8 +5743,6 @@ mod tests {
         spec.redirect_port = Some(5005);
         assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_ok());
     }
-
-    // -- derived endpoints (base_url_field + suffix) --
 
     fn derived_oauth_spec() -> PluginOAuthSpec {
         let mut spec = valid_oauth_spec();
@@ -6059,7 +5798,7 @@ mod tests {
     #[test]
     fn validate_oauth_spec_rejects_non_relative_suffix() {
         let mut spec = derived_oauth_spec();
-        spec.token_suffix = Some("token".to_string()); // no leading slash
+        spec.token_suffix = Some("token".to_string());
         assert!(validate_oauth_spec(Some(&spec), &derived_auth_fields()).is_err());
     }
 
@@ -6097,14 +5836,12 @@ mod tests {
         assert!(resolve_oauth_endpoints(&spec, &seed).is_err());
     }
 
-    // Edge: no oauth field and no oauth block — nothing to validate.
     #[test]
     fn validate_oauth_spec_ok_when_absent() {
         let plain = field_with_validation(None);
         assert!(validate_oauth_spec(None, &[plain]).is_ok());
     }
 
-    // Error path: oauth_flow field without an oauth block.
     #[test]
     fn validate_oauth_spec_rejects_field_without_block() {
         let err = validate_oauth_spec(None, &[oauth_field("client_id")])
@@ -6113,7 +5850,6 @@ mod tests {
         assert!(err.contains("no `oauth` block"), "got: {err}");
     }
 
-    // Error path: oauth block without any oauth_flow field.
     #[test]
     fn validate_oauth_spec_rejects_block_without_field() {
         let plain = field_with_validation(None);
@@ -6123,7 +5859,6 @@ mod tests {
         assert!(err.contains("oauth_flow: true"), "got: {err}");
     }
 
-    // Error path: non-https endpoint is rejected by the SSRF/scheme gate.
     #[test]
     fn validate_oauth_spec_rejects_non_https() {
         let mut spec = valid_oauth_spec();
@@ -6133,9 +5868,6 @@ mod tests {
             .to_string();
         assert!(err.contains("must use https"), "got: {err}");
     }
-
-    // device_code / client_credentials sit behind SUPPORTED_OAUTH_GRANT_TYPES at install time;
-    // testing validate_grant_endpoints directly keeps them honest until the gate widens (ADR-069).
 
     #[test]
     fn grant_endpoints_device_code_requires_device_authorization_url() {
@@ -6167,7 +5899,6 @@ mod tests {
         let err = validate_grant_endpoints(&spec, false)
             .unwrap_err()
             .to_string();
-        // Rejected by the shared SSRF validator ("private/reserved IP").
         assert!(err.contains("private"), "got: {err}");
     }
 
@@ -6209,7 +5940,6 @@ mod tests {
         assert!(validate_grant_endpoints(&spec, true).is_ok());
     }
 
-    // Error path: loopback/private endpoint blocked by the shared validator.
     #[test]
     fn validate_oauth_spec_rejects_private_address() {
         let mut spec = valid_oauth_spec();
@@ -6239,13 +5969,11 @@ mod tests {
 
     #[test]
     fn validate_oauth_spec_rejects_metadata_ip_token_url() {
-        // Cloud metadata endpoint must be blocked through the OAuth path.
         let mut spec = valid_oauth_spec();
         spec.token_url = Some("https://169.254.169.254/token".to_string());
         assert!(validate_oauth_spec(Some(&spec), &oauth_auth_fields()).is_err());
     }
 
-    // Edge: oversized endpoint URL is rejected by the length cap.
     #[test]
     fn validate_oauth_spec_rejects_oversized_url() {
         let mut spec = valid_oauth_spec();
@@ -6257,7 +5985,6 @@ mod tests {
         assert!(err.contains("exceeds"), "got: {err}");
     }
 
-    // Edge: too many scopes rejected by the count cap.
     #[test]
     fn validate_oauth_spec_rejects_too_many_scopes() {
         let mut spec = valid_oauth_spec();
@@ -6270,7 +5997,6 @@ mod tests {
         assert!(err.contains("must not exceed"), "got: {err}");
     }
 
-    // Edge: an oversized single scope is rejected by the per-scope length cap.
     #[test]
     fn validate_oauth_spec_rejects_oversized_scope() {
         let mut spec = valid_oauth_spec();
@@ -6281,7 +6007,6 @@ mod tests {
         assert!(err.contains("bytes"), "got: {err}");
     }
 
-    // Edge: an empty scope entry is rejected.
     #[test]
     fn validate_oauth_spec_rejects_empty_scope() {
         let mut spec = valid_oauth_spec();
@@ -6292,8 +6017,6 @@ mod tests {
         assert!(err.contains("empty"), "got: {err}");
     }
 
-    // Reserved: a grant not in SUPPORTED_OAUTH_GRANT_TYPES is rejected even
-    // though the enum can represent it (grant gating per PR).
     #[test]
     fn validate_oauth_spec_rejects_unsupported_grant() {
         let mut spec = valid_oauth_spec();
@@ -6305,7 +6028,6 @@ mod tests {
         assert!(err.contains("not supported"), "got: {err}");
     }
 
-    // Error path: authorization_code without authorize_url.
     #[test]
     fn validate_oauth_spec_rejects_missing_authorize_url() {
         let mut spec = valid_oauth_spec();
@@ -6316,7 +6038,6 @@ mod tests {
         assert!(err.contains("authorize_url is required"), "got: {err}");
     }
 
-    // Error path: client_id_field references a non-existent auth_field.
     #[test]
     fn validate_oauth_spec_rejects_dangling_client_id_field() {
         let mut spec = valid_oauth_spec();
@@ -6327,7 +6048,6 @@ mod tests {
         assert!(err.contains("client_id_field"), "got: {err}");
     }
 
-    // Error path: client_secret_field references a non-existent auth_field.
     #[test]
     fn validate_oauth_spec_rejects_dangling_client_secret_field() {
         let mut spec = valid_oauth_spec();
@@ -6338,7 +6058,6 @@ mod tests {
         assert!(err.contains("client_secret_field"), "got: {err}");
     }
 
-    // Seed file is under oauth/, distinct from the state file, never tokens/.
     #[test]
     fn oauth_seed_file_is_off_mount_and_distinct() {
         let base = std::path::Path::new("/d");
@@ -6350,7 +6069,6 @@ mod tests {
         assert!(seed.to_string_lossy().ends_with("my-plugin.seed.json"));
     }
 
-    // Grant string mapping matches the wire form.
     #[test]
     fn oauth_grant_type_as_str() {
         assert_eq!(
@@ -6364,8 +6082,6 @@ mod tests {
         );
     }
 
-    // Default: omitted oauth_flow → false, omitted oauth → None, omitted
-    // auth_style → Basic.
     #[test]
     fn oauth_fields_default_when_omitted() {
         let json = r#"{
@@ -6401,8 +6117,6 @@ mod tests {
 
     #[test]
     fn validate_credential_value_ok_for_empty_value() {
-        // Empty == "leave stored value untouched"; required-ness is enforced
-        // elsewhere, so the pattern must not fire on an empty submission.
         let field = field_with_validation(Some(AuthFieldValidation {
             pattern: "^tok_.+$".to_string(),
             message: None,
@@ -6436,16 +6150,13 @@ mod tests {
             message: None,
         }));
         let err = validate_credential_value(&field, "bad").unwrap_err();
-        // Falls back to a message naming the field's label, not its key.
         assert!(err.contains("Example Plugin Token"), "got: {err}");
     }
 
     #[test]
     fn validate_credential_value_is_anchored_full_match() {
-        // A value that only *contains* a match (but has extra chars) must be
-        // rejected — anchoring mirrors the HTML pattern's full-match rule.
         let field = field_with_validation(Some(AuthFieldValidation {
-            pattern: "tok_[a-z]+".to_string(), // intentionally un-anchored by author
+            pattern: "tok_[a-z]+".to_string(),
             message: Some("bad".to_string()),
         }));
         assert!(validate_credential_value(&field, "tok_abc").is_ok());
@@ -6454,8 +6165,6 @@ mod tests {
             "partial match must be rejected by the anchoring wrapper"
         );
     }
-
-    // ── instructions (long-form Markdown for the Dashboard) ────────────────
 
     #[test]
     fn manifest_instructions_defaults_to_none_when_omitted() {
@@ -6466,7 +6175,6 @@ mod tests {
 
     #[test]
     fn manifest_instructions_parses_when_present() {
-        // r##"…"## so the markdown `"#` heading doesn't close the raw string.
         let json = r##"{
             "name": "T", "slug": "t", "version": "1.0.0", "description": "d",
             "instructions": "# Setup\n1. Do the thing"
@@ -6494,8 +6202,6 @@ mod tests {
 
     #[test]
     fn validate_credential_value_surfaces_invalid_pattern_error() {
-        // The map_err arm of validate_credential_value: a pattern that fails to compile (unbalanced
-        // group) must surface a clear error, not panic. Unreachable post-install but defended.
         let field = field_with_validation(Some(AuthFieldValidation {
             pattern: "(".to_string(),
             message: Some("nope".to_string()),
@@ -6506,7 +6212,6 @@ mod tests {
 
     #[test]
     fn validate_manifest_accepts_pattern_at_cap() {
-        // Boundary: len == cap is allowed; only > cap is rejected.
         let at_cap = "a".repeat(consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN);
         let m = manifest_with_validation(Some(AuthFieldValidation {
             pattern: at_cap,
@@ -6518,7 +6223,6 @@ mod tests {
 
     #[test]
     fn validate_manifest_accepts_instructions_at_cap() {
-        // Boundary: len == cap is allowed; only > cap is rejected.
         let mut m = manifest_with_validation(None);
         m.instructions = Some("a".repeat(consts::PLUGIN_INSTRUCTIONS_MAX_BYTES));
         let tmp = tempfile::tempdir().unwrap();
@@ -6527,8 +6231,6 @@ mod tests {
 
     #[test]
     fn allowed_auth_field_types_match_ts_union() {
-        // Cross-language SSOT guard: the TS `PluginAuthFieldType` union must list exactly the
-        // Rust ALLOWED_AUTH_FIELD_TYPES, so the credentials form can't silently diverge.
         let src = include_str!("../../../desktop/src/src/app/models/plugin.ts");
         let re = regex::Regex::new(r"export\s+type\s+PluginAuthFieldType\s*=\s*([^;]+);").unwrap();
         let cap = re
@@ -6553,8 +6255,6 @@ mod tests {
 
     #[test]
     fn compile_anchored_pattern_enforces_invariants() {
-        // empty / oversized / uncompilable all rejected; valid compiles and
-        // matches anchored (full-match only).
         assert!(compile_anchored_pattern("").unwrap_err().contains("empty"));
         let huge = "a".repeat(consts::PLUGIN_AUTH_FIELD_PATTERN_MAX_LEN + 1);
         assert!(compile_anchored_pattern(&huge)
@@ -6573,7 +6273,6 @@ mod tests {
 
     #[test]
     fn test_token_dir_returns_correct_path() {
-        // Isolated: build under a tempdir home instead of consts::data_dir().
         let tmp = tempfile::tempdir().unwrap();
         let result = token_dir_with_base(tmp.path(), "myproject", "example-plugin");
         let expected_suffix = std::path::Path::new(".speedwave/tokens/myproject/example-plugin");
@@ -6583,8 +6282,6 @@ mod tests {
             result.display()
         );
     }
-
-    // --- Plugin settings-file delivery (contract: /tokens/_settings.json) ---
 
     #[test]
     fn test_settings_file_path_is_inside_token_dir() {
@@ -6680,8 +6377,6 @@ mod tests {
         assert!(err.contains("reserved"), "unexpected error: {err}");
     }
 
-    // --- Zip Slip security tests (issue #36) ---
-
     #[test]
     fn test_extract_zip_safe_archive() {
         use std::io::{Cursor, Write};
@@ -6726,7 +6421,6 @@ mod tests {
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         writer.start_file("bomb", options).unwrap();
-        // 8 MiB of zeros deflates to a few KiB — ratio well past the cap.
         writer.write_all(&vec![0u8; 8 * 1024 * 1024]).unwrap();
         let buf = writer.finish().unwrap();
         std::fs::write(&zip_path, buf.into_inner()).unwrap();
@@ -6798,7 +6492,6 @@ mod tests {
     fn test_extract_zip_total_uncompressed_at_limit_passes_one_over_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("total.zip");
-        // Two stored entries of 10 bytes each: total uncompressed is exactly 20.
         write_stored_zip(&zip_path, &[("a.bin", &[0u8; 10]), ("b.bin", &[0u8; 10])]);
 
         let ok_dir = tmp.path().join("ok");
@@ -6856,7 +6549,6 @@ mod tests {
             "Error should mention 'path traversal'"
         );
 
-        // File must not escape the extraction directory
         assert!(
             !tmp.path().join("etc").exists(),
             "Traversal file should not exist outside extract dir"
@@ -6916,7 +6608,6 @@ mod tests {
         let buf = writer.finish().unwrap();
         std::fs::write(&zip_path, buf.into_inner()).unwrap();
 
-        // Pre-validation rejects symlinks before anything is written
         let result = extract_zip(&zip_path, &extract_dir);
         assert!(result.is_err(), "extract_zip should reject symlink entries");
         assert!(
@@ -6924,7 +6615,6 @@ mod tests {
             "Error should mention symlink"
         );
 
-        // Symlink was never created on disk
         assert!(
             extract_dir.join("escape-link").symlink_metadata().is_err(),
             "Symlink should not exist — rejected before extraction"
@@ -6963,7 +6653,6 @@ mod tests {
         )
         .unwrap();
 
-        // Simulate remove_plugin logic: validate slug + remove dir
         validate_slug("test-plugin").unwrap();
         assert!(plugin_dir.exists());
         std::fs::remove_dir_all(&plugin_dir).unwrap();
@@ -6974,14 +6663,11 @@ mod tests {
     fn test_remove_plugin_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let plugin_dir = dir.path().join("nonexistent");
-        // Plugin dir doesn't exist — remove should fail
         assert!(!plugin_dir.exists());
     }
 
     #[test]
     fn test_validate_manifest_rejects_readwrite_token_mount() {
-        // ADR-009: token_mount read_write is reserved for built-in services (SharePoint only);
-        // plugins must use read_only. Covers BOTH justification cases — both must be rejected.
         for justification in ["   ", "I really need this"] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("Containerfile"), "FROM scratch").unwrap();
@@ -7020,8 +6706,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_slug_hub() {
-        // A plugin slug deriving a compose name colliding with a built-in service must be
-        // rejected, else a mapping insert silently overwrites `mcp-hub`, defeating zero-token.
         for bad_slug in ["hub", "claude"] {
             let dir = tempfile::tempdir().unwrap();
             let manifest = PluginManifest {
@@ -7057,8 +6741,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_dangerous_extra_env_keys() {
-        // SSOT: RESERVED_ENV_KEYS lists env vars a plugin must not inject — PORT, dynamic-linker
-        // (LD_PRELOAD, DYLD_*), runtime (NODE_OPTIONS, PYTHONPATH), shell (PATH, HOME) hijacks.
         for &dangerous in &[
             "LD_PRELOAD",
             "ld_preload",
@@ -7113,8 +6795,6 @@ mod tests {
             );
         }
     }
-
-    // ── host_bridge manifest validation ─────────────────────────────────
 
     fn fixture_host_bridge_manifest_with(
         roles: HashMap<String, HostBridgeRoleAuth>,
@@ -7201,8 +6881,6 @@ mod tests {
 
     #[test]
     fn test_plugin_state_dir_returns_plugin_state_path_for_slug() {
-        // Isolated: exercise the path logic via the _for variant on a tempdir
-        // so we never resolve consts::data_dir() / the real ~/.speedwave.
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path().join("plugins");
         let dir = plugin_state_dir_for(&plugins_dir, "my-plugin");
@@ -7274,7 +6952,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_host_bridge_with_reserved_url_env() {
-        // PORT is in RESERVED_ENV_KEYS (auto-injected by Speedwave).
         let bridge = fixture_host_bridge_manifest_with(valid_roles(), "PORT", "X_TOKEN", "X");
         let manifest = fixture_manifest_with_host_bridge(bridge);
         let tmp = tempfile::tempdir().unwrap();
@@ -7288,7 +6965,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_host_bridge_with_reserved_token_env() {
-        // LD_PRELOAD is a dangerous runtime hijack vector reserved by Speedwave.
         let bridge = fixture_host_bridge_manifest_with(valid_roles(), "X_URL", "LD_PRELOAD", "X");
         let manifest = fixture_manifest_with_host_bridge(bridge);
         let tmp = tempfile::tempdir().unwrap();
@@ -7302,7 +6978,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_host_bridge_with_equal_url_and_token_env() {
-        // Same env name on both fields would collide on the container env.
         let bridge =
             fixture_host_bridge_manifest_with(valid_roles(), "SAME_NAME", "SAME_NAME", "X");
         let manifest = fixture_manifest_with_host_bridge(bridge);
@@ -7379,8 +7054,6 @@ mod tests {
             "expected control-char rejection, got: {err}"
         );
     }
-
-    // ── host_bridge oversize edge cases ─────────────────────────────────
 
     #[test]
     fn test_validate_manifest_rejects_host_bridge_with_oversize_url_env() {
@@ -7486,7 +7159,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_mem_limit_exceeding_cap() {
-        // 999g (≈ 1 TiB) far exceeds PLUGIN_MEM_LIMIT_MAX_MIB.
         let dir = tempfile::tempdir().unwrap();
         let manifest = PluginManifest {
             name: "Test".to_string(),
@@ -7519,7 +7191,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_cpu_limit_exceeding_cap() {
-        // 16 cores exceeds PLUGIN_CPU_LIMIT_MAX (4.0).
         let dir = tempfile::tempdir().unwrap();
         let manifest = PluginManifest {
             name: "Test".to_string(),
@@ -7552,8 +7223,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_non_positive_or_nonfinite_cpu_limit() {
-        // "nan"/"inf" parse to NaN/inf; "0"/"-1" parse to non-positive. All four must be rejected
-        // by `!cores.is_finite() || cores <= 0.0`, not silently passed into rendered compose.
         for bad in ["nan", "inf", "-inf", "0", "-1", "-0.5"] {
             let dir = tempfile::tempdir().unwrap();
             let manifest = PluginManifest {
@@ -7588,8 +7257,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_non_object_settings_schema() {
-        // `settings_schema` is consumed by the Desktop UI as a JSON Schema object. A non-object
-        // value (array, scalar) cannot be Draft-7 and would silently break the settings form.
         let dir = tempfile::tempdir().unwrap();
         for non_object in [
             serde_json::json!("not a schema"),
@@ -7630,7 +7297,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_rejects_oversized_settings_schema() {
-        // 1 MiB pseudo-schema — 16x the cap. Should be rejected.
         let big_string = "x".repeat(1024 * 1024);
         let schema = serde_json::json!({
             "type": "object",
@@ -7665,7 +7331,6 @@ mod tests {
 
     #[test]
     fn test_validate_manifest_accepts_valid_settings_schema() {
-        // Sanity: an in-tree-style schema must still pass.
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -7706,20 +7371,14 @@ mod tests {
         assert_eq!(parse_mem_limit_to_mib("2g").unwrap(), 2048);
         assert_eq!(parse_mem_limit_to_mib("1G").unwrap(), 1024);
         assert_eq!(parse_mem_limit_to_mib("1024K").unwrap(), 1);
-        // 512000 bare bytes → 0 MiB after integer division, but still
-        // a real cap (non-zero n), so accepted.
         assert_eq!(parse_mem_limit_to_mib("512000").unwrap(), 0);
         assert!(parse_mem_limit_to_mib("").is_err());
         assert!(parse_mem_limit_to_mib("abc").is_err());
         assert!(parse_mem_limit_to_mib("1x").is_err());
-        // Explicit zero means "no limit" in Docker — must be rejected
-        // so a plugin can't bypass PLUGIN_MEM_LIMIT_MAX_MIB.
         assert!(parse_mem_limit_to_mib("0").is_err());
         assert!(parse_mem_limit_to_mib("0m").is_err());
         assert!(parse_mem_limit_to_mib("0g").is_err());
     }
-
-    // --- build_pending_from_dir error accumulation tests ---
 
     /// Builds a mock runtime whose `build_image` always errors with "mock build failure".
     /// `image_exists` defaults to `false`; tests that need it `true` can override.
@@ -7735,13 +7394,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Plugin with .image_pending and invalid JSON in plugin.json
         let bad_dir = plugins_dir.join("bad-json");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join(".image_pending"), "").unwrap();
         std::fs::write(bad_dir.join("plugin.json"), "NOT VALID JSON").unwrap();
 
-        // Another plugin with .image_pending and missing required fields
         let missing_fields_dir = plugins_dir.join("missing-fields");
         std::fs::create_dir_all(&missing_fields_dir).unwrap();
         std::fs::write(missing_fields_dir.join(".image_pending"), "").unwrap();
@@ -7767,7 +7424,6 @@ mod tests {
             err_msg.contains("parse manifest"),
             "error should mention parse failure: {err_msg}"
         );
-        // Both bad plugins should be mentioned
         assert!(
             err_msg.contains("bad-json") && err_msg.contains("missing-fields"),
             "error should mention both failing plugin dirs: {err_msg}"
@@ -7780,8 +7436,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Valid manifest with .image_pending — reaches build_single_plugin_image, which calls
-        // prepare_build_context() then build_image(); FailingBuildRuntime's Err is accumulated.
         let valid_dir = plugins_dir.join("valid-plugin");
         std::fs::create_dir_all(&valid_dir).unwrap();
         std::fs::write(valid_dir.join(".image_pending"), "").unwrap();
@@ -7797,7 +7451,6 @@ mod tests {
             }"#,
         )
         .unwrap();
-        // Containerfile needed by build_single_plugin_image
         std::fs::write(valid_dir.join("Containerfile"), "FROM scratch").unwrap();
 
         let rt = failing_build_runtime();
@@ -7821,13 +7474,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Plugin 1: bad manifest (parse error)
         let bad_dir = plugins_dir.join("broken-manifest");
         std::fs::create_dir_all(&bad_dir).unwrap();
         std::fs::write(bad_dir.join(".image_pending"), "").unwrap();
         std::fs::write(bad_dir.join("plugin.json"), "{invalid").unwrap();
 
-        // Plugin 2: valid manifest but build will fail
         let good_dir = plugins_dir.join("buildable");
         std::fs::create_dir_all(&good_dir).unwrap();
         std::fs::write(good_dir.join(".image_pending"), "").unwrap();
@@ -7850,7 +7501,6 @@ mod tests {
 
         assert!(result.is_err(), "should accumulate both error types");
         let err_msg = result.unwrap_err().to_string();
-        // Both errors should be accumulated, not just the first one
         assert!(
             err_msg.contains("parse manifest"),
             "should contain parse error: {err_msg}"
@@ -7866,7 +7516,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
 
-        // Plugin dir exists but has no .image_pending marker — should be skipped
         let no_marker_dir = plugins_dir.join("no-marker");
         std::fs::create_dir_all(&no_marker_dir).unwrap();
         std::fs::write(no_marker_dir.join("plugin.json"), "INVALID").unwrap();
@@ -7905,7 +7554,6 @@ mod tests {
         let tokens = HashMap::from([("token.txt".to_string(), "secret".to_string())]);
         write_token_files(&token_dir, &tokens).unwrap();
 
-        // All 3 levels should be 0o700
         assert_eq!(
             std::fs::metadata(&token_dir).unwrap().permissions().mode() & 0o777,
             0o700,
@@ -7930,14 +7578,12 @@ mod tests {
             "tokens should be 0o700"
         );
 
-        // data_dir itself should NOT have been changed
         assert_eq!(
             std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
             original_mode,
             "data_dir should not have been changed"
         );
 
-        // Token file should be 0o600
         assert_eq!(
             std::fs::metadata(token_dir.join("token.txt"))
                 .unwrap()
@@ -7948,8 +7594,6 @@ mod tests {
             "token file should be 0o600"
         );
     }
-
-    // --- ensure_plugin_images test helpers (delegating to MockRuntimeBuilder) ---
 
     /// Builds a mock with the given image tags marked as present. Successful builds insert the
     /// tag into `image_exists` (mirrors real-runtime), letting tests assert exact build counts.
@@ -8013,15 +7657,13 @@ mod tests {
         std::fs::write(plugin_dir.join("plugin.json"), manifest).unwrap();
     }
 
-    // --- Happy path: project-scoped ensure_plugin_images ---
-
     #[test]
     fn test_ensure_plugin_images_rebuilds_missing_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
-        let (rt, handle) = tracking_runtime(&[]); // no existing images
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -8034,13 +7676,10 @@ mod tests {
 
     #[test]
     fn test_build_single_plugin_image_containerfile_path_has_separator() {
-        // Regression: on Windows `prepare_build_context` returns a WSL path; `PathBuf::join`
-        // mangles it into `.../exampleContainerfile`. `build_image`'s arg must keep the separator.
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
-        // Simulate the Windows case: prepare_build_context yields a WSL path.
         let wsl_root = std::path::PathBuf::from("/mnt/c/Users/u/.speedwave/plugins/example-plugin");
         let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_prepare_build_context_root(wsl_root.clone())
@@ -8086,7 +7725,6 @@ mod tests {
             name: "Test".to_string(),
             service_id: Some("test".to_string()),
             slug: "test".to_string(),
-            // 99 ASCII chars then a multibyte char straddling index 100.
             version: format!("{}{}", "v".repeat(99), "łłł"),
             description: "test".to_string(),
             port: None,
@@ -8104,7 +7742,6 @@ mod tests {
             instructions: None,
             oauth: None,
         };
-        // Must not panic; result stays within the OCI cap.
         let tag = plugin_image_tag(&manifest, "0123456789abcdef");
         assert!(tag.split(':').nth(1).unwrap().len() <= 128);
     }
@@ -8163,15 +7800,12 @@ mod tests {
     #[test]
     fn record_applied_tag_prunes_superseded_and_updates_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        // Plugins dir must be a subdir: plugin-state lives at its SIBLING,
-        // and tmp.path() directly would leak state into the shared TMPDIR.
         let plugins_dir = tmp.path().join("plugins");
         let plugin_dir = plugins_dir.join("prune-test");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let plugins_dir = plugins_dir.as_path();
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
 
-        // First build: no marker yet — queues + prunes the LEGACY tag, records.
         record_applied_image_tag_and_prune(
             &rt,
             &plugin_dir,
@@ -8185,7 +7819,6 @@ mod tests {
             "pre-marker install queues the legacy version-only tag"
         );
 
-        // Second build with a new digest: prunes the recorded tag (force=false).
         record_applied_image_tag_and_prune(
             &rt,
             &plugin_dir,
@@ -8201,7 +7834,6 @@ mod tests {
 
         let marker = plugin_state_dir_for(plugins_dir, "prune-test").join(APPLIED_IMAGE_TAG_MARKER);
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "repo:tag-two");
-        // Everything pruned → no pending file left.
         assert!(!plugin_state_dir_for(plugins_dir, "prune-test")
             .join(SUPERSEDED_TAGS_FILE)
             .exists());
@@ -8217,7 +7849,6 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:old").unwrap();
 
-        // rmi fails (worker still running) → tag must land on the pending list.
         let (rt_fail, _h) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_remove_images_error("in use")
             .build();
@@ -8235,7 +7866,6 @@ mod tests {
             "repo:new"
         );
 
-        // Next build: retry succeeds → pending list drained.
         let (rt_ok, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         record_applied_image_tag_and_prune(
             &rt_ok,
@@ -8258,7 +7888,6 @@ mod tests {
         let (rt, handles) = crate::runtime::mock_runtime::MockRuntimeBuilder::new().build();
         record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
         record_applied_image_tag_and_prune(&rt, &plugin_dir, "idem-test", "repo:same", "repo:same");
-        // Unchanged tag (legacy == current too) must not remove anything.
         assert!(handles.remove_images_calls.lock().unwrap().is_empty());
     }
 
@@ -8268,7 +7897,6 @@ mod tests {
         let plugins_dir = tmp.path().join("plugins");
         write_plugin_dir(&plugins_dir, "img-cleanup", true);
         let current_tag = expected_tag_for(&plugins_dir, "img-cleanup");
-        // Simulate an earlier build of a different tree revision.
         let state = plugin_state_dir_for(&plugins_dir, "img-cleanup");
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join(APPLIED_IMAGE_TAG_MARKER), "repo:stale-old").unwrap();
@@ -8310,8 +7938,6 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
         let tag = expected_tag_for(tmp.path(), "example-plugin");
 
-        // First build hits the corrupted-snapshot signature; recovery prunes and
-        // the retry succeeds — parity with bundle builds.
         let (rt, handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_prepare_build_context_root(tmp.path().join("example-plugin"))
             .with_build_error_for_attempt(
@@ -8348,8 +7974,6 @@ mod tests {
         let digest = signing::plugin_tree_digest_hex(&dir).unwrap();
         plugin_image_tag(&manifest, &digest)
     }
-
-    // --- Rebuild-failure fallback to a previously-built image ---
 
     /// Plugins dir nested in the tempdir so `plugin-state/` (a sibling) stays inside it.
     fn nested_plugins_dir(tmp: &Path) -> PathBuf {
@@ -8499,7 +8123,7 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
         let tag = expected_tag_for(tmp.path(), "example-plugin");
-        let (rt, handle) = tracking_runtime(&[&tag]); // image exists
+        let (rt, handle) = tracking_runtime(&[&tag]);
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -8515,8 +8139,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
 
-        let (rt, handle) = tracking_runtime(&[]); // no existing images
-                                                  // enabled_service_ids is empty — example-plugin is disabled for this project
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &[], tmp.path()).unwrap();
 
         assert_eq!(
@@ -8533,7 +8156,6 @@ mod tests {
         make_resource_only_plugin_dir(tmp.path(), "my-skills", "1.0.0");
 
         let (rt, handle) = tracking_runtime(&[]);
-        // resource-only plugins have no service_id and no Containerfile
         ensure_plugin_images_from_dir(&rt, &["my-skills"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -8547,12 +8169,12 @@ mod tests {
     fn test_ensure_plugin_images_handles_multiple_plugins_mixed_enabled() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0"); // enabled, missing image
-        make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // enabled, existing image
-        make_mcp_plugin_dir(tmp.path(), "plugin-c", "1.0.0"); // disabled, missing image
+        make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "plugin-c", "1.0.0");
 
         let tag_b = expected_tag_for(tmp.path(), "plugin-b");
-        let (rt, handle) = tracking_runtime(&[&tag_b]); // B exists
+        let (rt, handle) = tracking_runtime(&[&tag_b]);
         ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path()).unwrap();
 
         assert_eq!(
@@ -8569,22 +8191,17 @@ mod tests {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.4.6");
-        // Add .image_pending marker
         std::fs::write(tmp.path().join("example-plugin").join(".image_pending"), "").unwrap();
 
-        let (rt, handle) = tracking_runtime(&[]); // image missing
+        let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
-        // Built exactly once: the pending pass builds it, then the second pass sees it via
-        // image_exists() and skips. (TrackingRuntime.build_image now inserts into existing_images.)
         assert_eq!(
             handle.build_call_count(),
             1,
             "pending plugin image should be built exactly once"
         );
     }
-
-    // --- Error path tests ---
 
     #[test]
     fn test_ensure_plugin_images_accumulates_build_errors() {
@@ -8593,7 +8210,7 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
 
-        let (rt, _handle) = failing_tracking_runtime(&[]); // build always fails
+        let (rt, _handle) = failing_tracking_runtime(&[]);
         let err =
             ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path()).unwrap_err();
 
@@ -8615,10 +8232,9 @@ mod tests {
         make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
         make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
 
-        let (rt, handle) = failing_tracking_runtime(&[]); // both fail
+        let (rt, handle) = failing_tracking_runtime(&[]);
         let _ = ensure_plugin_images_from_dir(&rt, &["plugin-a", "plugin-b"], tmp.path());
 
-        // Both should have been attempted despite first failure
         assert_eq!(
             handle.build_call_count(),
             2,
@@ -8630,8 +8246,6 @@ mod tests {
     fn test_ensure_plugin_images_rejects_mcp_plugin_without_containerfile() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        // An MCP plugin (service_id present) with no Containerfile fails `validate_manifest`
-        // inside the verified loader — `ensure_plugin_images` fails closed, never warn-and-skip.
         let plugin_dir = tmp.path().join("my-mcp");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
@@ -8646,7 +8260,6 @@ mod tests {
             }"#,
         )
         .unwrap();
-        // No Containerfile created
 
         let (rt, handle) = tracking_runtime(&[]);
         let err = ensure_plugin_images_from_dir(&rt, &["my-mcp"], tmp.path())
@@ -8658,8 +8271,6 @@ mod tests {
     #[test]
     fn test_ensure_plugin_images_image_exists_returns_err() {
         let _g = UnsignedBypassGuard::new();
-        // image_exists returning Err should be treated as missing — attempt build
-        // (which succeeds with the default builder), so the whole pass returns Ok.
 
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
@@ -8667,11 +8278,8 @@ mod tests {
         let (rt, _handle) = crate::runtime::mock_runtime::MockRuntimeBuilder::new()
             .with_image_exists_error("runtime unavailable")
             .build();
-        // image_exists returns Err → treated as missing → build attempted → succeeds
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
     }
-
-    // --- Edge cases ---
 
     #[test]
     fn test_ensure_plugin_images_empty_plugins_dir() {
@@ -8698,8 +8306,6 @@ mod tests {
     fn test_ensure_plugin_images_rejects_invalid_manifest_json() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        // Plugin dir with invalid plugin.json — even with the unsigned bypass active, the verified
-        // loader's manifest parse fails, so the whole image-ensure pass must fail closed.
         let plugin_dir = tmp.path().join("bad-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(plugin_dir.join("plugin.json"), "NOT VALID JSON").unwrap();
@@ -8752,8 +8358,6 @@ mod tests {
         );
     }
 
-    // --- Boundary / state tests ---
-
     #[test]
     fn test_ensure_plugin_images_pending_marker_cleared_after_build() {
         let _g = UnsignedBypassGuard::new();
@@ -8763,7 +8367,7 @@ mod tests {
         std::fs::write(&pending, "").unwrap();
         assert!(pending.exists(), "marker should exist before build");
 
-        let (rt, _handle) = tracking_runtime(&[]); // image missing
+        let (rt, _handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
 
         assert!(
@@ -8778,12 +8382,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         make_mcp_plugin_dir(tmp.path(), "example-plugin", "1.0.0");
 
-        // First call: image missing → builds it
         let (rt, handle) = tracking_runtime(&[]);
         ensure_plugin_images_from_dir(&rt, &["example-plugin"], tmp.path()).unwrap();
         assert_eq!(handle.build_call_count(), 1, "first call should build");
 
-        // Second call: image now exists (simulate by creating a runtime that knows about it)
         let tag = expected_tag_for(tmp.path(), "example-plugin");
         let (rt2, handle2) = tracking_runtime(&[&tag]);
         ensure_plugin_images_from_dir(&rt2, &["example-plugin"], tmp.path()).unwrap();
@@ -8794,17 +8396,13 @@ mod tests {
         );
     }
 
-    // --- Critical interaction test: reconcile → restore_projects ---
-
     #[test]
     fn test_broken_plugin_does_not_block_unrelated_project_restore() {
         let _g = UnsignedBypassGuard::new();
         let tmp = tempfile::tempdir().unwrap();
-        make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0"); // will always fail to build
-        make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0"); // will build successfully
+        make_mcp_plugin_dir(tmp.path(), "plugin-a", "1.0.0");
+        make_mcp_plugin_dir(tmp.path(), "plugin-b", "1.0.0");
 
-        // Reconcile pass: union covers both enabled plugins; plugin-a fails but
-        // the error is accumulated, not short-circuited.
         let (rt_failing, _) = failing_tracking_runtime(&[]);
         let union_result =
             ensure_plugin_images_from_dir(&rt_failing, &["plugin-a", "plugin-b"], tmp.path());
@@ -8813,7 +8411,6 @@ mod tests {
             "reconcile-union should return error when plugin-a fails"
         );
 
-        // Project using only plugin-b — succeeds (image already exists in this runtime).
         let tag_b = expected_tag_for(tmp.path(), "plugin-b");
         let (rt_b_exists, _) = tracking_runtime(&[&tag_b]);
         let project_b_result =
@@ -8824,7 +8421,6 @@ mod tests {
             project_b_result
         );
 
-        // Project using only plugin-a — still fails.
         let (rt_a_missing, _) = failing_tracking_runtime(&[]);
         let project_a_result =
             ensure_plugin_images_from_dir(&rt_a_missing, &["plugin-a"], tmp.path());
@@ -8833,8 +8429,6 @@ mod tests {
             "project using plugin-a should fail when plugin-a cannot be rebuilt"
         );
     }
-
-    // --- validate_speedwave_compat unit tests ---
 
     fn minimal_resource_only_manifest(compat: Option<String>) -> PluginManifest {
         PluginManifest {
@@ -8937,8 +8531,6 @@ mod tests {
             .to_string()
             .contains("Upgrade Speedwave"));
     }
-
-    // --- validate_manifest integration tests for speedwave_compat ---
 
     #[test]
     fn test_validate_manifest_rejects_invalid_compat() {

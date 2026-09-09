@@ -102,7 +102,6 @@ mod tests {
     #[test]
     fn has_oauth_credentials_false_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
-        // Home exists but no credentials file.
         std::fs::create_dir_all(claude_home_dir(tmp.path(), "p").join(".claude")).unwrap();
         assert!(!has_anthropic_oauth_credentials(tmp.path(), "p"));
     }
@@ -119,18 +118,15 @@ mod tests {
         let home = claude_home_dir(tmp.path(), "proj-a");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
-        // A different project sees no credentials.
         assert!(!has_anthropic_oauth_credentials(tmp.path(), "proj-b"));
     }
 
     #[test]
     fn remove_is_scoped_to_project_dir() {
-        // A plain project component cannot reach outside claude-home/<project>.
         let tmp = tempfile::tempdir().unwrap();
         let home = claude_home_dir(tmp.path(), "proj-a");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude").join(".credentials.json"), "{}").unwrap();
-        // Removing a *different* project removes nothing.
         assert_eq!(remove_claude_credentials(tmp.path(), "proj-b").unwrap(), 0);
         assert!(home.join(".claude").join(".credentials.json").exists());
     }

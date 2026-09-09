@@ -152,14 +152,12 @@ mod tests {
         assert!(!sp_dir.join("refresh_token").exists());
         assert!(!sp_dir.join("client_id").exists());
         assert!(!sp_dir.join("tenant_id").exists());
-        // Worker-mounted files preserved.
         assert!(sp_dir.join("access_token").exists());
         assert!(sp_dir.join("site_id").exists());
     }
 
     #[test]
     fn does_not_create_oauth_json_during_cleanup() {
-        // Cleanup must not create the host-only `oauth/<project>/sharepoint.json`.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-a").join("sharepoint");
@@ -188,14 +186,12 @@ mod tests {
 
         let n = run_with_data_dir(data_dir);
         assert_eq!(n, 0);
-        // access_token + site_id untouched.
         assert!(sp_dir.join("access_token").exists());
         assert!(sp_dir.join("site_id").exists());
     }
 
     #[test]
     fn handles_partial_legacy_state() {
-        // Only refresh_token exists — other two missing.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-c").join("sharepoint");
@@ -241,7 +237,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn does_not_crash_on_read_only_sharepoint_dir() {
-        // A read-only sp_dir must not panic cleanup; perms restored before drop.
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
@@ -251,10 +246,8 @@ mod tests {
 
         std::fs::set_permissions(&sp_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-        // Must not panic; return value is best-effort (0 or 1 both accepted).
         let _ = run_with_data_dir(data_dir);
 
-        // Restore writable perms so tempdir cleanup can recurse.
         std::fs::set_permissions(&sp_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
@@ -283,7 +276,6 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_files_in_sharepoint_dir() {
-        // Only the SSOT-listed legacy files are touched; other files survive.
         let tmp = make_tmp_data_dir();
         let data_dir = tmp.path();
         let sp_dir = data_dir.join("tokens").join("proj-e").join("sharepoint");
@@ -299,8 +291,6 @@ mod tests {
         assert!(sp_dir.join("future_field").exists());
     }
 
-    // -- retired host_exec state sweep --
-
     #[test]
     fn removes_orphaned_host_exec_tree() {
         let tmp = make_tmp_data_dir();
@@ -313,7 +303,6 @@ mod tests {
             write(&d.join("config.json"), "{}");
             write(&d.join("log"), "line");
         }
-        // Unrelated sibling state must survive.
         let sp_dir = data_dir.join("tokens").join("proj-a").join("sharepoint");
         std::fs::create_dir_all(&sp_dir).unwrap();
         write(&sp_dir.join("access_token"), "at");
@@ -359,7 +348,6 @@ mod tests {
 
     #[test]
     fn host_exec_sweep_runs_even_without_tokens_root() {
-        // Guard: the sweep must not sit behind the tokens/ early return.
         let tmp = make_tmp_data_dir();
         let he = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR);
         std::fs::create_dir_all(he.join("proj")).unwrap();
@@ -379,7 +367,6 @@ mod tests {
         write(&he.join("proj").join("auth-token"), "tok");
 
         assert!(remove_legacy_host_exec_tree(tmp.path()));
-        // Second run: already gone — no-op, no panic, nothing recreated.
         assert!(!remove_legacy_host_exec_tree(tmp.path()));
         assert!(!he.exists());
     }
@@ -387,8 +374,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn host_exec_sweep_survives_permission_denied() {
-        // remove_dir_all cannot unlink inside a r-x dir: the sweep reports failure via its return
-        // value (warn-logged), never panics. As root it succeeds, so both outcomes are asserted.
         use std::os::unix::fs::PermissionsExt;
         let tmp = make_tmp_data_dir();
         let protected = tmp.path().join(LEGACY_HOST_EXEC_SUBDIR).join("protected");
@@ -407,7 +392,6 @@ mod tests {
             );
         }
 
-        // Restore writable perms so tempdir cleanup can recurse.
         std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

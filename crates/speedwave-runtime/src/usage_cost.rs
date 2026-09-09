@@ -126,7 +126,6 @@ pub fn effective_response_id(r: &UsageRecord) -> Option<String> {
 /// `None` fetch is `deferred` (retryable), a missing gen_id is terminal `unknown`.
 pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher) -> CostEntry {
     let id = effective_response_id(r).unwrap_or_default();
-    // A failed request is never billed, regardless of provider.
     if r.status == "failure" {
         return CostEntry::new(id, None, CostSource::Failed);
     }
@@ -137,8 +136,6 @@ pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher
         },
         "anthropic_oauth" => (None, CostSource::Subscription),
         "local" => (None, CostSource::Free),
-        // With a gen_id the cost is still fetchable later → `deferred` (retryable);
-        // without one no source exists → `unknown` (terminal).
         "openrouter" => match r.gen_id.as_deref().filter(|g| !g.is_empty()) {
             Some(gen) => match fetch_gen_cost(gen) {
                 Some(c) => (Some(c), CostSource::Actual),
@@ -155,7 +152,6 @@ pub(crate) fn compute_cost_with(r: &UsageRecord, fetch_gen_cost: &GenCostFetcher
 /// when the model id is absent from the catalog (caller maps to `unknown`).
 fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
     let model = r.model.as_deref()?;
-    // `[1m]` suffix selects the 1M-context price variant when present.
     let is_1m = model.ends_with("[1m]");
     let base = model.trim_end_matches("[1m]");
     let info = crate::defaults::ANTHROPIC_MODELS
@@ -163,7 +159,6 @@ fn anthropic_catalog_cost(r: &UsageRecord) -> Option<f64> {
         .find(|m| m.id == base)?;
     let p = if is_1m {
         info.pricing_1m.as_ref().unwrap_or_else(|| {
-            // A [1m] pin on a model without 1M pricing would silently mis-charge.
             log::warn!("model {base}[1m] has no 1M pricing; using base rate");
             &info.pricing
         })
@@ -192,19 +187,14 @@ pub fn enrich_cost_with_in(
     let mut to_append: Vec<CostEntry> = Vec::new();
     let mut queued: std::collections::HashSet<String> = std::collections::HashSet::new();
     crate::usage::for_each_usage_record(data_dir, project, |record| {
-        // Key off response_id, or gen_id when message.id was absent (B6).
         let Some(id) = effective_response_id(&record) else {
             return;
         };
         let prior = already.get(&id);
-        // Skip ids already resolved to a terminal cost; re-price non-terminal
-        // ones (`deferred`) so a lagging OpenRouter `/generation` can recover.
         if prior.is_some_and(|e| e.cost_source.is_terminal()) || !queued.insert(id) {
             return;
         }
         let entry = compute_cost_with(&record, fetch_gen_cost);
-        // Append only when the re-priced result actually changes — a still-
-        // `deferred` line must not grow the sidecar on every pass.
         if prior.is_some_and(|e| e.cost_source == entry.cost_source && e.cost_usd == entry.cost_usd)
         {
             return;
@@ -266,7 +256,6 @@ pub fn pending_deferred_gen_ids(data_dir: &Path, project: &str) -> Vec<String> {
         let Some(gen) = rec.gen_id.as_deref().filter(|g| !g.is_empty()) else {
             return;
         };
-        // Cache is keyed by effective_response_id (gen_id when message.id absent).
         let key = effective_response_id(&rec).unwrap_or_else(|| gen.to_string());
         let priced_terminal = priced
             .get(&key)
@@ -371,7 +360,6 @@ mod tests {
 
     #[test]
     fn anthropic_apikey_cost_from_catalog() {
-        // 1M input tokens of opus (input 5.0/MTok) = $5.00 exactly.
         let e = compute_cost_with(
             &record("anthropic_apikey", "claude-opus-4-8", 1_000_000, 0, 0, 0),
             &|_| None,
@@ -396,7 +384,6 @@ mod tests {
 
     #[test]
     fn local_cost_is_null_free() {
-        // Local is no-charge: cost is null (rendered `—`), never $0.00 (invariant 6).
         let e = compute_cost_with(&record("local", "qwen3", 100, 100, 0, 0), &|_| None);
         assert!(e.cost_usd.is_none());
         assert_eq!(e.cost_source, CostSource::Free);
@@ -404,7 +391,6 @@ mod tests {
 
     #[test]
     fn openrouter_without_fetcher_is_unknown() {
-        // A fetcher that resolves nothing can't reach /generation.
         let e = compute_cost_with(
             &record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0),
             &|_| None,
@@ -436,7 +422,6 @@ mod tests {
 
     #[test]
     fn openrouter_fetcher_failure_with_gen_id_is_deferred() {
-        // gen_id present but /generation not yet resolved → retryable `deferred`.
         let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
         r.gen_id = Some("gen-abc".into());
         let e = compute_cost_with(&r, &|_| None);
@@ -461,8 +446,6 @@ mod tests {
 
     #[test]
     fn cost_source_ts_union_matches_rust() {
-        // The TS CostSourceKind union must list exactly the Rust serde strings
-        // (cf. llm_provider_kind_matches_ts_union).
         let all = [
             CostSource::Catalog,
             CostSource::Subscription,
@@ -472,7 +455,6 @@ mod tests {
             CostSource::Deferred,
             CostSource::Failed,
         ];
-        // Exhaustiveness gate: a new variant fails to compile until added above.
         for s in all {
             match s {
                 CostSource::Catalog
@@ -505,7 +487,6 @@ mod tests {
 
     #[test]
     fn cost_source_wire_format_is_snake_case() {
-        // The sidecar/statusline/front-end contract: snake_case strings.
         let cases = [
             (CostSource::Catalog, "\"catalog\""),
             (CostSource::Subscription, "\"subscription\""),
@@ -522,7 +503,6 @@ mod tests {
                 src,
                 "round-trip {wire}"
             );
-            // `Display` must equal the serde string sans the JSON quotes.
             assert_eq!(format!("\"{src}\""), wire);
         }
     }
@@ -546,7 +526,6 @@ mod tests {
 
     #[test]
     fn failed_request_is_not_billed_even_for_apikey() {
-        // status=failure short-circuits before the provider match → Failed, no cost.
         let mut r = record("anthropic_apikey", "claude-opus-4-8", 1_000_000, 0, 0, 0);
         r.status = "failure".to_string();
         let e = compute_cost_with(&r, &|_| None);
@@ -556,7 +535,6 @@ mod tests {
 
     #[test]
     fn failed_openrouter_is_failed_not_deferred() {
-        // A failed OpenRouter line must not become a retryable `deferred`.
         let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
         r.gen_id = Some("gen-abc".into());
         r.status = "failure".to_string();
@@ -577,10 +555,8 @@ mod tests {
         r.response_id = None;
         r.gen_id = Some("gen-xyz".into());
         assert_eq!(effective_response_id(&r).as_deref(), Some("gen-xyz"));
-        // response_id wins when both present.
         r.response_id = Some("msg_1".into());
         assert_eq!(effective_response_id(&r).as_deref(), Some("msg_1"));
-        // Neither present → None.
         r.response_id = None;
         r.gen_id = None;
         assert!(effective_response_id(&r).is_none());
@@ -588,7 +564,6 @@ mod tests {
 
     #[test]
     fn openrouter_no_message_id_keyed_by_gen_id() {
-        // A line with no response_id but a gen_id is priced and keyed by gen_id.
         let mut r = record("openrouter", "anthropic/claude-3.5-haiku", 100, 50, 0, 0);
         r.response_id = None;
         r.gen_id = Some("gen-xyz".into());
@@ -603,7 +578,6 @@ mod tests {
 
     #[test]
     fn one_m_suffix_without_pricing_1m_falls_back_to_base() {
-        // haiku has no pricing_1m; a [1m] pin must fall back to the base rate.
         let e = compute_cost_with(
             &record(
                 "anthropic_apikey",
@@ -615,7 +589,6 @@ mod tests {
             ),
             &|_| None,
         );
-        // haiku base input = 1.0/MTok → $1.00 for 1M input.
         assert!(
             (e.cost_usd.unwrap() - 1.0).abs() < 1e-9,
             "got {:?}",
@@ -672,7 +645,6 @@ mod tests {
     fn deferred_cost_is_repriced_on_later_pass() {
         let dir = tempfile::tempdir().unwrap();
         write_openrouter_line(dir.path(), "proj", "msg_or", "gen-xyz");
-        // First pass: /generation lags → deferred (retryable).
         enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         assert_eq!(
             read_cost_cache_in(dir.path(), "proj")
@@ -681,7 +653,6 @@ mod tests {
                 .cost_source,
             CostSource::Deferred
         );
-        // Second pass: /generation now succeeds → re-priced to actual.
         enrich_cost_with_in(dir.path(), "proj", &|_| Some(0.0042)).unwrap();
         let e = read_cost_cache_in(dir.path(), "proj")
             .get("msg_or")
@@ -693,8 +664,6 @@ mod tests {
 
     #[test]
     fn terminal_unknown_is_idempotent_no_unbounded_append() {
-        // openrouter line with NO gen_id → terminal `unknown`; repeated enrich
-        // must not append a duplicate (the regression this fix restores).
         let dir = tempfile::tempdir().unwrap();
         write_openrouter_line(dir.path(), "proj", "msg_or", "");
         for _ in 0..3 {
@@ -715,8 +684,6 @@ mod tests {
 
     #[test]
     fn still_deferred_does_not_grow_sidecar() {
-        // A line that stays deferred across passes (fetch keeps failing) must
-        // not append an identical line each time — bounded sidecar.
         let dir = tempfile::tempdir().unwrap();
         write_openrouter_line(dir.path(), "proj", "msg_or", "gen-xyz");
         for _ in 0..3 {
@@ -739,9 +706,7 @@ mod tests {
             "claude-opus-4-8",
         );
         enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        // A second pass with a fetcher must NOT add a duplicate for a terminal (catalog) id.
         enrich_cost_with_in(dir.path(), "proj", &|_| Some(99.0)).unwrap();
-        // Exactly one cache line for msg_1 still resolves to the catalog cost.
         let cache = read_cost_cache_in(dir.path(), "proj");
         assert_eq!(cache.get("msg_1").unwrap().cost_source, CostSource::Catalog);
     }
@@ -778,7 +743,6 @@ mod tests {
 
     #[test]
     fn cost_entry_new_accepts_valid_pairings() {
-        // Each source paired with its legal cost; the debug_assert must not fire.
         CostEntry::new("a".into(), Some(1.0), CostSource::Catalog);
         CostEntry::new("b".into(), Some(0.5), CostSource::Actual);
         CostEntry::new("c".into(), None, CostSource::Free);
@@ -802,8 +766,6 @@ mod tests {
 
     #[test]
     fn normalize_cost_clamps_unpriced_sources_to_none() {
-        // Release-path clamp: `new` runs this after the debug_assert, so a
-        // release build can never emit Free/0.0 (invariant 6).
         for src in [
             CostSource::Subscription,
             CostSource::Free,
@@ -824,15 +786,12 @@ mod tests {
             normalize_cost(Some(0.0042), CostSource::Actual),
             Some(0.0042)
         );
-        // A priced source with no cost stays None (fail-safe: never fabricate).
         assert_eq!(normalize_cost(None, CostSource::Catalog), None);
         assert_eq!(normalize_cost(None, CostSource::Actual), None);
     }
 
     #[test]
     fn pending_gen_ids_includes_gen_id_only_line() {
-        // Regression: a line with response_id=null but gen_id set is keyed by
-        // gen_id in the sidecar; it must still be returned for a /generation fetch.
         let dir = tempfile::tempdir().unwrap();
         let path = usage_file_in(dir.path(), "proj");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -858,10 +817,8 @@ mod tests {
     #[test]
     fn pending_gen_ids_skips_terminal_and_dedups() {
         let dir = tempfile::tempdir().unwrap();
-        // Two lines: one will resolve to terminal (actual), one stays deferred.
         write_openrouter_line(dir.path(), "proj", "msg_a", "gen-a");
         write_openrouter_line(dir.path(), "proj", "msg_b", "gen-b");
-        // Price gen-a terminally; leave gen-b deferred.
         enrich_cost_with_in(dir.path(), "proj", &|id| (id == "gen-a").then_some(0.01)).unwrap();
         let pending = pending_deferred_gen_ids(dir.path(), "proj");
         assert!(!pending.contains(&"gen-a".to_string()), "terminal skipped");
@@ -880,8 +837,6 @@ mod tests {
 
     #[test]
     fn cache_1m_variant_uses_1m_pricing() {
-        // The [1m] id must resolve to the catalog's pricing_1m — billed at the
-        // standard rate on Claude 4.6+ (sonnet-4-6 output 15.0/MTok), never None.
         let e = compute_cost_with(
             &record(
                 "anthropic_apikey",

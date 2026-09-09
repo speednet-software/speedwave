@@ -52,7 +52,6 @@ impl WorkerSpec for OauthSpec {
             .env("OAUTH_TOKENS_BASE", &self.tokens_base);
     }
     fn pre_spawn(&self, ctx: &SpawnContext) -> anyhow::Result<()> {
-        // Per-consumer bearer files mapped to service ids via .bearer-map.json (ADR-060).
         let bearer_map_path = ctx.state_dir.join(consts::OAUTH_BEARER_MAP_FILE);
         let mut bearer_map: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
@@ -90,7 +89,6 @@ impl OauthProcess {
         data_dir: &Path,
         consumers: &[&str],
     ) -> anyhow::Result<Self> {
-        // State dir must exist with 0o700 before the generic spawn writes into it.
         let state_dir = oauth_project_dir(data_dir, project);
         std::fs::create_dir_all(&state_dir)?;
         set_dir_owner_only(&state_dir)?;
@@ -236,7 +234,6 @@ mod tests {
 
     #[test]
     fn pre_spawn_writes_consistent_bearer_files_and_map() {
-        // After pre_spawn every bearer-<svc> file maps to its service via .bearer-map.json.
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -276,7 +273,6 @@ mod tests {
 
     #[test]
     fn pre_spawn_rejects_invalid_service_slug_without_writing_anything() {
-        // A malformed slug must bail before any bearer file lands on disk.
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = tmp.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -303,8 +299,6 @@ mod tests {
             err.to_string().contains("invalid service slug"),
             "error must call out the slug: {err}"
         );
-        // The first iteration wrote `bearer-sharepoint` before the invalid slug aborted.
-        // .bearer-map.json is written after the loop, so on bail it must not exist.
         assert!(
             !state_dir.join(consts::OAUTH_BEARER_MAP_FILE).exists(),
             ".bearer-map.json must not be written when pre_spawn bails"

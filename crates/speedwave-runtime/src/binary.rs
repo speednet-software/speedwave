@@ -38,13 +38,11 @@ pub fn resolve_binary(cmd: &str) -> String {
     if let Ok(resources_dir) = std::env::var(BUNDLE_RESOURCES_ENV) {
         let resources = PathBuf::from(&resources_dir);
 
-        // Try Lima bundle first (macOS)
         let lima_bundled = resources.join("lima").join("bin").join(cmd);
         if lima_bundled.exists() {
             return lima_bundled.to_string_lossy().to_string();
         }
 
-        // Try nerdctl-full bundle (reserved layout — see fn docstring)
         let nerdctl_bundled = resources
             .join(consts::NERDCTL_FULL_SUBDIR)
             .join("bin")
@@ -53,8 +51,6 @@ pub fn resolve_binary(cmd: &str) -> String {
             return nerdctl_bundled.to_string_lossy().to_string();
         }
 
-        // Try Node.js bundle (all platforms)
-        // Unix layout: nodejs/bin/<cmd>, Windows layout: nodejs/<cmd>.exe
         let nodejs_bundled = resources.join(consts::NODEJS_SUBDIR).join("bin").join(cmd);
         if nodejs_bundled.exists() {
             return nodejs_bundled.to_string_lossy().to_string();
@@ -69,7 +65,6 @@ pub fn resolve_binary(cmd: &str) -> String {
             }
         }
 
-        // Native CLI helpers live at the top of Resources/ per tauri.macos.conf.json.
         let top_level = resources.join(cmd);
         if top_level.exists() {
             return top_level.to_string_lossy().to_string();
@@ -106,7 +101,6 @@ pub fn command(cmd: &str) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    // For bundled (absolute) paths, prepend parent dir to PATH and set CNI_PATH.
     let resolved_path = std::path::Path::new(&resolved);
     if resolved_path.is_absolute() {
         if let Some(bin_dir) = resolved_path.parent() {
@@ -500,7 +494,6 @@ pub(crate) mod tests {
         env::remove_var(BUNDLE_RESOURCES_ENV);
     }
 
-    // Never-bundled OS commands are recognised case-insensitively (Windows-only).
     #[cfg(windows)]
     #[test]
     fn always_system_commands_recognised() {
@@ -508,7 +501,6 @@ pub(crate) mod tests {
         assert!(is_always_system_command("WSL.EXE"));
         assert!(is_always_system_command("powershell.exe"));
         assert!(is_always_system_command("cmd.exe"));
-        // Absolute path (reset_vm builds C:\Windows\System32\wsl.exe).
         assert!(is_always_system_command("C:\\Windows\\System32\\wsl.exe"));
         assert!(is_always_system_command("C:\\Windows\\System32\\WSL.EXE"));
         assert!(!is_always_system_command("limactl"));
@@ -517,7 +509,6 @@ pub(crate) mod tests {
         assert!(!is_always_system_command("C:\\bundle\\limactl.exe"));
     }
 
-    // Suppression must not change resolution — wsl.exe still resolves to the bare name.
     #[cfg(windows)]
     #[test]
     fn resolve_binary_wsl_still_returns_bare_name() {
@@ -530,7 +521,6 @@ pub(crate) mod tests {
 
     #[test]
     fn resolve_binary_top_level_native_cli_helper() {
-        // Native CLIs sit at the top of Resources/, not under lima/nerdctl-full/nodejs.
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
         let cli_path = tmp.path().join("audio-capture-cli");
@@ -566,7 +556,6 @@ pub(crate) mod tests {
     fn test_resolve_binary_nerdctl_fallback_to_path() {
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
-        // No nerdctl-full/bin/nerdctl exists
         env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
         assert_eq!(resolve_binary("nerdctl"), "nerdctl");
         env::remove_var(BUNDLE_RESOURCES_ENV);
@@ -576,7 +565,6 @@ pub(crate) mod tests {
     fn test_resolve_binary_lima_takes_priority_over_nerdctl() {
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Create same binary in both lima and nerdctl-full
         let lima_bin = tmp.path().join("lima").join("bin");
         std::fs::create_dir_all(&lima_bin).expect("mkdir");
         std::fs::write(lima_bin.join("nerdctl"), "lima-nerdctl").expect("write");
@@ -590,7 +578,6 @@ pub(crate) mod tests {
 
         env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
         let result = resolve_binary("nerdctl");
-        // Lima path should win (checked first)
         assert_eq!(
             result,
             lima_bin.join("nerdctl").to_string_lossy().to_string()
@@ -617,7 +604,6 @@ pub(crate) mod tests {
     fn test_resolve_binary_node_fallback_to_path() {
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir");
-        // No nodejs/bin/node exists
         env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
         assert_eq!(resolve_binary("node"), "node");
         env::remove_var(BUNDLE_RESOURCES_ENV);
@@ -625,7 +611,6 @@ pub(crate) mod tests {
 
     #[test]
     fn lima_home_returns_expected_path() {
-        // Structural invariant `<data_dir>/lima`, separator-agnostic (Path tail).
         let path = lima_home().expect("lima_home should resolve");
         assert!(
             path.ends_with(consts::LIMA_SUBDIR),
@@ -654,7 +639,6 @@ pub(crate) mod tests {
             .expect("LIMA_HOME env should be set for limactl");
 
         let value = lima_home_env.1.expect("LIMA_HOME should have a value");
-        // Structural invariant `<data_dir>/lima`, separator-agnostic (Path tail).
         let value_path = std::path::Path::new(value);
         assert!(
             value_path.ends_with(consts::LIMA_SUBDIR),
@@ -766,7 +750,6 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&bin_dir).expect("mkdir");
         std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
 
-        // Create the libexec/cni directory that nerdctl-full bundles include
         let cni_dir = tmp
             .path()
             .join(crate::consts::NERDCTL_FULL_SUBDIR)
@@ -804,7 +787,6 @@ pub(crate) mod tests {
             .join("bin");
         std::fs::create_dir_all(&bin_dir).expect("mkdir");
         std::fs::write(bin_dir.join("nerdctl"), "fake").expect("write");
-        // No libexec/cni directory
 
         env::set_var(BUNDLE_RESOURCES_ENV, tmp.path().to_string_lossy().as_ref());
         let cmd = command("nerdctl");
@@ -963,8 +945,6 @@ pub(crate) mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn run_wsl_bounded_errors_off_windows_instead_of_hanging() {
-        // wsl.exe does not exist off Windows — the helper must surface a spawn
-        // error, never panic or block.
         let err = super::run_wsl_bounded(
             &["--list", "--running", "--quiet"],
             None,
@@ -1052,8 +1032,6 @@ pub(crate) mod tests {
         );
     }
 
-    // Windows-only: exercises the real PowerShell path. cfg-gated because the
-    // System32 powershell.exe does not exist on Unix CI.
     #[test]
     #[cfg(windows)]
     fn powershell_command_raw_points_at_powershell_exe() {

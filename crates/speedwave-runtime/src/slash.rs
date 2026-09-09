@@ -93,8 +93,6 @@ impl ProjectHandle {
     }
 }
 
-// Public API
-
 /// Discovers slash commands for `project`'s active Claude session. Returns a
 /// cached result younger than [`CACHE_STALENESS`], else runs+caches discovery.
 pub fn discover_slash_commands(
@@ -152,8 +150,6 @@ fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
     log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
 }
 
-// Cache
-
 /// Cache entry tracks when the discovery was stored so we can expire it.
 #[derive(Clone)]
 struct CachedDiscovery {
@@ -197,8 +193,6 @@ fn cache_put(project_name: &str, discovery: SlashDiscovery) {
         Err(e) => log_cache_poisoned("cache_put", &e),
     }
 }
-
-// Discovery (running claude -p and parsing the init event)
 
 /// Raw payload extracted from the first `system/init` line emitted by
 /// `claude -p`.
@@ -312,7 +306,7 @@ fn run_discovery(
     while start.elapsed() < DISCOVERY_TIMEOUT {
         buf.clear();
         match reader.read_line(&mut buf) {
-            Ok(0) => break, // EOF — process exited without init
+            Ok(0) => break,
             Ok(_) => {
                 got_line = true;
                 if let Some(parsed) = parse_init_line(&buf) {
@@ -336,7 +330,6 @@ fn run_discovery(
         }
     }
 
-    // Always kill the child; ignore kill errors (may already have exited).
     let _ = child.kill();
     let _ = child.wait();
 
@@ -353,8 +346,6 @@ fn run_discovery(
         }
     }
 }
-
-// Enrichment and filtering
 
 /// Frontmatter fields we care about. All fields are optional so missing or
 /// malformed frontmatter degrades gracefully.
@@ -386,12 +377,10 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
             &raw.plugins,
         );
 
-        // Promote Command -> Skill when the file lived under skills/.
         if matches!(origin, Some(FrontmatterOrigin::Skill)) && kind == SlashKind::Command {
             kind = SlashKind::Skill;
         }
 
-        // Hide on `user-invocable: false` only, never `disable-model-invocation`.
         if matches!(frontmatter.user_invocable, Some(false)) {
             continue;
         }
@@ -406,7 +395,6 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path) -> SlashDiscovery {
     }
 
     for agent in raw.agents {
-        // Skip agents already present as slash_commands.
         if commands.iter().any(|c| c.name == agent) {
             continue;
         }
@@ -450,7 +438,6 @@ fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKi
     if is_builtin_name(name) {
         return SlashKind::Builtin;
     }
-    // Default; refined to Skill by enrich_and_filter when the file is under skills/.
     SlashKind::Command
 }
 
@@ -500,7 +487,6 @@ fn lookup_frontmatter(
             }
         }
     }
-    // Scan remaining plugin paths for unprefixed skills/commands.
     let already_scanned: Option<&str> = plugin;
     for plugin_entry in plugins {
         if Some(plugin_entry.name.as_str()) == already_scanned {
@@ -517,7 +503,6 @@ fn lookup_frontmatter(
                 if let Some(fm) = parse_frontmatter(&contents) {
                     return (fm, Some(origin));
                 }
-                // File exists without parseable frontmatter — still a kind hit.
                 return (SlashFrontmatter::default(), Some(origin));
             }
             Err(err) => {
@@ -578,8 +563,6 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     None
 }
 
-// Fallback
-
 fn fallback_discovery() -> SlashDiscovery {
     let names = [
         "help", "clear", "compact", "resume", "cost", "context", "memory",
@@ -614,13 +597,9 @@ fn fallback_description(name: &str) -> &'static str {
     }
 }
 
-// Helpers
-
 fn claude_container_name(project: &str) -> String {
     format!("{}_{}_claude", consts::compose_prefix(), project)
 }
-
-// Tests
 
 #[cfg(test)]
 #[expect(
@@ -641,7 +620,6 @@ mod tests {
 
     #[test]
     fn is_bare_slash_rejects_real_commands_and_text() {
-        // A real slash command and ordinary text are messages, not the trigger.
         assert!(!is_bare_slash("/code-review"));
         assert!(!is_bare_slash("/clear"));
         assert!(!is_bare_slash("what is 2/3?"));
@@ -650,7 +628,6 @@ mod tests {
 
     #[test]
     fn is_bare_slash_rejects_empty() {
-        // Empty is blank, not the slash trigger — callers handle blank separately.
         assert!(!is_bare_slash(""));
         assert!(!is_bare_slash("   "));
     }
@@ -836,7 +813,6 @@ mod tests {
 
     #[test]
     fn enrich_keeps_disable_model_invocation_true() {
-        // vibe-kanban filters these out — we must NOT.
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join(".claude/skills/user-only");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -858,7 +834,6 @@ mod tests {
 
     #[test]
     fn enrich_prefers_project_skill_over_personal() {
-        // Verify priority via a project skill's description (no HOME redirect).
         let tmp = tempfile::tempdir().unwrap();
         let project_skill = tmp.path().join(".claude/skills/myskill");
         std::fs::create_dir_all(&project_skill).unwrap();
@@ -966,7 +941,6 @@ mod tests {
         assert_eq!(first.source, DiscoverySource::Init);
         assert!(first.commands.iter().any(|c| c.name == "my-skill"));
 
-        // A failing runtime must still return the cached Init result.
         let (failing, _) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
             .build();
@@ -975,7 +949,6 @@ mod tests {
         assert_eq!(first, second);
 
         invalidate_cache(&project.name);
-        // After invalidation, the failing runtime must produce Fallback.
         let third = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(third.source, DiscoverySource::Fallback);
     }
@@ -988,7 +961,6 @@ mod tests {
 
     #[test]
     fn personal_claude_dir_resolves_to_home() {
-        // Result is `HOME/.claude` whenever HOME resolves.
         let home = dirs::home_dir();
         let personal = personal_claude_dir();
         assert_eq!(home.map(|h| h.join(".claude")), personal);
@@ -1033,7 +1005,6 @@ mod tests {
 
     #[test]
     fn skills_origin_promotes_command_to_skill_kind() {
-        // A bare name under .claude/skills/ must surface as kind=Skill.
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let skill_dir = project.join(".claude/skills/tool");

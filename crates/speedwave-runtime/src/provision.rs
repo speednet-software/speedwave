@@ -5,8 +5,6 @@ use crate::consts;
 #[cfg(any(target_os = "windows", test))]
 use std::path::PathBuf;
 
-// ── Lima VM config (macOS) ─────────────────────────────────────────────────
-
 /// Desired Lima VM memory as a Lima-compatible string (e.g. `"16GiB"`).
 /// Adaptive from [`crate::resources`]: host_ram / 2, clamped 4–32 GiB.
 #[cfg(any(target_os = "macos", test))]
@@ -122,16 +120,12 @@ pub fn lima_vm_config_needs_update_with(
     desired_gib: u32,
     desired_cpus: u32,
 ) -> bool {
-    // Trigger migration when either managed provision drop-in is absent — pre-update installs
-    // need the netplan (lima-vm/lima#2984) and clock-step fixes injected on next boot.
     if !config_content.contains(LIMA_VPN_PROVISION_SENTINEL)
         || !config_content.contains(LIMA_TIMESYNC_PROVISION_SENTINEL)
     {
         return true;
     }
-    // Whether a `prefix` line exists at all (regardless of parseability).
     let line_present = |prefix: &str| config_content.lines().any(|l| l.trim().starts_with(prefix));
-    // Parse a `memory: "8GiB"` or `cpus: 4` value to u32; unparseable → None.
     let line_val = |prefix: &str| -> Option<u32> {
         config_content.lines().find_map(|line| {
             line.trim().strip_prefix(prefix).and_then(|rest| {
@@ -140,10 +134,9 @@ pub fn lima_vm_config_needs_update_with(
             })
         })
     };
-    // Regenerate if memory or cpus is absent or drifted; unparseable → no drift.
     let needs_update = |prefix: &str, desired: u32| -> bool {
         if !line_present(prefix) {
-            return true; // line absent — regenerate to write the SSOT value
+            return true;
         }
         line_val(prefix).is_some_and(|current| current != desired)
     };
@@ -198,7 +191,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     let data_dir = consts::data_dir();
     let source_template = data_dir.join("lima.yaml");
 
-    // Fresh install — init_vm_macos will create it with correct config
     if !source_template.exists() {
         return Ok(());
     }
@@ -214,7 +206,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         desired_lima_vm_cpus()
     );
 
-    // Check if VM exists
     let list_output = limactl_command()
         .args(["list", "--format", "{{.Name}}"])
         .output()?;
@@ -223,7 +214,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         .lines()
         .any(|line| line.trim() == consts::lima_vm_name());
 
-    // Stop VM if running
     if vm_exists {
         let status_output = limactl_command()
             .args(["list", "--format", "{{.Status}}", consts::lima_vm_name()])
@@ -247,8 +237,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         }
     }
 
-    // Surgical rewrite of the managed fields; full template regeneration only
-    // when the VPN provision block or a managed line is missing.
     let desired_gib =
         crate::resources::desired_vm_memory_gib(crate::resources::host_total_memory_gib());
     let desired_cpus = desired_lima_vm_cpus();
@@ -276,7 +264,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
     };
     std::fs::write(&source_template, &updated)?;
 
-    // Update instance config too (may not exist if VM was never created).
     let instance_config = data_dir
         .join(consts::LIMA_SUBDIR)
         .join(consts::lima_vm_name())
@@ -300,7 +287,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
         std::fs::write(&instance_config, instance_updated)?;
     }
 
-    // Restart VM if it existed
     if vm_exists {
         log::info!("Starting VM after memory migration");
         init_vm_macos()?;
@@ -314,7 +300,6 @@ pub fn ensure_lima_vm_config() -> anyhow::Result<()> {
 /// ready inside it. Writes the SSOT `lima.yaml` on first run.
 #[cfg(target_os = "macos")]
 pub fn init_vm_macos() -> anyhow::Result<()> {
-    // Ensure lima.yaml exists
     let data_dir = consts::data_dir();
     std::fs::create_dir_all(data_dir)?;
     let lima_config_path = data_dir.join("lima.yaml");
@@ -322,7 +307,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
         std::fs::write(&lima_config_path, lima_config())?;
     }
 
-    // Check if Lima VM exists
     let list_output = limactl_command()
         .args(["list", "--format", "{{.Name}}"])
         .output()?;
@@ -332,7 +316,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
         .lines()
         .any(|line| line.trim() == consts::lima_vm_name())
     {
-        // VM does not exist — create it
         let output = limactl_command()
             .args([
                 "create",
@@ -347,15 +330,12 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
         }
     }
 
-    // Start VM if not running
     let info_output = limactl_command()
         .args(["list", "--format", "{{.Status}}", consts::lima_vm_name()])
         .output()?;
     let status_str = String::from_utf8_lossy(&info_output.stdout);
 
     if !status_str.trim().eq_ignore_ascii_case("running") {
-        // Provisioning-grade timeout: this start may first download the guest
-        // nerdctl-full archive (first start under a newly bundled Lima).
         use crate::runtime::CommandRunner as _;
         let timeout = std::time::Duration::from_secs(consts::LIMA_VM_PROVISION_START_TIMEOUT_SECS);
         log::info!(
@@ -374,7 +354,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
             })?;
     }
 
-    // Wait for containerd to be ready inside VM (up to 30s)
     let mut ready = false;
     for _ in 0..15 {
         let verify = limactl_command()
@@ -403,8 +382,6 @@ pub fn init_vm_macos() -> anyhow::Result<()> {
 
     Ok(())
 }
-
-// ── Windows / WSL2 provisioning ────────────────────────────────────────────
 
 /// Escapes a path for safe interpolation inside PowerShell single-quoted strings.
 /// PowerShell single-quoted strings only require doubling of single quotes.
@@ -465,14 +442,11 @@ fn verify_sha256_ps(file_path: &std::path::Path, expected_sha256: &str) -> anyho
 pub fn init_vm_windows() -> anyhow::Result<()> {
     use crate::runtime::decode_wsl_output;
 
-    // OS prerequisite check (SSOT: os_prereqs module)
     let violations = crate::os_prereqs::check_os_prereqs();
     if !violations.is_empty() {
-        // WSL not available — attempt auto-install (always bails: restart or failure)
         attempt_wsl_install()?;
     }
 
-    // Enable WSL2 mirrored networking before any distro starts; non-fatal.
     if let Err(e) = ensure_wslconfig_vpn_compat() {
         log::warn!("failed to ensure .wslconfig VPN compatibility (non-fatal): {e}");
     }
@@ -480,7 +454,6 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
     let list = crate::binary::system_command("wsl.exe")
         .args(["--list", "--quiet"])
         .output()?;
-    // Decode WSL output — wsl.exe often outputs UTF-16LE on Windows
     let list_str = decode_wsl_output(&list.stdout);
     let distro_exists = list_str
         .lines()
@@ -494,8 +467,6 @@ pub fn init_vm_windows() -> anyhow::Result<()> {
 
     install_nerdctl_full()?;
 
-    // Ungated by the nerdctl pin (install_nerdctl_full early-returns when aligned);
-    // iptables is CNI-critical — without it every compose up fails opaquely, so fatal.
     ensure_relay_packages()?;
 
     Ok(())
@@ -634,8 +605,6 @@ pub fn merge_wslconfig_vpn_keys(input: &str) -> String {
         ("autoProxy", "true"),
     ];
 
-    // Match the dominant line ending of the input — `.wslconfig` from Notepad is CRLF; bare LF
-    // for new keys yields a mixed-ending file (tolerated by WSL but cosmetically ugly).
     let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
 
     let mut out = String::with_capacity(input.len() + 128);
@@ -797,13 +766,11 @@ fn import_wsl_distro() -> anyhow::Result<()> {
 
     let (rootfs_url, expected_sha256) = wsl_rootfs_for_arch()?;
 
-    // Try bundled rootfs first (offline install from NSIS bundle)
     let mut have_valid_rootfs = false;
 
     if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::UBUNTU_ROOTFS_ASSET) {
         match verify_sha256_ps(&bundled, expected_sha256) {
             Ok(true) => {
-                // Copy bundled rootfs to the cache location for wsl --import
                 std::fs::copy(&bundled, &rootfs_path)?;
                 have_valid_rootfs = true;
             }
@@ -821,7 +788,6 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    // Check cached download
     if !have_valid_rootfs && rootfs_path.exists() {
         match verify_sha256_ps(&rootfs_path, expected_sha256) {
             Ok(true) => have_valid_rootfs = true,
@@ -834,8 +800,6 @@ fn import_wsl_distro() -> anyhow::Result<()> {
                 let _ = std::fs::remove_file(&rootfs_path);
             }
             Err(e) => {
-                // Verification didn't complete (e.g. AV-scan slowdown on a large file);
-                // keep the cached file on disk and fall through to a fresh download.
                 log::warn!(
                     "could not verify cached Ubuntu rootfs at {} ({e}); re-downloading",
                     rootfs_path.display()
@@ -844,7 +808,6 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    // Fall back to download
     if !have_valid_rootfs {
         let escaped_rootfs = ps_escape(&rootfs_path);
         let download_and_verify = format!(
@@ -887,7 +850,6 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         ])
         .status()?;
     if !status.success() {
-        // Check if the distro was already registered (import failed because it exists)
         let recheck = crate::binary::system_command("wsl.exe")
             .args(["--list", "--quiet"])
             .output()?;
@@ -896,7 +858,6 @@ fn import_wsl_distro() -> anyhow::Result<()> {
             .lines()
             .any(|l| l.trim().trim_matches('\0') == consts::wsl_distro_name())
         {
-            // Distro exists but we didn't create it — verify it's ours.
             verify_wsl_distro_origin()?;
             log::warn!(
                 "WSL2 import failed but distro '{}' already exists and is verified — continuing",
@@ -907,7 +868,6 @@ fn import_wsl_distro() -> anyhow::Result<()> {
         }
     }
 
-    // Import path: safe to terminate (no containers yet); Err retried by IfIdle on next launch (ADR-052).
     use anyhow::Context as _;
     ensure_wsl_distro_metadata(TerminateOnChange::Yes)
         .context("configuring the imported WSL distro's automount failed")?;
@@ -964,7 +924,6 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
 
     write_wsl_conf(distro, &updated)?;
 
-    // Verify the change landed; a read-only wsl.conf silently fails otherwise.
     let verify = wsl_conf_or_warn(read_wsl_conf(distro), distro, "post-write verify");
     if !wsl_conf_automount_has_uid(&verify, uid) {
         anyhow::bail!(
@@ -974,7 +933,6 @@ pub fn ensure_wsl_distro_metadata(terminate: TerminateOnChange) -> anyhow::Resul
         );
     }
 
-    // Probe lazily (only IfIdle, only now that a real change exists) then decide.
     let has_running =
         matches!(terminate, TerminateOnChange::IfIdle) && wsl_distro_has_running_containers(distro);
     if terminate_decision(terminate, has_running) {
@@ -1006,7 +964,6 @@ fn read_wsl_conf(distro: &str) -> anyhow::Result<String> {
     let out = crate::binary::system_command("wsl.exe")
         .args(["-d", distro, "-u", "root", "--", "cat", "/etc/wsl.conf"])
         .output()?;
-    // `cat` on a missing file exits non-zero — treat that as empty, not an error.
     Ok(if out.status.success() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     } else {
@@ -1039,7 +996,6 @@ fn write_wsl_conf(distro: &str, content: &str) -> anyhow::Result<()> {
 /// `true` if any container runs in the distro (containerd-down ⇒ idle; spawn failure ⇒ fail-safe busy).
 #[cfg(target_os = "windows")]
 fn wsl_distro_has_running_containers(distro: &str) -> bool {
-    // Session is already `-u root`, so no `sudo` (not always in root's PATH).
     let out = crate::binary::system_command("wsl.exe")
         .args(["-d", distro, "-u", "root", "--", "nerdctl", "ps", "-q"])
         .output();
@@ -1066,10 +1022,10 @@ pub fn running_containers_from_probe(success: bool, stdout: &str, stderr: &str) 
     let daemon_down = lower.contains("connection refused")
         || lower.contains("cannot connect")
         || lower.contains("failed to connect")
-        || lower.contains("no such file or directory") // containerd.sock absent
+        || lower.contains("no such file or directory")
         || lower.contains("is the containerd daemon running");
     if daemon_down {
-        false // daemon not up ⇒ nothing running ⇒ idle
+        false
     } else {
         log::warn!("nerdctl ps failed (assuming busy): {stderr}");
         true
@@ -1118,8 +1074,13 @@ pub fn options_has_uid(options: &str, uid: u32) -> bool {
 pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
     let nl = if input.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = String::with_capacity(input.len() + 64);
-    // `Some(true)` = first [automount]; `Some(false)` = duplicate (dropped); `None` = other.
-    let mut in_automount: Option<bool> = None;
+    #[derive(Clone, Copy)]
+    enum Section {
+        FirstAutomount,
+        DuplicateAutomount,
+        Other,
+    }
+    let mut section = Section::Other;
     let mut automount_seen = false;
     let mut options_written = false;
 
@@ -1132,25 +1093,23 @@ pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
         {
             if sec == "automount" {
                 if automount_seen {
-                    in_automount = Some(false); // duplicate — drop header + body
+                    section = Section::DuplicateAutomount;
                     continue;
                 }
                 automount_seen = true;
-                in_automount = Some(true);
+                section = Section::FirstAutomount;
                 out.push_str(line);
-                // Emit our options line right after the first header.
                 let line_nl = if line.ends_with('\n') { nl } else { "" };
                 out.push_str(&format!("options = \"{opts}\"{line_nl}"));
                 options_written = true;
                 continue;
             }
-            in_automount = None;
+            section = Section::Other;
             out.push_str(line);
             continue;
         }
-        match in_automount {
-            // First [automount] body: drop only the old options line, keep the rest.
-            Some(true) => {
+        match section {
+            Section::FirstAutomount => {
                 let is_options = trimmed
                     .split_once('=')
                     .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("options"));
@@ -1158,14 +1117,12 @@ pub fn merge_wsl_conf_automount(input: &str, opts: &str) -> String {
                     out.push_str(line);
                 }
             }
-            // Duplicate [automount] body — drop entirely.
-            Some(false) => {}
-            None => out.push_str(line),
+            Section::DuplicateAutomount => {}
+            Section::Other => out.push_str(line),
         }
     }
 
     if !options_written {
-        // No [automount] section existed — append a fresh one.
         if !out.is_empty() && !out.ends_with('\n') {
             out.push_str(nl);
         }
@@ -1294,7 +1251,6 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
     let drift = if nerdctl_check.status.success() {
         let version_line = String::from_utf8_lossy(&nerdctl_check.stdout);
         if nerdctl_version_matches_pin(&version_line) {
-            // Already aligned (possibly by the other lock holder) — drop any stale backoff.
             clear_download_backoff(&backoff_path);
             return Ok(());
         }
@@ -1304,7 +1260,6 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
             version_line.trim()
         )
     } else {
-        // Probe failed: distinguish genuinely-absent from a transient transport error.
         let stderr = String::from_utf8_lossy(&nerdctl_check.stderr);
         let absent = probe_indicates_absent(nerdctl_check.status.code(), &stderr);
         if !absent {
@@ -1320,22 +1275,18 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         )
     };
 
-    // Try bundled nerdctl-full tarball first (offline install from the bundle).
     let expected_sha256 = nerdctl_sha256_for_arch()?;
     let mut bundled_wsl_path: Option<String> = None;
     let mut bundled_rejected: Option<(PathBuf, String)> = None;
 
     if let Some(bundled) = crate::bundle::find_bundled_asset(crate::bundle::NERDCTL_TARBALL_ASSET) {
         match verify_sha256_ps(&bundled, expected_sha256) {
-            Ok(true) => {
-                // Translate the bundled tarball's host path to WSL via the SSOT.
-                match crate::engine_path::to_engine_path(&bundled) {
-                    Ok(wsl) => bundled_wsl_path = Some(wsl),
-                    Err(e) => log::warn!(
-                        "could not translate bundled nerdctl path to WSL ({e}); will download instead"
-                    ),
-                }
-            }
+            Ok(true) => match crate::engine_path::to_engine_path(&bundled) {
+                Ok(wsl) => bundled_wsl_path = Some(wsl),
+                Err(e) => log::warn!(
+                    "could not translate bundled nerdctl path to WSL ({e}); will download instead"
+                ),
+            },
             Ok(false) => {
                 bundled_rejected = Some((bundled, "does not match the pinned SHA256".to_string()))
             }
@@ -1343,8 +1294,6 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         }
     }
 
-    // Download path only: back off after a recent failure instead of re-pulling
-    // the full archive on every CLI invocation (state-change logging only).
     let downloading = bundled_wsl_path.is_none();
     if downloading
         && download_backoff_active(
@@ -1379,7 +1328,6 @@ fn install_nerdctl_full() -> anyhow::Result<()> {
         );
     }
 
-    // Build install script: use bundled file if available, otherwise download
     let source_commands = if let Some(ref wsl_path) = bundled_wsl_path {
         let escaped = wsl_path.replace('\'', "'\\''");
         format!(
@@ -1477,8 +1425,6 @@ install_service buildkit "/usr/local/bin/buildkitd --oci-worker=false --containe
         sha256_arm64 = consts::NERDCTL_FULL_SHA256_ARM64,
         source_commands = source_commands
     );
-    // Write the install script via stdin to avoid wsl.exe arg length/escaping.
-    // Bounded host-side wait — a stalled in-distro download must not hang startup.
     let output = match crate::binary::run_wsl_bounded(
         &["-d", consts::wsl_distro_name(), "--", "bash", "-s"],
         Some(&install_script),
@@ -1547,8 +1493,6 @@ pub fn ensure_windows_invariants() {
         if let Err(e) = ensure_wslconfig_vpn_compat() {
             log::warn!("could not verify .wslconfig VPN compat: {e}");
         }
-        // Upgrades skip the wizard (init_vm_windows never runs) — this per-start path is their
-        // only iptables/socat installer. Warn-only: a failed compose up surfaces iptables itself.
         if let Err(e) = ensure_relay_packages() {
             log::warn!("could not ensure relay packages (iptables/socat): {e}");
         }
@@ -1568,8 +1512,6 @@ pub fn ensure_windows_invariants() {}
 mod tests {
     use super::*;
 
-    // ── nerdctl version-pin matching ────────────────────────────────────────
-
     #[test]
     fn nerdctl_version_matches_exact_pin() {
         let line = format!("nerdctl version {}", consts::NERDCTL_FULL_VERSION);
@@ -1579,7 +1521,6 @@ mod tests {
 
     #[test]
     fn nerdctl_version_rejects_other_version() {
-        // A non-exact version (older, or longer like 2.2.20) must NOT match.
         assert!(!nerdctl_version_matches_pin("nerdctl version 2.1.2"));
         assert!(!nerdctl_version_matches_pin("nerdctl version 2.2.20"));
         assert!(!nerdctl_version_matches_pin(""));
@@ -1611,7 +1552,6 @@ mod tests {
             stop_pos < tar_pos && pkill_pos < tar_pos,
             "daemon stop+pkill (at {stop_pos}/{pkill_pos}) must precede tar (at {tar_pos})"
         );
-        // The stop must not be gated by is-system-running (skips on `degraded`).
         let stop_line_end = src[stop_pos..]
             .find('\n')
             .map(|i| stop_pos + i)
@@ -1633,7 +1573,6 @@ mod tests {
 
     #[test]
     fn probe_transient_errors_do_not_mean_absent() {
-        // wsl.exe transport failures: no daemon-stopping reinstall.
         assert!(!probe_indicates_absent(
             Some(1),
             "The system cannot find the distro"
@@ -1667,7 +1606,6 @@ mod tests {
             src[fallback..fi].contains("2>&1 &"),
             "fallback must redirect stderr and background the daemon"
         );
-        // A bare `$exec &` (no redirection) must not exist anywhere.
         assert!(
             !src.contains("\n    $exec &\n"),
             "bare $exec & inherits the Rust pipes and deadlocks wait_with_output"
@@ -1698,8 +1636,6 @@ mod tests {
         );
     }
 
-    // ── Lima VM config migration tests ──────────────────────────────────────
-
     #[test]
     fn lima_vm_config_detects_old_8gib() {
         let config = "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n";
@@ -1723,7 +1659,6 @@ mod tests {
 
     #[test]
     fn lima_vm_config_higher_memory_triggers_downgrade() {
-        // VMs with more RAM than desired must migrate down to reclaim host memory.
         let config = "vmType: vz\ncpus: 4\nmemory: \"16GiB\"\ndisk: \"30GiB\"\n";
         assert!(lima_vm_config_needs_update_with(config, 12, 4));
     }
@@ -1743,12 +1678,10 @@ mod tests {
             yaml.contains("provision:"),
             "lima.yaml must declare a provision section"
         );
-        // `mode: boot` (cloud-init bootcmd) re-runs on every VM start.
         assert!(
             yaml.contains("mode: boot"),
             "provision must use `mode: boot` so the fix re-applies on every VM restart"
         );
-        // Drop-in netplan: eth0 metric 100 (preferred), lima0 metric 300.
         assert!(
             yaml.contains("99-speedwave-prefer-vznat.yaml"),
             "provision must drop in a netplan file that demotes lima0 and promotes eth0 (vzNAT)"
@@ -1761,7 +1694,6 @@ mod tests {
             yaml.contains("route-metric: 100"),
             "eth0 must be promoted to route-metric 100 (preferred)"
         );
-        // Provision must `netplan apply` so changes take effect without reboot.
         assert!(
             yaml.contains("netplan apply"),
             "provision must apply the new netplan config immediately"
@@ -1773,7 +1705,6 @@ mod tests {
     #[test]
     fn lima_config_does_not_silently_drop_provision_section() {
         let yaml = lima_config();
-        // Both vzNAT and the provision script are load-bearing.
         assert!(yaml.contains("vzNAT: true"));
         assert!(yaml.contains("provision:"));
     }
@@ -1787,7 +1718,6 @@ mod tests {
 
     #[test]
     fn lima_vm_config_unparseable_cpus_no_update() {
-        // Present-but-garbage `cpus:` value is hand-mangled; don't clobber it.
         let config =
             with_provision_sentinel("vmType: vz\ncpus: lots\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n");
         assert!(!lima_vm_config_needs_update_with(&config, 12, 4));
@@ -1795,21 +1725,18 @@ mod tests {
 
     #[test]
     fn lima_vm_config_adaptive_upgrade_needed() {
-        // 32 GiB host → desired 16 GiB → old 12 GiB config needs upgrade
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
         assert!(lima_vm_config_needs_update_with(config, 16, 4));
     }
 
     #[test]
     fn lima_vm_config_downgrade_from_12_to_8() {
-        // 16 GiB host: old formula 12 GiB VM, new formula 8 GiB → migrate down.
         let config = "vmType: vz\ncpus: 4\nmemory: \"12GiB\"\ndisk: \"30GiB\"\n";
         assert!(lima_vm_config_needs_update_with(config, 8, 4));
     }
 
     #[test]
     fn lima_vm_config_no_op_when_current_equals_desired() {
-        // Already at the desired value (mem AND cpus) — must not trigger (idempotent).
         let config =
             with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
         assert!(!lima_vm_config_needs_update_with(&config, 8, 4));
@@ -1817,7 +1744,6 @@ mod tests {
 
     #[test]
     fn lima_vm_config_cpus_drift_triggers_update() {
-        // Memory matches but cpus drifted (desired 8) → migrate.
         let config =
             with_provision_sentinel("vmType: vz\ncpus: 4\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
         assert!(lima_vm_config_needs_update_with(&config, 8, 8));
@@ -1825,14 +1751,12 @@ mod tests {
 
     #[test]
     fn lima_vm_config_missing_cpus_triggers_update() {
-        // No `cpus:` line at all: absent ≠ no-drift → regenerate.
         let config = with_provision_sentinel("vmType: vz\nmemory: \"8GiB\"\ndisk: \"30GiB\"\n");
         assert!(lima_vm_config_needs_update_with(&config, 8, 4));
     }
 
     #[test]
     fn lima_vm_config_missing_memory_triggers_update() {
-        // No `memory:` line: absent ≠ no-drift → regenerate.
         let config = with_provision_sentinel("vmType: vz\ncpus: 4\ndisk: \"30GiB\"\n");
         assert!(lima_vm_config_needs_update_with(&config, 8, 4));
     }
@@ -1863,7 +1787,6 @@ mod tests {
 
     #[test]
     fn lima_vm_config_missing_timesync_sentinel_triggers_update() {
-        // A pre-clock-fix config carries only the netplan provision — must regenerate.
         let config = format!(
             "vmType: vz\ncpus: 4\nmemory: \"8GiB\"\nprovision:\n  - mode: boot\n    script: |\n      cat > /etc/netplan/{LIMA_VPN_PROVISION_SENTINEL} <<'YAML'\n"
         );
@@ -1891,8 +1814,6 @@ mod tests {
         );
     }
 
-    // ── update_lima_managed_fields (surgical migration, no user-edit clobber) ─
-
     #[test]
     fn managed_fields_update_rewrites_only_memory_and_cpus() {
         let config = with_provision_sentinel(
@@ -1903,7 +1824,6 @@ mod tests {
         assert!(updated.contains("memory: \"8GiB\""), "memory updated");
         assert!(!updated.contains("cpus: 4"));
         assert!(!updated.contains("\"4GiB\""));
-        // User edits preserved (no template clobber).
         assert!(updated.contains("disk: \"100GiB\""), "user disk size kept");
         assert!(updated.contains("~/extra"), "user mount kept");
         assert!(updated.contains(LIMA_VPN_PROVISION_SENTINEL));
@@ -1938,7 +1858,6 @@ mod tests {
 
     #[test]
     fn managed_fields_update_missing_lines_return_none() {
-        // Absent managed lines must fall back to full regeneration.
         assert!(update_lima_managed_fields("vmType: vz\n", 8, 4).is_none());
         assert!(update_lima_managed_fields("cpus: 4\n", 8, 4).is_none());
         assert!(update_lima_managed_fields("memory: \"4GiB\"\n", 8, 4).is_none());
@@ -1956,7 +1875,6 @@ mod tests {
 
     #[test]
     fn managed_fields_update_full_template_round_trip() {
-        // The real template must be updatable in place and converge.
         let template = lima_config();
         let updated = update_lima_managed_fields(&template, 32, 8).unwrap();
         assert!(updated.contains("memory: \"32GiB\""));
@@ -2024,8 +1942,6 @@ mod tests {
         );
     }
 
-    // ── nerdctl download backoff + install lock ──
-
     #[test]
     fn download_backoff_active_only_within_retry_delay() {
         assert!(!download_backoff_active(None, 1_000), "no marker = fresh");
@@ -2041,7 +1957,6 @@ mod tests {
             Some(&s),
             1_000 + consts::NERDCTL_DOWNLOAD_RETRY_DELAY_SECS
         ));
-        // A clock jump backwards must not underflow (stays backed off).
         assert!(download_backoff_active(Some(&s), 0));
     }
 
@@ -2062,7 +1977,7 @@ mod tests {
         );
         clear_download_backoff(&path);
         assert_eq!(load_download_backoff(&path), None);
-        clear_download_backoff(&path); // absent → silent no-op
+        clear_download_backoff(&path);
     }
 
     #[test]
@@ -2095,8 +2010,6 @@ mod tests {
 
     #[test]
     fn relay_packages_script_is_fatal_on_iptables_soft_on_socat() {
-        // Contract: a failed iptables install must FAIL provisioning (CNI-critical);
-        // a missing socat only degrades the ADR-080 relay via the marker.
         let script = relay_packages_script();
         assert!(script.contains("apt-get install -y -qq iptables socat"));
         assert!(
@@ -2107,12 +2020,10 @@ mod tests {
             script.contains("exit 1"),
             "iptables absence must exit non-zero (fatal)"
         );
-        // Marker is single-sourced: the emitter and the `ensure` matcher share the const.
         assert!(
             script.contains(&format!("|| echo {SPW_SOCAT_MISSING_MARKER}")),
             "socat absence must only emit the degradation marker"
         );
-        // Short-circuit: both present → exit 0 before touching apt.
         assert!(script.starts_with(
             "command -v iptables >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && exit 0"
         ));
@@ -2120,8 +2031,6 @@ mod tests {
 
     #[test]
     fn ensure_windows_invariants_installs_relay_packages_for_upgrades() {
-        // Wiring guard: upgrades never run init_vm_windows, so this per-start path is their
-        // only iptables/socat installer — dropping the call strands the relay (ADR-080).
         let src = include_str!("provision.rs");
         let start = src
             .find("pub fn ensure_windows_invariants() {\n")
@@ -2158,11 +2067,8 @@ mod tests {
             "lima_config() must use desired_lima_vm_cpus() ({desired}), \
              but the cpus line doesn't match. Config:\n{config}"
         );
-        // Adaptive floor: never below the historical 4-vCPU baseline.
         assert!(desired >= 4, "vCPU floor regressed below 4");
     }
-
-    // ── Windows .wslconfig VPN-compat merger tests ──────────────────────────
 
     /// Empty/missing .wslconfig → produces a fresh `[wsl2]` section with all
     /// three VPN-compat keys.
@@ -2243,7 +2149,6 @@ mod tests {
         assert!(!out.contains("networkingMode=NAT"));
         assert!(out.contains("memory=8GB"));
         assert_eq!(out.matches("[wsl2]").count(), 1, "no duplicate sections");
-        // Every newline in the output must be preceded by CR (no bare LF mixed in).
         let lone_lf = out
             .as_bytes()
             .windows(2)
@@ -2262,7 +2167,6 @@ mod tests {
     fn merge_wslconfig_preserves_lf_input_as_lf() {
         let out = merge_wslconfig_vpn_keys("[wsl2]\nmemory=8GB\nnetworkingMode=NAT\n");
         assert!(out.contains("networkingMode=mirrored"));
-        // No CR characters anywhere.
         assert!(!out.contains('\r'), "LF input must stay LF: {out:?}");
     }
 
@@ -2274,11 +2178,8 @@ mod tests {
         let out = merge_wslconfig_vpn_keys(input);
         assert!(out.contains("foo=bar"));
         assert!(out.contains("[wsl2]"));
-        // The boundary between `foo=bar` and `[wsl2]` must be a newline.
         assert!(!out.contains("foo=bar[wsl2]"));
     }
-
-    // ── read_existing_wslconfig: never treat a non-NotFound read error as empty ─
 
     /// Happy path: an existing readable file is returned verbatim.
     #[test]
@@ -2342,8 +2243,6 @@ mod tests {
         );
     }
 
-    // ── wsl_conf_or_warn: degrade to empty on spawn failure, but warn ──────────
-
     /// Ok read passes through unchanged.
     #[test]
     fn wsl_conf_or_warn_passes_ok_through() {
@@ -2364,9 +2263,6 @@ mod tests {
         assert_eq!(got, "", "spawn failure must degrade to empty");
     }
 
-    // ── TerminateOnChange policy + probe interpretation ─────────────────────
-
-    // Guards the "cannot exec in a stopped state" regression: Yes vs IfIdle stay distinct.
     #[test]
     fn terminate_variants_are_distinct() {
         assert_ne!(TerminateOnChange::IfIdle, TerminateOnChange::Yes);
@@ -2376,13 +2272,12 @@ mod tests {
     #[test]
     fn terminate_is_copy_and_debug() {
         let y = TerminateOnChange::Yes;
-        let copied = y; // Copy: original still usable below
+        let copied = y;
         assert_eq!(y, copied);
         assert_eq!(format!("{:?}", TerminateOnChange::Yes), "Yes");
         assert_eq!(format!("{:?}", TerminateOnChange::IfIdle), "IfIdle");
     }
 
-    // Yes always terminates; IfIdle only when no container runs.
     #[test]
     fn yes_always_terminates() {
         assert!(terminate_decision(TerminateOnChange::Yes, false));
@@ -2412,7 +2307,6 @@ mod tests {
         assert!(running_containers_from_probe(true, "abc123\n", ""));
     }
 
-    // containerd down (cold start) ⇒ idle, so IfIdle can terminate and apply.
     #[test]
     fn probe_daemon_down_means_idle() {
         assert!(!running_containers_from_probe(
@@ -2427,7 +2321,6 @@ mod tests {
         ));
     }
 
-    // A non-daemon-down failure stays fail-safe to busy (never terminate on doubt).
     #[test]
     fn probe_other_failure_assumes_busy() {
         assert!(running_containers_from_probe(
@@ -2436,8 +2329,6 @@ mod tests {
             "some unexpected error"
         ));
     }
-
-    // ── wsl.conf automount mergers (pure transforms) ────────────────────────
 
     const OPTS: &str = "metadata,uid=1000,gid=1000,umask=022";
 
@@ -2456,7 +2347,6 @@ mod tests {
         assert!(wsl_conf_automount_has_uid(&out, 1000));
     }
 
-    // [automount] present but with NO options line → insert it, keeping other keys.
     #[test]
     fn merge_inserts_options_and_keeps_other_keys() {
         let out = merge_wsl_conf_automount("[automount]\nenabled = false\nroot = /m/\n", OPTS);
@@ -2471,7 +2361,6 @@ mod tests {
         );
     }
 
-    // Existing wrong options line is replaced, not duplicated.
     #[test]
     fn merge_replaces_existing_options() {
         let out = merge_wsl_conf_automount("[automount]\noptions = \"metadata,uid=0\"\n", OPTS);
@@ -2479,7 +2368,6 @@ mod tests {
         assert!(wsl_conf_automount_has_uid(&out, 1000));
     }
 
-    // Interleaved duplicate [automount]: collapse to one without misplacing keys.
     #[test]
     fn merge_dedups_duplicate_sections() {
         let input = "[automount]\nenabled=true\n[network]\nx=1\n[automount]\nroot=/m/\n";
@@ -2487,7 +2375,6 @@ mod tests {
         assert_eq!(out.matches("[automount]").count(), 1);
         assert_eq!(out.matches("options =").count(), 1);
         assert!(out.contains("[network]"), "other sections preserved");
-        // The duplicate's `root=/m/` must not leak under [network].
         let net = out.find("[network]").unwrap();
         assert!(
             !out[net..].contains("root=/m/"),
@@ -2510,7 +2397,6 @@ mod tests {
         assert!(wsl_conf_automount_has_uid(&out, 1000));
     }
 
-    // Anchored verification: uid=1000 must NOT match uid=10000 or a comment.
     #[test]
     fn uid_check_is_anchored_not_substring() {
         assert!(options_has_uid("metadata,uid=1000,gid=1000", 1000));
@@ -2520,7 +2406,6 @@ mod tests {
 
     #[test]
     fn verify_ignores_commented_uid_and_other_sections() {
-        // uid=1000 only in a comment / a different section → not satisfied.
         assert!(!wsl_conf_automount_has_uid(
             "# uid=1000\n[automount]\nx=1\n",
             1000
@@ -2540,8 +2425,6 @@ mod tests {
         assert_eq!(automount_options_line("[boot]\noptions = \"x\"\n"), None);
     }
 
-    // ── verify_wsl_distro_origin (data-dir-explicit, tempdir-isolated) ──────
-
     #[test]
     fn verify_wsl_distro_origin_passes_when_vhdx_exists() {
         let data_dir = tempfile::tempdir().expect("tempdir");
@@ -2559,7 +2442,6 @@ mod tests {
 
     #[test]
     fn verify_wsl_distro_origin_fails_when_vhdx_missing() {
-        // Empty tempdir — the vhdx file does not exist.
         let data_dir = tempfile::tempdir().expect("tempdir");
         let result = verify_wsl_distro_origin_in(data_dir.path());
         let err_msg = result
@@ -2573,7 +2455,6 @@ mod tests {
 
     #[test]
     fn verify_wsl_distro_origin_rejects_empty_directory() {
-        // Create the wsl distro directory without the ext4.vhdx file.
         let data_dir = tempfile::tempdir().expect("tempdir");
         let vhdx_dir = data_dir.path().join("wsl").join(consts::wsl_distro_name());
         std::fs::create_dir_all(&vhdx_dir).expect("create dirs");
@@ -2613,20 +2494,15 @@ mod tests {
         );
     }
 
-    // ── wsl_rootfs_for_arch ─────────────────────────────────────────────────
-
     #[cfg(target_os = "windows")]
     #[test]
     fn wsl_rootfs_for_arch_returns_ok_for_current_arch() {
-        // On Windows CI this will be x86_64 or aarch64 — both are valid
         let result = wsl_rootfs_for_arch();
         assert!(result.is_ok(), "should succeed on supported arch");
         let (url, sha) = result.unwrap();
         assert!(url.starts_with("https://"));
         assert_eq!(sha.len(), 64, "SHA256 hash must be 64 hex chars");
     }
-
-    // ── ps_escape (Windows PowerShell path escaping) ────────────────────────
 
     #[cfg(target_os = "windows")]
     mod ps_escape_tests {
@@ -2664,8 +2540,6 @@ mod tests {
         }
     }
 
-    // ── verify_sha256_ps ─────────────────────────────────────────────────────
-
     #[cfg(target_os = "windows")]
     mod verify_sha256_ps_tests {
         use super::super::verify_sha256_ps;
@@ -2675,7 +2549,6 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let path = dir.path().join("file.txt");
             std::fs::write(&path, b"hello").expect("write");
-            // SHA256("hello")
             let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
             let result = verify_sha256_ps(&path, expected).expect("verification should run");
             assert!(result, "hash of 'hello' should match the known SHA256");
@@ -2700,8 +2573,6 @@ mod tests {
             assert!(!result);
         }
     }
-
-    // ── wsl_install_outcome_message ──────────────────────────────────────────
 
     mod wsl_install_outcome_message_tests {
         use super::super::wsl_install_outcome_message;
@@ -2749,8 +2620,6 @@ mod tests {
             assert!(msg.contains("restart your computer"), "got: {msg}");
         }
     }
-
-    // ── nerdctl download backoff + install lock + child timeout ────────────
 
     mod nerdctl_backoff {
         use super::super::*;
@@ -2811,7 +2680,7 @@ mod tests {
             record_download_failure(&path, 7);
             clear_download_backoff(&path);
             assert!(load_download_backoff(&path).is_none());
-            clear_download_backoff(&path); // absent → no-op, no panic
+            clear_download_backoff(&path);
         }
 
         #[test]

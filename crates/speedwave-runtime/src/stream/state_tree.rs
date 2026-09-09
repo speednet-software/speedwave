@@ -496,7 +496,6 @@ mod tests {
             dbg.contains('…'),
             "expected redaction marker for session_id, got: {dbg}"
         );
-        // Non-secret diagnostic fields must still be visible.
         assert!(
             dbg.contains("diagnostic-text"),
             "expected entry text in Debug, got: {dbg}"

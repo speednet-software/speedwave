@@ -58,7 +58,6 @@ mod tests {
 
     #[test]
     fn kill_command_does_not_match_a_different_instance() {
-        // The script greps for the exact id; a different id is not a substring.
         let cmd = kill_by_instance_command("aaaa");
         assert!(!cmd[2].contains("SPW_SESSION_INSTANCE_ID=bbbb"));
     }

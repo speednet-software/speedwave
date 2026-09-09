@@ -102,7 +102,6 @@ impl Collator {
         self.depth += delta;
         if self.depth > 0 {
             if self.buffer.len() >= MAX_BUFFERED_LINES {
-                // Malformed input — release buffered content verbatim and reset.
                 let joined = self.drain_buffer().unwrap_or_default();
                 self.depth = 0;
                 return vec![joined];
@@ -154,7 +153,6 @@ impl Collator {
             return out;
         }
 
-        // Same-id sending request flushes any previously-pending response for that id.
         if let Some(id) = extract_log_id(&line) {
             if line.contains("sending request") {
                 if let Some(merged) = self.flush_pending_response(&id) {
@@ -198,11 +196,8 @@ impl Collator {
     }
 }
 
-// ── Brace depth helper ─────────────────────────────────────────────────────
-
 /// Net change in brace depth for one line, ignoring braces inside `"…"` strings.
 fn brace_delta(line: &str) -> i32 {
-    // Fast path — most stdout lines contain no braces at all (memchr-vectorised).
     if !line.as_bytes().iter().any(|&b| b == b'{' || b == b'}') {
         return 0;
     }
@@ -225,10 +220,7 @@ fn brace_delta(line: &str) -> i32 {
     depth
 }
 
-// ── Block summariser ───────────────────────────────────────────────────────
-
 fn re(pat: &str) -> Regex {
-    // Static patterns; panic on a malformed regex (`.expect()` is clippy-forbidden in prod).
     Regex::new(pat).unwrap_or_else(|e| panic!("static regex must compile: {e}"))
 }
 
@@ -313,7 +305,6 @@ pub fn format_block(block: &str) -> String {
     if block.starts_with("response ") && block.contains("Headers {") {
         return format_response_full(block);
     }
-    // Response start / parsed blocks: render standalone when the merge never happens.
     if block.contains("response start") || block.contains("response parsed") {
         return format_response_start(block, log_id.as_deref());
     }
@@ -545,11 +536,9 @@ mod tests {
                 "}",
             ],
         );
-        // Simulate chat.rs flushing pending responses on the next RESULT: marker.
         out.extend(c.flush_all_pending_responses());
 
         let response_lines: Vec<_> = out.iter().filter(|l| l.starts_with("← 200")).collect();
-        // Standalone Headers block (no log_id) renders separately + one merged line = 2.
         assert_eq!(response_lines.len(), 2, "got: {out:?}");
         let merged = response_lines
             .iter()
@@ -571,14 +560,12 @@ mod tests {
                 "  status: 200,",
                 "  durationMs: 50,",
                 "}",
-                // New request reuses log_abc (defensive)
                 "[log_abc] sending request {",
                 r#"  method: "post","#,
                 r#"  url: "http://y","#,
                 "}",
             ],
         );
-        // Expect: response line (flushed by the new request) + the new request line.
         assert!(out
             .iter()
             .any(|l| l.starts_with("← 200") && l.contains("[log_abc]")));
@@ -688,7 +675,6 @@ mod tests {
 
     #[test]
     fn brace_delta_short_circuits_on_lines_without_braces() {
-        // Plain text with no braces — must return 0 via the fast path.
         assert_eq!(brace_delta("  some: value,"), 0);
         assert_eq!(brace_delta(""), 0);
         assert_eq!(brace_delta("RESULT: turn complete"), 0);
@@ -697,7 +683,6 @@ mod tests {
     #[test]
     fn buffer_overflow_releases_content_and_resets() {
         let mut c = Collator::new();
-        // Open a block, then exceed MAX_BUFFERED_LINES with never-closing content.
         c.push("[log_abc] sending request {".into());
         let mut emitted = None;
         for i in 0..MAX_BUFFERED_LINES + 5 {
@@ -709,7 +694,6 @@ mod tests {
         }
         let entries = emitted.expect("overflow must release buffered content");
         assert!(!entries.is_empty());
-        // Next push starts fresh.
         let next = c.push("RESULT: turn complete".into());
         assert_eq!(next, vec!["RESULT: turn complete".to_string()]);
     }
@@ -717,7 +701,6 @@ mod tests {
     #[test]
     fn pending_response_overflow_evicts_oldest() {
         let mut c = Collator::new();
-        // Insert more than MAX_PENDING_RESPONSES distinct fragments; oldest evicted.
         for i in 0..MAX_PENDING_RESPONSES + 5 {
             c.push(format!("[log_{i:06x}] response start {{"));
             c.push(format!(r#"  url: "http://x/{i}","#));
@@ -732,7 +715,6 @@ mod tests {
     #[test]
     fn multi_id_flush_returns_insertion_order() {
         let mut c = Collator::new();
-        // Three concurrent transactions, no terminator between them.
         for (i, id) in ["aaa111", "bbb222", "ccc333"].iter().enumerate() {
             c.push(format!("[log_{id}] response start {{"));
             c.push(format!(r#"  url: "http://x/{i}","#));
@@ -742,7 +724,6 @@ mod tests {
         }
         let flushed = c.flush_all_pending_responses();
         assert_eq!(flushed.len(), 3);
-        // Insertion order preserved.
         assert!(flushed[0].contains("[log_aaa111]"));
         assert!(flushed[1].contains("[log_bbb222]"));
         assert!(flushed[2].contains("[log_ccc333]"));

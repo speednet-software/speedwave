@@ -61,7 +61,6 @@ fn apply_update_transaction_runs_down_then_validate_then_recreate() {
 #[test]
 #[serial_test::serial]
 fn apply_update_transaction_does_not_build_images() {
-    // Contract pin (ADR-066): builds happen OUTSIDE the lock.
     let data_dir = shared_data_dir();
     let project = "tx-no-build";
     let compose_dir = data_dir.join("compose").join(project);
@@ -114,8 +113,6 @@ fn apply_update_transaction_aborts_recreate_on_compose_down_failure() {
 #[test]
 #[serial_test::serial]
 fn apply_update_transaction_fails_after_down_when_recreate_fails() {
-    // The dangerous window: compose_down succeeds, compose_up_recreate fails — the transaction
-    // errors with the project torn down, exactly what the CLI update path auto-rolls-back from.
     let data_dir = shared_data_dir();
     let project = "tx-recreate-fail";
     let compose_dir = data_dir.join("compose").join(project);
@@ -134,7 +131,6 @@ fn apply_update_transaction_fails_after_down_when_recreate_fails() {
         !err.to_string().is_empty(),
         "recreate failure must propagate"
     );
-    // The marker must be present so the CLI knows to roll back.
     assert!(
         err.downcast_ref::<speedwave_runtime::update::ContainersTornDown>()
             .is_some(),
@@ -153,7 +149,6 @@ fn apply_update_transaction_fails_after_down_when_recreate_fails() {
         vec![project.to_string()],
         "compose_up_recreate was attempted and failed (the rollback-worthy window)"
     );
-    // The snapshot saved before compose_down is what rollback restores.
     let snapshot = data_dir
         .join("snapshots")
         .join(project)
@@ -167,8 +162,6 @@ fn apply_update_transaction_fails_after_down_when_recreate_fails() {
 #[test]
 #[serial_test::serial]
 fn apply_update_transaction_down_failure_carries_torn_down_marker() {
-    // A failure AT compose_down must also carry ContainersTornDown — a partial
-    // teardown leaves the project with no guaranteed running containers.
     let data_dir = shared_data_dir();
     let project = "tx-down-fail-marker";
     let compose_dir = data_dir.join("compose").join(project);
@@ -193,8 +186,6 @@ fn apply_update_transaction_down_failure_carries_torn_down_marker() {
 #[test]
 #[serial_test::serial]
 fn apply_update_transaction_validate_failure_carries_torn_down_marker() {
-    // A validate failure after compose_down must carry ContainersTornDown so
-    // the CLI knows to roll back (containers are in a torn-down state).
     let data_dir = shared_data_dir();
     let project = "tx-validate-fail-marker";
     let compose_dir = data_dir.join("compose").join(project);
@@ -214,7 +205,6 @@ fn apply_update_transaction_validate_failure_carries_torn_down_marker() {
             .is_some(),
         "a post-compose_down validate failure must carry ContainersTornDown"
     );
-    // compose_down ran; validate failed; recreate must NOT have been attempted.
     assert_eq!(
         handles.down_calls.lock().unwrap().clone(),
         vec![project.to_string()],
@@ -287,7 +277,6 @@ fn maybe_prune_previous_bundle_skips_when_no_previous_bundle() {
 fn maybe_prune_previous_bundle_prunes_replaced_per_image_tags() {
     let _ = shared_data_dir();
     let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("newhash");
-    // Applied state matches the manifest except one image on an older hash.
     let mut state = legacy_state(Some("aggregate-id"));
     state.applied_image_hashes = manifest.image_hashes.clone();
     state
@@ -311,7 +300,6 @@ fn maybe_prune_previous_bundle_prunes_replaced_per_image_tags() {
 #[test]
 #[serial_test::serial]
 fn prune_does_not_run_when_apply_update_transaction_fails() {
-    // Atomicity: caller invokes maybe_prune_* only on Ok from apply.
     let data_dir = shared_data_dir();
     let project = "tx-prune-atomicity";
     let compose_dir = data_dir.join("compose").join(project);
@@ -328,7 +316,6 @@ fn prune_does_not_run_when_apply_update_transaction_fails() {
     let result = apply_update_transaction(&rt, project, VALID_YAML);
     assert!(result.is_err(), "apply_update_transaction must fail");
 
-    // Simulate caller: prune only on Ok.
     if result.is_ok() {
         let manifest = speedwave_runtime::bundle::BundleManifest::for_tests("new");
         maybe_prune_previous_bundle(&rt, &legacy_state(Some("old")), &manifest);
@@ -367,7 +354,6 @@ fn apply_rollback_transaction_runs_save_validate_then_recreate() {
 #[test]
 #[serial_test::serial]
 fn apply_rollback_transaction_proceeds_with_recreate_when_validate_fails() {
-    // Resilience contract: a validate failure must never block the recovery recreate.
     let data_dir = shared_data_dir();
     let project = "tx-rollback-validate-fails";
     let (rt, handles) = MockRuntimeBuilder::new()
@@ -375,7 +361,6 @@ fn apply_rollback_transaction_proceeds_with_recreate_when_validate_fails() {
         .build();
     apply_rollback_transaction(&rt, project, VALID_YAML).unwrap();
 
-    // Non-propagation failure: consumed on the first attempt, no retry, recovery continues.
     assert_eq!(
         handles.validate_calls.lock().unwrap().clone(),
         vec![project.to_string()],
@@ -394,8 +379,6 @@ fn apply_rollback_transaction_proceeds_with_recreate_when_validate_fails() {
 #[test]
 #[serial_test::serial]
 fn apply_rollback_transaction_retries_compose_file_enoent_before_recreate() {
-    // The stale-dentry ENOENT after the snapshot rename is absorbed by the retry,
-    // so recovery reaches recreate with the guest cache warmed.
     let data_dir = shared_data_dir();
     let project = "tx-rollback-enoent";
     let (rt, handles) = MockRuntimeBuilder::new()

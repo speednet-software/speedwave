@@ -84,13 +84,11 @@ pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider>
             Some(rest) => rest,
             None => return false,
         };
-        // Skip the username component
         let username_end = match after_users.find('/') {
             Some(i) => i,
             None => return false,
         };
         let after_user = &after_users[username_end + 1..];
-        // Tail must start with `<token>` then a component boundary.
         if let Some(tail) = after_user.strip_prefix(token) {
             return tail.is_empty() || tail.starts_with('/') || tail.starts_with('-');
         }
@@ -99,21 +97,18 @@ pub fn detect_cloudstorage_provider(path: &Path) -> Option<CloudStorageProvider>
 
     let path_str = path.to_string_lossy();
 
-    // OneDrive: ~/Library/CloudStorage/OneDrive(-…)? or ~/OneDrive(-…)?
     if contains_at_boundary(&path_str, "/Library/CloudStorage/OneDrive")
         || is_top_level_under_users(&path_str, "OneDrive")
     {
         return Some(CloudStorageProvider::OneDrive);
     }
 
-    // Dropbox: ~/Library/CloudStorage/Dropbox… or ~/Dropbox…
     if contains_at_boundary(&path_str, "/Library/CloudStorage/Dropbox")
         || is_top_level_under_users(&path_str, "Dropbox")
     {
         return Some(CloudStorageProvider::Dropbox);
     }
 
-    // Google Drive: ~/Library/CloudStorage/GoogleDrive(-…)? or ~/Google Drive…
     if contains_at_boundary(&path_str, "/Library/CloudStorage/GoogleDrive")
         || is_top_level_under_users(&path_str, "Google Drive")
     {
@@ -180,7 +175,7 @@ pub fn check_path_readable_with_timeout(path: &Path) -> Result<(), std::io::Erro
 
     match rx.recv_timeout(PROBE_TIMEOUT) {
         Ok(result) => result.map(|_| ()),
-        Err(_timeout) => Ok(()), // timeout — treat as non-blocking, let normal path handle it
+        Err(_timeout) => Ok(()),
     }
 }
 
@@ -194,8 +189,6 @@ pub fn check_cloudstorage_readability(path: &Path) -> Result<(), CloudStoragePro
     match check_path_readable_with_timeout(path) {
         Err(e) if is_permission_error(&e) => Err(provider),
         _ => {
-            // Readable, but still a synced dir: placeholder hydration and sync
-            // churn can break container bind mounts — leave a breadcrumb.
             log::warn!(
                 "project at {} is inside {} — cloud sync can stall or corrupt \
                  container workspace mounts; prefer a local directory",
@@ -229,8 +222,6 @@ pub fn check_project_readable_or_err(project_path: &Path) -> Result<(), String> 
 mod tests {
     use super::*;
 
-    // -- TCC_USER_REMEDIATION_MESSAGE tests (§5.1) --
-
     #[test]
     fn tcc_user_remediation_message_is_non_empty_and_actionable() {
         assert!(
@@ -256,8 +247,6 @@ mod tests {
             "TCC_USER_REMEDIATION_MESSAGE must not contain the TCC prefix (prevents re-substitution)"
         );
     }
-
-    // -- CloudStorageProvider tests --
 
     #[test]
     fn provider_display_names_are_non_empty() {
@@ -316,8 +305,6 @@ mod tests {
         assert!(CloudStorageProvider::from_stable_id("onedrive").is_none());
     }
 
-    // -- detect_cloudstorage_provider tests --
-
     #[test]
     fn detect_onedrive_library_cloudstorage() {
         let path = Path::new("/Users/alice/Library/CloudStorage/OneDrive-Personal/Projects/foo");
@@ -334,7 +321,6 @@ mod tests {
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
         assert_eq!(result, Some(CloudStorageProvider::Dropbox));
-        // Windows matches the well-known component name anywhere in the path.
         #[cfg(target_os = "windows")]
         assert_eq!(result, Some(CloudStorageProvider::Dropbox));
     }
@@ -365,7 +351,6 @@ mod tests {
 
     #[test]
     fn detect_substring_false_positive_is_none() {
-        // Regression: "OneDrive" mid-token must not be misclassified.
         let path = Path::new("/Users/alice/Projects/NotOneDriveBackup");
         assert!(detect_cloudstorage_provider(path).is_none());
     }
@@ -378,8 +363,6 @@ mod tests {
 
     #[test]
     fn detect_onedrive_outside_users() {
-        // macOS: a token outside /Users/ is not a real mount. Windows: the
-        // component-name match is the documented semantics (OneDrive can sit anywhere).
         let path = Path::new("/tmp/OneDrive/foo");
         let result = detect_cloudstorage_provider(path);
         #[cfg(target_os = "macos")]
@@ -387,8 +370,6 @@ mod tests {
         #[cfg(target_os = "windows")]
         assert_eq!(result, Some(CloudStorageProvider::OneDrive));
     }
-
-    // -- is_permission_error tests --
 
     #[test]
     fn is_permission_error_detects_eperm() {
@@ -408,8 +389,6 @@ mod tests {
         assert!(!is_permission_error(&err));
     }
 
-    // -- check_project_readable_or_err tests --
-
     #[test]
     fn check_project_readable_or_err_non_cloudstorage_returns_ok() {
         let path = Path::new("/tmp");
@@ -419,7 +398,6 @@ mod tests {
 
     #[test]
     fn check_project_readable_or_err_error_contains_prefix() {
-        // Verifies the TCC error format directly (TCC denial is unreproducible in a unit test).
         let provider = CloudStorageProvider::OneDrive;
         let path = Path::new("/Users/alice/Library/CloudStorage/OneDrive-Personal/Projects/foo");
         let formatted = format!(
@@ -435,7 +413,6 @@ mod tests {
 
     #[test]
     fn check_project_readable_or_err_existing_readable_dir_returns_ok() {
-        // /tmp is always readable and is not a CloudStorage path
         let path = Path::new("/tmp");
         let result = check_project_readable_or_err(path);
         assert!(result.is_ok());
@@ -446,7 +423,6 @@ mod tests {
         let root = Some(std::path::PathBuf::from(
             r"C:\Users\User\OneDrive - Speednet",
         ));
-        // KFM: redirected Desktop lives under the OneDrive root.
         for p in [
             r"C:\Users\User\OneDrive - Speednet",
             r"C:\Users\User\OneDrive - Speednet\Desktop\proj",
@@ -478,7 +454,6 @@ mod tests {
 
     #[test]
     fn windows_detector_negatives() {
-        // Substring inside a component must NOT match; unrelated paths pass.
         for p in [
             r"C:\Users\U\Projects\onedrive-clone-app",
             r"C:\Users\U\Downloads\proj",

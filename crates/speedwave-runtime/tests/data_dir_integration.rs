@@ -19,12 +19,10 @@ const TEST_DATA_DIR: &str = "/tmp/test-speedwave-xyz";
 #[test]
 fn data_dir_respects_env_var_and_derives_names() {
     if std::env::var("__SPEEDWAVE_INTEGRATION_CHILD").is_ok() {
-        // We are in the child — run assertions
         child_assertions();
         return;
     }
 
-    // Parent: re-exec this test binary with the env var set
     let exe = std::env::current_exe().expect("current_exe");
     let output = Command::new(&exe)
         .env("SPEEDWAVE_DATA_DIR", TEST_DATA_DIR)
@@ -47,7 +45,6 @@ fn data_dir_respects_env_var_and_derives_names() {
 fn child_assertions() {
     use speedwave_runtime::consts;
 
-    // data_dir() should return the env var value
     let dd = consts::data_dir();
     assert_eq!(
         dd.as_path(),
@@ -55,14 +52,12 @@ fn child_assertions() {
         "data_dir() should return SPEEDWAVE_DATA_DIR value"
     );
 
-    // lima_vm_name() should derive from basename
     assert_eq!(
         consts::lima_vm_name(),
         "test-speedwave-xyz",
         "lima_vm_name() should derive from data_dir basename"
     );
 
-    // compose_prefix() should derive identically
     assert_eq!(
         consts::compose_prefix(),
         "test-speedwave-xyz",

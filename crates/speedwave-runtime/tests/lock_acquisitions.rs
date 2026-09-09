@@ -8,7 +8,6 @@
 
 use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
 
-// Internal hook from the crate's `runtime::locked` module.
 extern crate speedwave_runtime as _runtime;
 
 fn count() -> usize {

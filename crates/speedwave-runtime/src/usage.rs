@@ -139,8 +139,6 @@ pub fn get_usage_for_response_in(
     });
     let rec = found?;
     let costs = crate::usage_cost::read_cost_cache_in(data_dir, project);
-    // Cost + source come from one lookup so they never disagree: sidecar entry
-    // first, else the inline cost (terminal — it is the final value, not deferred).
     let sidecar = crate::usage_cost::effective_response_id(&rec).and_then(|id| costs.get(&id));
     let (cost_usd, cost_source) = match sidecar {
         Some(e) => (e.cost_usd, e.cost_source.to_string()),
@@ -277,7 +275,6 @@ pub fn rotate_usage_if_large_in(data_dir: &Path, project: &str) {
         log::warn!("usage rotation failed for {}: {e}", live.display());
         return;
     }
-    // Rotation shrank the window — drop now-orphaned sidecar entries.
     prune_cost_cache_in(data_dir, project);
 }
 
@@ -304,7 +301,6 @@ pub fn prune_cost_cache_in(data_dir: &Path, project: &str) {
         .map(|l| format!("{l}\n"))
         .collect();
     if let Err(e) = crate::fs_perms::write_restricted_file_atomic(&path, &body) {
-        // Orphans survive until the next successful prune; readers stay window-correct.
         log::warn!("cost-cache prune failed for {}: {e}", path.display());
     }
 }
@@ -316,8 +312,6 @@ pub fn for_each_usage_record(
     project: &str,
     mut f: impl FnMut(UsageRecord),
 ) -> u64 {
-    // Guard the only path that turns `project` into a filesystem path — blocks
-    // traversal from Tauri IPC callers (session_cost_in, response_ids_in_window).
     if crate::validation::validate_project_name(project).is_err() {
         return 0;
     }
@@ -367,7 +361,6 @@ pub fn read_usage_summary_in(data_dir: &Path, project: &str) -> UsageSummary {
     let mut summary = UsageSummary::default();
     let mut seen_ids = std::collections::HashSet::new();
     summary.skipped_lines = for_each_usage_record(data_dir, project, |record| {
-        // Dedup by effective_response_id (gen_id fallback); first-seen wins.
         if let Some(id) = crate::usage_cost::effective_response_id(&record) {
             if !seen_ids.insert(id) {
                 return;
@@ -414,8 +407,6 @@ fn apply_record(bucket: &mut UsageBucket, r: &UsageRecord, cost: Option<f64>) {
     if let Some(c) = cost {
         bucket.cost_usd = Some(bucket.cost_usd.unwrap_or(0.0) + c);
     }
-    // Throughput counts only successful records with output, latency, and a
-    // ttft below latency — the decode window is `latency − ttft`.
     if let (Some(latency), Some(ttft)) = (r.latency_ms, r.ttft_ms) {
         if !is_failure && completion > 0 && latency > ttft {
             bucket.throughput_completion_tokens += completion;
@@ -447,7 +438,6 @@ mod tests {
             &[
                 r#"{"ts":"2026-06-12T10:00:00+0200","status":"success","model":"claude-haiku-4-5","cost_usd":0.005,"prompt_tokens":50000,"completion_tokens":10,"latency_ms":900,"ttft_ms":100}"#,
                 r#"{"ts":"2026-06-12T11:00:00+0200","status":"success","model":"local/qwen3","prompt_tokens":14,"completion_tokens":2,"latency_ms":300,"ttft_ms":100}"#,
-                // Failure with latency but no output — must NOT feed throughput.
                 r#"{"ts":"2026-06-13T09:00:00+0200","status":"failure","model":"local/qwen3","prompt_tokens":5,"completion_tokens":0,"latency_ms":60000}"#,
             ],
         );
@@ -461,13 +451,10 @@ mod tests {
         assert_eq!(day1["claude-haiku-4-5"].requests, 1);
         assert_eq!(day1["local/qwen3"].completion_tokens, 2);
         assert_eq!(s.skipped_lines, 0);
-        // Failure with 0 output excluded from throughput numerator and denominator.
         assert_eq!(s.totals.throughput_completion_tokens, 12);
-        // Decode = (900−100) + (300−100) = 1000.
         assert_eq!(s.totals.decode_latency_ms_sum, 1000);
         assert_eq!(day1["claude-haiku-4-5"].decode_latency_ms_sum, 800);
         assert_eq!(s.days["2026-06-13"]["local/qwen3"].decode_latency_ms_sum, 0);
-        // Hourly histogram: local hours 10 and 11 on day one, 9 on day two.
         assert_eq!(s.hours["2026-06-12"][10], 1);
         assert_eq!(s.hours["2026-06-12"][11], 1);
         assert_eq!(s.hours["2026-06-12"][9], 0);
@@ -481,9 +468,7 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                // 100 out, 2000ms wall, 500ms ttft -> decode window 1500ms.
                 r#"{"ts":"2026-06-27T10:00:00+0200","status":"success","model":"local/q","response_id":"r1","provider_kind":"local","completion_tokens":100,"latency_ms":2000,"ttft_ms":500}"#,
-                // No ttft -> excluded from throughput entirely.
                 r#"{"ts":"2026-06-27T10:01:00+0200","status":"success","model":"local/q","response_id":"r2","provider_kind":"local","completion_tokens":50,"latency_ms":1000}"#,
             ],
         );
@@ -502,9 +487,7 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                // latency == ttft -> zero decode window -> excluded (undefined rate).
                 r#"{"ts":"2026-06-27T10:00:00+0200","status":"success","model":"local/q","response_id":"r1","provider_kind":"local","completion_tokens":1,"latency_ms":500,"ttft_ms":500}"#,
-                // latency < ttft (clock skew) -> excluded, no u64 underflow.
                 r#"{"ts":"2026-06-27T10:01:00+0200","status":"success","model":"local/q","response_id":"r2","provider_kind":"local","completion_tokens":3,"latency_ms":400,"ttft_ms":500}"#,
             ],
         );
@@ -520,7 +503,6 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                // Record aggregates; only hour histogram skipped for malformed timestamps.
                 r#"{"ts":"2026-06-12Txx:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
                 r#"{"ts":"2026-06-12T99:00:00+0200","status":"success","model":"m","prompt_tokens":2}"#,
                 r#"{"ts":"short","status":"success","model":"m","prompt_tokens":4}"#,
@@ -537,27 +519,22 @@ mod tests {
 
     #[test]
     fn multibyte_timestamp_does_not_panic_on_byte_slicing() {
-        // Byte-slicing `ts` is safe with multibyte chars; str::get returns None (no panic).
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
             "proj",
             &[
-                // 'éé' crosses byte 10 → day becomes 'unknown'.
                 r#"{"ts":"2026-06éé2T10:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
-                // Emoji at byte 11 → histogram entry skipped.
                 r#"{"ts":"2026-06-12T😀0:00:00+0200","status":"success","model":"m","prompt_tokens":2}"#,
             ],
         );
         let s = read_usage_summary_in(dir.path(), "proj");
-        // Both records aggregate (no panic, nothing skipped as unparsable).
         assert_eq!(s.totals.requests, 2);
         assert_eq!(s.totals.prompt_tokens, 3);
         assert_eq!(
             s.skipped_lines, 0,
             "valid JSON — only ts derivation degrades"
         );
-        // Non-boundary day slice → "unknown"; the emoji record keeps its day.
         assert!(
             s.days.contains_key("unknown"),
             "non-boundary day → 'unknown'"
@@ -566,7 +543,6 @@ mod tests {
             s.days.contains_key("2026-06-12"),
             "emoji record keeps its day"
         );
-        // The emoji record's hour slice returned None, so no histogram entry.
         assert!(
             s.hours
                 .get("2026-06-12")
@@ -583,7 +559,7 @@ mod tests {
             "proj",
             &[
                 r#"{"ts":"2026-06-12T10:00:00+0200","status":"success","model":"m","prompt_tokens":1}"#,
-                r#"{"ts":"2026-06-12T10:01:00+0200","status":"succ"#, // crash-truncated
+                r#"{"ts":"2026-06-12T10:01:00+0200","status":"succ"#,
                 "not json at all",
                 "",
             ],
@@ -608,7 +584,6 @@ mod tests {
         let s = read_usage_summary_in(dir.path(), "proj");
         assert_eq!(s.totals.requests, 2, "msg_1 counted once");
         assert_eq!(s.totals.prompt_tokens, 13);
-        // First-seen line wins, so the later priced duplicate is dropped.
         assert!(
             s.totals.cost_usd.is_none(),
             "no priced request → None, not 0.0"
@@ -626,7 +601,6 @@ mod tests {
                 r#"{"ts":"2026-06-12T10:01:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_oauth","provider_kind":"anthropic_oauth"}"#,
             ],
         );
-        // Both local (free) and oauth (subscription) are unpriced → total stays None.
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
         let s = read_usage_summary_in(dir.path(), "proj");
         assert!(
@@ -677,7 +651,6 @@ mod tests {
         assert!(!live.exists(), "live file rotated away");
         assert!(live.with_extension("jsonl.1").exists());
 
-        // Under the threshold: untouched.
         std::fs::write(&live, b"small").unwrap();
         rotate_usage_if_large_in(dir.path(), "proj");
         assert!(live.exists());
@@ -735,7 +708,6 @@ mod tests {
             dir.path(),
             "proj",
             &[
-                // Two distinct gen-ids, one anthropic line (no gen), one dup gen.
                 r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
                 r#"{"ts":"2026-06-26T10:01:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
                 r#"{"ts":"2026-06-26T10:02:00+0200","status":"success","model":"or/x","gen_id":"gen-b","provider_kind":"openrouter"}"#,
@@ -760,7 +732,6 @@ mod tests {
                 r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"or/x","gen_id":"gen-a","provider_kind":"openrouter"}"#,
             ],
         );
-        // Resolve gen-a to a terminal Actual cost; it must drop from pending.
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|id| {
             (id == "gen-a").then_some(0.02)
         })
@@ -801,14 +772,12 @@ mod tests {
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        // opus 1M input = $5.00 + local free $0.00 = $5.00.
         let total = session_cost_in(dir.path(), "proj").unwrap();
         assert!((total - 5.0).abs() < 1e-9, "got {total}");
     }
 
     #[test]
     fn session_cost_local_is_unpriced_none() {
-        // A purely-local (free) session is unpriced → None (rendered `—`), not 0.0.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -823,7 +792,6 @@ mod tests {
 
     #[test]
     fn session_cost_all_unpriced_is_none() {
-        // Subscription/unknown only → None (never collapsed to 0.0).
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -845,7 +813,6 @@ mod tests {
 
     #[test]
     fn for_each_usage_record_rejects_traversal_project_name() {
-        // A traversal project name must short-circuit before any filesystem read.
         let dir = tempfile::tempdir().unwrap();
         let mut called = 0;
         let skipped = for_each_usage_record(dir.path(), "../../etc", |_| called += 1);
@@ -865,10 +832,8 @@ mod tests {
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        // Only msg_a is in this conversation → $5.00, not the project's $10.00.
         let only_a = conversation_cost_in(dir.path(), "proj", &["msg_a".to_string()]).unwrap();
         assert!((only_a - 5.0).abs() < 1e-9, "got {only_a}");
-        // Both turns → $10.00 (matches a two-turn conversation).
         let both =
             conversation_cost_in(dir.path(), "proj", &["msg_a".into(), "msg_b".into()]).unwrap();
         assert!((both - 10.0).abs() < 1e-9, "got {both}");
@@ -882,7 +847,6 @@ mod tests {
 
     #[test]
     fn conversation_cost_unpriced_turns_are_none() {
-        // A subscription-only conversation is unpriced → None (not 0.0).
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -897,7 +861,6 @@ mod tests {
 
     #[test]
     fn conversation_cost_local_is_unpriced_none() {
-        // A local conversation is unpriced → None (rendered `—`), not 0.0.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -922,8 +885,6 @@ mod tests {
         );
         let u = get_usage_for_response_in(dir.path(), "proj", "msg_1").unwrap();
         assert_eq!(u.cost_usd, Some(0.02));
-        // A priced inline cost is terminal — source must not be the empty
-        // (non-terminal) string, or the footer treats it as still deferred.
         assert_eq!(u.cost_source, "actual");
     }
 
@@ -945,8 +906,6 @@ mod tests {
 
     #[test]
     fn get_usage_for_response_local_is_terminal_free_null_after_enrich() {
-        // Regression: a local turn must reconcile to a TERMINAL free/null entry, else
-        // the footer keeps Claude Code's live-preview cost forever (invariant 6).
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -973,7 +932,6 @@ mod tests {
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        // Only the successful $5.00 counts; the failed line is not billed.
         let total = session_cost_in(dir.path(), "proj").unwrap();
         assert!((total - 5.0).abs() < 1e-9, "got {total}");
     }
@@ -996,8 +954,6 @@ mod tests {
 
     #[test]
     fn session_cost_only_counts_window_after_rotation() {
-        // An old priced line rotated entirely out of the window must not be
-        // summed by the footer; footer total then equals the dashboard total.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -1006,9 +962,7 @@ mod tests {
                 r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","model":"claude-opus-4-8","response_id":"msg_live","provider_kind":"anthropic_apikey","prompt_tokens":1000000,"completion_tokens":0}"#,
             ],
         );
-        // Price the live line.
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        // Inject an orphan sidecar entry whose usage line is NOT in the window.
         let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
         let orphan = serde_json::to_string(&crate::usage_cost::CostEntry {
             response_id: "msg_orphan".into(),
@@ -1020,7 +974,6 @@ mod tests {
         existing.push_str(&orphan);
         existing.push('\n');
         std::fs::write(&cache, existing).unwrap();
-        // Footer ignores the orphan; equals dashboard ($5.00 from the live line).
         let footer = session_cost_in(dir.path(), "proj").unwrap();
         let dashboard = read_usage_summary_in(dir.path(), "proj")
             .totals
@@ -1045,7 +998,6 @@ mod tests {
         );
         let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
-        // Two duplicate lines for the kept id + one orphan not in the window.
         std::fs::write(
             &cache,
             concat!(
@@ -1074,13 +1026,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let live = usage_file_in(dir.path(), "proj");
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
-        // Oversized live file with one record → triggers rotation.
         let mut content =
             r#"{"ts":"2026-06-26T10:00:00+0200","status":"success","response_id":"msg_in","provider_kind":"local","model":"local/q"}"#.to_string();
         content.push('\n');
         content.push_str(&"x".repeat((USAGE_ROTATE_BYTES + 1) as usize));
         std::fs::write(&live, content).unwrap();
-        // Sidecar carries an orphan whose usage line never existed.
         let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         std::fs::write(
@@ -1089,14 +1039,12 @@ mod tests {
         )
         .unwrap();
         rotate_usage_if_large_in(dir.path(), "proj");
-        // The orphan is gone after rotation pruned the sidecar.
         let map = crate::usage_cost::read_cost_cache_in(dir.path(), "proj");
         assert!(!map.contains_key("msg_orphan"), "orphan pruned on rotation");
     }
 
     #[test]
     fn footer_and_dashboard_cost_agree_across_provider_mix() {
-        // Invariant 6: footer total == dashboard total over a mixed session.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -1113,7 +1061,6 @@ mod tests {
             (gen == "gen-1").then_some(0.0046)
         })
         .unwrap();
-        // apikey 5.00 + local 0.00 + openrouter 0.0046 = 5.0046; sub/fail unpriced.
         let footer = session_cost_in(dir.path(), "proj").unwrap();
         let dashboard = read_usage_summary_in(dir.path(), "proj")
             .totals
@@ -1128,8 +1075,6 @@ mod tests {
 
     #[test]
     fn gen_id_only_line_is_priced_on_dashboard_and_footer() {
-        // An OpenRouter line with no message.id (response_id=null) but a gen_id
-        // must be priced (keyed by gen_id) on BOTH dashboard and footer — not $0.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -1152,15 +1097,12 @@ mod tests {
             (footer - dashboard).abs() < 1e-9,
             "footer must equal dashboard"
         );
-        // The conversation footer keyed by gen_id also resolves it.
         let convo = conversation_cost_in(dir.path(), "proj", &["gen-1".to_string()]).unwrap();
         assert!((convo - 0.02).abs() < 1e-9, "convo {convo}");
     }
 
     #[test]
     fn orphan_sidecar_entry_excluded_even_if_prune_did_not_run() {
-        // Even if prune never ran, an orphan whose usage line is gone is excluded
-        // by the window filter (not prune) — footer == dashboard regardless.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),
@@ -1170,7 +1112,6 @@ mod tests {
             ],
         );
         crate::usage_cost::enrich_cost_with_in(dir.path(), "proj", &|_| None).unwrap();
-        // Manually inject a numeric-cost orphan not present in the usage window.
         let cache = crate::usage_cost::cost_cache_file_in(dir.path(), "proj");
         let orphan = serde_json::to_string(&crate::usage_cost::CostEntry {
             response_id: "msg_orphan".into(),
@@ -1182,7 +1123,6 @@ mod tests {
         body.push_str(&orphan);
         body.push('\n');
         std::fs::write(&cache, body).unwrap();
-        // session_cost_in excludes the orphan (window filter), equals dashboard.
         let footer = session_cost_in(dir.path(), "proj").unwrap();
         let dashboard = read_usage_summary_in(dir.path(), "proj")
             .totals
@@ -1193,7 +1133,6 @@ mod tests {
             (footer - dashboard).abs() < 1e-9,
             "footer must equal dashboard"
         );
-        // The orphan is still physically in the file (prune didn't remove it).
         assert!(std::fs::read_to_string(&cache)
             .unwrap()
             .contains("msg_orphan"));
@@ -1201,7 +1140,6 @@ mod tests {
 
     #[test]
     fn unpriced_only_session_is_none_on_both_surfaces() {
-        // Subscription + failed only → both surfaces None, not 0.
         let dir = tempfile::tempdir().unwrap();
         write_usage(
             dir.path(),

@@ -56,8 +56,6 @@ pub fn truncate_if_oversized(path: &Path, max_bytes: u64) {
     let _ = std::fs::write(path, tail);
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -96,7 +94,6 @@ mod tests {
 
     #[test]
     fn open_log_file_returns_none_for_invalid_path() {
-        // Exercises the error arm: returns None.
         let path = std::path::Path::new("/nonexistent/dir/impossible.log");
         let file = open_log_file(path);
         assert!(file.is_none(), "should return None for invalid path");
@@ -180,7 +177,6 @@ mod tests {
     fn write_log_line_noop_on_none() {
         let mut file: Option<std::fs::File> = None;
         write_log_line(&mut file, "TEST", "should not panic");
-        // No panic = success
     }
 
     #[test]
@@ -244,7 +240,6 @@ mod tests {
     fn truncate_if_oversized_noop_for_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("missing.log");
-        // Should not panic
         truncate_if_oversized(&path, 2000);
     }
 }

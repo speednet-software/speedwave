@@ -134,7 +134,6 @@ mod tests {
     fn unknown_root_key_is_hard_error() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("managed-config.json");
-        // `telemetery` typo at the root: valid JSON, but not the `telemetry` key.
         std::fs::write(&p, r#"{"telemetery":{"enabled":false}}"#).unwrap();
         assert!(
             load_managed_config_from(&p).is_err(),
@@ -146,7 +145,6 @@ mod tests {
     fn unknown_telemetry_key_is_hard_error() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("managed-config.json");
-        // `endpont` typo inside telemetry: the intended lock would silently vanish.
         std::fs::write(&p, r#"{"telemetry":{"endpont":"https://corp:4318"}}"#).unwrap();
         assert!(
             load_managed_config_from(&p).is_err(),

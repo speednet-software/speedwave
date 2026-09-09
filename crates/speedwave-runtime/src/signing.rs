@@ -189,15 +189,12 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_files_recursive(plugin_dir, plugin_dir, &mut files)?;
 
-    // Relative path normalized to posix '/' on every host (matches sign script).
     let mut entries: Vec<(String, &std::path::PathBuf)> = files
         .iter()
         .map(|file| {
-            // Bail rather than fold an absolute path into the digest.
             let rel = file.strip_prefix(plugin_dir).map_err(|_| {
                 anyhow::anyhow!("plugin file is not under plugin_dir: {}", file.display())
             })?;
-            // A non-UTF-8 component must abort, never be silently dropped.
             let posix = rel
                 .components()
                 .map(|c| {
@@ -211,12 +208,10 @@ fn compute_plugin_digest(plugin_dir: &Path) -> anyhow::Result<Vec<u8>> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    // Byte sort on the posix path matches Python's as_posix() string sort.
     entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
     let mut hasher = Sha256::new();
     for (rel, file) in &entries {
-        // Hash: relative path (length-prefixed) + file contents (length-prefixed).
         let rel_bytes = rel.as_bytes();
         hasher.update((rel_bytes.len() as u64).to_le_bytes());
         hasher.update(rel_bytes);
@@ -238,7 +233,6 @@ fn collect_files_recursive(
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        // symlink_metadata rejects symlinks rather than following them.
         let file_type = std::fs::symlink_metadata(&path)?.file_type();
         if file_type.is_symlink() {
             anyhow::bail!(
@@ -251,7 +245,6 @@ fn collect_files_recursive(
         } else if path.file_name().map(|n| n != "SIGNATURE").unwrap_or(true) {
             out.push(path);
         } else if path.parent() != Some(root) {
-            // Posix-joined relative path so the message is identical on macOS and Windows.
             let rel = path.strip_prefix(root).map_or_else(
                 |_| path.display().to_string(),
                 |r| {
@@ -336,7 +329,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
 
-        // Create some plugin files
         std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
         std::fs::create_dir_all(plugin_dir.join("src")).unwrap();
         std::fs::write(plugin_dir.join("src/index.ts"), "console.log('hello');").unwrap();
@@ -344,7 +336,6 @@ mod tests {
         let (priv_key, pub_key) = generate_keypair();
         sign_plugin(plugin_dir, &priv_key).unwrap();
 
-        // Verify with the matching public key
         let sig_path = plugin_dir.join("SIGNATURE");
         assert!(
             sig_path.exists(),
@@ -360,7 +351,6 @@ mod tests {
             .unwrap();
         assert_eq!(sig_bytes.len(), 64);
 
-        // Verify using the public key directly
         let pub_key_arr: [u8; 32] = pub_key.try_into().unwrap();
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pub_key_arr).unwrap();
         let digest = compute_plugin_digest(plugin_dir).unwrap();
@@ -384,7 +374,6 @@ mod tests {
         let (priv_key, pub_key) = generate_keypair();
         sign_plugin(plugin_dir, &priv_key).unwrap();
 
-        // Tamper with a file after signing
         std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"EVIL"}"#).unwrap();
 
         let pub_key_arr: [u8; 32] = pub_key.try_into().unwrap();
@@ -411,7 +400,6 @@ mod tests {
     #[test]
     fn test_missing_signature_file_errors() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        // Clear in case the shell or a prior test leaked it.
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -434,9 +422,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
         std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
-        // No SIGNATURE file — would normally fail
 
-        // Serialized via ENV_MUTEX — no concurrent env access.
         std::env::set_var("SPEEDWAVE_ALLOW_UNSIGNED", "1");
         let result = verify_plugin_signature(plugin_dir);
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
@@ -477,14 +463,11 @@ mod tests {
     fn test_allow_unsigned_not_set_by_default() {
         let _guard = ENV_MUTEX.lock().unwrap();
 
-        // Remove the env var in case a previous test leaked it.
-        // Serialized via ENV_MUTEX — no concurrent env access.
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
 
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path();
         std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
-        // No SIGNATURE file
 
         let result = verify_plugin_signature(plugin_dir);
         assert!(
@@ -495,7 +478,6 @@ mod tests {
 
     #[test]
     fn test_compute_digest_path_content_boundary() {
-        // Without length-prefixing, "ab"+"cd" would collide with "a"+"bcd".
         let tmp1 = tempfile::tempdir().unwrap();
         std::fs::write(tmp1.path().join("ab"), b"cd").unwrap();
 
@@ -518,7 +500,6 @@ mod tests {
 
         let d1 = compute_plugin_digest(dir).unwrap();
 
-        // Adding SIGNATURE should not change the digest
         std::fs::write(dir.join("SIGNATURE"), "some-signature").unwrap();
         let d2 = compute_plugin_digest(dir).unwrap();
         assert_eq!(d1, d2, "SIGNATURE file must be excluded from digest");
@@ -539,8 +520,6 @@ mod tests {
             err.contains("nested SIGNATURE"),
             "a nested SIGNATURE file must be rejected, not silently excluded: {err}"
         );
-        // The message must name the offending relative path (posix separators on every
-        // host) and the remediation: the install/audit UI surfaces it verbatim.
         assert!(
             err.contains("'claude-resources/skills/SIGNATURE'"),
             "error must name the posix relative path of the nested file: {err}"
@@ -594,7 +573,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"test"}"#).unwrap();
-        // Symlink to an outside-the-tree path; target need not exist.
         std::os::unix::fs::symlink("/etc/passwd", dir.join("evil.md")).unwrap();
 
         let err = compute_plugin_digest(dir).expect_err("symlink must abort digest");
@@ -628,14 +606,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
 
-        // "schemas.ts" file at the same level as "schemas/" directory
         std::fs::write(dir.join("schemas.ts"), b"file").unwrap();
         std::fs::create_dir(dir.join("schemas")).unwrap();
         std::fs::write(dir.join("schemas").join("index.ts"), b"index").unwrap();
 
         let actual = compute_plugin_digest(dir).unwrap();
 
-        // Expected digest: "schemas.ts" hashed before "schemas/index.ts" ('.' 0x2E < '/' 0x2F).
         let mut hasher = Sha256::new();
         for (rel, content) in [
             (b"schemas.ts" as &[u8], b"file" as &[u8]),
@@ -671,7 +647,6 @@ mod tests {
 
         let actual = compute_plugin_digest(dir).unwrap();
 
-        // Expected digest: relative path hashed with '/' separators.
         let mut hasher = Sha256::new();
         let rel = b"claude-resources/skills/foo.md" as &[u8];
         let content = b"body" as &[u8];
@@ -710,9 +685,6 @@ mod tests {
         );
     }
 
-    // --- cache + test-only verifier tests ---
-    // Cache is process-global; these tests take ENV_MUTEX and call invalidate_cache_all().
-
     /// Helper: signs `dir` with a freshly-generated keypair, returns the public key.
     fn sign_with_fresh_key(dir: &Path) -> [u8; 32] {
         let (priv_key, pub_key) = generate_keypair();
@@ -739,7 +711,6 @@ mod tests {
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
         let pk = sign_with_fresh_key(dir);
 
-        // Modify a non-SIGNATURE file in place.
         std::fs::write(dir.join("plugin.json"), r#"{"name":"EVIL"}"#).unwrap();
 
         let err = verify_plugin_signature_with_key(dir, &pk)
@@ -750,14 +721,12 @@ mod tests {
     #[test]
     fn test_cache_invalidates_on_content_change() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        // Clear the bypass so the real verifier path runs.
         std::env::remove_var("SPEEDWAVE_ALLOW_UNSIGNED");
         invalidate_cache_all();
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
-        // Non-Speednet key: verify rejects and caches; we check the cached digest tracks content.
         let _pk = sign_with_fresh_key(dir);
         assert!(verify_plugin_signature_cached(dir).is_err());
         let key = cache_key(dir).expect("dir must canonicalize");
@@ -768,7 +737,6 @@ mod tests {
             .expect("cache populated after first verify")
             .content_digest;
 
-        // Cache keyed by digest; a file change forces recompute and overwrites the stale entry.
         std::fs::write(dir.join("plugin.json"), r#"{"name":"changed"}"#).unwrap();
         assert!(verify_plugin_signature_cached(dir).is_err());
         let digest_after = cache()
@@ -794,7 +762,6 @@ mod tests {
         std::fs::write(dir.join("plugin.json"), r#"{"name":"ok"}"#).unwrap();
         let _pk = sign_with_fresh_key(dir);
 
-        // Populate the cache.
         let _ = verify_plugin_signature_cached(dir);
         let key = cache_key(dir).expect("dir must canonicalize");
         assert!(

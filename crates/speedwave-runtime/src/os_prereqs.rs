@@ -76,8 +76,6 @@ fn check_wsl() -> Vec<PrereqViolation> {
     }
 }
 
-// ── Non-blocking OS warnings ────────────────────────────────────────────
-
 /// Returns non-blocking OS warnings (e.g. low memory, nested virtualization).
 /// Separate from `check_os_prereqs()` which returns blocking errors.
 pub fn check_os_warnings() -> Vec<String> {
@@ -100,7 +98,7 @@ pub fn check_os_warnings() -> Vec<String> {
 fn check_wsl_mirrored_mode_supported() -> Vec<String> {
     let build = match windows_build_number() {
         Some(b) => b,
-        None => return Vec::new(), // Couldn't detect — don't warn on uncertainty.
+        None => return Vec::new(),
     };
     if build >= 22621 {
         Vec::new()
@@ -187,7 +185,7 @@ fn check_nested_virt() -> Vec<String> {
 
     let output = match binary::run_powershell_capture(&args, std::time::Duration::from_secs(10)) {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        Ok(_) | Err(_) => return Vec::new(), // Fail open
+        Ok(_) | Err(_) => return Vec::new(),
     };
 
     match parse_vm_info(&output) {
@@ -241,8 +239,6 @@ mod tests {
         );
     }
 
-    // ── parse_vm_info() tests ───────────────────────────────
-
     #[test]
     fn test_parse_vm_info_valid_json() {
         let json = r#"{"Model":"VMware Virtual Platform","Manufacturer":"VMware, Inc."}"#;
@@ -290,8 +286,6 @@ mod tests {
         let json = r#"{"Model":null,"Manufacturer":null}"#;
         assert_eq!(parse_vm_info(json), None);
     }
-
-    // ── is_virtual_machine() tests ──────────────────────────
 
     #[test]
     fn test_is_vm_vmware_model() {
@@ -354,8 +348,6 @@ mod tests {
         assert!(is_virtual_machine("vmware virtual platform", ""));
     }
 
-    // ── check_os_warnings() and NESTED_VIRT_WARNING_MSG tests ──────────
-
     #[test]
     fn test_nested_virt_warning_msg_contains_remediation() {
         assert!(
@@ -370,8 +362,6 @@ mod tests {
 
     #[test]
     fn test_check_os_warnings_returns_empty_on_macos_with_sufficient_ram() {
-        // On macOS dev machines at/above the minimum host, check_os_warnings()
-        // returns empty (no nested-virt check, no low-memory warning).
         #[cfg(not(target_os = "windows"))]
         {
             let host_ram = crate::resources::host_total_memory_gib();
@@ -386,8 +376,6 @@ mod tests {
             }
         }
     }
-
-    // ── check_low_memory_with() tests ───────────────────────
 
     #[test]
     fn low_memory_warning_below_minimum() {
@@ -407,7 +395,6 @@ mod tests {
 
     #[test]
     fn low_memory_no_warning_at_minimum() {
-        // MIN_SUPPORTED_HOST_GIB (16) is the boundary — at/above it, no warning.
         assert!(check_low_memory_with(crate::resources::MIN_SUPPORTED_HOST_GIB).is_empty());
     }
 
@@ -418,7 +405,6 @@ mod tests {
 
     #[test]
     fn low_memory_warning_just_below_minimum() {
-        // 15 GiB — one below the boundary — must still warn.
         let w = check_low_memory_with(crate::resources::MIN_SUPPORTED_HOST_GIB - 1);
         assert_eq!(w.len(), 1);
         assert!(

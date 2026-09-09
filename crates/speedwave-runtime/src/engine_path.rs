@@ -58,7 +58,6 @@ mod tests {
 
     #[test]
     fn vm_path_join_inserts_single_separator() {
-        // WSL root + "Containerfile" yields exactly one "/" separator.
         assert_eq!(
             vm_path_join(
                 "/mnt/c/Users/u/.speedwave/plugins/example-plugin",
@@ -70,7 +69,6 @@ mod tests {
 
     #[test]
     fn vm_path_join_collapses_trailing_slashes_and_keeps_forward_slash() {
-        // Trailing slashes collapse; separator is always "/" on every host OS.
         assert_eq!(
             vm_path_join("/mnt/c/x/", "Containerfile"),
             "/mnt/c/x/Containerfile"
@@ -87,7 +85,6 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn to_engine_path_is_identity_on_unix() {
-        // On macOS/Linux the host path is the engine path (Lima 1:1 mount).
         assert_eq!(
             to_engine_path(Path::new("/Users/u/.speedwave/plugins/x")).unwrap(),
             "/Users/u/.speedwave/plugins/x"
@@ -147,7 +144,6 @@ mod tests {
 
     #[test]
     fn strip_extended_length_prefix_passthrough() {
-        // UNC verbatim, plain drive, POSIX, and short strings stay unchanged.
         assert_eq!(
             strip_extended_length_prefix(r"\\?\UNC\server\share"),
             r"\\?\UNC\server\share"

@@ -18,8 +18,6 @@ where
     dt.to_rfc3339_opts(SecondsFormat::Millis, false)
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -69,7 +67,6 @@ mod tests {
             parsed.is_ok(),
             "log_timestamp must be RFC-3339 parseable: {s}"
         );
-        // millisecond fractional-seconds slot is present
         assert!(s.contains('.'), "must carry millis: {s}");
     }
 }

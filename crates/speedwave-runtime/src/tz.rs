@@ -28,7 +28,6 @@ fn detect_platform() -> Option<String> {
 fn detect_platform() -> Option<String> {
     use std::time::Duration;
 
-    // 5 s deadline; slow PowerShell startup (cold boot, AV scan) must not stall caller.
     let output = crate::binary::run_powershell_capture(
         &[
             "-NoProfile",
@@ -406,7 +405,6 @@ mod tests {
 
     #[test]
     fn detect_host_timezone_never_panics() {
-        // smoke test: must always return a non-empty string on any platform.
         let tz = detect_host_timezone();
         assert!(!tz.is_empty());
     }
