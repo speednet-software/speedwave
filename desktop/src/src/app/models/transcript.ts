@@ -4,9 +4,6 @@
 /** PL/EN (forced; never auto-detected). */
 export type Language = 'pl' | 'en';
 
-/** Compiled whisper.cpp acceleration backends (build-time, not host-probe). */
-export type Backend = 'cpu' | 'metal' | 'vulkan';
-
 /** Probed host GPU class — mirrors Rust `GpuClass` (ADR-085). */
 export type GpuClass = 'none' | 'integrated' | 'discrete';
 
@@ -113,7 +110,6 @@ export type TranscriptEvent =
 /** `transcription_capabilities` command return type. */
 export interface CapabilitiesAck {
   capabilities: CaptureCapabilities;
-  backends: Backend[];
   gpu_class: GpuClass;
   /** Acceleration label computed host-side (`accel::accel_label()`) — render verbatim. */
   accel_label: string;

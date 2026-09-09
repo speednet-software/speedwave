@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use speedwave_runtime::transcription::{
-    self, AudioSource, AudioSourceInfo, Backend, CaptureCapabilities, DriverConfig, FinalizeConfig,
+    self, AudioSource, AudioSourceInfo, CaptureCapabilities, DriverConfig, FinalizeConfig,
     Language, ModelStatusEntry, ModelStore, StopSignal, TranscribeOptions, TranscriptDriver,
     TranscriptEvent, TranscriptSession, TranscriptStatus, TranscriptStore, WhisperCppTranscriber,
 };
@@ -56,12 +56,9 @@ fn short_id(id: Uuid) -> String {
 pub struct CapabilitiesAck {
     /// What the host's audio backend can do.
     pub capabilities: CaptureCapabilities,
-    /// Which whisper.cpp backends were compiled in.
-    pub backends: Vec<Backend>,
     /// Probed host GPU class (ADR-085) — drives the live-transcript default in the UI.
     pub gpu_class: transcription::GpuClass,
-    /// Acceleration label computed by `accel::accel_label()` — the UI renders it verbatim,
-    /// never re-derives it from `backends`/`gpu_class`.
+    /// Acceleration label computed by `accel::accel_label()` — the UI renders it verbatim.
     pub accel_label: String,
 }
 
@@ -71,7 +68,6 @@ pub async fn transcription_capabilities() -> Result<CapabilitiesAck, String> {
     // enumeration — unbounded FFI): keep it off the async workers (cached afterwards).
     tokio::task::spawn_blocking(|| CapabilitiesAck {
         capabilities: transcription::detect_audio_capture().capabilities(),
-        backends: transcription::compiled_backends(),
         gpu_class: transcription::gpu_class(),
         accel_label: transcription::accel_label(),
     })
@@ -983,11 +979,58 @@ pub async fn delete_transcription_model(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions may unwrap freely"
+)]
 mod tests {
     use super::*;
     use speedwave_runtime::transcription::TranscriptSession;
     use std::path::PathBuf;
+
+    #[test]
+    fn capabilities_ack_field_set_matches_ts() {
+        let ack = CapabilitiesAck {
+            capabilities: CaptureCapabilities {
+                supports_system_audio: true,
+                supports_microphone: false,
+                note: None,
+            },
+            gpu_class: transcription::GpuClass::Discrete,
+            accel_label: "Metal (GPU)".to_string(),
+        };
+        let json = serde_json::to_value(&ack).unwrap();
+        let mut rust: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        rust.sort_unstable();
+        assert_eq!(rust, ["accel_label", "capabilities", "gpu_class"]);
+
+        let src = include_str!("../../src/src/app/models/transcript.ts");
+        let marker = "export interface CapabilitiesAck {";
+        let idx = src
+            .find(marker)
+            .expect("transcript.ts must declare `export interface CapabilitiesAck`");
+        let body = src[idx + marker.len()..]
+            .split('}')
+            .next()
+            .expect("the CapabilitiesAck interface must be closed");
+        let mut ts: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts.sort_unstable();
+        assert_eq!(
+            rust, ts,
+            "TS CapabilitiesAck must mirror the Rust ack fields"
+        );
+    }
 
     fn mk_session_in(store: &TranscriptStore) -> Uuid {
         let s = TranscriptSession::new(

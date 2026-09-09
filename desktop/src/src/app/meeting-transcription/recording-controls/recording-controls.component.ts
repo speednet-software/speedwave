@@ -235,7 +235,7 @@ export class RecordingControlsComponent implements OnInit {
    */
   readonly recording = this.transcription.recording;
 
-  /** Loads backends + source list + model availability on first paint. */
+  /** Loads capabilities + source list + model availability on first paint. */
   async ngOnInit(): Promise<void> {
     try {
       const caps = await this.transcription.getCapabilities();
