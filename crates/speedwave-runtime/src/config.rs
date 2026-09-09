@@ -40,7 +40,6 @@ impl LlmProviderKind {
 /// SSOT predicate (ADR-073): a `provider/model`-shaped id is foreign to
 /// Anthropic — shape check, not catalog membership; retired `claude-*` kept.
 pub fn is_foreign_anthropic_model(model: &str) -> bool {
-    // Mirrored in llm-provider.component.ts::isForeignModel (frontend can't call Rust).
     model.contains('/')
 }
 
@@ -190,7 +189,6 @@ impl LlmConfig {
             .filter(|s| !s.is_empty());
         match (active_model, entry_model) {
             (Some(a), Some(e)) if a == e => Some(a.to_string()),
-            // Disagreement or active-only: trust the provider entry (provenance).
             (_, Some(e)) => {
                 if active_model.is_some_and(|a| a != e) {
                     log::debug!(
@@ -199,7 +197,6 @@ impl LlmConfig {
                 }
                 Some(e.to_string())
             }
-            // Entry has no model: active-only is unattributable → drop it.
             (_, None) => None,
         }
     }
@@ -252,8 +249,6 @@ pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
             llm.providers.push(LlmProviderEntry {
                 id: "local".to_string(),
                 kind: LlmProviderKind::Local,
-                // v0.13.3 filled the per-alias default port at render time; an
-                // unset base_url must keep that identity through the lift.
                 base_url: llm
                     .base_url
                     .clone()
@@ -268,8 +263,6 @@ pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
                 model: llm.model.clone(),
             });
         } else if legacy_provider.is_some() || evidence != AnthropicEvidence::None {
-            // v0.13.3 defaulted an unset provider to anthropic, so credentialed
-            // upgraders migrate; truly fresh (no creds) falls through (render refuses).
             let kind = if evidence == AnthropicEvidence::ApiKey {
                 LlmProviderKind::AnthropicApiKey
             } else {
@@ -292,8 +285,6 @@ pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
     }
     llm.schema_version = Some(LLM_SCHEMA_VERSION);
 
-    // Lift the flat model into active only when it belongs to the active entry;
-    // a foreign one would be cleared by the quarantine step below anyway.
     let flat = llm.model.as_deref().map(str::trim);
     let flat_belongs_to_active = llm
         .active_provider()
@@ -307,10 +298,8 @@ pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
         }
     }
 
-    // v3: clear any foreign model left under an Anthropic entry (provenance).
     quarantine_foreign_anthropic_models(llm);
 
-    // Validate ids — they reach token file paths and env names.
     let before = llm.providers.len();
     llm.providers.retain(|p| {
         let ok = crate::plugin::is_valid_slug(&p.id);
@@ -332,7 +321,6 @@ pub fn migrate_llm(llm: &mut LlmConfig, evidence: AnthropicEvidence) -> bool {
 
     sync_llm_legacy_fields(llm);
 
-    // Serialization failure → can't tell, assume unchanged (avoid spurious heal writes).
     snapshot_before
         .and_then(|b| serde_json::to_string(&*llm).ok().map(|after| b != after))
         .unwrap_or(false)
@@ -355,8 +343,6 @@ fn quarantine_foreign_anthropic_models(llm: &mut LlmConfig) {
             entry.model = None;
         }
     }
-    // Reconcile the active pointer to the entry's model (the routing SSOT), so
-    // a disagreeing active.model never persists — not just the cleared case.
     let routed = llm.effective_active_model();
     if let Some(active) = &mut llm.active {
         if active.model != routed {
@@ -380,7 +366,6 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.base_url.clone_from(&entry.base_url);
             llm.has_api_key = entry.has_api_key;
             llm.has_custom_headers = entry.has_custom_headers;
-            // Local model belongs to the provider — flat pair stays consistent.
             llm.model.clone_from(&entry.model);
         }
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
@@ -390,8 +375,6 @@ pub fn sync_llm_legacy_fields(llm: &mut LlmConfig) {
             llm.has_custom_headers = false;
             llm.model.clone_from(&entry.model);
         }
-        // No v1 equivalent — flat masquerades as anthropic, so its model must
-        // NOT carry the OpenRouter id (404s a downgrade reader); v2 fields keep it.
         LlmProviderKind::OpenRouter => {
             llm.provider = Some(ANTHROPIC_PROVIDER_ID.to_string());
             llm.base_url = None;
@@ -700,8 +683,6 @@ pub struct TelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
-// Manual Debug (headers is a secret); exhaustive destructure so a new field
-// cannot be added without updating this impl.
 impl std::fmt::Debug for TelemetryConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
@@ -774,8 +755,6 @@ pub struct ManagedTelemetryConfig {
     pub logs_export_interval_ms: Option<u64>,
 }
 
-// Manual Debug (headers is a secret); exhaustive destructure so a new field
-// cannot be added without updating this impl.
 impl std::fmt::Debug for ManagedTelemetryConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
@@ -871,10 +850,6 @@ struct LegacyCategoryFlags {
     card: bool,
     #[serde(rename = "API_KEY")]
     api_key: bool,
-    // v1 also carried SENSITIVE_FIELD; key-name-based detection was removed
-    // entirely from the engine (no v3 rule counterpart), so the value is
-    // accepted here (deny_unknown_fields would otherwise reject old configs
-    // that set it) and dropped, not mapped, during migration.
     #[serde(rename = "SENSITIVE_FIELD")]
     _sensitive_field: bool,
 }
@@ -932,8 +907,6 @@ struct PiiPolicyUserConfigShape {
     categories: Option<LegacyCategoryFlags>,
     custom_patterns: Option<Vec<LegacyCustomPiiPattern>>,
     sensitive_keys: Option<serde_json::Value>,
-    // v1's token-lifecycle overrides; the mapped tokenizer never existed, the
-    // field is accepted so an old config on disk still loads, then dropped.
     limits: Option<serde_json::Value>,
 }
 
@@ -962,8 +935,6 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
             });
         }
 
-        // v1 custom mode (categories/custom_patterns/sensitive_keys present):
-        // fold into a single synthesized "custom" policy definition.
         if has_v1_custom {
             let categories = legacy_categories_to_v3(raw.categories.unwrap_or_default());
             let rules = raw
@@ -980,8 +951,6 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
                     log: false,
                 })
                 .collect();
-            // v1's sensitive-keys concept has no v3 counterpart (key-name-based
-            // detection was removed entirely); intentionally dropped.
 
             return Ok(Self {
                 policies: vec!["custom".to_string()],
@@ -995,7 +964,6 @@ impl TryFrom<PiiPolicyUserConfigShape> for PiiPolicyUserConfig {
             });
         }
 
-        // Pure `template_id`, nothing else: a straight policy-id selection.
         if let Some(id) = raw.template_id {
             return Ok(Self {
                 policies: vec![id],
@@ -1046,8 +1014,6 @@ pub struct ResolvedTelemetry {
     pub kill_switch: bool,
 }
 
-// Manual Debug (headers is a secret); exhaustive destructure so a new field
-// cannot be added without updating this impl.
 impl std::fmt::Debug for ResolvedTelemetry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
@@ -1173,8 +1139,6 @@ pub fn resolve_telemetry(
     let mut locked_keys: BTreeSet<String> = BTreeSet::new();
     let mut any_locked = false;
 
-    // A macro (not a closure) so it doesn't hold a long-lived borrow of
-    // any_locked/locked_keys that would conflict with the `enabled` branch below.
     macro_rules! note_lock {
         ($field:expr) => {{
             any_locked = true;
@@ -1208,8 +1172,6 @@ pub fn resolve_telemetry(
     }
 
     use TelemetryField as F;
-    // `enabled` locks the CLAUDE_CODE_* master switch (not an OTEL_* key) by
-    // inserting ENABLE_KEY directly, so MDM can force it un-bypassably.
     let enabled = match managed.and_then(|m| m.enabled) {
         Some(v) => {
             any_locked = true;
@@ -1292,11 +1254,8 @@ pub fn resolve_telemetry(
         user.and_then(|u| u.logs_export_interval_ms)
     );
 
-    // Kill-switch = MDM set enabled=false (presence is the lock).
     let kill_switch = managed.and_then(|m| m.enabled) == Some(false);
 
-    // Cross-field gate: enabled=false suppresses ALL output — everything off
-    // (via `disabled()`) except the resolved lock bookkeeping and cardinality.
     if !enabled {
         return Ok(ResolvedTelemetry {
             protocol,
@@ -1308,7 +1267,6 @@ pub fn resolve_telemetry(
         });
     }
 
-    // Cross-field gate: enabled=true needs a valid endpoint (fail-closed).
     let parsed_endpoint = match &endpoint_opt {
         Some(ep) => crate::url_validation::validate_collector_url(
             ep,
@@ -1374,11 +1332,9 @@ fn check_telemetry_policy(
         return Ok(());
     };
     if let Some(ep) = e.downcast_ref::<InvalidOtlpEndpoint>() {
-        // An MDM-set endpoint failing validation IS an org policy error.
         if ep.mdm_locked {
             return Err(e);
         }
-        // MDM forcing enabled=true means disabling would erase the org mandate.
         if managed.and_then(|m| m.enabled) != Some(true) {
             log::error!(
                 "disabling telemetry for this run: user OTLP endpoint '{}' was rejected: {}",
@@ -1391,7 +1347,6 @@ fn check_telemetry_policy(
     if telemetry_error_implicates_mdm(user, managed) {
         return Err(e);
     }
-    // A pure user-config error must not be mislabeled as an org policy error.
     Err(anyhow::anyhow!(
         "invalid local telemetry configuration (no organization policy involved): {e}"
     ))
@@ -1550,7 +1505,6 @@ pub(crate) fn resolve_project_config_in_with_load(
                 None,
                 None,
             );
-            // Fail closed: drop any telemetry env the user layer added, force off.
             let disabled = ResolvedTelemetry::disabled();
             for f in crate::telemetry_env::TelemetryField::ALL {
                 if let Some(k) = crate::telemetry_env::env_key_for(*f) {
@@ -1561,8 +1515,6 @@ pub(crate) fn resolve_project_config_in_with_load(
                 .env
                 .extend(crate::telemetry_env::telemetry_env_map(&disabled));
             claude.telemetry = disabled;
-            // Opposite fail-closed direction: an unreadable managed-config might
-            // hide a forced PII policy — never silently resolve as if none applies.
             claude.pii_policy = Err(format!(
                 "cannot resolve PII policy: organization policy configuration is unreadable: {e}"
             ));
@@ -1587,8 +1539,6 @@ pub(crate) fn resolve_project_config_in_with_managed(
     let mut llm = LlmConfig::default();
     let mut integrations = ResolvedIntegrationsConfig::default();
 
-    // Baseline goes in BEFORE the user merge (user wins for non-locked keys);
-    // locked keys are re-forced AFTER, below. Map built ONCE and reused.
     let resolved_tel = resolve_telemetry(user_config.telemetry.as_ref(), managed_telemetry);
     let tel_env = resolved_tel
         .as_ref()
@@ -1599,8 +1549,6 @@ pub(crate) fn resolve_project_config_in_with_managed(
         env.insert(k.clone(), v.clone());
     }
 
-    // Layer 1: repo config (.speedwave.json)
-    // provider and base_url are ignored from repo config (SSRF prevention — ADR-040)
     if let Some(repo) = repo {
         if let Some(c) = repo.claude {
             merge_env(&mut env, sanitize_repo_env(c.env));
@@ -1612,10 +1560,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
             apply_integrations_layer(&mut integrations, &repo_integrations);
         }
     }
-    // Captured pre-user-layer so the documented repo suggestion survives migration.
     let repo_model_suggestion = llm.model.clone();
 
-    // Layer 2: user config (highest priority)
     if let Some(user) = user_config.find_project(project_name) {
         if let Some(c) = &user.claude {
             merge_env(&mut env, c.env.clone());
@@ -1628,8 +1574,6 @@ pub(crate) fn resolve_project_config_in_with_managed(
         }
     }
 
-    // Re-force: strip any user value for an MDM-locked key, then set the locked
-    // value from the built map — this is what the user cannot beat.
     match &resolved_tel {
         Ok(tel) => {
             env.retain(|k, _| !tel.locked_keys.contains(k));
@@ -1639,8 +1583,6 @@ pub(crate) fn resolve_project_config_in_with_managed(
                 }
             }
         }
-        // Fail closed: an unresolvable policy strips any telemetry-shaped key the
-        // user layer set directly, then re-forces the all-off map.
         Err(_) => {
             for f in crate::telemetry_env::TelemetryField::ALL {
                 if let Some(k) = crate::telemetry_env::env_key_for(*f) {
@@ -1654,23 +1596,16 @@ pub(crate) fn resolve_project_config_in_with_managed(
         }
     }
 
-    // Migrate to the current LLM schema (ADR-073).
     migrate_llm(
         &mut llm,
         AnthropicEvidence::detect_in(data_dir, project_name),
     );
     apply_repo_model_suggestion(&mut llm, repo_model_suggestion);
 
-    // Lift a legacy `local-llm/api_key` into the llm token namespace BEFORE the disk-sync below —
-    // otherwise sync re-derives has_api_key from the still-empty new path and migration never runs.
     crate::compose::migrate_legacy_local_key_in(data_dir, project_name, &llm);
 
-    // Re-derive each provider's `has_api_key` from disk — the key file is SSOT, the persisted flag
-    // only an echo. Every renderer (proxy/compose) reads resolved config; the single sync point.
     llm.sync_has_api_key_from_disk_in(data_dir, project_name);
 
-    // Local LLMs keep the full default system prompt; two local-only additions
-    // help small open models: stable prompt prefix (KV cache) + skill recall.
     let mut flags: Vec<String> = defaults::DEFAULT_FLAGS
         .iter()
         .map(|s| s.to_string())
@@ -1684,13 +1619,8 @@ pub(crate) fn resolve_project_config_in_with_managed(
         flags.push(crate::prompts::local_llm_skills_nudge().to_string());
     }
 
-    // Fail-closed: an unresolvable policy degrades to disabled(). MDM-implicated
-    // failures hard-stop at boot; a user-layer bad endpoint only logs there.
     let telemetry = resolved_tel.unwrap_or_else(|_| ResolvedTelemetry::disabled());
 
-    // Stored as a Result (not degraded here): `render_compose` hard-fails via `?`
-    // on an invalid per-project policy. Beta-gated (ADR-058): with beta off and
-    // no MDM-forced policies the engines get the inert all-off policy.
     let pii_policy =
         if crate::pii_policy::pii_feature_enabled(user_config.beta_enabled(), managed_pii_policy) {
             crate::pii_policy::resolve_pii_policy(
@@ -1739,7 +1669,6 @@ fn apply_repo_model_suggestion(llm: &mut LlmConfig, suggestion: Option<String>) 
     if let Some(active) = &mut llm.active {
         active.model = Some(model.clone());
     }
-    // Flat mirror for the legacy (proxy_enabled=false) renderer.
     llm.model = Some(model);
 }
 
@@ -1861,7 +1790,6 @@ pub(crate) fn save_user_config_to(config: &SpeedwaveUserConfig, path: &Path) -> 
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    // Durable atomic write (fsync data + parent dir).
     crate::fs_perms::write_restricted_file_atomic(path, &content)
 }
 
@@ -1917,8 +1845,6 @@ pub fn heal_llm_config_in(data_dir: &Path) -> anyhow::Result<()> {
                     changed |= migrate_llm(llm, evidence);
                 }
             } else if evidence != AnthropicEvidence::None {
-                // v0.13.3 default population: no llm block but working Anthropic
-                // credentials — fabricate the entry so the project keeps chatting.
                 let mut llm = LlmConfig::default();
                 migrate_llm(&mut llm, evidence);
                 project.claude.get_or_insert_with(Default::default).llm = Some(llm);
@@ -1993,7 +1919,6 @@ fn merge_llm(base: &mut LlmConfig, overlay: &LlmConfig) {
     if overlay.has_custom_headers {
         base.has_custom_headers = true;
     }
-    // v2 (ADR-073): the user layer carries the provider list wholesale.
     if overlay.schema_version.is_some() {
         base.schema_version = overlay.schema_version;
     }
@@ -2022,7 +1947,7 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
     with_config_lock_in(data_dir, || {
         let path = data_dir.join("config.json");
         let Ok(raw) = std::fs::read_to_string(&path) else {
-            return Ok(false); // first-run / missing file is normal
+            return Ok(false);
         };
         let mut value: serde_json::Value = serde_json::from_str(&raw)
             .with_context(|| format!("config migration: {} is not valid JSON", path.display()))?;
@@ -2036,7 +1961,6 @@ pub fn migrate_drop_log_level_in(data_dir: &Path) -> anyhow::Result<bool> {
             return Ok(false);
         }
         let content = serde_json::to_string_pretty(&value)?;
-        // Durable atomic write (fsync data + parent dir) — see save_user_config_to.
         crate::fs_perms::write_restricted_file_atomic(&path, &content).with_context(|| {
             format!(
                 "config migration: durable write of {} failed",
@@ -2121,15 +2045,12 @@ mod tests {
 
     #[test]
     fn is_unconfigured_true_for_fresh_default() {
-        // Never-touched project: no llm override fields set at all → render must refuse.
         assert!(LlmConfig::default().is_unconfigured());
         assert!(!LlmConfig::default().is_logged_out());
     }
 
     #[test]
     fn is_unconfigured_true_for_explicit_logout() {
-        // Emptied v2 (logout): schema + providers + no active → both true,
-        // is_logged_out picks the distinct "Run speedwave login" wording.
         let llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![anthropic_entry()],
@@ -2142,8 +2063,6 @@ mod tests {
 
     #[test]
     fn is_unconfigured_true_for_dangling_active() {
-        // Dangling active (missing entry) is unconfigured: render must refuse rather than silently
-        // fall back to the Anthropic default for a nonexistent provider id.
         let llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![],
@@ -2154,13 +2073,11 @@ mod tests {
             ..Default::default()
         };
         assert!(llm.is_unconfigured());
-        // Not a logout (active is Some, just dangling) — distinct bail wording.
         assert!(!llm.is_logged_out());
     }
 
     #[test]
     fn is_unconfigured_true_for_legacy_v1_with_provider_before_migration() {
-        // Legacy `provider` alone is not resolvable until migrated.
         let llm = LlmConfig {
             provider: Some("anthropic".into()),
             ..Default::default()
@@ -2184,8 +2101,6 @@ mod tests {
 
     #[test]
     fn unhealed_config_with_providers_no_active_is_unconfigured() {
-        // Regression: a not-yet-healed config (no schema, but providers + no
-        // active) has no resolvable active provider → unconfigured.
         let llm = LlmConfig {
             schema_version: None,
             providers: vec![anthropic_entry()],
@@ -2197,7 +2112,6 @@ mod tests {
 
     #[test]
     fn anthropic_provider_id_is_pinned_for_on_disk_compat() {
-        // Persisted config.json files carry this id — changing it orphans them.
         assert_eq!(ANTHROPIC_PROVIDER_ID, "anthropic");
     }
 
@@ -2222,7 +2136,6 @@ mod tests {
 
     #[test]
     fn set_active_to_anthropic_mirrors_existing_entry_model() {
-        // Previously selected Anthropic model (per-provider SSOT) is not discarded.
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![LlmProviderEntry {
@@ -2243,8 +2156,6 @@ mod tests {
 
     #[test]
     fn set_active_to_anthropic_clears_foreign_entry_model() {
-        // Corrupt pre-quarantine state: a provider/model shape under an
-        // Anthropic entry must not leak into the active pointer.
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![LlmProviderEntry {
@@ -2260,8 +2171,6 @@ mod tests {
 
     #[test]
     fn set_active_to_anthropic_adds_entry_when_absent() {
-        // Switching from an active non-Anthropic entry: its model must not
-        // carry over to the fresh Anthropic entry's pointer.
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![LlmProviderEntry {
@@ -2314,18 +2223,14 @@ mod tests {
         );
     }
 
-    // ---- LlmProviderKind Rust↔TS mirror (ADR-073) ---------------------------
-
     #[test]
     fn llm_provider_kind_matches_ts_union() {
-        // TS union must list exactly the Rust serde strings (cf. allowed_auth_field_types_match_ts_union).
         let all = [
             LlmProviderKind::AnthropicOauth,
             LlmProviderKind::AnthropicApiKey,
             LlmProviderKind::Local,
             LlmProviderKind::OpenRouter,
         ];
-        // Exhaustiveness gate: a new variant fails to compile until added above.
         for kind in all {
             match kind {
                 LlmProviderKind::AnthropicOauth
@@ -2371,7 +2276,6 @@ mod tests {
             OtlpProtocol::HttpProtobuf,
             OtlpProtocol::HttpJson,
         ];
-        // Exhaustiveness gate: a new variant fails to compile until added above.
         for p in all {
             match p {
                 OtlpProtocol::Grpc | OtlpProtocol::HttpProtobuf | OtlpProtocol::HttpJson => {}
@@ -2409,8 +2313,6 @@ mod tests {
 
     #[test]
     fn telemetry_locks_field_set_matches_ts() {
-        // Every TelemetryField's snake_case name must appear as a key in the TS
-        // TelemetryLocks interface, so a renamed/added field can't silently drift.
         use crate::telemetry_env::TelemetryField as F;
         let field_names = [
             (F::Enabled, "enabled"),
@@ -2428,7 +2330,6 @@ mod tests {
             (F::MetricExportInterval, "metric_export_interval_ms"),
             (F::LogsExportInterval, "logs_export_interval_ms"),
         ];
-        // Exhaustiveness: covers every variant (compile error if one is missing).
         assert_eq!(field_names.len(), F::ALL.len());
 
         let src = include_str!("../../../desktop/src/src/app/models/telemetry.ts");
@@ -2445,12 +2346,8 @@ mod tests {
         }
     }
 
-    // ---- Transcription config retired (ADR-056) -----------------------------
-
     #[test]
     fn old_user_config_with_a_transcription_block_still_loads() {
-        // The `transcription` field was removed; a config still carrying the
-        // block must deserialize fine (the key is tolerated as unknown).
         let old_json = r#"{
             "projects": [],
             "transcription": {
@@ -2472,7 +2369,6 @@ mod tests {
 
     #[test]
     fn repo_config_has_no_transcription_field() {
-        // Repo .speedwave.json has no transcription field — a stray key is dropped.
         let repo_json = r#"{
             "claude": null,
             "integrations": null,
@@ -2485,8 +2381,6 @@ mod tests {
             "repo config must not surface a transcription field; got {json_back}"
         );
     }
-
-    // ---- UiPrefsConfig (ADR-058) -------------------------------------------
 
     #[test]
     fn beta_disabled_by_default() {
@@ -2560,12 +2454,7 @@ mod tests {
             has_custom_headers: false,
         };
         let mut llm = LlmConfig {
-            providers: vec![
-                // Persisted true, but no key file on disk → must flip to false.
-                provider("stale-true", true),
-                // Persisted false, but key file exists → must flip to true.
-                provider("stale-false", false),
-            ],
+            providers: vec![provider("stale-true", true), provider("stale-false", false)],
             ..Default::default()
         };
         crate::compose::write_llm_provider_key_in(dir.path(), "proj", "stale-false", "sk-x")
@@ -2598,7 +2487,6 @@ mod tests {
 
     #[test]
     fn test_is_local_provider_matches_local_providers_const() {
-        // `is_local_provider` and `LOCAL_PROVIDERS` must stay in sync.
         for name in LOCAL_PROVIDERS {
             assert!(
                 is_local_provider(Some(name)),
@@ -2608,7 +2496,7 @@ mod tests {
         assert!(!is_local_provider(None));
         assert!(!is_local_provider(Some("anthropic")));
         assert!(!is_local_provider(Some("")));
-        assert!(!is_local_provider(Some("Ollama"))); // case-sensitive
+        assert!(!is_local_provider(Some("Ollama")));
     }
 
     #[test]
@@ -2654,8 +2542,6 @@ mod tests {
             resolved.env.get("ANTHROPIC_MODEL"),
             Some(&"claude-opus-4-6".to_string())
         );
-        // A repo `.speedwave.json` cannot enable telemetry (deny-listed, ADR-076);
-        // the compiled default stays off.
         assert_eq!(
             resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
             Some(&"0".to_string())
@@ -2686,7 +2572,6 @@ mod tests {
                 claude: Some(ClaudeOverrides {
                     env: Some(HashMap::from([
                         ("CLAUDE_CODE_ENABLE_TELEMETRY".to_string(), "0".to_string()),
-                        // User can override the base_env default.
                         ("WAYLAND_DISPLAY".to_string(), "".to_string()),
                     ])),
                     settings: None,
@@ -2703,7 +2588,6 @@ mod tests {
         };
 
         let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
-        // User override wins over both repo (.speedwave.json) and base_env.
         assert_eq!(
             resolved.env.get("CLAUDE_CODE_ENABLE_TELEMETRY"),
             Some(&"0".to_string())
@@ -2714,8 +2598,6 @@ mod tests {
             "user config must be able to override the base_env WAYLAND_DISPLAY default"
         );
     }
-
-    // ── telemetry: resolve_telemetry ────────────────────────────────────────
 
     #[test]
     fn telemetry_defaults_off_when_no_config() {
@@ -2764,8 +2646,6 @@ mod tests {
 
     #[test]
     fn telemetry_every_managed_field_reaches_resolved() {
-        // Guards the merge seam: every value below differs from the Resolved
-        // default, so a field forgotten in resolve_telemetry fails the assert.
         let managed = ManagedTelemetryConfig {
             enabled: Some(true),
             endpoint: Some("https://corp.example.com:4318".into()),
@@ -2818,7 +2698,6 @@ mod tests {
         assert!(r.endpoint.is_none());
         assert!(r.headers.is_none());
         assert!(!r.export_metrics);
-        // P0: the master switch itself is locked, so it is re-forced / written to managed-settings.
         assert!(r.locked_keys.contains("CLAUDE_CODE_ENABLE_TELEMETRY"));
     }
 
@@ -2847,7 +2726,6 @@ mod tests {
 
     #[test]
     fn mdm_implicated_false_when_user_error_persists_without_mdm() {
-        // MDM present but not the cause: the same user config still fails once MDM is removed.
         let user = TelemetryConfig {
             enabled: Some(true),
             endpoint: Some("ftp://x/".into()),
@@ -2863,7 +2741,6 @@ mod tests {
 
     #[test]
     fn mdm_implicated_true_when_removing_mdm_fixes_it() {
-        // MDM locks enabled=true with no endpoint of its own; the user layer alone is fine.
         let managed = ManagedTelemetryConfig {
             enabled: Some(true),
             ..Default::default()
@@ -2871,8 +2748,6 @@ mod tests {
         assert!(resolve_telemetry(None, Some(&managed)).is_err());
         assert!(telemetry_error_implicates_mdm(None, Some(&managed)));
     }
-
-    // ── telemetry: boot-gate degradation vs MDM fatality ────────────────────
 
     #[test]
     fn resolve_telemetry_endpoint_error_carries_layer_provenance() {
@@ -2883,7 +2758,6 @@ mod tests {
         };
         let err = resolve_telemetry(Some(&user), None).unwrap_err();
         let ep = err.downcast_ref::<InvalidOtlpEndpoint>().unwrap();
-        // Redaction normalizes the URL (trailing slash), so match on the host.
         assert!(ep.endpoint.contains("198.18.0.10:4318"), "{}", ep.endpoint);
         assert!(!ep.reason.is_empty());
         assert!(!ep.mdm_locked);
@@ -2900,8 +2774,6 @@ mod tests {
 
     #[test]
     fn endpoint_error_never_carries_embedded_credentials() {
-        // The creds-rejection reason must not smuggle the password back into
-        // the error message or the boot-check log line.
         let user = TelemetryConfig {
             enabled: Some(true),
             endpoint: Some("https://admin:s3cr3t-pw@collector.example.com:4318".into()),
@@ -2921,8 +2793,6 @@ mod tests {
 
     #[test]
     fn boot_check_degrades_user_layer_invalid_endpoint() {
-        // A stored endpoint reclassified by a validator tightening (RFC 2544,
-        // link-local) must not brick startup; resolve stays strict for save paths.
         for endpoint in ["http://198.18.0.10:4318", "https://169.254.169.254/"] {
             let user = TelemetryConfig {
                 enabled: Some(true),
@@ -2963,7 +2833,6 @@ mod tests {
             ..Default::default()
         };
         assert!(check_telemetry_policy(None, Some(&managed)).is_err());
-        // Enable from the user layer, endpoint from MDM: still an org policy error.
         let user_on = TelemetryConfig {
             enabled: Some(true),
             ..Default::default()
@@ -2977,8 +2846,6 @@ mod tests {
 
     #[test]
     fn boot_check_stays_fatal_when_mdm_forces_telemetry_on() {
-        // MDM mandates telemetry; degrading a broken user endpoint to disabled
-        // would silently erase the org policy.
         let managed = ManagedTelemetryConfig {
             enabled: Some(true),
             ..Default::default()
@@ -3030,7 +2897,6 @@ mod tests {
 
     #[test]
     fn boot_check_other_user_errors_stay_fatal() {
-        // Only the endpoint-validation class degrades; the rest keep hard-stopping.
         let no_endpoint = TelemetryConfig {
             enabled: Some(true),
             ..Default::default()
@@ -3072,8 +2938,6 @@ mod tests {
 
     #[test]
     fn telemetry_kill_switch_still_records_co_locked_fields() {
-        // MDM turns telemetry off AND separately locks a privacy gate; the
-        // early-return path must still carry both locks.
         let managed = ManagedTelemetryConfig {
             enabled: Some(false),
             log_user_prompts: Some(true),
@@ -3129,7 +2993,6 @@ mod tests {
             export_metrics: Some(true),
             ..Default::default()
         };
-        // localhost DNS name is NOT loopback; the loopback literal 127.0.0.1 is.
         assert!(resolve_telemetry(Some(&u), None).is_err());
         let u2 = TelemetryConfig {
             enabled: Some(true),
@@ -3192,7 +3055,6 @@ mod tests {
 
     #[test]
     fn telemetry_port_protocol_mismatch_is_advisory_not_error() {
-        // A mismatched port only warns; resolve still succeeds.
         let grpc_on_http_port = TelemetryConfig {
             enabled: Some(true),
             endpoint: Some("https://c.example.com:4318".into()),
@@ -3307,8 +3169,6 @@ mod tests {
 
     #[test]
     fn resolve_telemetry_err_strips_raw_user_env_telemetry_keys() {
-        // MDM locks enabled=true with no endpoint of its own -> resolve_telemetry errs.
-        // A direct user claude.env override must not survive that failure unfiltered.
         let tmp = tempfile::tempdir().unwrap();
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
@@ -3400,7 +3260,6 @@ mod tests {
     #[test]
     fn mdm_load_error_fails_closed_and_disables_telemetry() {
         let tmp = tempfile::tempdir().unwrap();
-        // User has telemetry ON; a broken MDM policy must still shut it off.
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
                 name: "p".into(),
@@ -3550,14 +3409,12 @@ mod tests {
         };
 
         let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
-        // User config wins; v1→v2 migration normalises `ollama` to `local`.
         assert_eq!(resolved.llm.provider.as_deref(), Some("local"));
         assert_eq!(resolved.llm.model.as_deref(), Some("llama3.3"));
         assert_eq!(
             resolved.llm.base_url.as_deref(),
             Some("http://host.docker.internal:11434")
         );
-        // And the v2 shape carries the same selection.
         let active = resolved.llm.active.as_ref().expect("active set");
         assert_eq!(active.provider_id, "local");
         assert_eq!(active.model.as_deref(), Some("llama3.3"));
@@ -3589,8 +3446,6 @@ mod tests {
 
         let user_config = SpeedwaveUserConfig::default();
         let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
-        // Repo provider/base_url ignored (SSRF, ADR-040): with no user-side
-        // override either, the project has no real config — stays unconfigured.
         assert_eq!(resolved.llm.provider, None);
         assert_eq!(resolved.llm.base_url, None);
         assert!(resolved.llm.active.is_none());
@@ -3642,7 +3497,6 @@ mod tests {
     /// the lift is idempotent, and the downgrade fields round-trip.
     #[test]
     fn test_migrate_llm_variants() {
-        // anthropic + secret → AnthropicApiKey
         let mut llm = LlmConfig {
             provider: Some("anthropic".into()),
             model: Some("claude-opus-4-8".into()),
@@ -3658,7 +3512,6 @@ mod tests {
             Some("claude-opus-4-8")
         );
 
-        // anthropic without secret → AnthropicOauth
         let mut llm = LlmConfig {
             provider: Some("anthropic".into()),
             ..Default::default()
@@ -3669,19 +3522,14 @@ mod tests {
             LlmProviderKind::AnthropicOauth
         );
 
-        // truly fresh (provider unset) → no-op, stays unconfigured. Render
-        // must refuse to start rather than fabricate an Anthropic session.
         let mut llm = LlmConfig::default();
         migrate_llm(&mut llm, AnthropicEvidence::None);
         assert!(llm.active_provider().is_none());
         assert!(llm.providers.is_empty());
         assert!(llm.is_unconfigured());
-        // Schema is still stamped (idempotent re-entry), but no provider/active
-        // is fabricated and the legacy flat field stays unset.
         assert_eq!(llm.schema_version, Some(LLM_SCHEMA_VERSION));
         assert_eq!(llm.provider, None);
 
-        // every legacy local alias → Local, base_url + flags carried over
         for alias in LOCAL_PROVIDERS {
             let mut llm = LlmConfig {
                 provider: Some((*alias).into()),
@@ -3703,12 +3551,10 @@ mod tests {
             );
             assert!(entry.has_api_key && entry.has_custom_headers);
             assert_eq!(entry.context_tokens, Some(131072));
-            // Downgrade fields: alias normalised to `local`.
             assert_eq!(llm.provider.as_deref(), Some("local"));
             assert_eq!(llm.model.as_deref(), Some("qwen"));
         }
 
-        // Idempotence: re-running must not duplicate or rebuild entries.
         let mut llm = LlmConfig {
             provider: Some("local".into()),
             base_url: Some("http://host.docker.internal:8080".into()),
@@ -3716,7 +3562,7 @@ mod tests {
         };
         migrate_llm(&mut llm, AnthropicEvidence::None);
         let first = serde_json::to_string(&llm).unwrap();
-        migrate_llm(&mut llm, AnthropicEvidence::ApiKey); // even with secret flag flipped
+        migrate_llm(&mut llm, AnthropicEvidence::ApiKey);
         assert_eq!(first, serde_json::to_string(&llm).unwrap());
     }
 
@@ -3726,11 +3572,10 @@ mod tests {
         assert!(LlmProviderKind::AnthropicApiKey.is_anthropic());
         assert!(!LlmProviderKind::Local.is_anthropic());
         assert!(!LlmProviderKind::OpenRouter.is_anthropic());
-        // Foreign = provider/model shape, NOT catalog membership.
         assert!(is_foreign_anthropic_model("nex-agi/nex-n2-pro:free"));
         assert!(is_foreign_anthropic_model("openrouter/z-ai/glm-5.2"));
         assert!(!is_foreign_anthropic_model("claude-opus-4-8"));
-        assert!(!is_foreign_anthropic_model("claude-opus-4-1")); // retired but kept
+        assert!(!is_foreign_anthropic_model("claude-opus-4-1"));
         assert!(!is_foreign_anthropic_model(""));
     }
 
@@ -3748,7 +3593,6 @@ mod tests {
             has_custom_headers: false,
         };
 
-        // Real corrupted shape: anthropic entry + active both hold an OR id.
         let llm = LlmConfig {
             providers: vec![entry("anthropic", LlmProviderKind::AnthropicOauth, None)],
             active: Some(LlmActive {
@@ -3763,7 +3607,6 @@ mod tests {
             "foreign active.model under anthropic entry with no entry model → account default"
         );
 
-        // Agreement: active.model == entry.model → used.
         let llm = LlmConfig {
             providers: vec![entry(
                 "anthropic",
@@ -3781,7 +3624,6 @@ mod tests {
             Some("claude-opus-4-8")
         );
 
-        // Disagreement: entry wins (provenance), not the stale active pointer.
         let llm = LlmConfig {
             providers: vec![entry(
                 "openrouter",
@@ -3799,7 +3641,6 @@ mod tests {
             Some("z-ai/glm-5.2")
         );
 
-        // Empty/whitespace entry model → None.
         let llm = LlmConfig {
             providers: vec![entry(
                 "anthropic",
@@ -3814,7 +3655,6 @@ mod tests {
         };
         assert_eq!(llm.effective_active_model(), None);
 
-        // No active → None.
         assert_eq!(LlmConfig::default().effective_active_model(), None);
     }
 
@@ -3847,7 +3687,6 @@ mod tests {
             "{kind:?}: flat model must be None, not the OR/compat id"
         );
 
-        // Local/anthropic keep their own model in the flat field (consistent).
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![LlmProviderEntry {
@@ -3911,12 +3750,10 @@ mod tests {
             None,
             "active reconciled"
         );
-        // The openrouter entry keeps its own (legitimate) model untouched.
         let or = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
         assert_eq!(or.model.as_deref(), Some("z-ai/glm-5.2"));
         assert_eq!(llm.effective_active_model(), None);
 
-        // Idempotent: a second pass is a no-op (byte-identical).
         let first = serde_json::to_string(&llm).unwrap();
         migrate_llm(&mut llm, AnthropicEvidence::None);
         assert_eq!(first, serde_json::to_string(&llm).unwrap());
@@ -3974,7 +3811,6 @@ mod tests {
         assert_eq!(llm.providers[0].model, None);
         assert_eq!(llm.active.as_ref().unwrap().model, None);
 
-        // Idempotent: a second heal leaves the file byte-identical.
         let after_first = std::fs::read_to_string(&config_path).unwrap();
         heal_llm_config_in(dir.path()).unwrap();
         assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
@@ -4124,7 +3960,6 @@ mod tests {
             "credential-less project untouched"
         );
 
-        // Idempotent: a second heal leaves the file byte-identical.
         let after_first = std::fs::read_to_string(&config_path).unwrap();
         heal_llm_config_in(dir.path()).unwrap();
         assert_eq!(after_first, std::fs::read_to_string(&config_path).unwrap());
@@ -4228,8 +4063,6 @@ mod tests {
         };
         save_user_config_to(&config, &config_path).unwrap();
 
-        // First heal reaches the synced steady state (and must not panic on the
-        // no-claude project). The SECOND heal must be a no-op — no startup churn.
         heal_llm_config_in(dir.path()).unwrap();
         let steady = std::fs::read_to_string(&config_path).unwrap();
         heal_llm_config_in(dir.path()).unwrap();
@@ -4238,7 +4071,6 @@ mod tests {
             std::fs::read_to_string(&config_path).unwrap(),
             "a settled config must not be rewritten on subsequent heals"
         );
-        // The clean openrouter model survived; no-claude project untouched.
         let healed = load_user_config_from(&config_path).unwrap();
         let or = healed.projects[1]
             .claude
@@ -4273,7 +4105,6 @@ mod tests {
             context_tokens: None,
             has_custom_headers: false,
         };
-        // Stage 1: OpenRouter active + saved (migrate runs on resolve/save).
         let mut llm = LlmConfig {
             schema_version: Some(LLM_SCHEMA_VERSION),
             providers: vec![anthropic, or],
@@ -4284,10 +4115,8 @@ mod tests {
             ..Default::default()
         };
         migrate_llm(&mut llm, AnthropicEvidence::None);
-        // Flat masquerade must not carry the OR id (downgrade-safe).
         assert_eq!(llm.model, None);
 
-        // Stage 2: user switches active to anthropic (no model = default).
         llm.active = Some(LlmActive {
             provider_id: "anthropic".into(),
             model: None,
@@ -4304,7 +4133,6 @@ mod tests {
             None,
             "no foreign model routed"
         );
-        // OpenRouter keeps its own model untouched.
         let or_entry = llm.providers.iter().find(|p| p.id == "openrouter").unwrap();
         assert_eq!(or_entry.model.as_deref(), Some("nex-agi/nex-n2-pro:free"));
     }
@@ -4400,9 +4228,7 @@ mod tests {
 
         let user_config = SpeedwaveUserConfig::default();
         let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
-        // base_url from repo config must be ignored
         assert_eq!(resolved.llm.base_url, None);
-        // model from repo config is allowed
         assert_eq!(resolved.llm.model.as_deref(), Some("hacked-model"));
     }
 
@@ -4448,13 +4274,11 @@ mod tests {
                 "repo .speedwave.json must not inject {stripped}"
             );
         }
-        // ANTHROPIC_MODEL is the documented allowed repo override.
         assert_eq!(
             resolved.env.get("ANTHROPIC_MODEL"),
             Some(&"claude-opus-4-6".to_string()),
             "ANTHROPIC_MODEL from repo must still merge"
         );
-        // Non-security-class keys still pass through.
         assert_eq!(resolved.env.get("SAFE_VAR"), Some(&"ok".to_string()));
     }
 
@@ -4544,8 +4368,6 @@ mod tests {
                 "Anthropic key {k} must be denied"
             );
         }
-        // Every telemetry env key (SSOT) must be denied so a repo cannot enable or
-        // redirect telemetry (ADR-076).
         assert!(repo_env_key_is_denied(crate::telemetry_env::ENABLE_KEY));
         for f in crate::telemetry_env::TelemetryField::ALL {
             if let Some(k) = crate::telemetry_env::env_key_for(*f) {
@@ -4720,13 +4542,12 @@ mod tests {
         for func in ["fn save_user_config_to(", "fn migrate_drop_log_level_in("] {
             let start = source.find(func).expect("function must exist");
             let body = &source[start..];
-            // Bound the slice to this function (stop at next top-level item or test module).
-            let end = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
+            let next_top_level_item = ["\npub fn ", "\nfn ", "\npub(crate) fn ", "\n#[cfg(test)]"]
                 .iter()
                 .filter_map(|marker| body[1..].find(marker).map(|i| i + 1))
                 .min()
                 .unwrap_or(body.len());
-            let body = &body[..end];
+            let body = &body[..next_top_level_item];
             assert!(
                 body.contains("write_restricted_file_atomic"),
                 "{func} must use the durable write_restricted_file_atomic helper"
@@ -4759,7 +4580,6 @@ mod tests {
             telemetry: None,
         };
         save_user_config_to(&config, &config_path).unwrap();
-        // Durable helper writes owner-only perms.
         let mode = std::fs::metadata(&config_path)
             .unwrap()
             .permissions()
@@ -4775,7 +4595,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
-        // Write initial config
         let config_v1 = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
                 name: "v1".to_string(),
@@ -4792,7 +4611,6 @@ mod tests {
         };
         save_user_config_to(&config_v1, &config_path).unwrap();
 
-        // Overwrite with v2
         let config_v2 = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
                 name: "v2".to_string(),
@@ -4818,8 +4636,6 @@ mod tests {
             "tmp file should not exist after atomic write"
         );
     }
-
-    // ── resolve_project_config: local-provider flag injection (ADR-040) ──
 
     fn make_ollama_user_config(
         tmp_dir: &std::path::Path,
@@ -4855,8 +4671,6 @@ mod tests {
 
     #[test]
     fn resolve_never_replaces_prompt_or_pins_model_for_local_provider() {
-        // Routing/model stay env-driven (compose::apply_llm_config); only the
-        // append-style skill nudge is allowed as a CLI flag.
         let tmp = tempfile::tempdir().unwrap();
         let user_config = make_ollama_user_config(tmp.path(), Some("llama3.3"));
         let resolved = resolve_claude_config_for_test(tmp.path(), &user_config, "test-project");
@@ -4928,8 +4742,6 @@ mod tests {
 
     #[test]
     fn resolve_injects_no_local_only_flags_when_local_entry_present_but_inactive() {
-        // A Local entry sitting unused in `providers` must not leak its flags onto a different
-        // active provider: the discriminator is `active`, not mere presence of a Local kind.
         let tmp = tempfile::tempdir().unwrap();
         let mut user_config = make_ollama_user_config(tmp.path(), None);
         user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
@@ -4975,8 +4787,6 @@ mod tests {
 
     #[test]
     fn resolve_injects_local_only_flags_when_active_local_coexists_with_other_provider() {
-        // Mirror case: Local IS active alongside a non-Local sibling entry: flags must still land,
-        // keyed off `active`, not the list's first/only entry.
         let tmp = tempfile::tempdir().unwrap();
         let mut user_config = make_ollama_user_config(tmp.path(), None);
         user_config.projects[0].claude.as_mut().unwrap().llm = Some(LlmConfig {
@@ -5134,7 +4944,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
-        // On-disk config with no `playwright` field; only slack configured.
         let legacy_json = r#"{
             "projects": [
                 {
@@ -5154,19 +4963,16 @@ mod tests {
         }"#;
         std::fs::write(&config_path, legacy_json).unwrap();
 
-        // Loading must not fail even though `playwright` is absent.
         let mut cfg = load_user_config_from(&config_path).unwrap();
         let project = cfg.find_project_mut("acme-corp").unwrap();
         let integrations = project.integrations.as_ref().unwrap();
         assert!(integrations.playwright.is_none());
-        // Existing fields preserved:
         assert_eq!(
             integrations.slack.as_ref().unwrap().enabled,
             Some(true),
             "legacy slack setting must survive deserialisation"
         );
 
-        // UI enables Playwright for this project.
         let integrations = project.integrations.as_mut().unwrap();
         assert!(integrations.set_service(
             "playwright",
@@ -5175,7 +4981,6 @@ mod tests {
             },
         ));
 
-        // Persist and reload.
         save_user_config_to(&cfg, &config_path).unwrap();
         let reloaded = load_user_config_from(&config_path).unwrap();
         let reloaded_integrations = reloaded
@@ -5287,9 +5092,9 @@ mod tests {
         };
 
         let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
-        assert!(resolved.slack); // user override wins
-        assert!(!resolved.gitlab); // repo stays
-        assert!(!resolved.sharepoint); // default is disabled
+        assert!(resolved.slack);
+        assert!(!resolved.gitlab);
+        assert!(!resolved.sharepoint);
     }
 
     /// The retired `host_exec` worker (ADR-054) left a `hostExec` key in some
@@ -5307,14 +5112,12 @@ mod tests {
                 "slack": { "enabled": true }
             }
         }"#;
-        // Parsing must not fail on the unknown `hostExec` block.
         let integrations: IntegrationsConfig = serde_json::from_str::<serde_json::Value>(raw)
             .and_then(|v| serde_json::from_value(v["integrations"].clone()))
             .expect("legacy hostExec block must parse-and-drop, not error");
 
         let mut resolved = ResolvedIntegrationsConfig::default();
         apply_integrations_layer(&mut resolved, &integrations);
-        // `slack` toggle still applies; legacy `hostExec` enables nothing.
         assert!(resolved.slack, "slack toggle still resolves");
         assert!(
             resolved.plugins.is_empty(),
@@ -5362,10 +5165,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let resolved = resolve_integrations_for_test(tmp.path(), &user_config, "test-project");
-        assert!(!resolved.os_reminders); // explicitly disabled
-        assert!(!resolved.os_calendar); // default is disabled
-        assert!(!resolved.os_mail); // explicitly disabled
-        assert!(!resolved.os_notes); // default is disabled
+        assert!(!resolved.os_reminders);
+        assert!(!resolved.os_calendar);
+        assert!(!resolved.os_mail);
+        assert!(!resolved.os_notes);
     }
 
     #[test]
@@ -5528,16 +5331,12 @@ mod tests {
         assert!(!integrations.gitlab);
     }
 
-    // ---- PII policy wiring (WP4) --------------------------------------------
-
     #[test]
     fn project_user_entry_without_policy_field_loads_as_none() {
         let json = r#"{"name":"p","dir":"/tmp/p"}"#;
         let entry: ProjectUserEntry = serde_json::from_str(json).unwrap();
         assert!(entry.policy.is_none());
     }
-
-    // ---- v1 -> v2 PII policy config migration -------------------------------
 
     #[test]
     fn migrates_v1_template_id_only_to_a_single_policy_id() {
@@ -5571,10 +5370,8 @@ mod tests {
         assert_eq!(def.rules.len(), 1);
         assert_eq!(def.rules[0].id, "EMPLOYEE_ID");
         assert_eq!(def.rules[0].patterns, vec![r"\bEMP-\d{4,8}\b".to_string()]);
-        // Old `forced: true` carries no effect post-migration — always {tokenize:true, log:false}.
         assert!(def.rules[0].tokenize);
         assert!(!def.rules[0].log);
-        // v1's sensitive_keys concept has no v3 counterpart — dropped, not migrated.
         assert!(def.keywords.is_empty());
     }
 
@@ -5733,7 +5530,6 @@ mod tests {
         );
     }
 
-    // Also the beta-off + MDM case: ui is None, so MDM-forced ids alone activate the feature.
     #[test]
     fn managed_forced_pii_policy_reaches_resolved_project_config() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5813,8 +5609,6 @@ mod tests {
 
     #[test]
     fn repo_speedwave_json_cannot_set_pii_policy() {
-        // A repo `.speedwave.json` is a restricted subset (ProjectRepoConfig) that
-        // never gains a `policy` field; an extra "policy" key must be a no-op.
         let with_policy_key = tempfile::tempdir().unwrap();
         std::fs::write(
             with_policy_key.path().join(".speedwave.json"),
@@ -5823,7 +5617,6 @@ mod tests {
         .unwrap();
         let without_policy_key = tempfile::tempdir().unwrap();
 
-        // Beta on so the policy actually resolves (off would mask the repo key anyway).
         let user_config = SpeedwaveUserConfig {
             ui: Some(UiPrefsConfig {
                 beta_enabled: Some(true),
@@ -5981,7 +5774,6 @@ mod tests {
     #[test]
     fn test_resolve_integrations_with_plugins() {
         let tmp = tempfile::tempdir().unwrap();
-        // No repo config (no .speedwave.json)
 
         let user_config = SpeedwaveUserConfig {
             projects: vec![ProjectUserEntry {
@@ -6023,8 +5815,6 @@ mod tests {
             vec!["example-plugin"]
         );
     }
-
-    // -- SpeedwaveUserConfig::find_project / require_project tests --
 
     fn make_config_with_projects() -> SpeedwaveUserConfig {
         SpeedwaveUserConfig {
@@ -6100,8 +5890,6 @@ mod tests {
         assert_eq!(config.projects[0].dir, "/updated/path");
     }
 
-    // -- active_project_entry tests --
-
     #[test]
     fn test_active_project_entry_returns_matching_project() {
         let config = SpeedwaveUserConfig {
@@ -6161,8 +5949,6 @@ mod tests {
         );
     }
 
-    // -- OsIntegrationsConfig::set_service tests --
-
     #[test]
     fn test_os_set_service_known_keys() {
         for key in &["reminders", "calendar", "mail", "notes"] {
@@ -6205,8 +5991,6 @@ mod tests {
         assert_eq!(cfg.calendar.unwrap().enabled, Some(false));
     }
 
-    // -- ResolvedIntegrationsConfig::is_os_service_enabled tests --
-
     #[test]
     fn test_is_os_service_enabled_known_keys() {
         let r = ResolvedIntegrationsConfig {
@@ -6228,8 +6012,6 @@ mod tests {
         assert_eq!(r.is_os_service_enabled("unknown"), None);
         assert_eq!(r.is_os_service_enabled("slack"), None);
     }
-
-    // ── migrate_drop_log_level ──
 
     #[test]
     fn migrate_drop_log_level_removes_field_and_preserves_unknown() {
@@ -6305,7 +6087,6 @@ mod tests {
 
     #[test]
     fn migrate_drop_log_level_errs_when_root_is_not_object() {
-        // Every non-object JSON root shape (array/null/number/string/bool) must error, not be accepted.
         for original in [
             r#"["unexpected","array","root"]"#,
             "null",
@@ -6335,8 +6116,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_drop_log_level_cleans_orphan_tmp_on_rename_failure() {
-        // No `.tmp` orphan is left behind on the happy path.
+    fn migrate_drop_log_level_leaves_no_orphan_tmp() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.json");
         std::fs::write(&path, r#"{"projects":[],"log_level":"trace"}"#).unwrap();
@@ -6368,7 +6148,6 @@ mod tests {
         restore.set_mode(0o755);
         std::fs::set_permissions(tmp.path(), restore).unwrap();
 
-        // On failure the file must not silently shed `log_level`; the config must survive.
         match result {
             Err(_) => {}
             Ok(false) => {}
@@ -6415,7 +6194,6 @@ mod plugin_order_tests {
         let data_dir = tempfile::tempdir().unwrap();
         let project = "proj";
 
-        // Seed a legacy v1 local key under the OLD path tokens/<project>/local-llm/.
         let legacy_dir = data_dir
             .path()
             .join("tokens")
@@ -6424,8 +6202,6 @@ mod plugin_order_tests {
         std::fs::create_dir_all(&legacy_dir).unwrap();
         std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
 
-        // v1 flat local config (no providers list, no schema_version) with the
-        // legacy has_api_key flag set — exactly what a v0.13.x user has on disk.
         let llm = LlmConfig {
             provider: Some("local".to_string()),
             base_url: Some("http://host.docker.internal:9000".to_string()),
@@ -6470,7 +6246,6 @@ mod plugin_order_tests {
             "after resolve the legacy key must be migrated and has_api_key true \
              (regression: migrate must run before the disk-sync)"
         );
-        // The key must now live on the new path so the proxy renders a bearer route.
         let new_key = data_dir
             .path()
             .join("tokens")
