@@ -155,6 +155,53 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('recordingLive tracks how the recording actually started', () => {
+    async function startWithLiveModel(live: string | null): Promise<void> {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot({ models_used: { live, finalize: null } }),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      await svc.startRecording({ kind: 'system_wide' }, 'pl', true);
+    }
+
+    it('is null while nothing is recording', () => {
+      expect(svc.recordingLive()).toBeNull();
+    });
+
+    it('is true when the session snapshot names a live model', async () => {
+      await startWithLiveModel('small');
+      expect(svc.recordingLive()).toBe(true);
+    });
+
+    it('is false for a record-only session even though live was requested', async () => {
+      // `models_used.live: null` is the host saying record-only; the request does not win.
+      await startWithLiveModel(null);
+      expect(svc.recordingLive()).toBe(false);
+    });
+
+    it('clears on stopRecording', async () => {
+      await startWithLiveModel('small');
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.stopRecording('sess-1');
+      expect(svc.recordingLive()).toBeNull();
+    });
+
+    it('clears when a failed start rolls back successfully', async () => {
+      // Start for real first, or the assertion passes on the initial `null` either way.
+      await startWithLiveModel('small');
+      expect(svc.recordingLive()).toBe(true);
+      mockTauri.listen = vi.fn(async () => {
+        throw new Error('ipc down');
+      });
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
+        'ipc down'
+      );
+      expect(svc.recordingLive()).toBeNull();
+    });
+  });
+
   describe('recording state survives a tab switch', () => {
     async function startWith(id: string): Promise<void> {
       const ack = {

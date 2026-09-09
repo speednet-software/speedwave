@@ -188,7 +188,10 @@ export class RecordingControlsComponent implements OnInit {
   readonly sourceIndex = signal(0);
   /** Acceleration badge text, from the host-computed `accel_label` (empty until loaded). */
   readonly accel = signal('');
-  /** Whether the next recording runs the live pass (persisted; default from the GPU class). */
+  /**
+   * Live-pass mode shown in the checkbox: the persisted preference, or the in-progress
+   * recording's actual mode while one is running.
+   */
   readonly liveTranscript = signal(true);
   /** Disables Start/Stop while a transition is in flight. */
   readonly busy = signal(false);
@@ -264,7 +267,7 @@ export class RecordingControlsComponent implements OnInit {
   }
 
   /**
-   * Restores `sourceIndex`/`micDevice` to match the source of a recording already in progress.
+   * Restores the picker selection and live mode of a recording already in progress.
    * @param list - the freshly-loaded source list.
    * @param source - the in-progress recording's source.
    */
@@ -273,6 +276,10 @@ export class RecordingControlsComponent implements OnInit {
     if (idx >= 0) this.sourceIndex.set(idx);
     if (source.kind === 'mixed') this.micDevice.set(source.mic);
     else if (source.kind === 'microphone') this.micDevice.set(source.device);
+    // Show how this recording runs, not what the preference now asks for; stopping hands the
+    // toggle back to the preference.
+    const live = this.transcription.recordingLive();
+    if (live !== null) this.liveTranscript.set(live);
   }
 
   /**
@@ -408,6 +415,9 @@ export class RecordingControlsComponent implements OnInit {
       this.error.set(msg);
       this.errorOccurred.emit(msg);
     }
+    // The restore borrowed the session's mode; hand the toggle back to the preference even when
+    // the stop call rejected, since the service clears the session either way.
+    this.liveTranscript.set(this.transcription.liveTranscriptPreferred());
     this.busy.set(false);
     this.cdr.markForCheck();
   }

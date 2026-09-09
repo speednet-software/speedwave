@@ -68,6 +68,7 @@ export class TranscriptionService {
   private readonly recordingSessionIdSignal = signal<string | null>(null);
   private readonly recordingSourceSignal = signal<AudioSource | null>(null);
   private readonly recordingLanguageSignal = signal<Language | null>(null);
+  private readonly recordingLiveSignal = signal<boolean | null>(null);
   private readonly liveDraftSignal = signal<string>('');
   private readonly audioLevelsSignal = signal<number[] | null>(null);
   private readonly gpuClassSignal = signal<GpuClass | null>(null);
@@ -91,6 +92,12 @@ export class TranscriptionService {
    */
   readonly recordingSource: Signal<AudioSource | null> = this.recordingSourceSignal.asReadonly();
   readonly recordingLanguage: Signal<Language | null> = this.recordingLanguageSignal.asReadonly();
+
+  /**
+   * How the in-flight recording actually started, from the host's `models_used.live`; `null` when
+   * nothing is recording, or when a failed start's rollback left the mode unknown.
+   */
+  readonly recordingLive: Signal<boolean | null> = this.recordingLiveSignal.asReadonly();
 
   /** Latest capture-health warning for the active session (null = none). */
   readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
@@ -203,6 +210,7 @@ export class TranscriptionService {
         this.recordingSessionIdSignal.set(null);
         this.recordingSourceSignal.set(null);
         this.recordingLanguageSignal.set(null);
+        this.recordingLiveSignal.set(null);
       } catch {
         // Stop failed — keep the id so the Stop control still targets the session.
         this.recordingSessionIdSignal.set(ack.session_id);
@@ -212,6 +220,9 @@ export class TranscriptionService {
     this.recordingSessionIdSignal.set(ack.session_id);
     this.recordingSourceSignal.set(source);
     this.recordingLanguageSignal.set(language);
+    // `models_used.live` is the authoritative mode: `null` means record-only, whatever the
+    // client preference asked for (ADR-056 Am. 13).
+    this.recordingLiveSignal.set(ack.snapshot.models_used.live != null);
     return ack;
   }
 
@@ -227,6 +238,7 @@ export class TranscriptionService {
         this.recordingSessionIdSignal.set(null);
         this.recordingSourceSignal.set(null);
         this.recordingLanguageSignal.set(null);
+        this.recordingLiveSignal.set(null);
       }
     }
   }
