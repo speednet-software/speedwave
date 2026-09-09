@@ -166,16 +166,16 @@ pub async fn start_transcription(
     // Register the driver entry before creating the session so the delete guard
     // covers the whole start window (delete refuses while an entry is live).
     let stop = StopSignal::new();
-    register_driver(drivers.inner(), session_id, &stop)?;
+    register_driver_and_repaint_tray(&app, drivers.inner(), session_id, &stop)?;
     if let Err(e) = store.create(session) {
-        unregister_driver(drivers.inner(), session_id, &stop);
+        unregister_driver_and_repaint_tray(&app, drivers.inner(), session_id, &stop);
         return Err(format!("store create: {e}"));
     }
 
     let stream = match capture.start(audio_source) {
         Ok(s) => s,
         Err(e) => {
-            unregister_driver(drivers.inner(), session_id, &stop);
+            unregister_driver_and_repaint_tray(&app, drivers.inner(), session_id, &stop);
             // Mark the session failed so the UI shows the error, not a hang.
             let _ = store.set_status(
                 session_id,
@@ -189,7 +189,7 @@ pub async fn start_transcription(
 
     // Wire the event forwarder before the driver mutates anything.
     spawn_event_forwarder(
-        app,
+        app.clone(),
         store_arc.clone(),
         forwarders.inner().clone(),
         session_id,
@@ -206,6 +206,7 @@ pub async fn start_transcription(
             time_base: std::time::Duration::ZERO,
         },
         audio_wav,
+        app,
         drivers.inner().clone(),
     );
 
@@ -245,9 +246,42 @@ fn unregister_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) {
     }
 }
 
+pub fn is_recording(drivers: &DriversHandle) -> bool {
+    !drivers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty()
+}
+
+fn register_driver_and_repaint_tray(
+    app: &AppHandle,
+    drivers: &DriversHandle,
+    id: Uuid,
+    stop: &StopSignal,
+) -> Result<(), String> {
+    register_driver(drivers, id, stop)?;
+    crate::tray::refresh_tray_icon(app);
+    Ok(())
+}
+
+fn unregister_driver_and_repaint_tray(
+    app: &AppHandle,
+    drivers: &DriversHandle,
+    id: Uuid,
+    stop: &StopSignal,
+) {
+    unregister_driver(drivers, id, stop);
+    crate::tray::refresh_tray_icon(app);
+}
+
 /// Runs a built driver on a blocking task; cleans up the stop-signal registry
 /// and wakes `await_finished()` waiters when it winds down.
-fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: DriversHandle) {
+fn spawn_driver(
+    cfg: DriverConfig,
+    audio_wav: std::path::PathBuf,
+    app: AppHandle,
+    drivers: DriversHandle,
+) {
     let session_id = cfg.id;
     let stop_for_cleanup = cfg.stop.clone();
     let driver = TranscriptDriver::new(cfg);
@@ -261,7 +295,7 @@ fn spawn_driver(cfg: DriverConfig, audio_wav: std::path::PathBuf, drivers: Drive
                 short_id(session_id)
             );
         }
-        unregister_driver(&drivers, session_id, &stop_for_cleanup);
+        unregister_driver_and_repaint_tray(&app, &drivers, session_id, &stop_for_cleanup);
         stop_for_cleanup.signal_finished();
     });
 }
@@ -321,16 +355,16 @@ pub async fn resume_transcription(
     // Register the driver entry before mutating the session so the delete guard
     // covers the whole resume window (delete refuses while an entry is live).
     let stop = StopSignal::new();
-    register_driver(drivers.inner(), id, &stop)?;
+    register_driver_and_repaint_tray(&app, drivers.inner(), id, &stop)?;
     let resumed_live_model = live_transcriber.as_ref().map(|(key, _)| key.clone());
     if let Err(e) = store.resume(id, next_part.clone(), resumed_live_model) {
-        unregister_driver(drivers.inner(), id, &stop);
+        unregister_driver_and_repaint_tray(&app, drivers.inner(), id, &stop);
         return Err(e.to_string());
     }
     let stream = match capture.start(audio_source) {
         Ok(s) => s,
         Err(e) => {
-            unregister_driver(drivers.inner(), id, &stop);
+            unregister_driver_and_repaint_tray(&app, drivers.inner(), id, &stop);
             // Roll back to Done: resume requires Done, so leaving the mutated session
             // behind would strand a finished transcript on a transient capture error.
             if let Err(re) = store.rollback_resume(id, &next_part) {
@@ -349,7 +383,12 @@ pub async fn resume_transcription(
         }
     };
 
-    spawn_event_forwarder(app, store_arc.clone(), forwarders.inner().clone(), id);
+    spawn_event_forwarder(
+        app.clone(),
+        store_arc.clone(),
+        forwarders.inner().clone(),
+        id,
+    );
     spawn_driver(
         DriverConfig {
             id,
@@ -361,6 +400,7 @@ pub async fn resume_transcription(
             time_base,
         },
         next_part,
+        app,
         drivers.inner().clone(),
     );
 
@@ -992,6 +1032,90 @@ mod tests {
         // The owning stop removes its own entry.
         unregister_driver(&drivers, id, &winner);
         assert!(drivers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn is_recording_follows_register_and_unregister() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        assert!(
+            !is_recording(&drivers),
+            "an empty registry is not recording"
+        );
+
+        let first = StopSignal::new();
+        let first_id = Uuid::new_v4();
+        register_driver(&drivers, first_id, &first).unwrap();
+        assert!(is_recording(&drivers));
+
+        let second = StopSignal::new();
+        let second_id = Uuid::new_v4();
+        register_driver(&drivers, second_id, &second).unwrap();
+        unregister_driver(&drivers, first_id, &first);
+        assert!(is_recording(&drivers));
+
+        unregister_driver(&drivers, second_id, &second);
+        assert!(!is_recording(&drivers));
+    }
+
+    #[test]
+    fn is_recording_reads_through_a_poisoned_lock() {
+        let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
+        let poisoner = drivers.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = poisoner.lock().unwrap();
+            panic!("poison the drivers lock");
+        })
+        .join();
+        assert!(drivers.is_poisoned());
+        assert!(!is_recording(&drivers));
+    }
+
+    #[test]
+    fn every_registry_mutation_repaints_the_tray() {
+        let source = include_str!("transcription_cmd.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module must exist")];
+
+        for (raw, wrapper) in [
+            ("register_driver", "register_driver_and_repaint_tray"),
+            ("unregister_driver", "unregister_driver_and_repaint_tray"),
+        ] {
+            let body = fn_body(production, wrapper);
+            assert!(
+                body.contains("refresh_tray_icon"),
+                "{wrapper} must repaint the tray"
+            );
+            assert!(
+                body.contains(&format!("{raw}(")),
+                "{wrapper} must delegate to {raw}"
+            );
+            assert_eq!(
+                count_calls(production, raw),
+                2,
+                "`{raw}` must appear only at its definition and inside {wrapper}; a direct \
+                 call elsewhere leaves the tray disagreeing with the registry"
+            );
+        }
+    }
+
+    fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        let rest = &source[start..];
+        &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
+    }
+
+    fn count_calls(source: &str, name: &str) -> usize {
+        let needle = format!("{name}(");
+        source
+            .match_indices(&needle)
+            .filter(|(idx, _)| {
+                source[..*idx]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            })
+            .count()
     }
 
     #[test]
