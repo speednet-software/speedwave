@@ -10,6 +10,30 @@ Every change must work on **both macOS and Windows**.
 - **This file stays thin on purpose.** The real guidance lives in `.claude/rules/` — the SSOT registry, architecture map, alignment pairs, and per-area pitfalls are there, kept next to the code they describe. When a rule and the code disagree, trust the code and fix the rule.
 - If a needed guideline is missing, add it as a new file in `.claude/rules/` — never as a link out to `docs/` or an ADR. These rule files must stay self-contained.
 
+## Comments policy: agents write no comments
+
+Code must read without comments: clear names, small functions, extracted steps, tests that state
+intent. As an agent, never add a comment to source code, including "why" notes; if code is not
+understandable without one, rewrite the code (rename, extract a step, add a test). Architectural
+decisions live in ADRs, working guidance in `.claude/rules/`, never in inline comments.
+
+The only comments an agent may write:
+
+- Tool and compiler directives: `eslint-disable*`, `@ts-expect-error`, `prettier-ignore`,
+  `shellcheck disable`, Swift `// MARK:`, and similar.
+- `// SAFETY:` above every `unsafe` block.
+- Doc comments: Rust `///` and `//!`, JSDoc (lint-required). A doc comment documents the item's
+  contract for callers; do not stash implementation narration in doc comments.
+- License headers and shebang lines.
+
+Existing comments are not fair game: never delete or rewrite a comment outside the lines you are
+already changing, and inside your diff delete a pre-existing comment only together with the code it
+annotates. A comment that seems to violate this policy gets reported (PR description or chat), not
+removed; the only exception is a task that is explicitly a comment cleanup.
+
+This policy binds agents. Humans add or remove comments at their own judgment; review is the
+quality gate.
+
 ## Rules index (`.claude/rules/`)
 
 **Always loaded** (read every session — the non-negotiables and the maps you need before touching anything):

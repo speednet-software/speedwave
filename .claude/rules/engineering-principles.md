@@ -20,7 +20,14 @@ Build only what's needed now — no speculative features, flags, or "future exte
 
 ## Code hygiene (hard rules)
 
-- **Comments: max 2 lines, written for the developer.** A comment states a behavior or constraint the code itself cannot show. Never narrate what the next line does, why your change is correct, review/audit context, or change history — that is noise the moment it merges. Doc comments (`//!`, `///`, JSDoc) also stay short (≤2 lines of prose); for JSDoc the cap covers the summary text — structured `@param`/`@returns` tags sit outside it and follow the eslint `jsdoc` rules (every tag carries a description). If you feel the need for a paragraph, the content belongs in an ADR, not the code.
+- **Comments: agents write none.** Code must read without them: clear names, small functions, extracted steps, tests that state intent. Never add a comment to source code, `"why"` notes (constraints, design rationale, intent) included; when code is not understandable without one, rewrite the code (rename, extract a named step, add a test). Architectural decisions live in ADRs, working guidance in `.claude/rules/`, never in inline comments. The only comments you may write:
+  - Tool and compiler directives: `eslint-disable*`, `@ts-expect-error`, `@ts-ignore`, `prettier-ignore`, `shellcheck disable`, Swift `// MARK:`, and similar.
+  - `// SAFETY:` above every `unsafe` block.
+  - Doc comments: Rust `///` and `//!`, JSDoc where the eslint `jsdoc` rules require it (`mcp-servers/`, `desktop/src/`). A doc comment documents the item's contract for callers; keep prose to ≤2 lines and never stash implementation narration in one. Structured `@param`/`@returns` tags sit outside that cap and each carries a description.
+  - License headers and shebang lines.
+
+  No smuggling either: a comment moved into a dead string, a `const _NOTE`, an attribute, or a sentence-shaped identifier is the same violation. Existing comments are not fair game: never delete or rewrite a comment outside the lines you are already changing, and inside your own diff delete a pre-existing comment only together with the code it annotates. A comment that looks like it violates this policy gets reported (PR description or chat), not removed; the only exception is a task that is explicitly a comment cleanup. This policy binds agents. Humans add and remove comments at their own judgment, and review is the quality gate.
+
 - **Every code change ships tests in the same commit**, covering four categories where applicable: happy path, edge cases (empty/null/boundary/Unicode), error paths (verify the right error, not just "doesn't crash"), and state transitions (before/after invariants; races for concurrent code). Skipping a non-applicable category is fine. This mandates _writing_ the tests, not running the full suite locally — CI executes them across macOS and Windows (pre-push runs only `make check-fmt`).
 - **Never skip or neuter tests** — no `.skip`, `xit`, `xdescribe`, no renaming/moving test files to dodge failures. Fix the code or fix the test.
 - **No marker comments** — no `TODO`/`FIXME`/`HACK`/`XXX`, no `@deprecated`. Implement the fix now or report it to the user.
