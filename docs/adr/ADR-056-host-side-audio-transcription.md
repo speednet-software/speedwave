@@ -43,7 +43,9 @@ The supporting sub-decisions:
 - **macOS capture = CoreAudio process taps (macOS 14.4+)[^7], not ScreenCaptureKit.** Apple recommends Core Audio taps for audio-only capture; ScreenCaptureKit has audio-only defects on macOS 15 (unverified). The feature floor is macOS 14.4+ (runtime-gated via `if #available`); older macOS gets a clean "14.4+ required" message and the rest of the app still works.
 - **macOS permissions.** Microphone uses the public `AVCaptureDevice.requestAccess(for: .audio)`, called in-process by the main app before any capture spawn (Amendment 5): the prompt does not fire from the headless CLI. The system-audio consent prompt has no public trigger, so the native CLI uses the private TCC API (`TCCAccessRequest`, service `kTCCServiceAudioCapture`) behind a `dlopen`/`dlsym`-guarded path that degrades gracefully; a System-Settings deep-link plus silence-detection is the fallback if it reports denied.
 - **Windows capture = WASAPI loopback** (system-wide). Per-app (single-process) capture was removed — see Amendment 3.
-- **Transcription engine** = whisper.cpp (MIT)[^8] via `whisper-rs`; acceleration backends are compile-time, so the runtime reports the acceleration it was built with as a single label. v1 ships CPU (all platforms) + Metal (macOS); CUDA/Vulkan deferred.
+- **Transcription engine**: Powered by whisper.cpp (MIT)[^8] via `whisper-rs`.
+  - **Acceleration:** Hardware acceleration backends are configured at compile time. The runtime reports its build configuration as a single acceleration label.
+  - **Supported Targets (v1):** CPU (all platforms) and Metal (macOS). CUDA and Vulkan support are deferred.
 - **PL/EN strategy** = forced language (never auto-detected, picked per-recording), with a live pass plus a higher-quality offline re-pass after recording stops. A single model is downloaded per the hardware (see Amendment 2); on GPU builds the live and offline passes share `large-v3`. The promise is "local best-effort live + higher-quality offline final pass", not "perfect Polish/English".
 - **Model store** = download-on-demand, SHA256-verified, streamed to disk, into `<data_dir>/models/`. Hugging Face[^9] and GitHub[^10] `302`-redirect downloads to signed CDN URLs, so the downloader uses a redirect-host allowlist rather than `redirect::Policy::none()`. Otherwise it reuses the ADR-041 host-HTTP hardening.
 - **Live-transcript transport** = an append-only event stream with a monotonic `seq` plus snapshot recovery, reusing the _delivery semantics_ of `MsgStore::history_plus_stream()` (ADR-043) — not the full JSON-patch protocol (ADR-042).
@@ -61,7 +63,8 @@ The supporting sub-decisions:
 ## Where it lives in code
 
 - **Runtime SSOT (feature-gated)** — `crates/speedwave-runtime/src/transcription/` (`mod.rs`, `audio.rs`, `audio_macos.rs`, `audio_windows.rs`, `mix.rs`, `transcriber.rs`, `transcript_driver.rs`, `transcript_store.rs`, `transcript.rs`, `gpu_probe.rs` — the runtime Vulkan device probe, ADR-085).
-- **Acceleration labelling + model selection** — `crates/speedwave-runtime/src/transcription/accel.rs` (`accel_label()`, `gpu_class()`, `live_model_for_this_build()`, `finalize_model_for_this_build()`, `decode_threads()`).
+- **Acceleration labelling + model selection**: Managed in `crates/speedwave-runtime/src/transcription/accel.rs`.
+  - Exposed functions: `accel_label()`, `gpu_class()`, `live_model_for_this_build()`, `finalize_model_for_this_build()`, and `decode_threads()`.
 - **Model catalog SSOT** — `crates/speedwave-runtime/src/transcription/model_catalog.rs` (the Whisper GGML model entries; see [ADR-075](ADR-075-remove-speaker-diarization.md) for the removal of the former speaker-embedding/segmentation entries).
 - **Download/verify** — `crates/speedwave-runtime/src/transcription/model_store.rs` (streamed download, on-the-fly SHA256, atomic rename, redirect-host allowlist).
 - **Settings UI** — `desktop/src/src/app/settings/transcription-section/` (acceleration label + per-pass download/remove rows — live and, where the host class splits the pair, finalize — driven by the `recommended_transcription_model` command).
