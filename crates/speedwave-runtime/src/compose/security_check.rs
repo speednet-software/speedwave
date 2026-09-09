@@ -8,8 +8,6 @@ use strum::EnumProperty;
 
 use super::{container_user, resolve_tokens_dir_in};
 
-// --- SecurityCheck ---
-
 /// Expected engine paths for security validation.
 /// Single source of truth — used by both render_compose() and SecurityCheck.
 pub struct SecurityExpectedPaths {
@@ -62,8 +60,6 @@ pub(crate) fn parse_short_form_volume(vol: &str) -> Option<(&str, &str, Option<&
     let mut search_from = 0;
     let sep = loop {
         let pos = vol[search_from..].find(":/")? + search_from;
-        // A lone drive letter before the colon is a Windows host (`C:/Users/…`),
-        // not the host/target separator — keep scanning past it.
         if pos == 1 && vol.as_bytes()[0].is_ascii_alphabetic() {
             search_from = pos + 1;
             continue;
@@ -72,7 +68,6 @@ pub(crate) fn parse_short_form_volume(vol: &str) -> Option<(&str, &str, Option<&
     };
     let host = &vol[..sep];
     let rest = &vol[sep + 1..];
-    // Trim a trailing :ro/:rw/:z-style mode; a tail containing '/' is not a mode.
     match rest.rfind(':') {
         Some(pos) if pos > 0 && !rest[pos + 1..].contains('/') => {
             Some((host, &rest[..pos], Some(&rest[pos + 1..])))
@@ -424,7 +419,6 @@ pub enum SecurityRule {
     ))]
     ClaudeWorkspaceMount,
 
-    // 31. Host file security
     #[strum(to_string = "FILE_SECURITY_VIOLATION")]
     #[strum(props(description = "Host file permissions and ownership are correct"))]
     /// Host file/dir has wrong mode bits or UID (Unix-only, skipped on Windows).
@@ -568,42 +562,30 @@ impl SecurityCheck {
             Self::check_tmpfs_noexec(&doc),
             Self::check_no_tokens_in_claude(&doc),
             Self::check_no_tokens_in_hub(&doc),
-            // PORTS_LOCALHOST: any exposed port must bind 127.0.0.1 (plugins)
             Self::check_ports_localhost_only(&doc),
             Self::check_claude_no_socket(&doc),
             Self::check_no_external_llm_keys_claude(&doc),
-            // NO_PORTS_WORKERS: built-in services must not expose ports at all.
-            // May fire alongside PORTS_LOCALHOST — intentional defense-in-depth.
             Self::check_no_ports_on_workers(&doc),
             Self::check_container_user(&doc),
-            // Plugin-specific checks
             Self::check_plugin_no_privileged(&doc),
             Self::check_plugin_no_host_network(&doc),
             Self::check_plugin_volumes(&doc, expected_paths, plugin_manifests),
-            // Built-in SharePoint context mount validation
             Self::check_builtin_sharepoint_volumes(&doc, expected_paths),
             Self::check_builtin_slack_volumes(&doc, expected_paths),
             Self::check_builtin_atlassian_volumes(&doc, expected_paths),
-            // proxy mount profile (ADR-073)
             Self::check_proxy_volumes(&doc, expected_paths),
-            // MDM telemetry managed-settings mount profile
             Self::check_claude_managed_settings(
                 &doc,
                 data_dir,
                 project,
                 expected_paths.telemetry_locked,
             ),
-            // Resolved PII policy mount profile on mcp-hub + proxy (mirrors)
             Self::check_hub_policy_mount(&doc, data_dir, project),
             Self::check_proxy_policy_mount(&doc, data_dir, project),
-            // PII audit directory :rw mount profile on proxy + mcp-hub
             Self::check_audit_mount(&doc, data_dir, project, "proxy"),
             Self::check_audit_mount(&doc, data_dir, project, "mcp-hub"),
-            // claude must never receive the policy or audit directories
             Self::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, project),
-            // claude volumes: renderer target allowlist + per-target source/mode
             Self::check_claude_workspace_mount(&doc, expected_paths, data_dir, project),
-            // Host filesystem checks (I/O — unlike pure YAML checks above)
             Self::check_file_security(data_dir, project),
         ]
         .into_iter()
@@ -751,13 +733,11 @@ impl SecurityCheck {
         if let Some((_name, service)) = services.iter().find(|(n, _)| n == "claude") {
             if let Some(env_seq) = service.get("environment").and_then(|v| v.as_sequence()) {
                 let forbidden_patterns = ["TOKEN", "KEY", "SECRET"];
-                // Allowed env vars that contain these patterns but are safe
                 let allowed = [
                     "ANTHROPIC_AUTH_TOKEN",
                     "ANTHROPIC_API_KEY",
                     "CLAUDE_CODE_OAUTH_TOKEN",
                     "DISABLE_AUTOUPDATER",
-                    // Numeric context-window pin from compose/llm.rs, not a credential.
                     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
                 ];
 
@@ -845,8 +825,6 @@ impl SecurityCheck {
             if let Some(ports_seq) = service.get("ports").and_then(|v| v.as_sequence()) {
                 for port in ports_seq {
                     if let Some(port_str) = port.as_str() {
-                        // Valid format: "127.0.0.1:host:container"
-                        // Invalid: "host:container" (binds to 0.0.0.0) or "0.0.0.0:host:container"
                         if !port_str.starts_with("127.0.0.1:") {
                             violations.push(SecurityViolation {
                                 container: name.clone(),
@@ -860,8 +838,6 @@ impl SecurityCheck {
                             });
                         }
                     } else if port.as_mapping().is_some() {
-                        // Long-form: {target: 3000, published: 3000, protocol: tcp}
-                        // If "published" is present without a host_ip of 127.0.0.1, it binds to 0.0.0.0
                         let host_ip = port.get("host_ip").and_then(|v| v.as_str()).unwrap_or("");
                         if port.get("published").is_some() && host_ip != "127.0.0.1" {
                             violations.push(SecurityViolation {
@@ -872,10 +848,7 @@ impl SecurityCheck {
                                     "All ports must bind to 127.0.0.1 only. Add host_ip: 127.0.0.1 to the port mapping.",
                             });
                         }
-                    }
-                    // Bare integer port (e.g. `- 3000`) binds a random host port on
-                    // all interfaces; not used in our template — flag it.
-                    else if port.as_i64().is_some() || port.as_f64().is_some() {
+                    } else if port.as_i64().is_some() || port.as_f64().is_some() {
                         violations.push(SecurityViolation {
                             container: name.clone(),
                             rule: SecurityRule::PortsLocalhost,
@@ -983,7 +956,6 @@ impl SecurityCheck {
             None => return violations,
         };
 
-        // Addon services (not listed in consts::BUILT_IN_SERVICES) are allowed to expose ports.
         for (name, service) in services {
             if !consts::BUILT_IN_SERVICES.contains(&name.as_str()) {
                 continue;
@@ -1100,8 +1072,6 @@ impl SecurityCheck {
                 plugin::TokenMount::ReadOnly => "ro",
                 plugin::TokenMount::ReadWrite { .. } => "rw",
             };
-            // An OAuth plugin consumes the host-side oauth worker, so it gets the
-            // same per-service bearer mount as SharePoint (ADR-069).
             let extra_allowed: Vec<String> = if manifest.oauth.is_some() {
                 vec![format!("/secrets/oauth-auth-token-{sid}")]
             } else {
@@ -1135,7 +1105,7 @@ impl SecurityCheck {
         };
         let (name, service) = match services.iter().find(|(n, _)| n == "proxy") {
             Some(pair) => pair,
-            None => return violations, // not rendered (legacy path) — nothing to check
+            None => return violations,
         };
 
         if service.get("network_mode").is_some() {
@@ -1160,6 +1130,11 @@ impl SecurityCheck {
         let expected_tokens = format!("{}/llm", expected_paths.tokens_engine_dir());
         let mut matched = 0usize;
         for vol in &volumes {
+            let validated_by_dedicated_rule = extract_volume_for_target(vol, "/policy").is_some()
+                || extract_volume_for_target(vol, "/audit").is_some();
+            if validated_by_dedicated_rule {
+                continue;
+            }
             if let Some((host, mode)) = extract_volume_for_target(vol, "/config") {
                 let _ = host;
                 if mode.as_deref() != Some("ro") {
@@ -1202,10 +1177,6 @@ impl SecurityCheck {
                     });
                 }
                 matched += 1;
-            } else if extract_volume_for_target(vol, "/policy").is_some() {
-                // Full correctness (source/mode/env pin) is ProxyPolicyMount's job.
-            } else if extract_volume_for_target(vol, "/audit").is_some() {
-                // Full correctness (source/mode) is AuditMount's job.
             } else {
                 violations.push(SecurityViolation {
                     container: name.clone(),
@@ -1251,8 +1222,6 @@ impl SecurityCheck {
             .cloned()
             .unwrap_or_default();
         let target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
-        // A path-resolution failure must fail closed: never let an unverifiable
-        // mount source pass through as if the mount were merely absent.
         let expected_source = match to_engine_path(&crate::claude_managed::managed_settings_path(
             data_dir, project,
         )) {
@@ -1327,7 +1296,6 @@ impl SecurityCheck {
         let expected_source = match expected_source {
             Ok(p) => p,
             Err(e) => {
-                // Presence-mandatory rule: an unverifiable expectation fails closed.
                 violations.push(SecurityViolation {
                     container: service.into(),
                     rule,
@@ -1353,8 +1321,6 @@ impl SecurityCheck {
                 }
                 Some(_) => {}
                 None => {
-                    // Map/long-form volumes are never render output; reject any
-                    // that target the area instead of silently skipping.
                     let target = vol.get("target").and_then(|t| t.as_str()).unwrap_or("");
                     if is_mount_area_target(&normalize_mount_target(target), area) {
                         violations.push(SecurityViolation {
@@ -1571,8 +1537,6 @@ impl SecurityCheck {
             .unwrap_or_default();
         let expected = expected_paths.project_engine_path();
         let managed_target = format!("/etc/claude-code/{}", crate::consts::MANAGED_SETTINGS_FILE);
-        // Renderer conventions (compose.template.yml + render_compose) for the fixed
-        // claude mounts: exact target -> (required host-source suffix, required mode).
         let claude_home_suffix = format!("/{}/{project}", crate::consts::CLAUDE_HOME_SUBDIR);
         let usage_suffix = format!("/usage/{project}/proxy");
         let fixed_targets: [(&str, &str, &str); 4] = [
@@ -1583,8 +1547,6 @@ impl SecurityCheck {
         ];
         let mut matches = 0;
         for vol in &vols {
-            // Fail-closed: a long-form mapping is never renderer output on claude
-            // (same precedent as validate_service_volume_mounts' volume_long_form).
             let Some(s) = vol.as_str() else {
                 violations.push(SecurityViolation {
                     container: "claude".into(),
@@ -1595,8 +1557,6 @@ impl SecurityCheck {
                 });
                 continue;
             };
-            // Fail-closed: anonymous/named volumes without an absolute target are
-            // never renderer output either.
             let Some((host, target, mode)) = parse_short_form_volume(s) else {
                 violations.push(SecurityViolation {
                     container: "claude".into(),
@@ -1619,8 +1579,6 @@ impl SecurityCheck {
                             "The claude /workspace mount must come from exactly the project directory.",
                     });
                 }
-                // The template renders no mode here (compose defaults to rw);
-                // fixture composes carry an explicit :rw. Anything else is a tamper.
                 if mode.is_some_and(|m| m != "rw") {
                     violations.push(SecurityViolation {
                         container: "claude".into(),
@@ -1638,8 +1596,6 @@ impl SecurityCheck {
                 continue;
             }
             if target == managed_target {
-                // Source and :ro mode of this exact target are enforced per-entry
-                // by ManagedSettingsMount (check_claude_managed_settings).
                 continue;
             }
             if let Some((_, suffix, want_mode)) =
@@ -1710,8 +1666,6 @@ impl SecurityCheck {
                 remediation: "Re-render compose; plugin claude-resources mounts are read-only.",
             });
         }
-        // A path-resolution failure must fail closed: never let an unverifiable
-        // mount source pass through as if the mount were merely absent.
         let plugin_dir = data_dir.join("plugins").join(slug);
         let resources_dir = plugin::plugin_claude_resources_dir(&plugin_dir);
         let expected_source = match to_engine_path(&resources_dir) {
@@ -1804,7 +1758,7 @@ impl SecurityCheck {
         let compose_name = format!("mcp-{service_id}");
         let (name, service) = match services.iter().find(|(n, _)| n == &compose_name) {
             Some(pair) => pair,
-            None => return Vec::new(), // worker not in compose (disabled)
+            None => return Vec::new(),
         };
 
         let extra_allowed = vec![format!("/secrets/oauth-auth-token-{service_id}")];
@@ -1868,8 +1822,6 @@ impl SecurityCheck {
         project: &str,
     ) -> Vec<SecurityViolation> {
         use std::os::unix::fs::MetadataExt;
-        // Get current user's UID by checking ownership of data_dir itself.
-        // This avoids unsafe libc::getuid() while respecting workspace unsafe_code = "deny".
         let expected_uid = match std::fs::metadata(data_dir) {
             Ok(m) => m.uid(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -1936,12 +1888,11 @@ impl SecurityCheck {
             }
         };
         if meta.file_type().is_symlink() {
-            return Vec::new(); // Skip symlinks — prevent traversal attacks
+            return Vec::new();
         }
 
         let mut violations = Vec::new();
 
-        // Ownership check
         if meta.uid() != expected_uid {
             violations.push(SecurityViolation {
                 container: "host".into(),
@@ -1960,7 +1911,6 @@ impl SecurityCheck {
             });
         }
 
-        // Permission check
         let mode = meta.permissions().mode() & 0o777;
         if mode != expected_mode {
             violations.push(SecurityViolation {
@@ -2042,8 +1992,6 @@ impl VolumeCheckRules {
         token_path_mismatch: SecurityRule::SharepointTokenPathMismatch,
         token_path_mismatch_rem:
             "SharePoint token mount must use the project-specific tokens directory.",
-        // ADR-060/PR3: `/tokens:ro` is universal; reuse generic
-        // `PluginTokenMountMode` (dedicated SharePoint variant removed).
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "SharePoint token mount must be :ro (ADR-060)",
         token_mount_mode_rem: "SharePoint refresh moved to the host-side `oauth` worker; \
@@ -2071,8 +2019,6 @@ impl VolumeCheckRules {
         token_path_mismatch: SecurityRule::SlackTokenPathMismatch,
         token_path_mismatch_rem:
             "Slack token mount must use the project-specific tokens directory.",
-        // `/tokens:ro` is the universal rule — reuse the generic mode variant
-        // (same convention as SHAREPOINT above).
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "Slack token mount must be :ro (ADR-071)",
         token_mount_mode_rem: "Slack refresh runs in the host-side `oauth` worker; /tokens must be :ro like every other worker.",
@@ -2099,8 +2045,6 @@ impl VolumeCheckRules {
         token_path_mismatch: SecurityRule::AtlassianTokenPathMismatch,
         token_path_mismatch_rem:
             "Atlassian token mount must use the project-specific tokens directory.",
-        // `/tokens:ro` is the universal rule — reuse the generic mode variant
-        // (same convention as SHAREPOINT/SLACK above).
         token_mount_mode: SecurityRule::PluginTokenMountMode,
         token_mount_mode_msg: "Atlassian token mount must be :ro",
         token_mount_mode_rem:
@@ -2214,8 +2158,6 @@ fn validate_service_volume_mounts(
                 .iter()
                 .find_map(|t| extract_volume_for_target(vol_str, t).map(|hp_mode| (t, hp_mode)))
             {
-                // Permitted ADR-060 OAuth bearer mount (or future analogous mounts)
-                // — must be :ro. host path is opaque (per-project, dynamic).
                 let (_target, (_host_path, mode)) = extra;
                 let actual = mode.as_deref().unwrap_or("ro");
                 if actual != "ro" {
@@ -2350,7 +2292,6 @@ mod tests {
     #[test]
     fn managed_settings_wrong_source_fails() {
         let data_dir = std::path::Path::new("/data");
-        // Sourced from the user-editable claude-home instead of claude-managed.
         let bad = to_engine_path(
             &data_dir
                 .join("claude-home")
@@ -2376,7 +2317,6 @@ mod tests {
 
     #[test]
     fn claude_plugin_resources_mount_is_allowed() {
-        // A plugin's claude-resources dir mounts read-only at /speedwave/plugins/<slug>.
         let data_dir = std::path::Path::new("/host/.speedwave");
         let yaml = format!(
             "services:\n  claude:\n    volumes:\n      \
@@ -2395,8 +2335,6 @@ mod tests {
 
     #[test]
     fn claude_plugin_resources_mount_from_foreign_root_rejected() {
-        // Correct /plugins/<slug>/claude-resources suffix but wrong root must not
-        // pass as a mere substring/suffix match (the ends_with bypass).
         let data_dir = std::path::Path::new("/host/.speedwave");
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
@@ -2430,8 +2368,6 @@ mod tests {
         );
     }
 
-    // ── parse_short_form_volume: the one short-form volume grammar ──────────
-
     #[test]
     fn parse_short_form_volume_with_and_without_mode() {
         assert_eq!(
@@ -2446,7 +2382,6 @@ mod tests {
 
     #[test]
     fn parse_short_form_volume_windows_backslash_host() {
-        // `C:\` is a colon followed by a backslash, never the `:/` separator.
         assert_eq!(
             parse_short_form_volume(r"C:\Users\x:/workspace:rw"),
             Some((r"C:\Users\x", "/workspace", Some("rw")))
@@ -2459,8 +2394,6 @@ mod tests {
 
     #[test]
     fn parse_short_form_volume_windows_forward_slash_host() {
-        // Pinned contract: the drive-letter `C:/` at index 1 is skipped, so the
-        // whole `C:/Users/x` is the host and the target starts at the next `:/`.
         assert_eq!(
             parse_short_form_volume("C:/Users/x:/workspace:rw"),
             Some(("C:/Users/x", "/workspace", Some("rw")))
@@ -2473,11 +2406,9 @@ mod tests {
 
     #[test]
     fn parse_short_form_volume_anonymous_and_named_forms() {
-        // No `:/`-separated absolute target = anonymous volume = None (fail-closed).
         assert_eq!(parse_short_form_volume("cache-vol"), None);
         assert_eq!(parse_short_form_volume("/data"), None);
         assert_eq!(parse_short_form_volume(""), None);
-        // A named volume with an absolute target parses; source checks reject it later.
         assert_eq!(
             parse_short_form_volume("myvol:/data"),
             Some(("myvol", "/data", None))
@@ -2491,8 +2422,6 @@ mod tests {
             Some(("/h", "/target:/odd", None))
         );
     }
-
-    // ── check_claude_workspace_mount: fail-closed entry + per-target checks ─
 
     #[test]
     fn claude_long_form_volume_entry_fails_closed() {
@@ -2530,7 +2459,6 @@ mod tests {
 
     #[test]
     fn claude_usage_mount_with_foreign_source_rejected() {
-        // Right target and mode, wrong host source: must not clear the gate.
         let data_dir = std::path::Path::new("/host/.speedwave");
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
@@ -2550,7 +2478,6 @@ mod tests {
     #[test]
     fn claude_fixed_target_wrong_mode_rejected() {
         let data_dir = std::path::Path::new("/host/.speedwave");
-        // :rw where the template fixes :ro.
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
                     - /host/.speedwave/usage/test/proxy:/usage:rw\n";
@@ -2563,7 +2490,6 @@ mod tests {
                     && x.message.contains("must be :ro")),
             "a :rw mount on the ro-fixed /usage target must be rejected, got: {v:?}"
         );
-        // A missing mode on an ro-fixed target is equally a tamper.
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
                     - /host/.speedwave/claude-resources:/speedwave/resources\n";
@@ -2595,7 +2521,6 @@ mod tests {
 
     #[test]
     fn claude_bare_plugins_prefix_target_rejected() {
-        // Exactly `/speedwave/plugins` (no slug) is not an allowlisted target.
         let data_dir = std::path::Path::new("/host/.speedwave");
         let yaml = "services:\n  claude:\n    volumes:\n      \
                     - /proj:/workspace:rw\n      \
@@ -2629,8 +2554,6 @@ mod tests {
 
     #[test]
     fn claude_full_renderer_volume_set_passes() {
-        // Mirrors render_compose output for project "p": every fixed target, the
-        // modeless /workspace, the managed-settings mount, and a plugin mount.
         let data_dir = std::path::Path::new("/host/.speedwave");
         let managed = managed_source(data_dir, "p");
         let plugin_resources = plugin_resources_source(data_dir, "figma");
@@ -2678,7 +2601,6 @@ mod tests {
 
     #[test]
     fn managed_settings_no_volumes_key_fails_when_locked() {
-        // The claude service has no `volumes:` block at all, not merely an unrelated mount.
         let data_dir = std::path::Path::new("/data");
         let doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str("services:\n  claude:\n    image: x\n").unwrap();
@@ -2735,8 +2657,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn managed_settings_unresolvable_source_fails_closed() {
-        // A network UNC data_dir makes `to_engine_path` return `Err` on Windows —
-        // must fail closed (an empty violation list would fail-open).
         let data_dir = std::path::Path::new(r"\\fileserver\share");
         let doc = claude_doc_with_volume("/data/foo:/workspace:rw");
         let v = SecurityCheck::check_claude_managed_settings(&doc, data_dir, "p", false);
@@ -2885,7 +2805,6 @@ mod tests {
                 "normalization dodge '{dodge}' must fail even beside the canonical mount"
             );
         }
-        // Accept sanity: the canonical entry alone still passes after normalization.
         let doc = hub_doc(&[&canonical], &[PINNED_POLICY_ENV]);
         let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
         assert!(v.is_empty(), "canonical mount must still pass, got: {v:?}");
@@ -2955,8 +2874,6 @@ mod tests {
         let v = SecurityCheck::check_hub_policy_mount(&doc, data_dir, "p");
         assert!(v.is_empty(), "no mcp-hub service = no violation");
     }
-
-    // ---- ProxyPolicyMount (mirrors HubPolicyMount on the proxy service) ----
 
     #[test]
     fn proxy_policy_mount_variant_renders_expected_code() {
@@ -3059,8 +2976,6 @@ mod tests {
         assert!(v.is_empty(), "no proxy service = no violation");
     }
 
-    // ---- AuditMount (proxy + mcp-hub, :rw, no env pin) ----
-
     #[test]
     fn audit_mount_variant_renders_expected_code() {
         assert_eq!(SecurityRule::AuditMount.to_string(), "AUDIT_MOUNT");
@@ -3141,8 +3056,6 @@ mod tests {
         let v = SecurityCheck::check_audit_mount(&doc, data_dir, "p", "proxy");
         assert!(v.is_empty(), "no proxy service = no violation");
     }
-
-    // ---- NoPolicyOrAuditMountClaude ----
 
     #[test]
     fn no_policy_or_audit_mount_claude_variant_renders_expected_code() {
@@ -3229,7 +3142,6 @@ mod tests {
     fn claude_rejects_policy_dir_mount_with_dot_segment() {
         let data_dir = std::path::Path::new("/data");
         let policies_dir = to_engine_path(&data_dir.join("policies")).unwrap();
-        // Normalizes to exactly policy_source(data_dir, "p"): "policies/./p" -> "policies/p".
         let mount = format!("{policies_dir}/./p:/whatever:ro");
         let doc = service_doc("claude", &[&mount], &[]);
         let v = SecurityCheck::check_no_policy_or_audit_mount_on_claude(&doc, data_dir, "p");

@@ -115,8 +115,6 @@ pub fn mirror_relay_port(bind_port: u16) -> Option<u16> {
             (addr.mode == AddressingMode::MirroredRelay).then(|| relay_port_for(bind_port))
         }
         Err(e) => {
-            // Warn once per failure streak, not per 30 s watchdog poll; errors stay
-            // uncached upstream so the relay heals as soon as detection recovers.
             if !RELAY_DETECT_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 log::warn!("host addressing unavailable, mirror relay disabled: {e}");
             }
@@ -183,10 +181,7 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
             return std::sync::Arc::clone(c);
         }
     }
-    // Install the default computer for this platform.
     let default: std::sync::Arc<dyn HostAddressingComputer> = {
-        // Deterministic under tests/test-support: the real detector makes addressing
-        // host-dependent and spawns wsl.exe from dependent crates' tests (ADR-080).
         #[cfg(any(test, feature = "test-support"))]
         {
             std::sync::Arc::new(FixedComputer(HostAddressing::direct(
@@ -224,8 +219,6 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
 /// Test seam: inject a fixture computer. Pair with `#[serial_test::serial(host_addressing)]`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
-    // Recover from poison rather than silently skipping the install — a prior test panic
-    // must not leave the next test running against the wrong (real) computer.
     *COMPUTER
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(computer);
@@ -272,8 +265,6 @@ pub fn pin_mirrored_addressing() -> AddressingGuard {
 }
 
 mod host_addressing_impls {
-    // Gate shared by the WSL detector's helpers: compiled for the production Windows
-    // detector or for unit tests — never for the test-support fixed-computer builds.
     #[cfg(any(
         all(target_os = "windows", not(any(test, feature = "test-support"))),
         test
@@ -342,8 +333,6 @@ mod host_addressing_impls {
     #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
     fn detect_wsl_gateway_ip() -> anyhow::Result<String> {
         let distro = crate::consts::wsl_distro_name();
-        // Bounded: watchdog ticks (and the joins in `stop()`) reach this probe — a
-        // wedged wsl.exe must never pin them indefinitely.
         let output = crate::binary::run_wsl_bounded(
             &["-d", distro, "--", "sh", "-c", "ip -4 route show default"],
             None,
@@ -378,7 +367,6 @@ mod host_addressing_impls {
                 continue;
             }
             let mut tokens = line.split_whitespace();
-            // `default via X.X.X.X ...`
             while let Some(tok) = tokens.next() {
                 if tok == "via" {
                     if let Some(ip_str) = tokens.next() {
@@ -497,8 +485,6 @@ impl HostAddressingComputer for FixedComputer {
 mod resolver_tests {
     use super::*;
 
-    // ── HostAddressing resolver tests ───────────────────────────────────────
-
     struct CountingComputer {
         addr: HostAddressing,
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -593,15 +579,12 @@ mod resolver_tests {
         assert_eq!(mirror_relay_port(60123), Some(60123 ^ 0x4000));
         assert_ne!(mirror_relay_port(60123), Some(60123));
 
-        // 16384's XOR image is 0 (invalid); the bijection routes the 3-cycle
-        // 16384→49152→32768→16384 around it instead.
         assert_eq!(mirror_relay_port(0x4000), Some(0xC000));
         assert_eq!(mirror_relay_port(0x8000), Some(0x4000));
 
         let _direct = pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
         assert_eq!(mirror_relay_port(60123), None);
 
-        // Detection failure disables the relay (None; warned once per failure streak).
         set_host_addressing_computer_for_test(std::sync::Arc::new(FailingComputer("boom".into())));
         assert_eq!(mirror_relay_port(60123), None);
     }
@@ -609,8 +592,6 @@ mod resolver_tests {
     #[test]
     #[serial_test::serial(host_addressing)]
     fn direct_gateway_equal_to_relay_ip_does_not_translate() {
-        // A user-pinned WSL NAT subnet can legitimately yield a bindable 10.200.0.1
-        // gateway; Direct mode must never XOR-translate ports (mode beats IP). ADR-080.
         let _guard = pin_direct_addressing(crate::consts::MIRROR_RELAY_GATEWAY_IP);
         assert_eq!(mirror_relay_port(60123), None);
         assert_eq!(container_facing_port(60123), 60123);
@@ -652,7 +633,6 @@ mod resolver_tests {
             assert_eq!(host_bind_port_for_container_facing(facing), bind);
         }
 
-        // Direct mode: container-facing == bind, and the reverse is the identity.
         let _direct = pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
         assert_eq!(container_facing_port(60123), 60123);
         assert_eq!(host_bind_port_for_container_facing(60123), 60123);

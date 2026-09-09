@@ -29,8 +29,6 @@ pub(crate) fn init_secrets_dir_in(data_dir: &Path, project: &str) -> anyhow::Res
     Ok(secrets_dir)
 }
 
-// ── Local-LLM token paths ────────────────────────────────────────────────
-
 /// Services with token files under `~/.speedwave/tokens/<project>/<service>/`. Whitelist enforced
 /// by `tokens_path`. Plugins use a separate discipline (validated by `plugin::validate_manifest`).
 const ALLOWED_TOKEN_SERVICES: &[&str] = &["local-llm", LLM_TOKEN_SERVICE];
@@ -157,8 +155,6 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    // ── init_secrets_dir_in ──────────────────────────────────────────────
-
     #[test]
     fn init_secrets_dir_creates_project_and_parent_dirs() {
         let d = data_dir();
@@ -201,8 +197,6 @@ mod tests {
         assert!(secrets_dir.is_dir());
     }
 
-    // ── llm token namespace (ADR-073) ────────────────────────────────────
-
     #[test]
     fn llm_key_path_happy_path() {
         let d = data_dir();
@@ -215,7 +209,6 @@ mod tests {
 
     #[test]
     fn llm_file_must_end_with_api_key_suffix() {
-        // `llm` service file names must carry the `_api_key` suffix.
         let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, "openrouter")
             .unwrap_err()
             .to_string();
@@ -224,8 +217,6 @@ mod tests {
 
     #[test]
     fn llm_provider_id_must_be_a_slug() {
-        // Leading capital, dot, and traversal segments all fail the slug shape
-        // before they can reach a file path.
         for bad in [
             "Bad_api_key",
             "a.b_api_key",
@@ -244,14 +235,11 @@ mod tests {
 
     #[test]
     fn llm_empty_provider_id_rejected() {
-        // `_api_key` alone strips to an empty id, which is not a valid slug.
         let err = tokens_path_in(data_dir().path(), "proj", LLM_TOKEN_SERVICE, "_api_key")
             .unwrap_err()
             .to_string();
         assert!(err.contains("not a valid slug"), "got: {err}");
     }
-
-    // ── service allow-list ────────────────────────────────────────────────
 
     #[test]
     fn unknown_service_rejected() {

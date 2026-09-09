@@ -36,7 +36,6 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
         })
         .unwrap_or_default();
     for name in service_names {
-        // strip_prefix once — not trim_start_matches (over-strips mcp-mcp-x).
         let key = name.strip_prefix("mcp-").unwrap_or(&name);
         match credentials_digest(&tokens_root.join(key)) {
             Ok(Some(digest)) => {
@@ -44,7 +43,6 @@ fn apply_credentials_digests(yaml: &str, tokens_root: &std::path::Path) -> anyho
             }
             Ok(None) => {}
             Err(e) => {
-                // One unreadable token dir must not abort the whole render — other services still start.
                 log::warn!("credentials_digest for '{name}' failed, skipping: {e}");
             }
         }
@@ -134,8 +132,6 @@ fn ensure_worker_auth_token(
 
     // Reject symlinks before is_file() — is_file() follows symlinks.
     let token = if !token_path.is_symlink() && token_path.is_file() {
-        // An unreadable token (e.g. a DACL corrupted by an interrupted write) must self-heal
-        // like an empty one, not hard-fail every container start with a bare ACCESS_DENIED.
         match std::fs::read_to_string(&token_path) {
             Ok(content) if !content.trim().is_empty() => content.trim().to_string(),
             Ok(_) => {
@@ -173,10 +169,8 @@ fn ensure_worker_auth_token(
 
     crate::fs_perms::write_restricted_file_atomic(&token_path, &token)?;
 
-    // Inject env var into worker container (fail-loud)
     add_service_env_var(doc, compose_name, env_key, &token)?;
 
-    // Mount token file into hub as /secrets/<service>-auth-token:ro
     add_hub_volume(
         doc,
         &format!(
@@ -215,7 +209,6 @@ pub(crate) fn apply_worker_auth_tokens_with_dir(
         )?;
     }
 
-    // Generate auth tokens for enabled plugin MCP workers (same pattern as built-in)
     for manifest in installed_plugins {
         let sid = match manifest.service_id.as_deref() {
             Some(s) => s,
@@ -240,7 +233,6 @@ pub fn enabled_hub_service_ids(
 ) -> Vec<String> {
     let mut ids: Vec<String> = consts::TOGGLEABLE_MCP_SERVICES
         .iter()
-        // `build::enabled_images` applies this same per-service predicate to the `IMAGES` list.
         .filter(|svc| integrations.is_service_enabled(svc.config_key) == Some(true))
         .map(|svc| svc.config_key.to_string())
         .collect();
@@ -281,7 +273,6 @@ pub(crate) fn apply_integrations_filter(
         })
     };
 
-    // Drop disabled MCP worker containers + their hub env vars.
     for svc in consts::TOGGLEABLE_MCP_SERVICES {
         if service_enabled(svc.config_key) {
             continue;
@@ -292,7 +283,6 @@ pub(crate) fn apply_integrations_filter(
             }
         }
         remove_env_from(&mut doc, "mcp-hub", svc.worker_env);
-        // Disabled egress-less worker (ADR-055): drop its internal network + hub attachment.
         if svc.egress_less {
             let net = format!("{network_name}_{}", svc.config_key);
             if let Some(map) = doc.get_mut("networks").and_then(|n| n.as_mapping_mut()) {
@@ -309,13 +299,11 @@ pub(crate) fn apply_integrations_filter(
         }
     }
 
-    // Hub uses ENABLED_SERVICES for tool routing; claude entrypoint uses it to gate claude-resources.
     let enabled_csv = enabled_hub_service_ids(integrations, plugin_manifests).join(",");
     log::debug!("integrations filter: enabled_services={}", enabled_csv);
     inject_env_into(&mut doc, "mcp-hub", "ENABLED_SERVICES", &enabled_csv);
     inject_env_into(&mut doc, "claude", "ENABLED_SERVICES", &enabled_csv);
 
-    // Hub uses DISABLED_OS_SERVICES for sub-tool routing; claude entrypoint uses it to gate OS sub-service skills.
     let disabled_os: Vec<&str> = consts::TOGGLEABLE_OS_SERVICES
         .iter()
         .filter(|svc| {
@@ -332,7 +320,6 @@ pub(crate) fn apply_integrations_filter(
         inject_env_into(&mut doc, "claude", "DISABLED_OS_SERVICES", &disabled_csv);
     }
 
-    // OS_AVAILABLE_SUBS lets entrypoint.sh iterate sub-services without hardcoding the list.
     let os_available_csv = consts::TOGGLEABLE_OS_SERVICES
         .iter()
         .map(|svc| svc.config_key)
@@ -376,7 +363,6 @@ pub(crate) fn apply_worker_config(
     env_var: &str,
     secret_name: &str,
 ) -> anyhow::Result<String> {
-    // PID-liveness gate: a stale lock.json must not inject a dead WORKER_*_URL.
     let port = match crate::host_mcp_process::lock::read(lock_path, service) {
         Some(l) if crate::host_mcp_process::probe::is_pid_alive(l.pid) => l.port,
         _ => return Ok(yaml.to_string()),
@@ -536,7 +522,6 @@ mod credentials_digest_tests {
         std::fs::write(tokens.join("sharepoint").join("client_secret"), "s3cret").unwrap();
         std::fs::write(tokens.join("sharepoint").join("access_token"), "tok-A").unwrap();
         let before = apply_credentials_digests(YAML2, &tokens).unwrap();
-        // Routine refresh rewrites access_token — must NOT recreate the worker.
         std::fs::write(tokens.join("sharepoint").join("access_token"), "tok-B").unwrap();
         let after = apply_credentials_digests(YAML2, &tokens).unwrap();
         assert_eq!(
@@ -544,7 +529,6 @@ mod credentials_digest_tests {
             env_of(&after, "mcp-sharepoint"),
             "machine-managed access_token churn must not change the digest"
         );
-        // But rotating the USER-entered secret must.
         std::fs::write(tokens.join("sharepoint").join("client_secret"), "rotated").unwrap();
         let rotated = apply_credentials_digests(YAML2, &tokens).unwrap();
         assert_ne!(
@@ -556,14 +540,12 @@ mod credentials_digest_tests {
     #[test]
     #[cfg(unix)]
     fn transient_unreadable_dir_skips_worker_not_whole_render() {
-        // One token dir's permission error must not abort the whole render.
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let tokens = tmp.path().join("tokens");
         let slack_dir = tokens.join("slack");
         std::fs::create_dir_all(&slack_dir).unwrap();
         std::fs::write(slack_dir.join("token"), "t").unwrap();
-        // github has readable credentials so we can verify the render still succeeds
         let github_dir = tokens.join("github");
         std::fs::create_dir_all(&github_dir).unwrap();
         std::fs::write(github_dir.join("token"), "gh-token").unwrap();
@@ -571,12 +553,10 @@ mod credentials_digest_tests {
         let result = apply_credentials_digests(YAML, &tokens);
         std::fs::set_permissions(&slack_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let out = result.expect("render must succeed despite one unreadable token dir");
-        // Unreadable worker gets no digest — not silently wrong, just absent for this session.
         assert!(
             env_of(&out, "mcp-slack").is_none(),
             "unreadable slack dir must produce no digest (warn+skip, not fail)"
         );
-        // Readable worker's digest is still injected.
         assert!(
             env_of(&out, "mcp-github").is_some(),
             "github with valid credentials must still get a digest"
@@ -602,13 +582,11 @@ mod credentials_digest_tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, tokens.join("slack").join("token")).unwrap();
         let out = apply_credentials_digests(YAML, &tokens).unwrap();
-        // Error path: symlinks never feed the digest (mirrors signing policy).
         assert!(env_of(&out, "mcp-slack").is_none());
     }
 
     #[test]
     fn write_in_progress_tmp_file_does_not_change_digest() {
-        // Verify .tmp. write-in-progress files are excluded from the digest.
         let tmp = tempfile::tempdir().unwrap();
         let tokens = tmp.path().join("tokens");
         let slack_dir = tokens.join("slack");
@@ -617,7 +595,6 @@ mod credentials_digest_tests {
 
         let before = apply_credentials_digests(YAML, &tokens).unwrap();
 
-        // Simulate write-in-progress: a tmp file appears mid-rename.
         std::fs::write(slack_dir.join("access_token.tmp.1234.abcdef"), "ephemeral").unwrap();
 
         let during = apply_credentials_digests(YAML, &tokens).unwrap();
@@ -627,7 +604,6 @@ mod credentials_digest_tests {
             ".tmp. in-progress file must not change the digest"
         );
 
-        // After rename: the tmp file is gone, access_token appears (volatile → still excluded).
         std::fs::remove_file(slack_dir.join("access_token.tmp.1234.abcdef")).unwrap();
         std::fs::write(slack_dir.join("access_token"), "tok-A").unwrap();
 
@@ -694,7 +670,6 @@ mod worker_os_url_state_tests {
     #[serial_test::serial(host_addressing)]
     fn compares_against_the_relay_port_under_mirrored_addressing() {
         let _mirrored = crate::compose::pin_mirrored_addressing();
-        // Bind port 60123 rides relay port 43739 (ADR-080: bind XOR 0x4000).
         let relayed = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:43739"]);
         assert_eq!(
             worker_os_url_state(&relayed, 60123),

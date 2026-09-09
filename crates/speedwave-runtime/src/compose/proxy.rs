@@ -101,15 +101,11 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
 pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> String {
     let mut routes = Vec::new();
 
-    // OAuth vs API key render the same passthrough route; the kind is learned
-    // host-side from the active provider (ADR-073) — never sniffed in the proxy.
     let anthropic_kind = match llm.active_provider().map(|p| p.kind) {
         Some(LlmProviderKind::AnthropicApiKey) => "anthropic_apikey",
         _ => "anthropic_oauth",
     };
 
-    // Anthropic passthrough is always first — bare model names resolve here and
-    // the caller's Authorization header is forwarded unchanged.
     routes.push(RenderRoute {
         prefix: "anthropic".into(),
         base_url: "https://api.anthropic.com".into(),
@@ -124,7 +120,6 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
             continue;
         }
         match entry.kind {
-            // Subscription + API-key Anthropic both ride the passthrough; no route.
             LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {}
             LlmProviderKind::OpenRouter => {
                 routes.push(RenderRoute {
@@ -143,8 +138,6 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
                     log::warn!("provider '{}' has no base_url — skipped", entry.id);
                     continue;
                 };
-                // Normalize BEFORE validating — v1 configs persisted the raw form
-                // (`…/v1/`), and the forwarder appends `/v1/messages` itself.
                 let base_url = super::llm::strip_trailing_v1(base_url);
                 if let Err(e) = super::llm::validate_base_url(&base_url) {
                     log::warn!(
@@ -258,7 +251,6 @@ pub(crate) fn migrate_legacy_local_key_in(data_dir: &Path, project: &str, llm: &
     if target.exists() {
         return;
     }
-    // Source of truth for "is there a legacy key to migrate": the legacy file.
     let Some(value) = super::llm::read_local_llm_token_opt_in(data_dir, project, "api_key") else {
         log::debug!("no legacy local-llm api_key to migrate (missing or unreadable)");
         return;
@@ -359,14 +351,13 @@ mod tests {
         let out = render_proxy_config(&cfg);
         assert!(!out.contains("sk-"));
         assert!(!out.contains("ANTHROPIC_API_KEY") && !out.contains("ANTHROPIC_AUTH_TOKEN"));
-        assert!(out.contains("SPW_KEY_OPENROUTER")); // env NAME only
+        assert!(out.contains("SPW_KEY_OPENROUTER"));
     }
 
     #[test]
     fn render_embeds_caller_token_when_present_and_omits_when_none() {
         let cfg = full_provider_mix();
         let with = render_proxy_config_with(&cfg, Some("secret-abc"));
-        // No `{with}`: it embeds the caller token (cleartext-logging).
         assert!(
             with.contains(r#""caller_token":"secret-abc""#),
             "token must be embedded"
@@ -471,8 +462,6 @@ mod tests {
 
     #[test]
     fn render_strips_trailing_v1_so_forwarder_does_not_double_it() {
-        // Forwarder appends `/v1/messages`; a base_url ending in `/v1` must not
-        // survive or the URL becomes `…/v1/v1/messages` → 404.
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 base_url: Some("http://host.docker.internal:9000/v1".into()),
@@ -517,7 +506,6 @@ mod tests {
             ..Default::default()
         };
         let json = render_proxy_config(&llm);
-        // Only the built-in anthropic passthrough route.
         assert!(
             json.contains(r#""prefix":"anthropic""#),
             "anthropic passthrough must be present: {json}"
@@ -526,7 +514,6 @@ mod tests {
             json.contains(r#""auth":"passthrough""#),
             "must be passthrough: {json}"
         );
-        // No other routes for OAuth-only config.
         let route_count = json.matches(r#""prefix":"#).count();
         assert_eq!(
             route_count, 1,
@@ -617,7 +604,6 @@ mod tests {
             "legacy key must be copied (trimmed) into the llm namespace"
         );
 
-        // Idempotent + non-clobbering: a newer key in the llm namespace wins.
         std::fs::write(&target, "sk-new-token").unwrap();
         migrate_legacy_local_key_in(dir.path(), "proj", &llm);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "sk-new-token");
@@ -632,7 +618,6 @@ mod tests {
             super::super::ensure_token_dir_in(dir.path(), "proj", "local-llm").unwrap();
         std::fs::write(legacy_dir.join("api_key"), "sk-legacy\n").unwrap();
 
-        // has_api_key:false mirrors the post-disk-sync state on a fresh upgrade.
         let llm = LlmConfig {
             providers: vec![LlmProviderEntry {
                 has_api_key: false,
@@ -740,7 +725,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-x").unwrap();
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
-        // Second removal: missing file is fine.
         remove_llm_provider_key_in(dir.path(), "proj", "openrouter").unwrap();
         assert!(remove_llm_provider_key_in(dir.path(), "proj", "../x").is_err());
     }
@@ -764,7 +748,6 @@ mod tests {
         assert_ne!(d1, d2);
         assert!(!d2.contains("sk-or-v1-abc"));
 
-        // Same-length rotation must flip the digest: it hashes content, not size/mtime.
         write_llm_provider_key_in(dir.path(), "proj", "openrouter", "sk-or-v1-xyz").unwrap();
         let d3 = proxy_state_digest_in(dir.path(), "proj");
         assert_ne!(d2, d3, "same-length key rotation must change the digest");
@@ -793,7 +776,6 @@ mod tests {
         write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         let d1 = proxy_state_digest_in(dir.path(), "proj");
 
-        // Patching proxy.json must change the digest.
         let proxy_json = proxy_config_path_in(dir.path(), "proj");
         std::fs::write(&proxy_json, r#"{"routes":[]}"#).unwrap();
         assert_ne!(d1, proxy_state_digest_in(dir.path(), "proj"));
@@ -820,7 +802,6 @@ mod tests {
             }],
             ..Default::default()
         };
-        // Simulate post-migration state: user-rotated key already in new namespace.
         write_llm_provider_key_in(dir.path(), "proj", "local", "sk-rotated").unwrap();
         write_proxy_config_in(dir.path(), "proj", &llm).unwrap();
         let target =
@@ -852,10 +833,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        // Must not panic; the unreadable legacy file is silently skipped.
         migrate_legacy_local_key_in(dir.path(), "proj", &llm);
 
-        // Restore permissions before tempdir cleanup.
         let _ = std::fs::set_permissions(&legacy_file, std::fs::Permissions::from_mode(0o600));
 
         let target =

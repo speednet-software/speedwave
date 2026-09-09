@@ -14,8 +14,6 @@ pub(crate) fn apply_llm_config_in(
     llm: &LlmConfig,
     project: &str,
 ) -> anyhow::Result<String> {
-    // Gate (SSOT: LlmConfig::is_unconfigured) — never-touched, explicit logout, and dangling
-    // active (entry missing) all refuse to start; logout gets distinct wording, checked first.
     if llm.is_logged_out() {
         anyhow::bail!(
             "No LLM provider selected. Run `speedwave login` to use your Anthropic \
@@ -29,7 +27,6 @@ pub(crate) fn apply_llm_config_in(
     }
     if llm.proxy_enabled.unwrap_or(true) {
         if let Some(entry) = llm.active_provider() {
-            // Local custom headers are unsupported by the proxy — stay on direct path.
             let needs_direct = entry.kind == LlmProviderKind::Local && entry.has_custom_headers;
             if !needs_direct {
                 let caller_token = super::proxy::ensure_caller_token_in(data_dir, project)?;
@@ -38,8 +35,6 @@ pub(crate) fn apply_llm_config_in(
             log::info!("custom headers configured — using the direct (non-proxy) path");
         }
     } else if let Some(entry) = llm.active_provider() {
-        // Legacy direct path supports only anthropic + local; erroring beats
-        // silently billing the Anthropic subscription for an OpenRouter session.
         if matches!(entry.kind, LlmProviderKind::OpenRouter) {
             anyhow::bail!(
                 "Provider '{}' requires the LLM proxy. Re-enable it (unset proxy_enabled=false) \
@@ -61,12 +56,9 @@ fn apply_llm_config_proxy(
     let entry = llm
         .active_provider()
         .ok_or_else(|| anyhow::anyhow!("proxy path requires an active provider"))?;
-    // Provenance: routing model comes from the active provider entry (ADR-073).
     let model = llm.effective_active_model().unwrap_or_default();
 
     let mut extra_env = std::collections::HashMap::new();
-    // Caller secret to the proxy's /v1 auth middleware; the proxy strips it
-    // (not in its outbound allow-list) so it never reaches the upstream.
     extra_env.insert(
         "ANTHROPIC_CUSTOM_HEADERS".to_string(),
         format!("{}: {caller_token}", super::proxy::PROXY_CALLER_AUTH_HEADER),
@@ -74,22 +66,16 @@ fn apply_llm_config_proxy(
     match entry.kind {
         LlmProviderKind::AnthropicOauth | LlmProviderKind::AnthropicApiKey => {
             extra_env.extend(crate::defaults::anthropic_default_models_env());
-            // Bare base URL: claude POSTs /v1/messages with a bare claude-* model,
-            // which the forwarder routes to the anthropic passthrough by prefix.
             extra_env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
                 super::PROXY_BASE_URL.to_string(),
             );
-            // Defense-in-depth after heal/quarantine: drop a foreign id from a
-            // not-yet-healed config → account default, not 404.
             if crate::config::is_foreign_anthropic_model(&model) {
                 log::warn!(
                     "ignoring foreign model '{model}' under anthropic provider '{}' — using account default",
                     entry.id
                 );
             } else if !model.is_empty() {
-                // Startup default, not a pin: a /model pick persisted in settings.json outranks
-                // it, whereas ANTHROPIC_MODEL would override the pick (ADR-073 amendment).
                 extra_env.insert("ANTHROPIC_DEFAULT_MODEL".to_string(), model.clone());
             }
         }
@@ -101,7 +87,6 @@ fn apply_llm_config_proxy(
                     entry.id
                 );
             }
-            // `<id>/<model>` matches the per-provider wildcard route in the proxy config.
             let routed_model = if model.starts_with(&format!("{}/", entry.id)) {
                 model.clone()
             } else {
@@ -111,13 +96,10 @@ fn apply_llm_config_proxy(
                 "ANTHROPIC_BASE_URL".to_string(),
                 super::PROXY_BASE_URL.to_string(),
             );
-            // Dummy Bearer: disables OAuth and satisfies non-empty Authorization.
             extra_env.insert(
                 "ANTHROPIC_AUTH_TOKEN".to_string(),
                 "sk-no-key-required".to_string(),
             );
-            // Remap every built-in alias to the routed id (ADR-073) so
-            // `/model opus` etc. hit the wildcard route, not a bare claude-*.
             for key in [
                 "ANTHROPIC_MODEL",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -180,22 +162,17 @@ fn apply_llm_config_legacy_in(
     }
     match provider {
         "anthropic" => {
-            // Pins each ANTHROPIC_DEFAULT_*_MODEL to the SSOT-latest id, `[1m]` where supported.
             let mut extra_env = crate::defaults::anthropic_default_models_env();
             let model = llm.model.as_deref().map(str::trim).unwrap_or("");
-            // Provenance guard (mirrors the proxy path): a foreign id falls
-            // back to account default rather than 404 the API.
             if crate::config::is_foreign_anthropic_model(model) {
                 log::warn!(
                     "ignoring foreign model '{model}' on direct anthropic path — using account default"
                 );
             } else if !model.is_empty() {
-                // Same default-not-pin semantics as the proxy path (ADR-073 amendment).
                 extra_env.insert("ANTHROPIC_DEFAULT_MODEL".to_string(), model.to_string());
             }
             inject_claude_env(yaml, &extra_env)
         }
-        // All `LOCAL_PROVIDERS` (SSOT) share the same env injection.
         local if crate::config::LOCAL_PROVIDERS.contains(&local) => {
             let base_url = llm
                 .base_url
@@ -212,7 +189,6 @@ fn apply_llm_config_legacy_in(
                 )
             })?;
 
-            // Resolve Bearer auth token: per-project key file, else dummy.
             const DUMMY_TOKEN: &str = "sk-no-key-required";
             let auth_token = if llm.has_api_key {
                 read_local_llm_token_opt_in(data_dir, project, "api_key").unwrap_or_else(|| {
@@ -249,7 +225,6 @@ fn apply_llm_config_legacy_in(
                 ),
             ]);
 
-            // Flatten `Name: Value` header lines to one comma-separated line; drop `Authorization`.
             if llm.has_custom_headers {
                 if let Some(headers) =
                     read_local_llm_token_opt_in(data_dir, project, "custom_headers")
@@ -259,7 +234,6 @@ fn apply_llm_config_legacy_in(
                         .map(str::trim)
                         .filter(|line| !line.is_empty())
                         .filter(|line| {
-                            // Strip any leading `Authorization:` header.
                             !line
                                 .split_once(':')
                                 .map(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
@@ -275,7 +249,6 @@ fn apply_llm_config_legacy_in(
 
             inject_claude_env(yaml, &extra_env)
         }
-        // Unreachable: provider filtered by the early guard above.
         _ => unreachable!("provider validated by early guard"),
     }
 }
@@ -367,7 +340,6 @@ pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
         "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        // A local model's window must never cap or un-enforce catalog models.
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
         "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
     ]
@@ -399,7 +371,6 @@ pub fn validate_base_url(raw: &str) -> anyhow::Result<()> {
     }
     let path = parsed.path();
     if path != "/" && !path.is_empty() {
-        // Allow only a single-segment path prefix.
         if !path.starts_with('/') {
             anyhow::bail!("base_url path must start with '/', got '{}'", path);
         }
@@ -458,8 +429,6 @@ mod tests {
 
     #[test]
     fn login_unset_keys_cover_local_and_anthropic_proxy_env() {
-        // BASE_URL is re-exported by login; ATTRIBUTION_HEADER is OAuth-neutral
-        // (prompt-cache only) — both deliberately stay off the unset list.
         const OAUTH_NEUTRAL: &[&str] = &["ANTHROPIC_BASE_URL", "CLAUDE_CODE_ATTRIBUTION_HEADER"];
         let unset: std::collections::HashSet<&str> =
             anthropic_login_unset_keys().iter().copied().collect();
@@ -534,8 +503,6 @@ mod tests {
 
     #[test]
     fn routed_provider_without_window_disables_unknown_model_enforcement() {
-        // Discovery reported no window: never substitute a made-up value —
-        // restore CC's pre-enforcement (wait-for-the-API) behavior instead.
         let rendered = apply_llm_config_proxy(
             CLAUDE_ENV_YAML,
             &routed_cfg(crate::config::LlmProviderKind::Local, None),
@@ -554,7 +521,6 @@ mod tests {
 
     #[test]
     fn anthropic_provider_injects_no_window_env() {
-        // Catalog models are recognized by CC — neither knob may leak there.
         let cfg = crate::config::LlmConfig {
             providers: vec![crate::config::LlmProviderEntry {
                 id: "anthropic".into(),
@@ -611,8 +577,6 @@ mod tests {
 
     #[test]
     fn dangling_active_bails_no_provider_configured() {
-        // Dangling active (points at a missing entry) is unconfigured (SSOT gate): render must
-        // refuse rather than silently fall back to Anthropic for a nonexistent provider id.
         let tmp = tempfile::tempdir().unwrap();
         for proxy in [Some(true), Some(false), None] {
             let llm = crate::config::LlmConfig {
@@ -642,8 +606,6 @@ mod tests {
 
     #[test]
     fn fresh_config_bails_no_provider_configured() {
-        // Never-touched project (no llm override at all) must refuse to start
-        // rather than silently default to Anthropic with no credentials.
         let tmp = tempfile::tempdir().unwrap();
         for proxy in [Some(true), Some(false), None] {
             let llm = crate::config::LlmConfig {
@@ -667,8 +629,6 @@ mod tests {
 
     #[test]
     fn legacy_v1_config_with_provider_still_renders() {
-        // A real legacy v1 config (provider explicitly set), migrated the way
-        // every production caller does before render_compose, still renders.
         let tmp = tempfile::tempdir().unwrap();
         let mut llm = crate::config::LlmConfig {
             provider: Some("anthropic".to_string()),
@@ -682,14 +642,11 @@ mod tests {
             "proj",
         )
         .expect("legacy v1 config must render (anthropic default)");
-        // No `{rendered}`: the proxy path injects the caller-auth token (cleartext-logging).
         assert!(rendered.contains("ANTHROPIC_"), "anthropic env injected");
     }
 
     #[test]
     fn unmigrated_legacy_v1_config_bails_until_migrated() {
-        // Flip side of the above: render_compose requires migrate_llm to run first. A raw,
-        // never-migrated flat `provider` has no resolvable active provider and must bail.
         let tmp = tempfile::tempdir().unwrap();
         let llm = crate::config::LlmConfig {
             provider: Some("anthropic".to_string()),
@@ -736,8 +693,6 @@ mod tests {
 
     #[test]
     fn legacy_in_rejects_custom_provider_after_removal() {
-        // Regression guard: provider="custom" removed end-to-end; falls
-        // through to the unknown-provider path, not its own bespoke error.
         let tmp = tempfile::tempdir().unwrap();
         let llm = crate::config::LlmConfig {
             provider: Some("custom".to_string()),
