@@ -241,10 +241,6 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
 
-  /**
-   * Meeting transcription is beta-gated (ADR-058/056) but kept while a recording runs, so
-   * its indicator and Stop control never disappear.
-   */
   readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
     const recording = this.transcription.recording();
     const show = this.beta.enabled() || recording;
@@ -345,8 +341,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        // Beta-gated route — the shortcut is inert until beta is enabled.
-        if (this.beta.enabled()) {
+        if (this.beta.enabled() || this.transcription.recording()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
         return;

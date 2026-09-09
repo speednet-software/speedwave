@@ -43,19 +43,19 @@
 > - `tray::refresh_tray_icon` queues a repaint and `apply_recording_state` re-derives the icon and tooltip ("Speedwave" / "Speedwave (recording)") from the driver registry (`transcription_cmd::DriversHandle`).
 > - The registry serves as authority because it outlives the webview, keeping the indicator accurate when the window is closed onto the tray.
 > - Registry mutations route through `register_driver_and_repaint_tray` / `unregister_driver_and_repaint_tray` so error rollbacks never strand a red icon. A source-structure test (`every_registry_mutation_repaints_the_tray`) enforces this pairing because wiring requires a live `AppHandle`.
-> - Sampling and applies run in one `run_on_main_thread` task. `set_icon` and `set_tooltip` each marshal to the main thread on their own[^20], so reading on the caller thread risks out-of-order execution during concurrent repaints.
+> - Sampling and applies run in one `run_on_main_thread` task. `set_icon` and `set_tooltip` each marshal to the main thread on their own[^20], so reading on the caller thread risks out-of-order execution during concurrent repaints. The badge pulse obeys the same rule: every repaint mints a pulse generation (`BADGE_PULSE_GENERATION`) that retires the previous loop, and the loop re-reads generation and registry inside its main-thread closure, so a stop landing mid-tick cannot strand a recording badge.
 > - Both states use `set_icon_with_as_template(.., true)`. In `tray-icon`, plain `set_icon` passes `is_template: false` internally[^28], leaving glyphs unadapted and turning white idle icons permanently black.
 >
 > **Window Indicator Implementation:**
 >
 > - Meeting transcription nav-rail entry carries a pulsing red dot (`--animate-record-pulse`, disabled under `prefers-reduced-motion`) with `aria-label` accessibility text.
-> - Nav-rail entry remains visible during active recording even with beta off, avoiding removal of controls when toggled from tray.
-> - `TranscriptionService.recording` is the predicate read by all consumers. `applyEvent` clears tracked recordings when sessions leave recording state, handling unexpected device loss across both indicators.
+> - Nav-rail entry remains visible during active recording even with beta off, avoiding removal of controls when toggled from tray. The route guard (`transcriptionRouteGuard`) and the `⌘4` shortcut carry the same exception, so the visible entry stays reachable.
+> - `TranscriptionService.recording` is the predicate read by all consumers. `applyEvent` clears tracked recordings when sessions leave recording state, handling unexpected device loss across both indicators. The record tab keeps its event listener while a recording runs, and `activateSnapshot` clears the tracked recording when a re-subscribed snapshot is no longer recording, so a driver ending on its own cannot leave the window indicator on.
 >
 > **Platform Design Choices:**
 >
 > - **macOS Monochrome vs. Windows Red:** macOS template images render from alpha alone[^21], recolored by the menu bar[^22]. Keeping red requires dropping template flags, making non-template images unadapted[^23] and invisible in one appearance mode.
-> - **Theme Detection Constraints:** `Window::theme()` pins to in-app Appearance mode via `NativeThemeAdapter.syncWindowTheme`. On Windows, tao derives app theme from `AppsUseLightTheme`, while the notification area follows `SystemUsesLightTheme`.
+> - **Theme Detection Constraints:** `Window::theme()` pins to in-app Appearance mode via `NativeThemeAdapter.syncWindowTheme`. On Windows, tao derives the app theme from `AppsUseLightTheme`[^29], while the notification area follows the separate `SystemUsesLightTheme` value (unverified — no Microsoft documentation for it).
 > - **Motion Rule:** macOS loses color cues, turning monochrome dots into unnoticed shape changes. Motion goes where color is unavailable: macOS pulses the badge via a 35%-opacity frame swapped every 800 ms (`BADGE_PULSES`, half the window indicator's 1.6 s breathe). Windows keeps its colored badge static per Microsoft guidance against long-running notification animations[^26].
 > - **Animation Engine:** Neither platform animates natively (`NSStatusItem` exposes no animation API without a custom view[^24]; `Shell_NotifyIcon` carries a single `HICON` per call[^25]). The pulse uses a self-driven image swap active only during capture, matching Apple's static colored screen recording indicator[^27].
 
@@ -167,3 +167,5 @@ The supporting sub-decisions:
 [^27]: macOS screen recording is stopped from a static menu-bar control: "To stop recording, click the Stop button in the menu bar": <https://support.apple.com/en-us/102618>.
 
 [^28]: `tray-icon`'s macOS `set_icon` calls `set_icon_for_ns_status_item_button` with `icon_is_template: false`, and that helper ends with `nsimage.setTemplate(icon_is_template)`; `set_icon_with_as_template` is the variant that forwards the flag: <https://docs.rs/tray-icon/0.24.2/src/tray_icon/platform_impl/macos/mod.rs.html>. Verified against the copy Tauri 2.11.5 vendors.
+
+[^29]: tao's `read_apps_use_light_theme` reads `AppsUseLightTheme` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, and `should_use_dark_mode` inverts it: <https://github.com/tauri-apps/tao/blob/tao-v0.35.3/src/platform_impl/windows/dark_mode.rs>. Verified against tao 0.35.3, the copy Tauri 2.11.5 vendors.

@@ -201,6 +201,12 @@ describe('MeetingTranscriptionComponent', () => {
     expect(svc.detach).toHaveBeenCalled();
   });
 
+  it('keeps the live stream attached on destroy while a recording runs', async () => {
+    recordingSessionIdSig.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
+  });
+
   it('renders no capture-warning banner without a warning', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-testid="capture-warning"]')).toBeNull();

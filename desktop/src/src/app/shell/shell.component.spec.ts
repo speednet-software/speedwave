@@ -386,8 +386,6 @@ describe('ShellComponent', () => {
     });
 
     it('keeps the entry and its dot when beta is turned off mid-recording', () => {
-      // Beta is toggleable from the tray while a driver runs; losing the entry would
-      // take the only in-window indicator and the Stop control with it.
       startRecording();
       betaEnabled.set(false);
       fixture.detectChanges();
@@ -623,6 +621,33 @@ describe('ShellComponent', () => {
       const before = theme.theme();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true }));
       expect(theme.theme()).toBe(before);
+    });
+  });
+
+  describe('Cmd+4 meeting-transcription shortcut', () => {
+    function pressCmd4(): void {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '4', metaKey: true }));
+    }
+
+    it('navigates when beta is enabled', () => {
+      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+      pressCmd4();
+      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
+    });
+
+    it('navigates during a recording even with beta disabled', () => {
+      betaEnabled.set(false);
+      recordingSessionId.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+      pressCmd4();
+      expect(nav).toHaveBeenCalledWith('/meeting-transcription');
+    });
+
+    it('stays inert with beta disabled and no recording', () => {
+      betaEnabled.set(false);
+      const nav = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+      pressCmd4();
+      expect(nav).not.toHaveBeenCalled();
     });
   });
 });

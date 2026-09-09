@@ -15,7 +15,6 @@ export interface NavRailEntry {
   iconName: IconName;
   /** Hint shown next to the label, e.g. `⌘1`. */
   shortcut?: string;
-  /** Renders a pulsing red dot on the entry; set while its feature is capturing. */
   recording?: boolean;
 }
 
@@ -82,8 +81,7 @@ export class NavRailComponent {
   readonly paletteOpened = output<void>();
 
   /**
-   * Tooltip and accessible name for an entry; carries the recording state, which the dot
-   * itself cannot because it is `aria-hidden`.
+   * Tooltip and accessible name for an entry.
    * @param entry - the entry being rendered.
    * @returns the entry label, suffixed while that entry is recording.
    */

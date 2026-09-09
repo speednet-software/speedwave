@@ -125,7 +125,6 @@ describe('NavRailComponent', () => {
     expect(dots[0].getAttribute('data-testid')).toBe('nav-recording-dot-chat');
     expect(dots[0].className).toContain('animate-record-pulse');
     expect(dots[0].className).toContain('motion-reduce:animate-none');
-    // The state is named on the entry, so the dot itself stays out of the a11y tree.
     expect(dots[0].getAttribute('aria-hidden')).toBe('true');
   });
 

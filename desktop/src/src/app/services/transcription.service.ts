@@ -83,7 +83,6 @@ export class TranscriptionService {
    */
   readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
 
-  /** `true` while a recording is in flight: the one predicate every indicator reads. */
   readonly recording: Signal<boolean> = computed(() => this.recordingSessionIdSignal() !== null);
 
   /**
@@ -455,6 +454,10 @@ export class TranscriptionService {
     this.captureWarningSignal.set(null); // warnings are per-session
     if (snapshot.id !== this.recordingSessionIdSignal()) {
       this.liveDraftSignal.set(''); // a genuinely different session starts with no draft
+    } else if (snapshot.status.state !== 'recording') {
+      this.liveDraftSignal.set('');
+      this.audioLevelsSignal.set(null);
+      this.clearInProgressRecording(snapshot.id);
     }
     this.activeSignal.set(snapshot);
   }
@@ -466,11 +469,6 @@ export class TranscriptionService {
     });
   }
 
-  /**
-   * The backend releases its driver on a self-inflicted end too (a lost device), so without
-   * this the indicators would keep claiming a live microphone until the next explicit stop.
-   * @param sessionId - session whose recording ended.
-   */
   private clearInProgressRecording(sessionId: string): void {
     if (this.recordingSessionIdSignal() !== sessionId) return;
     this.recordingSessionIdSignal.set(null);

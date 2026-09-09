@@ -1,7 +1,4 @@
-//! System tray icon and context menu. `TrayMenuState` owns the menu's variable bits and
-//! `refresh_tray_icon` the icon; mutate, then call the matching refresh. ADR-058, ADR-056 Am. 18.
-
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -19,33 +16,23 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 #[cfg(target_os = "windows")]
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon-white.png");
 
-/// Recording variant of the platform glyph: same shape plus a red dot badge. macOS keeps
-/// rendering it as a template, so the dot takes the menu-bar tint there (ADR-056 Am. 18).
 #[cfg(target_os = "macos")]
 const TRAY_ICON_RECORDING_PNG: &[u8] = include_bytes!("../icons/tray-icon-recording.png");
 #[cfg(target_os = "windows")]
 const TRAY_ICON_RECORDING_PNG: &[u8] = include_bytes!("../icons/tray-icon-white-recording.png");
 
-/// Same badge at 35% opacity. A template image discards colour but honours alpha, which is
-/// what lets the badge breathe on macOS without the glyph moving (ADR-056 Am. 18).
 #[cfg(target_os = "macos")]
 const TRAY_ICON_RECORDING_DIM_PNG: &[u8] = include_bytes!("../icons/tray-icon-recording-dim.png");
 #[cfg(target_os = "windows")]
 const TRAY_ICON_RECORDING_DIM_PNG: &[u8] =
     include_bytes!("../icons/tray-icon-white-recording-dim.png");
 
-/// Motion is used only where colour is unavailable: macOS renders the badge in the menu-bar
-/// tint, while Windows keeps its red badge static per Microsoft's notification-area guidance.
 const BADGE_PULSES: bool = cfg!(target_os = "macos");
 
-/// Half of the pulse period, matching the window indicator's 1.6 s breathe.
 const BADGE_PULSE_HALF_PERIOD: Duration = Duration::from_millis(800);
 
-/// True while a pulse loop is alive. `swap` makes claiming it race-free, and clearing it is
-/// how a stopped recording tells that loop to exit.
-static BADGE_PULSING: AtomicBool = AtomicBool::new(false);
+static BADGE_PULSE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// What the tray icon shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayIconState {
     Idle,
@@ -221,8 +208,6 @@ pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
     }
 }
 
-/// Queues a tray icon + tooltip repaint. Callers only signal that the recording registry
-/// changed; the state is sampled where it is applied, so concurrent repaints cannot interleave.
 pub(crate) fn refresh_tray_icon(app: &tauri::AppHandle) {
     let handle = app.clone();
     if let Err(e) = app.run_on_main_thread(move || apply_recording_state(&handle)) {
@@ -230,8 +215,6 @@ pub(crate) fn refresh_tray_icon(app: &tauri::AppHandle) {
     }
 }
 
-/// Main thread only: sampling the registry and applying it in one task is what keeps two
-/// concurrent repaints from landing out of order.
 fn apply_recording_state(app: &tauri::AppHandle) {
     let recording = crate::transcription_cmd::is_recording(
         &app.state::<crate::transcription_cmd::DriversHandle>(),
@@ -250,23 +233,18 @@ fn apply_recording_state(app: &tauri::AppHandle) {
         }
     }
 
-    if !recording {
-        BADGE_PULSING.store(false, Ordering::SeqCst);
-    } else if BADGE_PULSES && !BADGE_PULSING.swap(true, Ordering::SeqCst) {
-        spawn_badge_pulse(app.clone());
+    let generation = BADGE_PULSE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if recording && BADGE_PULSES {
+        spawn_badge_pulse(app.clone(), generation);
     }
 }
 
-/// Paints `state`. Returns false when there is no tray to paint, so callers can stop early.
-/// Main thread only.
 fn set_tray_icon(app: &tauri::AppHandle, state: TrayIconState) -> bool {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return false;
     };
     match Image::from_bytes(tray_icon_png(state)) {
         Ok(icon) => {
-            // `set_icon` hard-resets the macOS template flag to false, so it has to be
-            // re-asserted on every repaint or the glyph stops adapting to the menu bar.
             if let Err(e) = tray.set_icon_with_as_template(Some(icon), true) {
                 log::warn!("failed to set the tray icon: {e}");
             }
@@ -276,35 +254,38 @@ fn set_tray_icon(app: &tauri::AppHandle, state: TrayIconState) -> bool {
     true
 }
 
-/// Alternates the badge's opacity until the recording ends. Exits on a cleared
-/// `BADGE_PULSING` or an empty registry, so a stop and a quit both wind it down.
-fn spawn_badge_pulse(app: tauri::AppHandle) {
+fn spawn_badge_pulse(app: tauri::AppHandle, generation: u64) {
     tauri::async_runtime::spawn(async move {
         let mut dim = false;
         loop {
             tokio::time::sleep(BADGE_PULSE_HALF_PERIOD).await;
-            if !BADGE_PULSING.load(Ordering::SeqCst)
+            if BADGE_PULSE_GENERATION.load(Ordering::SeqCst) != generation
                 || !crate::transcription_cmd::is_recording(
                     &app.state::<crate::transcription_cmd::DriversHandle>(),
                 )
             {
-                BADGE_PULSING.store(false, Ordering::SeqCst);
                 return;
             }
             dim = !dim;
-            let state = if dim {
-                TrayIconState::RecordingDimBadge
-            } else {
-                TrayIconState::Recording
-            };
             let handle = app.clone();
             if app
                 .run_on_main_thread(move || {
+                    if BADGE_PULSE_GENERATION.load(Ordering::SeqCst) != generation
+                        || !crate::transcription_cmd::is_recording(
+                            &handle.state::<crate::transcription_cmd::DriversHandle>(),
+                        )
+                    {
+                        return;
+                    }
+                    let state = if dim {
+                        TrayIconState::RecordingDimBadge
+                    } else {
+                        TrayIconState::Recording
+                    };
                     set_tray_icon(&handle, state);
                 })
                 .is_err()
             {
-                BADGE_PULSING.store(false, Ordering::SeqCst);
                 return;
             }
         }
@@ -355,7 +336,6 @@ mod tests {
             recording.height(),
             "recording icon must be square for consistent rendering at all scales"
         );
-        // A differently sized variant would make the glyph resize the moment recording starts.
         assert_eq!(recording.width(), idle.width());
         assert_eq!(recording.height(), idle.height());
     }
@@ -388,7 +368,6 @@ mod tests {
             tray_icon_png(TrayIconState::Recording),
             "the pulse needs two distinct frames"
         );
-        // Only the badge fades: a dimmed glyph would make the whole icon flicker.
         let alpha_sum = |img: &Image<'_>| -> u64 {
             img.rgba()
                 .iter()
@@ -413,8 +392,6 @@ mod tests {
 
     #[test]
     fn the_pulse_runs_only_where_the_badge_cannot_be_coloured() {
-        // Motion substitutes for colour: macOS renders the badge in the menu-bar tint, and
-        // Microsoft's notification-area guidance rules out animating the coloured one.
         assert_eq!(BADGE_PULSES, cfg!(target_os = "macos"));
         assert!(
             BADGE_PULSE_HALF_PERIOD.as_millis() >= 500,
@@ -423,31 +400,46 @@ mod tests {
     }
 
     #[test]
-    fn the_pulse_loop_exits_on_a_cleared_flag_and_a_stopped_recording() {
-        // The loop needs a live `AppHandle`, so pin its two exit conditions structurally.
+    fn the_pulse_loop_exits_on_a_stale_generation_and_a_stopped_recording() {
         let source = include_str!("tray.rs");
         let body = &source[source
             .find("fn spawn_badge_pulse(")
             .expect("spawn_badge_pulse must exist")..];
         let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+        assert_eq!(
+            body.matches("BADGE_PULSE_GENERATION.load(Ordering::SeqCst) != generation")
+                .count(),
+            2,
+            "the loop must check its generation before the tick and again beside the paint"
+        );
+        let paint = &body[body
+            .find("run_on_main_thread")
+            .expect("the paint must be dispatched to the main thread")..];
         assert!(
-            body.contains("!BADGE_PULSING.load(Ordering::SeqCst)"),
-            "a cleared flag must end the loop"
+            paint.contains("is_recording("),
+            "the registry must be re-sampled beside the paint, not off-thread"
         );
         assert!(
-            body.contains("is_recording("),
-            "an emptied registry must end the loop even if the flag was missed"
+            body[..body.find("run_on_main_thread").unwrap_or(body.len())].contains("is_recording("),
+            "an emptied registry must end the loop even if the generation was missed"
         );
+    }
+
+    #[test]
+    fn every_repaint_retires_the_previous_pulse_loop() {
+        let source = include_str!("tray.rs");
+        let body = &source[source
+            .find("fn apply_recording_state(")
+            .expect("apply_recording_state must exist")..];
+        let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
         assert!(
-            body.contains("BADGE_PULSING.store(false, Ordering::SeqCst)"),
-            "the loop must release the flag on exit or no later pulse can start"
+            body.contains("BADGE_PULSE_GENERATION.fetch_add(1, Ordering::SeqCst)"),
+            "a repaint must bump the generation so no earlier loop can keep painting"
         );
     }
 
     #[test]
     fn the_repaint_reasserts_the_macos_template_flag() {
-        // `tray-icon`'s `set_icon` passes is_template=false internally, so a bare `set_icon`
-        // here leaves the glyph unadapted after the first recording toggle.
         let source = include_str!("tray.rs");
         let body = &source[source
             .find("fn set_tray_icon(")

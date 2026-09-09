@@ -347,8 +347,6 @@
     }
   }
 
-  /* Recording indicator: a soft breathe rather than a hard blink. It runs for a whole
-     meeting, so it has to stay noticeable without turning into a distraction. */
   @keyframes record-pulse {
     0%,
     100% {

@@ -246,8 +246,6 @@ fn unregister_driver(drivers: &DriversHandle, id: Uuid, stop: &StopSignal) {
     }
 }
 
-/// The registry outlives the webview, so the tray indicator stays correct after the
-/// window is closed onto the tray.
 pub fn is_recording(drivers: &DriversHandle) -> bool {
     !drivers
         .lock()
@@ -255,8 +253,6 @@ pub fn is_recording(drivers: &DriversHandle) -> bool {
         .is_empty()
 }
 
-/// Every registry mutation goes through this pair, so the tray cannot drift from the
-/// registry on an error-rollback path.
 fn register_driver_and_repaint_tray(
     app: &AppHandle,
     drivers: &DriversHandle,
@@ -1063,7 +1059,6 @@ mod tests {
 
     #[test]
     fn is_recording_reads_through_a_poisoned_lock() {
-        // A poisoned lock must recover the guard, never default to "recording".
         let drivers: DriversHandle = Arc::new(Mutex::new(HashMap::new()));
         let poisoner = drivers.clone();
         let _ = std::thread::spawn(move || {
@@ -1077,8 +1072,6 @@ mod tests {
 
     #[test]
     fn every_registry_mutation_repaints_the_tray() {
-        // The wiring needs a live `AppHandle`, so pin it structurally: a direct
-        // `register_driver`/`unregister_driver` call would strand the tray indicator.
         let source = include_str!("transcription_cmd.rs");
         let production = &source[..source.find("#[cfg(test)]").expect("test module must exist")];
 
@@ -1104,7 +1097,6 @@ mod tests {
         }
     }
 
-    /// Source of `fn <name>(` up to the first column-zero closing brace.
     fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
         let start = source
             .find(&format!("fn {name}("))
@@ -1113,8 +1105,6 @@ mod tests {
         &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
     }
 
-    /// Occurrences of `name(` as a whole identifier, so `unregister_driver(` is not
-    /// miscounted as `register_driver(`.
     fn count_calls(source: &str, name: &str) -> usize {
         let needle = format!("{name}(");
         source

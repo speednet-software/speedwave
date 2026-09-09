@@ -107,7 +107,6 @@ export class SessionListComponent implements OnInit, OnDestroy {
   readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
-  /** `true` while any recording is in flight — resume is hidden then. */
   readonly recordingInProgress = this.transcription.recording;
   private readonly cdr = inject(ChangeDetectorRef);
   /** Poll timer, active only while a session is still recording/finalizing. */
