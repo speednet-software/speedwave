@@ -34,8 +34,6 @@ bootstrapApplication(AppComponent, {
     ...(tauriNonce ? [{ provide: CSP_NONCE, useValue: tauriNonce }] : []),
   ],
 }).catch((err) => {
-  // Bootstrap failed before Angular DI exists, so route the error straight to
-  // the Rust log pipeline (the GlobalErrorHandler is the only console bridge).
   import('@tauri-apps/plugin-log')
     .then(({ error }) => error(`[Bootstrap] ${String(err)}`))
     .catch(() => {});

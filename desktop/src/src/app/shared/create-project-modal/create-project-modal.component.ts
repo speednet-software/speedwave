@@ -198,7 +198,6 @@ export class CreateProjectModalComponent {
     this.error.set(null);
     let selected: string | string[] | null;
     try {
-      // E2E seam: `window.__E2E_DIALOG_PATH__` overrides the picker (string=path, null=cancel).
       const e2eOverride = (window as unknown as { __E2E_DIALOG_PATH__?: string | null })
         .__E2E_DIALOG_PATH__;
       selected =
@@ -211,7 +210,6 @@ export class CreateProjectModalComponent {
     if (typeof selected !== 'string' || selected.length === 0) {
       return;
     }
-    // Auto-fill name only when the user has not yet edited it.
     const nameDirty = this.projectForm.name().dirty();
     this.model.update((m) => ({
       ...m,
@@ -219,7 +217,6 @@ export class CreateProjectModalComponent {
       name: nameDirty ? m.name : slugify(basename(selected as string)),
     }));
     this.cloudstorageWarning.set(null);
-    // Fire-and-forget CloudStorage detection; errors ignored.
     void this.detectCloudstorage(selected as string);
     this.cdr.markForCheck();
   }
@@ -238,7 +235,7 @@ export class CreateProjectModalComponent {
         this.cdr.markForCheck();
       }
     } catch {
-      // Outside Tauri or command unavailable — no warning shown.
+      return;
     }
   }
 
@@ -294,7 +291,6 @@ export class CreateProjectModalComponent {
 
   private reset(): void {
     this.model.set({ name: '', dir: '' });
-    // Clear the form's dirty/touched flags.
     this.projectForm().reset();
     this.error.set(null);
     this.cloudstorageWarning.set(null);

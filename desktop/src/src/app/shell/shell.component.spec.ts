@@ -15,7 +15,6 @@ describe('ShellComponent', () => {
   let fixture: ComponentFixture<ShellComponent>;
   let mockTauri: MockTauriService;
   let projectState: ProjectStateService;
-  // Beta on by default so the meeting-transcription nav entry is present.
   const betaEnabled = signal(true);
 
   beforeEach(async () => {
@@ -53,7 +52,6 @@ describe('ShellComponent', () => {
     fixture = TestBed.createComponent(ShellComponent);
     component = fixture.componentInstance;
     projectState = TestBed.inject(ProjectStateService);
-    // Reset shared UI state so ⌘B keybinding tests start from a clean slate.
     const ui = TestBed.inject(UiStateService);
     ui.closeSidebar();
     ui.closeMemory();
@@ -177,7 +175,6 @@ describe('ShellComponent', () => {
     component.ngOnDestroy();
 
     mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
-    // After destroy, component should not update (no crash)
     expect(component).toBeTruthy();
   });
 
@@ -255,7 +252,6 @@ describe('ShellComponent', () => {
   });
 
   it('keeps the Chat nav link visible when status is auth_required', async () => {
-    // Chat icon persists in nav even when auth is required; auth surfaces inline.
     await component.ngOnInit();
     projectState.status.set('auth_required');
     component['cdr'].markForCheck();
@@ -347,13 +343,11 @@ describe('ShellComponent', () => {
 
       const overlay = q('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
-      // Terminal-minimal restart overlay copy.
       expect(overlay!.textContent).toContain('restart required');
       expect(overlay!.textContent).toContain('Container config changed');
     });
 
     it('shows overlay when needsRestart is true and status is auth_required', () => {
-      // Restart prompt must surface in auth_required, not only in ready.
       projectState.status.set('auth_required');
       projectState.needsRestart = true;
       component['cdr'].markForCheck();
@@ -435,7 +429,6 @@ describe('ShellComponent', () => {
       component['cdr'].markForCheck();
       fixture.detectChanges();
 
-      // Spinner branch lives in the host template, so it stays in the fixture DOM.
       const overlay = fixture.nativeElement.querySelector('[data-testid="restart-overlay"]');
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Restarting containers...');

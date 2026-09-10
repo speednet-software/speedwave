@@ -1,16 +1,3 @@
-/**
- * No-LLM Chat Gating E2E test.
- *
- * The e2e-second project (created by spec 06 with no LLM provider) must block
- * chat access: navigating to /chat renders the choose-a-provider surface
- * (chat-view-no-provider) instead of the composer. This is the positive
- * assertion of the product rule "chat is only available once an LLM provider
- * is configured".
- *
- * Runs after spec 09 and before spec 07 (factory reset, always last).
- * All assertions use data-testid attributes, never UX-volatile text.
- */
-
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 
 const SECOND_PROJECT_NAME = 'e2e-second';

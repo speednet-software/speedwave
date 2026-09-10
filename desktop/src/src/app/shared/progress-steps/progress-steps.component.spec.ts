@@ -69,7 +69,6 @@ describe('ProgressStepsComponent', () => {
     ]);
     fixture.detectChanges();
     const pills = fixture.nativeElement.querySelectorAll('[data-testid="step-pill"]');
-    // pending step has no pill
     expect(pills.length).toBe(3);
     expect(pills[0].textContent.trim()).toBe('done');
     expect(pills[1].textContent.trim()).toBe('running');
@@ -88,7 +87,6 @@ describe('ProgressStepsComponent', () => {
   });
 
   it('colors the active-step circle with the brand accent to match primary buttons', () => {
-    // The spinner stroke is currentColor, inherited from the circle's color.
     host.steps.set([makeStep('a', 'active')]);
     fixture.detectChanges();
     const circle = fixture.nativeElement.querySelector('app-spin-icon').closest('div');

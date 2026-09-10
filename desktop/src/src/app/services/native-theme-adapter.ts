@@ -18,7 +18,6 @@ export class NativeThemeAdapter {
     import('@tauri-apps/api/window')
       .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(effective))
       .catch((err: unknown) => {
-        // Best-effort native chrome sync; log so bundle/IPC failures stay diagnosable.
         this.log.warn(`NativeThemeAdapter: setTheme failed: ${String(err)}`);
       });
   }

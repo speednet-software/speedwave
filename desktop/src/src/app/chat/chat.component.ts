@@ -106,7 +106,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Wires effects driven by the state-tree signal and the drawer toggles. */
   constructor() {
-    // Refresh branch on streaming->idle to catch mid-turn git checkout.
     let wasStreaming = false;
     effect(() => {
       const streaming = this.chat.isStreamingFromState();
@@ -115,10 +114,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
       wasStreaming = streaming;
       this.cdr.markForCheck();
-      // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
 
-    // Decouple toggle from data load so keyboard shortcut works like button.
     effect(() => {
       if (this.ui.sidebarOpen()) void this.loadConversations();
     });
@@ -129,7 +126,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
-    // Run init and branch read in parallel; they are independent.
     await Promise.all([this.chat.init(), this.refreshGitBranch()]);
     this.cdr.markForCheck();
 
@@ -139,8 +135,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     });
 
-    // Resume-on-restart lives in ChatStateService (survives this component being destroyed on
-    // /settings); register the overflow-prompt opener while mounted, else the service auto-resumes.
     this.chat.setResumeDecider(() => this.promptResumeOrFresh());
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -150,7 +144,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.projectMemory = '';
       this.memoryError = '';
       this.cdr.markForCheck();
-      // Bypass TTL: project switch is a strong signal the branch could be different.
       await this.refreshGitBranch(true);
       if (wasHistoryOpen) {
         await this.loadConversations();
@@ -203,7 +196,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   onEscape(event: Event): void {
     if (!this.chat.isStreaming) return;
-    if (this.hasUnansweredQuestion()) return; // let the block own ESC semantics
+    if (this.hasUnansweredQuestion()) return;
     event.preventDefault();
     this.chat.stopConversation();
   }
@@ -362,7 +355,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
-    // Re-focus composer so user can type immediately after clicking new conversation.
     this.composer?.focusInput();
   }
 
@@ -401,12 +393,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     const href = target.getAttribute('href');
     if (!href) return;
 
-    // Fragments/relative links are same-origin; let the WebView handle them.
     const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(href);
     if (!schemeMatch) return;
 
-    // Absolute URL: open http(s) externally, block every other scheme
-    // (data:/vbscript:/javascript:) from navigating the main WebView.
     event.preventDefault();
     const scheme = schemeMatch[1].toLowerCase();
     if (scheme === 'http' || scheme === 'https') {
@@ -424,9 +413,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.unsubAuthWatch();
       this.unsubAuthWatch = null;
     }
-    // Unregister the overflow-prompt opener → service auto-resumes while unmounted.
     this.chat.setResumeDecider(null);
-    // Dismiss any pending context-overflow dialog.
     this.contextOverflowResolve?.('fresh');
     this.contextOverflowResolve = null;
     this.contextOverflowOpen.set(false);
