@@ -1,6 +1,3 @@
-// Plugin OAuth2 authorization_code flow (loopback redirect + PKCE, ADR-069). Minted refresh
-// token + client credentials stay host-side under oauth/; only access token reaches the plugin.
-
 use crate::oauth_flow::{self, FlowRegistry, ProgressStatus};
 use crate::oauth_loopback::{build_authorize_url, wait_for_callback, CallbackFailure};
 use crate::types::check_project;
@@ -63,7 +60,6 @@ pub async fn start_plugin_oauth(
             oauth.grant_type.as_str()
         ));
     }
-    // Credentials + per-instance base URL come from the saved seed, not args.
     let seed = read_oauth_seed(&project, &slug)?;
     let client_id = seed
         .get(&oauth.client_id_field)
@@ -74,7 +70,6 @@ pub async fn start_plugin_oauth(
         .as_ref()
         .and_then(|k| seed.get(k).cloned());
 
-    // Static manifest endpoints, or per-instance SSRF-validated ones from the seed. See ADR-069.
     let (resolved_authorize, token_url) = resolve_endpoints(oauth, &seed)?;
     let authorize_url =
         resolved_authorize.ok_or_else(|| "oauth.authorize_url missing".to_string())?;
@@ -86,7 +81,6 @@ pub async fn start_plugin_oauth(
     let pkce = speedwave_runtime::pkce::generate_pkce();
     let state = speedwave_runtime::pkce::generate_state();
 
-    // Loopback callback server on 127.0.0.1; manifest port, else ephemeral.
     let bind_port = oauth.redirect_port.unwrap_or(0);
     // SSOT-allow: browser-side OAuth redirect URI is 127.0.0.1, not the container-reach host_bind_address (WSL adapter IP on Windows). See ADR-069.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", bind_port))
@@ -115,7 +109,6 @@ pub async fn start_plugin_oauth(
     )
     .inspect_err(|_| FLOW_STATE.clear_if_current(&request_id))?;
 
-    // Command returns request_id immediately; the flow runs in a spawned task.
     let oauth = oauth.clone();
     let seed = seed.clone();
     let resp = PluginOAuthResult {
@@ -210,7 +203,6 @@ pub async fn start_plugin_oauth(
             oauth_flow::emit_terminal(&app, &FLOW_STATE, ProgressStatus::Error, &e, &request_id);
             return;
         }
-        // Auto-enable the freshly-authorized plugin, best-effort. See ADR-069.
         if let Err(e) = crate::plugin_cmd::set_plugin_enabled_in_config(&project, &slug, true) {
             log::warn!("oauth[{slug}]: authorized but auto-enable failed: {e}");
         }
@@ -231,7 +223,6 @@ pub fn cancel_plugin_oauth() {
 #[tauri::command]
 pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> {
     check_project(&project)?;
-    // Cancel any in-flight flow first; FLOW_STATE is a singleton across all plugins.
     FLOW_STATE.cancel();
     crate::plugin_cmd::remove_oauth_offmount(&project, &slug)?;
     let access = access_token_path(&project, &slug)?;
@@ -242,8 +233,6 @@ pub fn forget_plugin_oauth(project: String, slug: String) -> Result<(), String> 
     }
     Ok(())
 }
-
-// ── Helpers ──
 
 /// Reads the pre-auth seed (`oauth/<project>/<slug>.seed.json`).
 fn read_oauth_seed(project: &str, slug: &str) -> Result<HashMap<String, String>, String> {
@@ -442,14 +431,12 @@ mod tests {
         }
     }
 
-    // Auto-enable must precede the success event; source-order check, not behavioral.
     #[test]
     fn start_plugin_oauth_auto_enables_on_success() {
         let src = include_str!("plugin_oauth_cmd.rs");
         let start = src
             .find("pub async fn start_plugin_oauth(")
             .expect("start_plugin_oauth must exist");
-        // Slice up to the next top-level item so the window tracks fn growth.
         let end = src[start..]
             .find("\npub fn cancel_plugin_oauth(")
             .map(|p| start + p)
@@ -588,9 +575,9 @@ mod tests {
         assert_eq!(token.expires_in, 900);
 
         let req = handle.await.unwrap();
-        // base64("cid:sec") — credentials travel in the header, not the form.
+        let cid_sec_base64 = "Y2lkOnNlYw==";
         assert!(
-            req.contains("Y2lkOnNlYw=="),
+            req.contains(cid_sec_base64),
             "missing Basic credential: {req}"
         );
         let form = req.split("\r\n\r\n").nth(1).unwrap_or("");
@@ -621,7 +608,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // RFC 6749 §5.1: expires_in present, refresh_token absent is valid.
         assert_eq!(token.refresh_token, None);
 
         let req = handle.await.unwrap();
@@ -694,7 +680,6 @@ mod tests {
         let _ = handle.await;
     }
 
-    // An access token without refresh_token must fail loudly.
     #[test]
     fn persist_state_rejects_missing_refresh_token() {
         let token = TokenResponse {
@@ -716,7 +701,6 @@ mod tests {
         assert!(err.contains("no refresh_token"), "got: {err}");
     }
 
-    // The worker's generic refresh reads these exact keys (GenericProviderData in generic.ts).
     #[test]
     fn build_provider_data_carries_worker_contract_keys() {
         let data =

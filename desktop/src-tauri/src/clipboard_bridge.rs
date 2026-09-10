@@ -55,13 +55,11 @@ fn start_watcher(
 }
 
 fn run(app: AppHandle, rx: mpsc::Receiver<notify::Result<Event>>) {
-    // Dedup key: the last content pushed to the clipboard.
     let mut last_content = String::new();
     while let Ok(res) = rx.recv() {
         let event = match res {
             Ok(e) => e,
             Err(e) => {
-                // Watcher error (inotify exhaustion, permission loss); events dropped.
                 log::warn!("clipboard bridge watcher error: {e}");
                 continue;
             }
@@ -83,7 +81,6 @@ fn read_capped(path: &Path) -> Option<String> {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            // NotFound is expected (file can vanish between notify event and open).
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("clipboard bridge: open failed at {}: {e}", path.display());
             }
@@ -151,8 +148,6 @@ mod tests {
         path
     }
 
-    // -- read_capped: happy path --
-
     #[test]
     fn read_capped_returns_content_within_cap() {
         let tmp = tempfile::tempdir().unwrap();
@@ -173,8 +168,6 @@ mod tests {
             MAX_PAYLOAD_BYTES as usize
         );
     }
-
-    // -- read_capped: edge cases --
 
     #[test]
     fn read_capped_rejects_oversized_payload() {
@@ -198,26 +191,19 @@ mod tests {
         assert!(read_capped(&path).is_none());
     }
 
-    // -- read_capped: error path (file gone between event and read) --
-
     #[test]
     fn read_capped_returns_none_when_file_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(BRIDGE_FILENAME);
-        // never created
         assert!(read_capped(&path).is_none());
     }
 
-    // -- dedup state transitions --
-
     #[test]
     fn dedup_skips_identical_content() {
-        // Dedup decision is the String equality the function uses.
         let mut last = String::from("payload-1");
         let new = String::from("payload-1");
         let is_dup = new == last;
         assert!(is_dup);
-        // and a changed payload is not a dup
         let changed = String::from("payload-2");
         assert!(changed != last);
         last = changed.clone();
@@ -226,17 +212,13 @@ mod tests {
 
     #[test]
     fn max_payload_bytes_is_64k() {
-        // Guards against an accidental constant change without a failing test.
         assert_eq!(MAX_PAYLOAD_BYTES, 65_536);
     }
 
     #[test]
     fn bridge_filename_matches_shell_wrapper_literal() {
-        // SSOT: containers/osc52-copy.sh and _tests/entrypoint/osc52-copy.bats depend on this value.
         assert_eq!(BRIDGE_FILENAME, ".clipboard-bridge");
     }
-
-    // -- watcher lifecycle: stop releases the watched directory --
 
     /// Polls `remove_dir_all` with a bounded deadline: notify's watcher drop
     /// closes the directory handle asynchronously on Windows.
@@ -297,7 +279,6 @@ mod tests {
         let root = tmp.path().join("claude-home");
         let (watcher, rx) = start_watcher(&root).unwrap();
         drop(watcher);
-        // Drain queued events; the channel must then disconnect so the bridge thread exits.
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(5)) {
                 Ok(_) => continue,

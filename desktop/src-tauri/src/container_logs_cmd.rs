@@ -1,13 +1,9 @@
-// Tauri commands for the unified `/logs` view (`get_all_logs`).
-
 use crate::logging_cmd::desktop_log_dir;
 use crate::types::check_project;
 
 /// Read a log file, take the last `tail` lines, and sanitize secrets.
 /// Returns an empty string if the file does not exist.
 fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, String> {
-    // claude-home is container-writable: the no-follow read (Unix O_NOFOLLOW,
-    // Windows reparse rejection) keeps symlink-swapped host files out of /logs.
     let content = match speedwave_runtime::fs_perms::read_regular_file_no_follow(path)? {
         Some(c) => c,
         None => return Ok(String::new()),
@@ -19,7 +15,6 @@ fn read_tail_sanitized(path: &std::path::Path, tail: usize) -> Result<String, St
     ))
 }
 
-// Reads all `speedwave-desktop*.log` segments (tauri-plugin-log rotates them).
 fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -55,9 +50,6 @@ fn read_tail_desktop_logs(dir: &std::path::Path, tail: usize) -> String {
     speedwave_runtime::log_sanitizer::sanitize(&combined[start..].join("\n"))
 }
 
-// ── Unified `/logs` view — merge of every log source the app produces ──
-// Frontend `parseLogLine` expects `<source> | <rest>`; host files reformat via `prefix_lines`.
-
 /// Returns true when the line already carries a `<source-token> | …` prefix
 /// that the frontend parser will recognise.
 fn has_source_prefix(line: &str) -> bool {
@@ -77,7 +69,6 @@ fn has_source_prefix(line: &str) -> bool {
     if i == 0 {
         return false;
     }
-    // Skip optional whitespace before `|` (matches frontend `\s*\|`).
     while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
         i += 1;
     }
@@ -87,7 +78,6 @@ fn has_source_prefix(line: &str) -> bool {
 /// Rewrites tauri-plugin-log's bracketed level (`[INFO]`) into the unbracketed form Angular's
 /// `LEVEL_RE` expects. Returns the line unchanged when it doesn't match the expected layout.
 fn rewrite_desktop_bracketed_level(line: &str) -> String {
-    // ISO timestamp ends at the first space (it contains no spaces).
     let Some(space_idx) = line.find(' ') else {
         return line.to_string();
     };
@@ -105,7 +95,6 @@ fn rewrite_desktop_bracketed_level(line: &str) -> String {
     ) {
         return line.to_string();
     }
-    // Frontend `LEVEL_RE` requires a space after the level word.
     let before = &line[..space_idx];
     let after = &after_ts[close_idx + 1..];
     format!("{before} {level} {after}")
@@ -176,7 +165,6 @@ pub(crate) fn merge_log_sources(sources: LogSources, project: &str) -> String {
     let audit_proxy = prefix_lines("audit-proxy", &sources.audit_proxy, None);
     let audit_hub = prefix_lines("audit-hub", &sources.audit_hub, None);
 
-    // Defence-in-depth sanitizer pass over the merged buffer (idempotent).
     speedwave_runtime::log_sanitizer::sanitize(&format!(
         "{compose}{desktop}{mcp_os}{claude}{lima}{entrypoint}{audit_proxy}{audit_hub}"
     ))
@@ -218,7 +206,6 @@ async fn fetch_compose_logs_bounded(project: String, tail: u32) -> String {
     let handle = tokio::task::spawn_blocking(move || {
         let _guard = InFlightGuard;
         let rt = speedwave_runtime::runtime::detect_runtime();
-        // best-effort; missing runtime should not blank the whole view
         if rt.is_available() {
             rt.compose_logs(&project, tail).unwrap_or_default()
         } else {
@@ -231,7 +218,6 @@ async fn fetch_compose_logs_bounded(project: String, tail: u32) -> String {
             log::warn!("compose logs task failed: {e}");
             String::new()
         }
-        // The detached task clears the in-flight flag when it eventually ends.
         Err(_) => {
             log::warn!("compose logs timed out — container engine busy");
             compose_busy_marker()
@@ -253,7 +239,6 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
             None => String::new(),
         };
 
-        // File-source paths resolved from the SSOT registry (platform-gated).
         let data_dir = speedwave_runtime::consts::data_dir();
         let read_source = |key: &str| -> String {
             speedwave_runtime::diagnostic_sources::resolve_file_path(key, data_dir, &project)
@@ -279,14 +264,10 @@ pub(crate) async fn get_all_logs(project: String, tail: Option<u32>) -> Result<S
     .map_err(|e| e.to_string())?
 }
 
-// ── Tests ──
-
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions may unwrap freely")]
 mod tests {
     use super::*;
-
-    // -- Log sanitization tests (compose / container log content) --
 
     #[test]
     fn container_logs_sanitize_bearer_token() {
@@ -392,8 +373,6 @@ mod tests {
         );
     }
 
-    // -- read_tail_sanitized --
-
     #[cfg(unix)]
     #[test]
     fn read_tail_sanitized_refuses_a_symlinked_source() {
@@ -448,8 +427,6 @@ mod tests {
         assert!(result.contains("line5"), "result: {result}");
     }
 
-    // -- has_source_prefix tests --
-
     #[test]
     fn has_source_prefix_matches_compose_container_format() {
         // What `nerdctl compose logs` emits — must pass through unchanged.
@@ -466,18 +443,14 @@ mod tests {
 
     #[test]
     fn has_source_prefix_rejects_empty_token() {
-        // `| no-source` would put an empty source token in the dropdown — guard against it
         assert!(!has_source_prefix("| only pipe"));
         assert!(!has_source_prefix(" | leading-space"));
     }
 
     #[test]
     fn has_source_prefix_rejects_token_with_spaces() {
-        // Token chars are `[\w.-]`; any space inside the token portion fails.
         assert!(!has_source_prefix("a b | c"));
     }
-
-    // -- rewrite_desktop_bracketed_level tests --
 
     #[test]
     fn rewrite_desktop_level_unwraps_known_levels() {
@@ -503,7 +476,6 @@ mod tests {
 
     #[test]
     fn rewrite_desktop_level_handles_colon_offset_timestamp() {
-        // RFC-3339 colon-offset `+02:00` has no space, so the split lands at `[LEVEL]`.
         let line = "2026-05-12T14:34:02.814+02:00 [WARN][speedwave_desktop::x] msg";
         let out = rewrite_desktop_bracketed_level(line);
         assert_eq!(
@@ -514,25 +486,20 @@ mod tests {
 
     #[test]
     fn rewrite_desktop_level_passes_through_unknown_levels() {
-        // `[VERBOSE]` is not a recognised log level — line must pass unchanged.
         let line = "2026-05-06T19:58:38 [VERBOSE][x] msg";
         assert_eq!(rewrite_desktop_bracketed_level(line), line);
     }
 
     #[test]
     fn rewrite_desktop_level_passes_through_lines_without_timestamp() {
-        // Multi-line stack traces, banners, etc.
         let line = "stack trace continued";
         assert_eq!(rewrite_desktop_bracketed_level(line), line);
     }
-
-    // -- prefix_lines tests --
 
     #[test]
     fn prefix_lines_passthrough_for_compose_format_when_no_project() {
         let raw = "claude_1 | hello\nmcp_hub_1 | world";
         let out = prefix_lines("compose", raw, None);
-        // With no project supplied, compose lines pass through verbatim.
         assert!(out.contains("claude_1 | hello"));
         assert!(out.contains("mcp_hub_1 | world"));
         assert!(!out.contains("compose | claude_1"));
@@ -589,8 +556,6 @@ mod tests {
             "non-desktop source must NOT unwrap brackets; got: {out}"
         );
     }
-
-    // -- merge_log_sources tests --
 
     #[test]
     fn merge_log_sources_handles_missing_files_as_empty() {
@@ -658,7 +623,6 @@ mod tests {
 
     #[test]
     fn logs_view_covers_all_displayable_registry_sources() {
-        // A displayable registry source not wired into the merge fails here.
         use speedwave_runtime::diagnostic_sources::DIAGNOSTIC_SOURCES;
         let merged = merge_log_sources(
             LogSources {
@@ -685,7 +649,6 @@ mod tests {
                 );
             }
         }
-        // compose-yml (non-displayable) must never appear in /logs.
         assert!(!merged.contains("compose-yml |"), "merged: {merged}");
     }
 
@@ -763,8 +726,6 @@ mod tests {
             "JSON content must pass through verbatim with only the prefix, got: {out}"
         );
     }
-
-    // ── read_tail_desktop_logs tests ─────────────────────────────────────────
 
     #[test]
     fn read_tail_desktop_logs_returns_empty_when_dir_missing() {
