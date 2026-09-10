@@ -66,6 +66,58 @@ const MAX_BUFFERED_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 60;
 /// capture as dead — never per call: one side still delivering means waiting, not stalled.
 pub const STALL_GIVE_UP: Duration = Duration::from_secs(2);
 
+/// How long a microphone-only capture goes without a delivery before giving up — longer than
+/// [`STALL_GIVE_UP`] (no second stream carries it). System-only capture keeps no deadline.
+pub const SINGLE_STREAM_GIVE_UP: Duration = Duration::from_secs(5);
+
+/// Liveness deadline for a capture with only one stream to lose. Owns the threshold and the
+/// message so both platform backends give up on the same terms.
+#[derive(Debug)]
+pub struct SingleStreamWatchdog {
+    last_delivery: std::time::Instant,
+}
+
+impl SingleStreamWatchdog {
+    /// Starts the deadline now — capture is about to begin.
+    pub fn new() -> Self {
+        Self {
+            last_delivery: std::time::Instant::now(),
+        }
+    }
+
+    /// Restarts the deadline: audio landed, so the device is alive.
+    pub fn delivered(&mut self) {
+        self.last_delivery = std::time::Instant::now();
+    }
+
+    /// `Err` once nothing has landed for [`SINGLE_STREAM_GIVE_UP`].
+    pub fn check(&self) -> Result<(), CaptureError> {
+        if self.last_delivery.elapsed() >= SINGLE_STREAM_GIVE_UP {
+            return Err(CaptureError::Failed(
+                "microphone delivered no audio — the device appears to be gone".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Time since the last delivery — for tests asserting the deadline restarted.
+    pub fn since_delivery(&self) -> Duration {
+        self.last_delivery.elapsed()
+    }
+
+    /// Winds the deadline back, so a test can reach it without sleeping.
+    #[cfg(test)]
+    pub fn rewind(&mut self, by: Duration) {
+        self.last_delivery -= by;
+    }
+}
+
+impl Default for SingleStreamWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// How long one bounded `next_chunk` blocks without a chunk before yielding an empty keepalive
 /// so the ingest loop re-checks `stop`. SSOT for every platform's recv/poll bound.
 pub const KEEPALIVE_AFTER: Duration = Duration::from_millis(100);
@@ -408,6 +460,24 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn the_single_stream_deadline_stays_looser_than_the_mixed_one() {
+        // A mixed capture can lose one side and keep going; a single stream cannot, so a false
+        // positive there ends the recording outright.
+        assert!(SINGLE_STREAM_GIVE_UP > STALL_GIVE_UP);
+    }
+
+    #[test]
+    fn the_watchdog_gives_up_only_once_the_deadline_passes() {
+        let mut w = SingleStreamWatchdog::new();
+        assert!(w.check().is_ok(), "a fresh capture has not failed");
+        w.rewind(SINGLE_STREAM_GIVE_UP);
+        let err = w.check().unwrap_err();
+        assert!(err.to_string().contains("microphone"), "got: {err}");
+        w.delivered();
+        assert!(w.check().is_ok(), "a landed chunk restarts the deadline");
+    }
 
     #[test]
     fn chunk_samples_is_one_chunk_duration_at_16khz() {
