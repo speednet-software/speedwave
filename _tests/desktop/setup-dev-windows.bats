@@ -84,8 +84,8 @@ package_loop() {
 @test "the short target-dir is created here, and a foreign owner is refused" {
     # A drive-root DACL lets any local account pre-create it and keep CREATOR OWNER over
     # every desktop build artifact, including the exe sign-windows-binaries.ps1 signs.
-    grep -qF '(Get-Acl $shortTargetWin).Owner' "$SETUP_SCRIPT"
-    grep -qF "'BUILTIN\\Administrators', 'NT AUTHORITY\\SYSTEM'" "$SETUP_SCRIPT"
+    grep -qF 'GetOwner([Security.Principal.SecurityIdentifier])' "$SETUP_SCRIPT"
+    grep -qF "@(\$mySid, 'S-1-5-32-544', 'S-1-5-18') -notcontains \$owner" "$SETUP_SCRIPT"
     grep -qF '$failedItems += @{ Name = $shortTargetWin' "$SETUP_SCRIPT"
 }
 
@@ -94,7 +94,17 @@ package_loop() {
     # local account plant files here and keep CREATOR OWNER control of them.
     grep -qF 'icacls $shortTargetWin /inheritance:r /grant:r' "$SETUP_SCRIPT"
     ! grep -qE 'icacls \$shortTargetWin /grant[^:]' "$SETUP_SCRIPT"
-    grep -qF "'NT AUTHORITY\\SYSTEM:(OI)(CI)F'" "$SETUP_SCRIPT"
+}
+
+@test "every ACL principal is a well-known SID, never an account name" {
+    # Verified on a pl-PL host: 'BUILTIN\Administrators' does not resolve there, so icacls
+    # fails 1332 and leaves the inherited DACL fully intact (cross-platform rules).
+    local code
+    code="$(grep -vE '^[[:space:]]*#' "$SETUP_SCRIPT")"
+    ! printf '%s\n' "$code" | grep -qE 'BUILTIN.|NT AUTHORITY.'
+    grep -qF "\$SID_ADMINISTRATORS = '*S-1-5-32-544'" "$SETUP_SCRIPT"
+    grep -qF "\$SID_LOCAL_SYSTEM = '*S-1-5-18'" "$SETUP_SCRIPT"
+    grep -qF '([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value' "$SETUP_SCRIPT"
 }
 
 @test "a target-dir with a foreign owner is refused, not re-ACLed" {

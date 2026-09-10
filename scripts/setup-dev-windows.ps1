@@ -258,16 +258,20 @@ if (Test-Path $tauriCargoConfig) {
 
 # Own the creation: the default DACL on a drive root lets any local account pre-create the
 # dir and keep CREATOR OWNER control over every desktop build artifact we later sign.
+# SIDs, never account names: 'BUILTIN\Administrators' does not resolve on a localized
+# Windows (pl-PL has 'Administratorzy'), and icacls then fails 1332 without changing a thing.
+$SID_ADMINISTRATORS = '*S-1-5-32-544'
+$SID_LOCAL_SYSTEM = '*S-1-5-18'
 if ($shortTargetDir -and [System.IO.Path]::IsPathRooted($shortTargetDir)) {
     $shortTargetWin = $shortTargetDir -replace '/', '\'
+    $mySid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
     $ownerTrusted = $true
     if (Test-Path $shortTargetWin) {
-        $owner = (Get-Acl $shortTargetWin).Owner
-        $trusted = @("$env:USERDOMAIN\$env:USERNAME", 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')
-        if ($trusted -notcontains $owner) {
+        $owner = (Get-Acl $shortTargetWin).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if (@($mySid, 'S-1-5-32-544', 'S-1-5-18') -notcontains $owner) {
             $ownerTrusted = $false
-            $failedItems += @{ Name = $shortTargetWin; Hint = "pre-existing and owned by '$owner' -- delete it or pick another target-dir." }
-            Write-Warning "$shortTargetWin is owned by '$owner', not you -- refusing to build into it."
+            $failedItems += @{ Name = $shortTargetWin; Hint = "pre-existing and owned by SID $owner -- delete it or pick another target-dir." }
+            Write-Warning "$shortTargetWin is owned by SID $owner, not you -- refusing to build into it."
         }
     } else {
         New-Item -ItemType Directory -Force $shortTargetWin | Out-Null
@@ -276,8 +280,8 @@ if ($shortTargetDir -and [System.IO.Path]::IsPathRooted($shortTargetDir)) {
     # /inheritance:r, not a bare /grant: the inherited drive-root ACEs hand BUILTIN\Users
     # create rights plus CREATOR OWNER control of whatever they plant here.
     if ($ownerTrusted) {
-        icacls $shortTargetWin /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" `
-            'BUILTIN\Administrators:(OI)(CI)F' 'NT AUTHORITY\SYSTEM:(OI)(CI)F' | Out-Null
+        icacls $shortTargetWin /inheritance:r /grant:r "*${mySid}:(OI)(CI)F" `
+            "${SID_ADMINISTRATORS}:(OI)(CI)F" "${SID_LOCAL_SYSTEM}:(OI)(CI)F" | Out-Null
         if ($LASTEXITCODE -ne 0) {
             $failedItems += @{ Name = $shortTargetWin; Hint = "icacls could not harden its DACL (exit $LASTEXITCODE) -- fix the permissions or pick another target-dir." }
             Write-Warning "icacls could not harden $shortTargetWin -- continuing; reported at the end."
