@@ -899,4 +899,19 @@ mod tests {
             e.cost_usd
         );
     }
+
+    #[test]
+    fn fable_5_1_cache_hit_uses_its_own_non_standard_rate() {
+        // Fable 5.1's cached_input (0.25) is stored per-model, not derived as
+        // 0.1x input (which would be 1.0) — the field must actually be read.
+        let e = compute_cost_with(
+            &record("anthropic_apikey", "claude-fable-5-1", 0, 0, 1_000_000, 0),
+            &|_| None,
+        );
+        assert!(
+            (e.cost_usd.unwrap() - 0.25).abs() < 1e-9,
+            "expected the 0.25/MTok cache-hit rate, got {:?}",
+            e.cost_usd
+        );
+    }
 }
