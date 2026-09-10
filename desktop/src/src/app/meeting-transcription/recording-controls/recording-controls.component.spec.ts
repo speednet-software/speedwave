@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { signal } from '@angular/core';
+import { computed, signal, type Signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
@@ -56,6 +56,7 @@ describe('RecordingControlsComponent', () => {
   let recordingSessionId: ReturnType<typeof signal<string | null>>;
   let recordingSource: ReturnType<typeof signal<AudioSource | null>>;
   let recordingLanguage: ReturnType<typeof signal<Language | null>>;
+  let recordingLive: ReturnType<typeof signal<boolean | null>>;
   let svc: {
     getCapabilities: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
@@ -68,8 +69,10 @@ describe('RecordingControlsComponent', () => {
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     recordingSessionId: typeof recordingSessionId;
+    recording: Signal<boolean>;
     recordingSource: typeof recordingSource;
     recordingLanguage: typeof recordingLanguage;
+    recordingLive: typeof recordingLive;
   };
   let logger: {
     warn: ReturnType<typeof vi.fn>;
@@ -84,7 +87,6 @@ describe('RecordingControlsComponent', () => {
       supports_microphone: false,
       note: 'Requires macOS 14.4+',
     },
-    backends: ['cpu', 'metal'],
     gpu_class: 'discrete' as const,
     accel_label: 'Metal (GPU)',
   };
@@ -126,6 +128,7 @@ describe('RecordingControlsComponent', () => {
     recordingSessionId = signal<string | null>(null);
     recordingSource = signal<AudioSource | null>(null);
     recordingLanguage = signal<Language | null>(null);
+    recordingLive = signal<boolean | null>(null);
     svc = {
       getCapabilities: vi.fn(async () => caps),
       liveTranscriptPreferred: vi.fn(() => true),
@@ -133,7 +136,8 @@ describe('RecordingControlsComponent', () => {
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
       recommendedModel: vi.fn(async () => recAllDownloaded),
-      // Mirror the real service: start/stop drive the shared recording signal.
+      // Mirror the real service: start/stop drive the shared recording signals. `recordingLive`
+      // is left to each test, since the real value comes from the host snapshot, not the request.
       startRecording: vi.fn(async (source: AudioSource, language: Language): Promise<StartAck> => {
         recordingSessionId.set('sess-1');
         recordingSource.set(source);
@@ -149,13 +153,16 @@ describe('RecordingControlsComponent', () => {
           recordingSessionId.set(null);
           recordingSource.set(null);
           recordingLanguage.set(null);
+          recordingLive.set(null);
         }
       }),
       requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       recordingSessionId,
+      recording: computed(() => recordingSessionId() !== null),
       recordingSource,
       recordingLanguage,
+      recordingLive,
     };
     logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     await TestBed.configureTestingModule({
@@ -221,11 +228,10 @@ describe('RecordingControlsComponent', () => {
   });
 
   it('renders the host-computed acceleration label verbatim, never re-deriving it', async () => {
-    // The label is Rust's `accel_label()` (SSOT) — the badge must not recompute it from
-    // backends/gpu_class, so a contradictory pair changes nothing.
+    // The label is Rust's `accel_label()` (SSOT) — the badge renders it as sent, so a
+    // gpu_class that contradicts the label changes nothing.
     svc.getCapabilities.mockResolvedValueOnce({
       ...caps,
-      backends: ['cpu'],
       gpu_class: 'none' as const,
       accel_label: 'Vulkan (integrated GPU)',
     });
@@ -410,6 +416,65 @@ describe('RecordingControlsComponent', () => {
     fixture.detectChanges();
     expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
     expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
+  });
+
+  it('a freshly-mounted control restores the live mode from the session, not the preference', async () => {
+    // The preference says live; this session is record-only, so the session must win.
+    svc.liveTranscriptPreferred.mockReturnValue(true);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: null });
+    recordingLive.set(false);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).not.toBeNull();
+  });
+
+  it('a freshly-mounted control with no recording ignores the session signal', async () => {
+    // A stale `recordingLive` must not beat the preference when nothing is actually recording.
+    svc.liveTranscriptPreferred.mockReturnValue(false);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingLive.set(true);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).not.toBeNull();
+  });
+
+  it('a rejected stop still hands the toggle back to the preference', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(true);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: null });
+    recordingLive.set(false);
+    await component.ngOnInit();
+    expect(component.liveTranscript()).toBe(false);
+    // The service clears its recording signals in a `finally`, so the session is gone either way.
+    svc.stopRecording.mockImplementationOnce(async () => {
+      recordingSessionId.set(null);
+      recordingSource.set(null);
+      recordingLive.set(null);
+      throw new Error('stop failed');
+    });
+    await component.stop();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(true);
+    expect(component.recording()).toBe(false);
+  });
+
+  it('stopping hands the toggle back to the preference the session mode borrowed it from', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(true);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: null });
+    recordingLive.set(false);
+    await component.ngOnInit();
+    expect(component.liveTranscript()).toBe(false);
+    await component.stop();
+    fixture.detectChanges();
+    // Otherwise the finished session's record-only mode would silently start the next recording.
+    expect(component.liveTranscript()).toBe(true);
   });
 
   it('a freshly-mounted control with no recording keeps the compile-time defaults', async () => {

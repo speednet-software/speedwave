@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, type Signal } from '@angular/core';
+import { Injectable, computed, inject, signal, type Signal } from '@angular/core';
 import { type UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
@@ -64,10 +64,10 @@ export class TranscriptionService {
   private readonly downloadProgressSignal = signal<DownloadProgress | null>(null);
   private downloadUnlisten: UnlistenFn | null = null;
   private downloadPollTimer: ReturnType<typeof setInterval> | undefined;
-  private readonly captureWarningSignal = signal<CaptureWarning | null>(null);
   private readonly recordingSessionIdSignal = signal<string | null>(null);
   private readonly recordingSourceSignal = signal<AudioSource | null>(null);
   private readonly recordingLanguageSignal = signal<Language | null>(null);
+  private readonly recordingLiveSignal = signal<boolean | null>(null);
   private readonly liveDraftSignal = signal<string>('');
   private readonly audioLevelsSignal = signal<number[] | null>(null);
   private readonly gpuClassSignal = signal<GpuClass | null>(null);
@@ -83,6 +83,8 @@ export class TranscriptionService {
    */
   readonly recordingSessionId: Signal<string | null> = this.recordingSessionIdSignal.asReadonly();
 
+  readonly recording: Signal<boolean> = computed(() => this.recordingSessionIdSignal() !== null);
+
   /**
    * Source/language of the in-progress recording — service-level so a remounted
    * `RecordingControlsComponent` can restore its picker selection instead of showing defaults.
@@ -90,8 +92,16 @@ export class TranscriptionService {
   readonly recordingSource: Signal<AudioSource | null> = this.recordingSourceSignal.asReadonly();
   readonly recordingLanguage: Signal<Language | null> = this.recordingLanguageSignal.asReadonly();
 
-  /** Latest capture-health warning for the active session (null = none). */
-  readonly captureWarning: Signal<CaptureWarning | null> = this.captureWarningSignal.asReadonly();
+  /**
+   * How the in-flight recording actually started, from the host's `models_used.live`; `null` when
+   * nothing is recording, or when a failed start's rollback left the mode unknown.
+   */
+  readonly recordingLive: Signal<boolean | null> = this.recordingLiveSignal.asReadonly();
+
+  /** Capture warnings currently raised for the active session, in arrival order. */
+  readonly captureWarnings: Signal<readonly CaptureWarning[]> = computed(
+    () => this.activeSignal()?.active_warnings ?? []
+  );
 
   /** Uncommitted tail of the latest live decode ('' = none); replace-only. */
   readonly liveDraft: Signal<string> = this.liveDraftSignal.asReadonly();
@@ -115,9 +125,9 @@ export class TranscriptionService {
     this.downloadProgressSignal.asReadonly();
 
   /**
-   * Capabilities, compiled backends, probed `gpu_class`, and the host-computed acceleration
-   * label. Side effect: caches `gpu_class`, which `liveTranscriptPreferred()` reads (before
-   * the first call it assumes 'discrete', i.e. live on).
+   * Capabilities, probed `gpu_class`, and the host-computed acceleration label. Side effect:
+   * caches `gpu_class`, which `liveTranscriptPreferred()` reads (before the first call it
+   * assumes 'discrete', i.e. live on).
    */
   async getCapabilities(): Promise<CapabilitiesAck> {
     const ack = await this.tauri.invoke<CapabilitiesAck>('transcription_capabilities');
@@ -201,6 +211,7 @@ export class TranscriptionService {
         this.recordingSessionIdSignal.set(null);
         this.recordingSourceSignal.set(null);
         this.recordingLanguageSignal.set(null);
+        this.recordingLiveSignal.set(null);
       } catch {
         // Stop failed — keep the id so the Stop control still targets the session.
         this.recordingSessionIdSignal.set(ack.session_id);
@@ -210,6 +221,9 @@ export class TranscriptionService {
     this.recordingSessionIdSignal.set(ack.session_id);
     this.recordingSourceSignal.set(source);
     this.recordingLanguageSignal.set(language);
+    // `models_used.live` is the authoritative mode: `null` means record-only, whatever the
+    // client preference asked for (ADR-056 Am. 13).
+    this.recordingLiveSignal.set(ack.snapshot.models_used.live != null);
     return ack;
   }
 
@@ -225,6 +239,7 @@ export class TranscriptionService {
         this.recordingSessionIdSignal.set(null);
         this.recordingSourceSignal.set(null);
         this.recordingLanguageSignal.set(null);
+        this.recordingLiveSignal.set(null);
       }
     }
   }
@@ -449,9 +464,12 @@ export class TranscriptionService {
    */
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
-    this.captureWarningSignal.set(null); // warnings are per-session
     if (snapshot.id !== this.recordingSessionIdSignal()) {
       this.liveDraftSignal.set(''); // a genuinely different session starts with no draft
+    } else if (snapshot.status.state !== 'recording') {
+      this.liveDraftSignal.set('');
+      this.audioLevelsSignal.set(null);
+      this.clearInProgressRecording(snapshot.id);
     }
     this.activeSignal.set(snapshot);
   }
@@ -461,6 +479,13 @@ export class TranscriptionService {
     this.patchUnlisten = await this.tauri.listen<TranscriptEvent>(eventName, (e) => {
       this.applyEvent(e.payload);
     });
+  }
+
+  private clearInProgressRecording(sessionId: string): void {
+    if (this.recordingSessionIdSignal() !== sessionId) return;
+    this.recordingSessionIdSignal.set(null);
+    this.recordingSourceSignal.set(null);
+    this.recordingLanguageSignal.set(null);
   }
 
   /**
@@ -488,6 +513,7 @@ export class TranscriptionService {
         if (ev.status.state !== 'recording') {
           this.liveDraftSignal.set('');
           this.audioLevelsSignal.set(null);
+          this.clearInProgressRecording(cur.id);
         }
         break;
       case 'finalize_progress':
@@ -500,15 +526,17 @@ export class TranscriptionService {
       case 'finished':
         next.status = { state: 'done' };
         this.liveDraftSignal.set('');
+        this.clearInProgressRecording(cur.id);
         break;
-      case 'capture_warning':
-        this.captureWarningSignal.set(ev.warning);
+      case 'capture_warning': {
+        // Both conditions can be live at once, and the host repeats a raise it already sent.
+        const raised = next.active_warnings ?? [];
+        next.active_warnings = raised.includes(ev.warning) ? raised : [...raised, ev.warning];
         break;
+      }
       case 'capture_warning_cleared':
         // Only the banner for the recovered warning goes away.
-        if (this.captureWarningSignal() === ev.warning) {
-          this.captureWarningSignal.set(null);
-        }
+        next.active_warnings = (next.active_warnings ?? []).filter((w) => w !== ev.warning);
         break;
     }
     this.lastSeq = ev.seq;

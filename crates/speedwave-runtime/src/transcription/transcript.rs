@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::transcription::audio::AudioSourceInfo;
+use crate::transcription::audio::{AudioSourceInfo, CaptureWarning};
 use crate::transcription::transcriber::{Language, Segment};
 
 /// On-disk filename for the persisted session.
@@ -68,6 +68,10 @@ pub struct TranscriptSession {
     /// after `audio_path` (ADR-056 Amendment 10). Empty on never-resumed sessions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_parts: Vec<PathBuf>,
+    /// Capture warnings raised for this session, in arrival order (ADR-056 Am. 16). Retired when
+    /// a capture ends; one raised by the offline pass afterwards stays on the finished session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_warnings: Vec<CaptureWarning>,
     /// What models were used for each pass.
     pub models_used: ModelsUsed,
     /// Last event seq emitted for this session — for snapshot+stream resume.
@@ -80,6 +84,8 @@ pub struct TranscriptSession {
     /// `rollback_resume` so the invariant lives in the store, not at call sites.
     #[serde(skip, default)]
     pub(crate) prior_live_model: Option<String>,
+    #[serde(skip, default)]
+    pub(crate) prior_active_warnings: Vec<CaptureWarning>,
 }
 
 impl TranscriptSession {
@@ -106,10 +112,12 @@ impl TranscriptSession {
             final_segments: None,
             audio_path: Some(audio_path),
             audio_parts: Vec::new(),
+            active_warnings: Vec::new(),
             models_used: ModelsUsed::default(),
             last_seq: 0,
             live_draft: String::new(),
             prior_live_model: None,
+            prior_active_warnings: Vec::new(),
         }
     }
 
@@ -381,6 +389,39 @@ mod tests {
             src.contains("audio_parts?: string[]"),
             "models/transcript.ts TranscriptSession must carry the optional audio_parts field"
         );
+    }
+
+    #[test]
+    fn active_warnings_field_matches_ts_mirror() {
+        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
+        assert!(
+            src.contains("active_warnings?: CaptureWarning[]"),
+            "models/transcript.ts TranscriptSession must carry the optional active_warnings field"
+        );
+    }
+
+    #[test]
+    fn active_warnings_is_omitted_when_empty_and_wire_encoded_when_raised() {
+        let mut s = TranscriptSession::new(Language::Pl, mk_source(), PathBuf::from("a.wav"));
+        assert!(s.active_warnings.is_empty(), "a new session is healthy");
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(
+            json.get("active_warnings").is_none(),
+            "an empty list stays off the wire so older readers see no new field"
+        );
+
+        s.active_warnings = vec![
+            CaptureWarning::MicrophoneStalled,
+            CaptureWarning::AudioDropped,
+        ];
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json.get("active_warnings").unwrap().to_string(),
+            "[\"microphone_stalled\",\"audio_dropped\"]",
+            "arrival order and snake_case wire names are both part of the contract"
+        );
+        let back: TranscriptSession = serde_json::from_value(json).unwrap();
+        assert_eq!(back.active_warnings, s.active_warnings);
     }
 
     #[test]

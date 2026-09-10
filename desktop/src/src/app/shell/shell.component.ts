@@ -15,12 +15,15 @@ import { ProjectSwitcherComponent } from '../project-switcher/project-switcher.c
 import { UpdateNotificationComponent } from '../update-notification/update-notification.component';
 import { BetaService } from '../services/beta.service';
 import { ProjectStateService } from '../services/project-state.service';
+import { TranscriptionService } from '../services/transcription.service';
 import { UiStateService } from '../services/ui-state.service';
 import { CommandPaletteComponent } from './command-palette/command-palette.component';
 import { ModalOverlayComponent } from './modal-overlay/modal-overlay.component';
 import { NavRailComponent, type NavRailEntry } from './nav-rail/nav-rail.component';
 import { SpinIconComponent } from '../shared/spin-icon.component';
 import { CloudStorageModalComponent } from '../shared/cloudstorage-modal/cloudstorage-modal.component';
+
+const TRANSCRIPTION_ENTRY_ID = 'meeting-transcription';
 
 /**
  * Application shell — hosts the icon rail, routed content, global keyboard
@@ -189,6 +192,7 @@ export class ShellComponent implements OnInit, OnDestroy {
   readonly projectState = inject(ProjectStateService);
   readonly ui = inject(UiStateService);
   readonly beta = inject(BetaService);
+  private readonly transcription = inject(TranscriptionService);
   private cdr = inject(ChangeDetectorRef);
   private router = inject(Router);
   private unsubscribe: (() => void) | null = null;
@@ -212,7 +216,7 @@ export class ShellComponent implements OnInit, OnDestroy {
       shortcut: '⌘3',
     },
     {
-      id: 'meeting-transcription',
+      id: TRANSCRIPTION_ENTRY_ID,
       label: 'Meeting transcription',
       route: '/meeting-transcription',
       iconName: 'microphone',
@@ -237,12 +241,13 @@ export class ShellComponent implements OnInit, OnDestroy {
 
   private readonly currentUrlSignal = signal<string>(this.router.url);
 
-  /** Nav entries to render: chat always visible; meeting-transcription beta-gated (ADR-058/056). */
-  readonly visibleEntries = computed(() =>
-    this.beta.enabled()
-      ? this.entryCatalog
-      : this.entryCatalog.filter((e) => e.id !== 'meeting-transcription')
-  );
+  readonly visibleEntries = computed<readonly NavRailEntry[]>(() => {
+    const recording = this.transcription.recording();
+    const show = this.beta.enabled() || recording;
+    return this.entryCatalog
+      .filter((e) => e.id !== TRANSCRIPTION_ENTRY_ID || show)
+      .map((e) => (e.id === TRANSCRIPTION_ENTRY_ID ? { ...e, recording } : e));
+  });
 
   /** Active entry id derived from the current router URL — used by the rail. */
   readonly activeViewId = computed(() => {
@@ -336,8 +341,7 @@ export class ShellComponent implements OnInit, OnDestroy {
         return;
       case '4':
         event.preventDefault();
-        // Beta-gated route — the shortcut is inert until beta is enabled.
-        if (this.beta.enabled()) {
+        if (this.beta.enabled() || this.transcription.recording()) {
           void this.router.navigateByUrl('/meeting-transcription');
         }
         return;
