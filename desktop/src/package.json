@@ -46,7 +46,7 @@
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^26.4.1",
     "@vitest/coverage-v8": "^4.1.11",
-    "angular-eslint": "^22.2.0",
+    "angular-eslint": "^22.5.0",
     "axe-core": "^4.13.0",
     "eslint": "^10",
     "eslint-config-prettier": "^10",
