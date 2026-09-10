@@ -329,7 +329,7 @@ describe('transport', () => {
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
       expect(res.status).not.toHaveBeenCalledWith(406);
-      expect(mockSendJSONResponse).toHaveBeenCalled();
+      expect(mockCreateSSEStream).toHaveBeenCalledWith(res);
     });
 
     it('returns 406 when Accept has text/event-stream but missing application/json', async () => {
@@ -382,7 +382,7 @@ describe('transport', () => {
       await handleMCPPost(handler, req as Request, res as unknown as Response);
 
       expect(res.status).not.toHaveBeenCalledWith(406);
-      expect(mockSendJSONResponse).toHaveBeenCalled();
+      expect(mockCreateSSEStream).toHaveBeenCalledWith(res);
     });
 
     it('passes when Accept has quality values (application/json;q=0.9, text/event-stream)', async () => {
