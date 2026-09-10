@@ -108,6 +108,11 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # TypeScript 7 ships no tsserver and no JS compiler API. Nothing here typechecks — WDIO
+      # strips types via tsx/jiti — so a 7.x bump buys nothing and costs editor IntelliSense.
+      - dependency-name: "typescript"
+        versions: [">=7"]
 
   # `/` scans only .github/workflows and a root action.yml, so composite actions under
   # .github/actions need their own directory; group-by keeps one PR per action across both.
