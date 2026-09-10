@@ -1069,9 +1069,11 @@ pub(crate) mod tests {
     fn run_powershell_capture_reads_stdout() {
         use std::time::Duration;
 
+        // Asserts stdout is captured, not how fast powershell starts; the deadline is
+        // generous because cold powershell spawn under CI runner load has exceeded 30s.
         let out = run_powershell_capture(
             &["-NoProfile", "-Command", "Write-Output hi"],
-            Duration::from_secs(30),
+            Duration::from_secs(120),
         )
         .expect("powershell probe should run");
         assert!(out.status.success());
