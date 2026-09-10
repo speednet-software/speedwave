@@ -720,6 +720,7 @@ describe('RedmineClient', () => {
         subject: '  Updated Subject  ',
         status_id: 2,
         priority_id: 3,
+        tracker_id: 4,
       });
 
       expect(mockAxiosInstance.put).toHaveBeenCalledWith('/issues/1.json', {
@@ -727,6 +728,7 @@ describe('RedmineClient', () => {
           subject: 'Updated Subject',
           status_id: 2,
           priority_id: 3,
+          tracker_id: 4,
         },
       });
       expect(result.id).toBe(1);
