@@ -54,6 +54,24 @@
 > **Rejected Alternatives:**
 > Splitting `AudioDropped` per channel was rejected as new enum variants on both sides of the mirror for a distinction no user action depends on. A drop counter in banner text is the cheaper answer if ever needed.
 
+> **Amendment 17 (single-stream capture deadline):**
+>
+> **Problem:**
+> Mixed capture ends the stream after `STALL_GIVE_UP` (Amendment 4), but single-stream capture had no deadline. A microphone dying mid-recording left the ingest loop waiting indefinitely on an unclosed channel, hanging the recording without a message.
+>
+> **Decision:**
+> Microphone-only capture now fails after `SINGLE_STREAM_GIVE_UP` (5 s) via the existing stream-error path rather than a new warning variant or UI surface.
+>
+> - **Timeout Threshold:** Set to 5 s (looser than mixed capture) because no second stream carries the recording, making false positives fatal rather than degrading.
+> - **Scope:** Runs from stream open to catch devices that never deliver a first frame.
+> - **Three-Way Asymmetric Policy:**
+>   - **Microphone-only:** Fails after 5 s via standard stream error.
+>   - **System-audio-only:** No deadline, as silence is a legitimate state and consent issues are covered by Amendment 4 zero-streak warnings.
+>   - **Mixed capture:** Degrades to the healthy side with a `MicrophoneStalled` warning instead of failing.
+>
+> **Platform Specifics (Windows):**
+> On Windows, the cpal error callback raises an abort flag instead of only logging. This separates disconnects from clean stops when cpal ends its worker thread on fatal device errors and drops the sender[^19]. The flag is not a standalone failure because cpal routes recoverable buffer discontinuities (`ErrorKind::Xrun`) through the same callback while continuing to stream[^19].
+
 > **Amendment 18 (recording indicator in the tray and the app window):**
 >
 > **Problem:**
@@ -173,6 +191,8 @@ The supporting sub-decisions:
 [^17]: `large-v3-turbo` is a pruned, finetuned `large-v3` whose decoder drops from 32 layers to 4, which is where its CPU speedup comes from: <https://huggingface.co/openai/whisper-large-v3-turbo>.
 
 [^18]: whisper.cpp pads/truncates every `whisper_full` input to a fixed 30 s chunk (`WHISPER_CHUNK_SIZE`), so the encoder runs over 30 s regardless of the audio's real length; its stream example counteracts exactly this with a reduced `audio_ctx` (`--audio-ctx`, "speed up encoder by trading accuracy"): <https://github.com/ggml-org/whisper.cpp/tree/master/examples/stream>.
+
+[^19]: In cpal's WASAPI backend a fatal device error goes through the error callback and then breaks the worker loop (`process_commands_and_await_signal` returns `ControlFlow::Break`), ending the thread and dropping the data sender, while a recoverable buffer discontinuity is reported as `ErrorKind::Xrun` through that same callback with the loop still running: <https://github.com/RustAudio/cpal/blob/v0.18.2/src/host/wasapi/stream.rs>. Verified against cpal 0.18.2, the version this workspace pins.
 
 [^20]: Every `TrayIcon` setter in Tauri 2.11 dispatches through `run_item_main_thread!`, which posts the call to the main thread and blocks on the reply: <https://docs.rs/tauri/2.11.5/tauri/tray/struct.TrayIcon.html>.
 
