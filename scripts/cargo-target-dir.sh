@@ -5,6 +5,9 @@
 set -euo pipefail
 
 crate_dir="${1:?usage: $0 <crate-dir>}"
+# Absolute up front: a relative crate dir would be re-prefixed by the relative-target-dir
+# normalization below, yielding <crate>/<crate>/target.
+crate_dir="$(cd "$crate_dir" && pwd)"
 
 target_dir="${CARGO_TARGET_DIR:-}"
 if [ -z "$target_dir" ]; then

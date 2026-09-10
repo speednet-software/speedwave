@@ -130,6 +130,29 @@ stage_rig() {
     [[ "$output" == *"too deep"* ]]
 }
 
+@test "cargo-target-dir resolves a relative crate dir without doubling it" {
+    # Makefile's E2E_BINARY passes a repo-relative crate dir: the no-cargo fallback used to
+    # re-prefix it into <crate>/<crate>/target and print a path nothing ever builds into.
+    local sealed expected
+    mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri"
+    cp "$RESOLVER_SCRIPT" "$WORK/repo/scripts/cargo-target-dir.sh"
+    sealed="$(dirname "$(command -v bash)")"
+    ! PATH="$sealed" command -v cargo >/dev/null 2>&1
+    expected="$(cd "$WORK/repo" && pwd)/desktop/src-tauri/target"
+
+    cd "$WORK/repo"
+    run env -u CARGO_TARGET_DIR PATH="$sealed" bash scripts/cargo-target-dir.sh desktop/src-tauri
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "cargo-target-dir fails loud on a crate dir that does not exist" {
+    run bash "$RESOLVER_SCRIPT" "$WORK/absent"
+
+    [ "$status" -ne 0 ]
+}
+
 # Fabricates a minimal crate so `cargo metadata` (the config-layer resolver) works in isolation.
 budget_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri/.cargo" "$WORK/repo/desktop/src-tauri/src"

@@ -28,7 +28,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
   - Allowed script outputs: `~/msvc-env.sh`, `~/.bashrc`, and `desktop/src-tauri/.cargo/config.toml`.
   - Never write to the committed `<repo>/.cargo/config.toml` (pins `SPEEDWAVE_DATA_DIR`).
   - Shared resolver: `scripts/cargo-target-dir.sh` serves both the path budget gate and `Makefile`'s `E2E_BINARY`.
-  - Tests: `_tests/desktop/setup-dev-windows.bats` and `_tests/desktop/vulkan-scripts.bats`.
+  - Tests: `_tests/desktop/setup-dev-windows.bats`, `_tests/desktop/vulkan-scripts.bats` and `_tests/desktop/check-windows-build-deps.bats`.
 - `.node-version` ↔ every `node-version-file:` in `.github` ↔ Makefile `NODE_VERSION` (bundled Node, `make setup-dev` gate via `scripts/check-node-version.sh`) — `_tests/ci/node-version-pin.bats` (also forbids a `.nvmrc` shadow copy and inline `node-version:` literals).
 - No hardcoded loopback binds — drift detector `tests/no_hardcoded_loopback_bind.rs`; no raw engine paths — `tests/no_raw_engine_path.rs` (escape hatch for both: `// SSOT-allow: <reason>`).
 - `LockedRuntime` encapsulation (trait stays `pub(crate)`, no lock re-exports) — `tests/ssot_enforcement.rs`.

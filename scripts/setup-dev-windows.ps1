@@ -218,11 +218,16 @@ try {
 Write-Host "== Enabling Windows long paths (ninja needs them for the whisper.cpp Vulkan build) =="
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
     -Name 'LongPathsEnabled' -Value 1 -Type DWord
-# No 2>&1 capture: under EAP=Stop PS 5.1 turns merged native stderr into a terminating
-# NativeCommandError. A warning matches the choco-3010 handling above — setup must not die here.
-git config --system core.longpaths true
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "git config --system core.longpaths failed (exit $LASTEXITCODE) — set it manually if the whisper build hits long git paths."
+# No 2>&1 capture: under EAP=Stop, merged native stderr becomes a terminating NativeCommandError.
+# try/catch too: a missing git.exe throws, and dying here would skip every step below.
+try {
+    git config --system core.longpaths true
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "git config --system core.longpaths failed (exit $LASTEXITCODE) — set it manually if the whisper build hits long git paths."
+    }
+} catch {
+    $failedItems += @{ Name = 'git core.longpaths'; Hint = 'git not on PATH -- set core.longpaths manually once git is installed.' }
+    Write-Warning "git config --system core.longpaths skipped (git not found) -- continuing; reported at the end."
 }
 
 # --- desktop/src-tauri/.cargo/config.toml: short cargo target-dir (gitignored) -
@@ -255,21 +260,28 @@ if (Test-Path $tauriCargoConfig) {
 # dir and keep CREATOR OWNER control over every desktop build artifact we later sign.
 if ($shortTargetDir -and [System.IO.Path]::IsPathRooted($shortTargetDir)) {
     $shortTargetWin = $shortTargetDir -replace '/', '\'
+    $ownerTrusted = $true
     if (Test-Path $shortTargetWin) {
         $owner = (Get-Acl $shortTargetWin).Owner
         $trusted = @("$env:USERDOMAIN\$env:USERNAME", 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM')
         if ($trusted -notcontains $owner) {
+            $ownerTrusted = $false
             $failedItems += @{ Name = $shortTargetWin; Hint = "pre-existing and owned by '$owner' -- delete it or pick another target-dir." }
             Write-Warning "$shortTargetWin is owned by '$owner', not you -- refusing to build into it."
         }
     } else {
         New-Item -ItemType Directory -Force $shortTargetWin | Out-Null
-        # Owned by the elevated shell, so grant the invoking user the write access cargo needs.
-        icacls $shortTargetWin /grant "${env:USERNAME}:(OI)(CI)F" | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "icacls could not grant $env:USERNAME access to $shortTargetWin -- cargo may fail to write there."
-        }
         Write-Host "Created $shortTargetWin"
+    }
+    # /inheritance:r, not a bare /grant: the inherited drive-root ACEs hand BUILTIN\Users
+    # create rights plus CREATOR OWNER control of whatever they plant here.
+    if ($ownerTrusted) {
+        icacls $shortTargetWin /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" `
+            'BUILTIN\Administrators:(OI)(CI)F' 'NT AUTHORITY\SYSTEM:(OI)(CI)F' | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $failedItems += @{ Name = $shortTargetWin; Hint = "icacls could not harden its DACL (exit $LASTEXITCODE) -- fix the permissions or pick another target-dir." }
+            Write-Warning "icacls could not harden $shortTargetWin -- continuing; reported at the end."
+        }
     }
 }
 

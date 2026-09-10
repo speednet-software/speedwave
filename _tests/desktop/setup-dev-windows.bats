@@ -87,7 +87,30 @@ package_loop() {
     grep -qF '(Get-Acl $shortTargetWin).Owner' "$SETUP_SCRIPT"
     grep -qF "'BUILTIN\\Administrators', 'NT AUTHORITY\\SYSTEM'" "$SETUP_SCRIPT"
     grep -qF '$failedItems += @{ Name = $shortTargetWin' "$SETUP_SCRIPT"
-    grep -qF 'icacls $shortTargetWin /grant' "$SETUP_SCRIPT"
+}
+
+@test "the short target-dir drops the inherited drive-root ACEs" {
+    # A bare /grant only adds an ACE: the drive root's inherited ACEs still let another
+    # local account plant files here and keep CREATOR OWNER control of them.
+    grep -qF 'icacls $shortTargetWin /inheritance:r /grant:r' "$SETUP_SCRIPT"
+    ! grep -qE 'icacls \$shortTargetWin /grant[^:]' "$SETUP_SCRIPT"
+    grep -qF "'NT AUTHORITY\\SYSTEM:(OI)(CI)F'" "$SETUP_SCRIPT"
+}
+
+@test "a target-dir with a foreign owner is refused, not re-ACLed" {
+    # Hardening a dir we already refuse to build into would only bless the planter's copy.
+    grep -qF '$ownerTrusted = $false' "$SETUP_SCRIPT"
+    grep -qF 'if ($ownerTrusted) {' "$SETUP_SCRIPT"
+}
+
+@test "a missing git cannot abort the long-paths step" {
+    # A bare `git` throws CommandNotFoundException under EAP=Stop, skipping every step
+    # below it -- including the "Incomplete" report the package loop feeds.
+    local block
+    block="$(awk '/^# No 2>&1 capture:/,/^\}$/' "$SETUP_SCRIPT")"
+    printf '%s\n' "$block" | grep -qF 'git config --system core.longpaths true'
+    printf '%s\n' "$block" | grep -qF 'try {'
+    printf '%s\n' "$block" | grep -qF "\$failedItems += @{ Name = 'git core.longpaths'"
 }
 
 @test "the node probe enforces the .node-version floor, not mere presence" {
