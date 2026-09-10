@@ -38,7 +38,6 @@
     "tslib": "^2.6.0"
   },
   "overrides": {
-    "undici": "^7.24.0",
     "piscina": "^5.2.0"
   },
   "devDependencies": {
