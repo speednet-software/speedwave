@@ -109,6 +109,29 @@ fn million_context_variants_bill_at_standard_rates() {
 }
 
 #[test]
+fn fable_5_1_cache_hit_is_the_lone_025x_multiplier() {
+    // CC 2.1.257+ made Fable 5.1 the default Fable model. Its cache hits are
+    // 0.025x base input; every other catalog entry uses the standard 0.1x
+    // (platform.claude.com/docs/en/about-claude/pricing, Prompt caching).
+    let fable_5_1 = ANTHROPIC_MODELS
+        .iter()
+        .find(|m| m.id == "claude-fable-5-1")
+        .expect("claude-fable-5-1 must be in the catalog");
+    assert!((fable_5_1.pricing.cached_input - fable_5_1.pricing.input * 0.025).abs() < 1e-9);
+    for m in ANTHROPIC_MODELS {
+        if m.id == "claude-fable-5-1" {
+            continue;
+        }
+        assert!(
+            (m.pricing.cached_input - m.pricing.input * 0.1).abs() < 1e-9,
+            "{}: expected the standard 0.1x cache-hit multiplier, got cached_input={}",
+            m.id,
+            m.pricing.cached_input
+        );
+    }
+}
+
+#[test]
 fn sonnet_5_is_priced_below_sonnet_46() {
     // Sonnet 5 ($2/$10) sits below Sonnet 4.6 ($3/$15) — the launch price became
     // the standard price (pricing page note, 2026-08). Guards against a shared const.

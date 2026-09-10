@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.252";
+pub const CLAUDE_VERSION: &str = "2.1.267";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -65,6 +65,14 @@ const FABLE_PRICING: ModelPricing = ModelPricing {
     cache_write: 12.5,
     output: 50.0,
 };
+// Fable 5.1 cache hits are 0.025x base input (every other model is 0.1x) — pricing
+// page footnote, "Prompt caching" section.
+const FABLE_5_1_PRICING: ModelPricing = ModelPricing {
+    input: 10.0,
+    cached_input: 0.25,
+    cache_write: 12.5,
+    output: 50.0,
+};
 const OPUS_PRICING: ModelPricing = ModelPricing {
     input: 5.0,
     cached_input: 0.5,
@@ -94,13 +102,13 @@ const HAIKU_PRICING: ModelPricing = ModelPricing {
 /// **Order matters** — frontend renders this list as-is.
 pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
     AnthropicModelInfo {
-        id: "claude-fable-5",
-        family: "Fable 5",
+        id: "claude-fable-5-1",
+        family: "Fable 5.1",
         context_tokens: 1_000_000,
         latest: true,
         premium: true,
-        pricing: FABLE_PRICING,
-        pricing_1m: Some(FABLE_PRICING),
+        pricing: FABLE_5_1_PRICING,
+        pricing_1m: Some(FABLE_5_1_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-opus-5",
@@ -128,6 +136,15 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
+    },
+    AnthropicModelInfo {
+        id: "claude-fable-5",
+        family: "Fable 5",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: true,
+        pricing: FABLE_PRICING,
+        pricing_1m: Some(FABLE_PRICING),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-8",
@@ -486,16 +503,31 @@ mod tests {
     }
 
     #[test]
-    fn fable_entry_present_with_million_context() {
-        // Settings dropdown + cost meter need the Fable 5 entry ($10/$50).
+    fn fable_5_1_is_the_latest_fable_entry() {
+        // CC 2.1.257+ made Fable 5.1 the default Fable model; the FABLE alias pin
+        // resolves to the first `latest: true` Fable, so 5.1 must lead the tier.
         let fable = ANTHROPIC_MODELS
             .iter()
-            .find(|m| m.id == "claude-fable-5")
-            .expect("claude-fable-5 must be in the catalog");
-        assert!(fable.latest, "Fable 5 must be in the Latest group");
+            .find(|m| m.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in the catalog");
+        assert!(fable.latest, "Fable 5.1 must be in the Latest group");
+        assert!(fable.premium);
         assert_eq!(fable.context_tokens, 1_000_000);
         assert_eq!(fable.pricing.input, 10.0);
+        assert_eq!(fable.pricing.cache_write, 12.5);
         assert_eq!(fable.pricing.output, 50.0);
+    }
+
+    #[test]
+    fn fable_5_is_demoted_to_legacy() {
+        // Fable 5.1 replaces Fable 5 as the Latest Fable entry; Fable 5 keeps its
+        // pricing but must no longer be the alias-pin target.
+        let fable_5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5")
+            .expect("claude-fable-5 must remain in the catalog");
+        assert!(!fable_5.latest, "Fable 5 must be demoted to Legacy");
+        assert_eq!(fable_5.pricing.cached_input, 1.0);
     }
 
     #[test]
