@@ -53,7 +53,7 @@
     "axe-core": "^4.13.0",
     "eslint": "^10",
     "eslint-config-prettier": "^10",
-    "eslint-plugin-jsdoc": "^63.0.6",
+    "eslint-plugin-jsdoc": "^64.3.6",
     "eslint-plugin-prettier": "^5",
     "jsdom": "^30.0.1",
     "postcss": "^8.5.28",
