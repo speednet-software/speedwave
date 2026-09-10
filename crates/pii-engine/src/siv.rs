@@ -102,6 +102,36 @@ mod tests {
         EngineKey::from_bytes([7u8; 32])
     }
 
+    /// Frozen pseudonyms: a crypto-dependency change that alters this output would orphan
+    /// every token already written into stored session transcripts.
+    #[test]
+    fn seal_output_matches_frozen_vectors() {
+        let key = test_key();
+        for (category, value, expected) in [
+            (
+                "EMAIL",
+                "alice@example.com",
+                "DwxnusR1yFfnSg-V-AwbwfYXbo0kqSIEksBkkIpf7v6C",
+            ),
+            (
+                "PHONE_PL",
+                "+48123456789",
+                "I6m9-JFyYryQqVPHSC88wAjJwzFgHTEuVkVLdg",
+            ),
+        ] {
+            let sealed = seal(&key, category, value.as_bytes()).unwrap();
+            assert_eq!(encode_payload(&sealed), expected, "category {category}");
+        }
+    }
+
+    /// Guards the `zeroize` feature on the `aes-siv` dependency: without it the cipher stops
+    /// wiping the encryption key half on drop.
+    #[test]
+    fn siv_cipher_wipes_its_key_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<Aes128Siv>();
+    }
+
     #[test]
     fn seal_is_deterministic() {
         let key = test_key();

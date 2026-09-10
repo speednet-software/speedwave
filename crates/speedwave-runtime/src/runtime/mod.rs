@@ -766,6 +766,7 @@ fn is_propagation_error(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
     s.contains(crate::compose::UNDEFINED_NETWORK_ERROR_FRAGMENT)
         || s.contains(crate::compose::INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT)
+        || s.contains(crate::compose::COMPOSE_FILE_ENOENT_ERROR_FRAGMENT)
         || crate::compose::COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS
             .iter()
             .any(|frag| s.contains(frag))
@@ -2680,6 +2681,21 @@ services:
     }
 
     #[test]
+    fn compose_validate_with_retry_retries_on_compose_file_enoent() {
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .push_validate_result(Err(
+                "limactl failed: time=\"2026-08-25T09:37:03+02:00\" level=fatal \
+                 msg=\"open /Users/u/.speedwave/compose/proj/compose.yml: \
+                 no such file or directory\""
+                    .to_string(),
+            ))
+            .push_validate_result(Ok(()))
+            .build();
+        compose_validate_with_retry(&rt, "proj").unwrap();
+        assert_eq!(handles.validate_calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
     #[expect(
         clippy::assertions_on_constants,
         reason = "SSOT guard: asserts COMPOSE_VALIDATE_MAX_ATTEMPTS stays sane"
@@ -2750,6 +2766,18 @@ services:
     }
 
     #[test]
+    fn is_propagation_error_matches_compose_file_enoent() {
+        // The path in nerdctl's `open <path>: <err>` always ends in compose.yml, so
+        // the scoped fragment is contiguous. Lima (host path) and WSL (drvfs) shapes.
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "limactl failed: time=\"2026-08-25T09:37:03+02:00\" level=fatal msg=\"open /Users/u/.speedwave/compose/proj/compose.yml: no such file or directory\""
+        )));
+        assert!(is_propagation_error(&anyhow::anyhow!(
+            "wsl failed: time=\"2026-08-25T09:37:03+02:00\" level=fatal msg=\"open /mnt/c/Users/u/.speedwave/compose/proj/compose.yml: no such file or directory\""
+        )));
+    }
+
+    #[test]
     fn is_propagation_error_rejects_unrelated() {
         assert!(!is_propagation_error(&anyhow::anyhow!(
             "connection refused"
@@ -2759,6 +2787,11 @@ services:
         // the fragment is scoped to the network-driver torn-write.
         assert!(!is_propagation_error(&anyhow::anyhow!(
             "validating compose.yml: services.claude.image must be a string"
+        )));
+        // ENOENT retry is scoped to compose.yml — a missing token or binary is
+        // a real error, not virtiofs lag on the freshly renamed compose file.
+        assert!(!is_propagation_error(&anyhow::anyhow!(
+            "open /Users/u/.speedwave/tokens/proj/slack/token: no such file or directory"
         )));
     }
 

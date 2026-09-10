@@ -1945,8 +1945,8 @@ describe('LlmProviderComponent', () => {
   });
 
   it('save_allows_anthropic_with_empty_model', async () => {
-    // Anthropic infers the model from ANTHROPIC_MODEL env or Claude's
-    // default — no model in config is legal.
+    // Anthropic starts on ANTHROPIC_DEFAULT_MODEL, a persisted /model pick, or
+    // Claude's plan default — no model in config is legal.
     let invokeCalled = false;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') {
@@ -2385,7 +2385,7 @@ describe('LlmProviderComponent', () => {
     expect(emitted).toContain('requires an API key');
   });
 
-  it('save accepts a keyed remote provider without a model (backend auto-defaults, ADR-085 §8)', async () => {
+  it('save accepts a keyed remote provider without a model (backend auto-defaults, ADR-087 §8)', async () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;

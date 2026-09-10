@@ -159,6 +159,12 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "cli/speedwave.exe",
         kind: BundledAssetKind::File,
     },
+    // The Vulkan loader must sit next to the exe: the whisper Vulkan backend is a load-time
+    // import and ggml touches it on every whisper init (ADR-085). Same path staged + installed.
+    BundledAssetSpec {
+        path: "vulkan-1.dll",
+        kind: BundledAssetKind::File,
+    },
 ];
 
 /// Manifest of the currently shipped app bundle.
@@ -321,7 +327,7 @@ pub fn generate_bundle_manifest(
         let mut components: Vec<(&str, &str)> = Vec::with_capacity(img.hash_inputs.len());
         for input in img.hash_inputs {
             if !component_cache.contains_key(input) {
-                let hash = digest_paths(&[(input, &build_root.join(input))])?;
+                let hash = digest_paths(&[(input, &resolve_hash_input(build_root, input)?)])?;
                 component_cache.insert(input, hash);
             }
         }
@@ -658,6 +664,33 @@ fn validate_bundled_asset(
     Ok(())
 }
 
+/// A hash input is repo-root-relative; in the bundled build-context the bundle scripts stage
+/// vendored sources under `containers/`, so a missing direct path falls back to that layout.
+fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf> {
+    let direct = build_root.join(input);
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let vendored = build_root.join("containers").join(input);
+    if vendored.exists() {
+        return Ok(vendored);
+    }
+    anyhow::bail!(
+        "Missing path for bundle digest: {} (also tried {})",
+        direct.display(),
+        vendored.display()
+    );
+}
+
+/// Test-only seam: `build.rs`'s catalog tests assert every declared input resolves.
+#[cfg(test)]
+pub(crate) fn resolve_hash_input_for_test(
+    build_root: &Path,
+    input: &str,
+) -> anyhow::Result<PathBuf> {
+    resolve_hash_input(build_root, input)
+}
+
 fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for (prefix, path) in paths {
@@ -766,6 +799,41 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_hash_input_prefers_the_direct_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("crates/pii-engine")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/crates/pii-engine")).unwrap();
+        let resolved = resolve_hash_input(tmp.path(), "crates/pii-engine").unwrap();
+        assert_eq!(resolved, tmp.path().join("crates/pii-engine"));
+    }
+
+    #[test]
+    fn resolve_hash_input_falls_back_to_the_vendored_containers_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("containers/crates/pii-engine")).unwrap();
+        let resolved = resolve_hash_input(tmp.path(), "crates/pii-engine").unwrap();
+        assert_eq!(resolved, tmp.path().join("containers/crates/pii-engine"));
+    }
+
+    #[test]
+    fn resolve_hash_input_error_names_both_candidate_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_hash_input(tmp.path(), "crates/pii-engine")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Missing path for bundle digest"), "{err}");
+        // Separator-insensitive: the message mixes native joins with the
+        // POSIX-relative input on Windows.
+        let norm = err.replace('\\', "/");
+        let direct = tmp.path().join("crates/pii-engine");
+        let vendored = tmp.path().join("containers/crates/pii-engine");
+        for candidate in [direct, vendored] {
+            let expected = candidate.display().to_string().replace('\\', "/");
+            assert!(norm.contains(&expected), "{err}");
+        }
+    }
 
     #[test]
     #[cfg(unix)]
@@ -1141,6 +1209,7 @@ mod tests {
                 std::fs::write(root.join("wsl/ubuntu-rootfs.tar.gz"), "binary").unwrap();
                 std::fs::write(root.join("nodejs/node.exe"), "binary").unwrap();
                 std::fs::write(root.join("cli/speedwave.exe"), "binary").unwrap();
+                std::fs::write(root.join("vulkan-1.dll"), "binary").unwrap();
             }
             other => panic!("unexpected target os in test: {other}"),
         }
@@ -1679,6 +1748,50 @@ mod tests {
             tauri_cfg.contains(&expected),
             "tauri.windows.conf.json must bundle {expected}; rename it there too"
         );
+    }
+
+    #[test]
+    fn windows_vulkan_loader_path_is_aligned_across_bundle_config_and_scripts() {
+        // The literal `vulkan-1.dll` recurs in the asset list, the Tauri resource map, and the
+        // stage/verify/install scripts — no SSOT const carries it, so pin the copies together.
+        let expected = "vulkan-1.dll";
+        let assets = required_bundled_assets("windows").expect("windows assets");
+        assert!(
+            assets.iter().any(|a| a.path == expected),
+            "WINDOWS_BUNDLED_ASSETS must carry {expected}"
+        );
+        let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
+        assert!(
+            tauri_cfg.contains(expected),
+            "tauri.windows.conf.json must bundle {expected}"
+        );
+        for (name, body) in [
+            (
+                "stage-vulkan-runtime.sh",
+                include_str!("../../../scripts/stage-vulkan-runtime.sh"),
+            ),
+            (
+                "verify-bundled-assets.sh",
+                include_str!("../../../scripts/verify-bundled-assets.sh"),
+            ),
+            (
+                "install-vulkan-sdk.ps1",
+                include_str!("../../../scripts/install-vulkan-sdk.ps1"),
+            ),
+            (
+                "create-desktop-stubs.sh",
+                include_str!("../../../scripts/create-desktop-stubs.sh"),
+            ),
+            (
+                "desktop/src-tauri/.gitignore",
+                include_str!("../../../desktop/src-tauri/.gitignore"),
+            ),
+        ] {
+            assert!(
+                body.contains(expected),
+                "scripts/{name} must reference {expected}; the staged filename drifted"
+            );
+        }
     }
 
     #[test]

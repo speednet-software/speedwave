@@ -220,6 +220,44 @@ const MISSING_SCOPE_MESSAGE = withSetupGuidance(
 const MALFORMED_FIELD_MESSAGE =
   'Slack rejected the request: a required field was missing or malformed (e.g. empty message text).';
 
+/** Message/code fragments identifying a transport-level failure; `fetch failed` is undici's marker for every network error. */
+const NETWORK_ERROR_MARKERS = ['getaddrinfo', 'ECONNREFUSED', 'fetch failed'];
+
+/** Bound on cause-chain traversal — guards against cyclic `cause` references. */
+const CAUSE_CHAIN_LIMIT = 8;
+
+/**
+ * True when the thrown value or anything in its `cause`/`errors` chain is a network failure.
+ * `@slack/web-api` v8 wraps undici's `fetch failed` TypeError, burying the syscall detail in nested causes.
+ * @param error - The thrown value to inspect.
+ */
+function isNetworkError(error: unknown): boolean {
+  const queue: unknown[] = [error];
+  for (let visited = 0; visited < CAUSE_CHAIN_LIMIT && queue.length > 0; visited++) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object') {
+      continue;
+    }
+    const { message, code, cause, errors } = current as {
+      message?: unknown;
+      code?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+    const haystack = `${typeof message === 'string' ? message : ''} ${typeof code === 'string' ? code : ''}`;
+    if (NETWORK_ERROR_MARKERS.some((marker) => haystack.includes(marker))) {
+      return true;
+    }
+    if (cause) {
+      queue.push(cause);
+    }
+    if (Array.isArray(errors)) {
+      queue.push(...errors);
+    }
+  }
+  return false;
+}
+
 /** Slack platform error code → user-facing message, for exact-match codes. */
 const SLACK_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
   not_authed: AUTH_FAILURE_MESSAGE,
@@ -266,7 +304,7 @@ export function formatSlackError(error: unknown): string {
     return SLACK_ERROR_MESSAGES[slackError];
   }
 
-  if (e.message?.includes('getaddrinfo') || e.message?.includes('ECONNREFUSED')) {
+  if (isNetworkError(error)) {
     return 'Network error. Cannot connect to Slack API.';
   }
 

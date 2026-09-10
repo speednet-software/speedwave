@@ -25,7 +25,7 @@ Only macOS and Windows are built — Linux was dropped as a host platform (see [
 | Windows (NSIS)      | `Speedwave_<ver>_x64-setup.exe`           | NSIS installer with WSL2 setup logic                              |
 | Windows (MSI)       | `Speedwave_<ver>_x64_en-US.msi`           | MSI installer (same payload, MSI packaging)                       |
 
-The two macOS DMGs are produced from one matrix per arch (`aarch64-apple-darwin`, `x86_64-apple-darwin`) with arch labels applied via the release workflow's `assetNamePattern`. The Windows job produces both the NSIS and MSI installers under Tauri's default naming. See [ADR-021](ADR-021-bundled-dependencies-and-zero-install-strategy.md) for what gets bundled into each artifact.
+The two macOS DMGs are produced from one matrix per arch (`aarch64-apple-darwin`, `x86_64-apple-darwin`) with arch labels applied via the release workflow's `releaseAssetNamePattern` (named `assetNamePattern` before tauri-action 1.0.0). The Windows job produces both the NSIS and MSI installers under Tauri's default naming. See [ADR-021](ADR-021-bundled-dependencies-and-zero-install-strategy.md) for what gets bundled into each artifact.
 
 ## SHA256 Verification in CI
 

@@ -49,6 +49,8 @@ Speedwave uses only **User** (its defaults) and leaves **Project** to teams. Bec
 - **Managed scope for Speedwave's resources** — highest precedence means teams could not override them, which defeats the point. Managed is for enterprise IT policy, not application defaults.
 - **Writing into `/workspace/.claude/`** — would surface Speedwave files in the team's `git status` and risk merge conflicts.
 - **Copying everything instead of symlinking** — wastes disk and needs re-copy logic on every update. Only `settings.json` needs to be a copy (because it is written at runtime); the rest stay symlinks.
+- **Gating integration-bound resources by an `integration:` key in resource frontmatter**: the entrypoint would have to parse YAML in shell (or the filter would move into the Rust renderer), and hooks (scripts plus a `hooks.json` manifest) carry no frontmatter, so they would need a second mechanism. With the `integrations/<config_key>/` directory convention the directory name is the service key, and `integrations_directories_match_known_service_keys` in `crates/speedwave-runtime/src/consts.rs` fails when a directory matches no `TOGGLEABLE_MCP_SERVICES` or `TOGGLEABLE_OS_SERVICES` entry.
+- **Gating integration-bound resources at render time, in a per-project resource tree**: `sync_claude_resources` in `crates/speedwave-runtime/src/bundle.rs` would have to stage one filtered copy per project, with its own cache invalidation, to act on information the `claude` service already receives from `crates/speedwave-runtime/src/compose/workers.rs` as `ENABLED_SERVICES`. Gating in `containers/entrypoint.sh` keeps the single shared read-only bundle and re-evaluates enablement on every container start.
 
 ## See also
 

@@ -3,7 +3,9 @@
 use crate::bridges::ide_bridge;
 use crate::bridges::plugin_host_bridge::PluginHostBridge;
 use crate::types::BundleReconcileStatus;
-use speedwave_runtime::compose::{HostBridgeRegistration, HostBridgesInfo};
+use speedwave_runtime::compose::{
+    worker_os_url_state, HostBridgeRegistration, HostBridgesInfo, WorkerOsUrlState,
+};
 use speedwave_runtime::mcp_os_process;
 use speedwave_runtime::oauth_process::OauthProcess;
 use speedwave_runtime::{build, bundle, config, plugin};
@@ -194,6 +196,30 @@ impl Drop for ImageReadinessGuard {
         drop(state);
         BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
     }
+}
+
+/// True when the readiness gate is poisoned by a failed reconcile.
+fn image_readiness_failed() -> bool {
+    let (lock, _) = &*IMAGES_READY;
+    matches!(
+        &*lock.lock().unwrap_or_else(|e| e.into_inner()),
+        ImageReadiness::Failed(_)
+    )
+}
+
+/// Re-enters the startup bundle reconcile iff the gate is `Failed` (error-banner
+/// Retry); the CAS in `reconcile_bundle_update` dedups a concurrent run.
+pub(crate) fn retry_bundle_reconcile_if_failed(app_handle: &tauri::AppHandle) -> bool {
+    retry_when_failed(|| reconcile_bundle_update(app_handle))
+}
+
+/// Testable core of [`retry_bundle_reconcile_if_failed`]; forwards whether the
+/// re-entry actually started (the CAS can lose to a reconcile still winding down).
+fn retry_when_failed(reenter: impl FnOnce() -> bool) -> bool {
+    if !image_readiness_failed() {
+        return false;
+    }
+    reenter()
 }
 
 fn phase_name(phase: bundle::BundleReconcilePhase) -> String {
@@ -793,7 +819,7 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
     Ok(())
 }
 
-pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
+pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) -> bool {
     if BUNDLE_RECONCILE_PHASE
         .compare_exchange(
             RECONCILE_IDLE,
@@ -805,7 +831,7 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
     {
         log::debug!("bundle reconcile already running, skipping");
         emit_bundle_status(app_handle);
-        return;
+        return false;
     }
 
     log::info!("starting bundle reconcile");
@@ -844,6 +870,7 @@ pub(crate) fn reconcile_bundle_update(app_handle: &tauri::AppHandle) {
         BUNDLE_RECONCILE_PHASE.store(RECONCILE_IDLE, Ordering::Relaxed);
         emit_bundle_status(&handle);
     });
+    true
 }
 
 /// When running containers have a stale `WORKER_OS_URL`, regenerate compose and recreate
@@ -905,22 +932,18 @@ pub(crate) fn reconcile_compose_port(app_handle: &tauri::AppHandle) {
             }
         };
 
-        // Check if compose already has the correct port
-        let expected_url_fragment = format!(":{current_port}");
-        if let Some(line) = compose_content
-            .lines()
-            .find(|l| l.contains("WORKER_OS_URL="))
-        {
-            if line.contains(&expected_url_fragment) {
+        match worker_os_url_state(&compose_content, current_port) {
+            WorkerOsUrlState::Current => {
                 log::debug!("compose WORKER_OS_URL already matches mcp-os port {current_port}");
                 return;
             }
-            log::info!(
+            WorkerOsUrlState::Absent => {
+                log::debug!("no WORKER_OS_URL in compose, OS integration not enabled");
+                return;
+            }
+            WorkerOsUrlState::Stale => log::info!(
                 "compose WORKER_OS_URL is stale (mcp-os port is {current_port}), regenerating"
-            );
-        } else {
-            log::debug!("no WORKER_OS_URL in compose, OS integration not enabled");
-            return;
+            ),
         }
 
         // ensure_images_ready runs outside the transaction — long-running and idempotent.
@@ -1377,6 +1400,22 @@ mod tests {
         assert!(
             ensure_pos < up_pos,
             "ensure_images_ready must come BEFORE compose_up_recreate"
+        );
+    }
+
+    #[test]
+    fn reconcile_compose_port_decides_staleness_through_the_compose_ssot() {
+        // Exact container-facing URL match lives in the runtime; a substring probe on
+        // the compose text matched `:80` inside `:8080` and suppressed the reconcile.
+        let source = include_str!("reconcile.rs");
+        let fn_body = extract_fn_body_braced(source, "pub(crate) fn reconcile_compose_port(");
+        assert!(
+            fn_body.contains("worker_os_url_state("),
+            "reconcile_compose_port must decide staleness via compose::worker_os_url_state"
+        );
+        assert!(
+            !fn_body.contains(".contains("),
+            "reconcile_compose_port must not probe the compose text for a port substring"
         );
     }
 
@@ -2169,6 +2208,69 @@ mod tests {
             assert!(
                 branch.contains("ensure_ready"),
                 "interrupted-reconcile branch must call ensure_ready after prepare_rebuild"
+            );
+        }
+    }
+
+    mod retry_gate_tests {
+        use super::*;
+
+        /// Mutates the shared `IMAGES_READY` static — every test here is `#[serial]`
+        /// and restores `Ready` before returning.
+        #[test]
+        #[serial]
+        fn retry_when_failed_reenters_only_from_failed_gate() {
+            set_image_readiness(ImageReadiness::Failed("restore failed".to_string()));
+            let mut reentered = false;
+            assert!(retry_when_failed(|| {
+                reentered = true;
+                true
+            }));
+            assert!(reentered, "a Failed gate must re-enter the reconcile");
+            set_image_readiness(ImageReadiness::Ready);
+        }
+
+        #[test]
+        #[serial]
+        fn retry_when_failed_reports_a_reenter_that_did_not_start() {
+            // The CAS can lose to a reconcile thread still winding down — the
+            // caller must see false, not a fabricated success.
+            set_image_readiness(ImageReadiness::Failed("restore failed".to_string()));
+            assert!(!retry_when_failed(|| false));
+            set_image_readiness(ImageReadiness::Ready);
+        }
+
+        #[test]
+        #[serial]
+        fn retry_when_failed_noops_on_ready_gate() {
+            set_image_readiness(ImageReadiness::Ready);
+            let mut reentered = false;
+            assert!(!retry_when_failed(|| {
+                reentered = true;
+                true
+            }));
+            assert!(!reentered, "a healthy gate must not trigger a reconcile");
+        }
+
+        #[test]
+        #[serial]
+        fn retry_when_failed_noops_while_reconcile_in_flight() {
+            set_image_readiness(ImageReadiness::Building);
+            let mut reentered = false;
+            assert!(!retry_when_failed(|| {
+                reentered = true;
+                true
+            }));
+            assert!(!reentered, "an in-flight reconcile must not be disturbed");
+            set_image_readiness(ImageReadiness::Ready);
+        }
+
+        #[test]
+        fn retry_command_is_registered_in_main() {
+            let main_src = include_str!("main.rs");
+            assert!(
+                main_src.contains("containers_cmd::retry_bundle_reconcile,"),
+                "retry_bundle_reconcile must be in the invoke_handler list"
             );
         }
     }

@@ -315,8 +315,14 @@ fn apply_rollback_transaction_inner(
     snapshot_yml: &str,
 ) -> anyhow::Result<()> {
     runtime.transaction(project, |runtime| -> anyhow::Result<()> {
-        // No VM-side validate on rollback — virtiofs lag would block recovery (ADR-066).
         compose::save_compose(project, snapshot_yml)?;
+        // Best-effort VM-side validate: the bounded retry absorbs virtiofs lag (stale
+        // ENOENT/torn reads) before recreate; any other failure must not block recovery.
+        if let Err(e) = crate::runtime::compose_validate_with_retry(runtime, project) {
+            log::warn!(
+                "compose validate before rollback recreate failed for '{project}' — proceeding with recreate: {e}"
+            );
+        }
         runtime.compose_up_recreate(project).map_err(|e| {
             anyhow::anyhow!(
                 "Rollback failed: {}. Old compose.yml was restored. Run `speedwave` to start containers manually.",

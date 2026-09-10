@@ -292,7 +292,17 @@ setup() {
   export FIXTURE_LATEST_JSON="$FIXTURES/latest-wrong-url-prefix.json"
   run bash "$SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" =~ "does not start with https://github.com/test/repo/releases/" ]]
+  [[ "$output" =~ "does not start with https://api.github.com/repos/test/repo/releases/assets/" ]]
+}
+
+# ── Case 14b: browser download URL on platform entry ──────────────────────────
+
+@test "latest.json browser download URL rejected (API asset URL required)" {
+  export FIXTURE_ASSETS_JSON="$FIXTURES/assets-happy.json"
+  export FIXTURE_LATEST_JSON="$FIXTURES/latest-browser-download-url.json"
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" =~ "platforms.darwin-x86_64.url does not start with" ]]
 }
 
 # ── Case 15: empty platform url ───────────────────────────────────────────────

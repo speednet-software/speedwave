@@ -5,3 +5,9 @@ cli/
 
 # Runtime bundle lock (holds the running make dev PID).
 .bundle.lock/
+
+# Vulkan runtime loader staged by scripts/stage-vulkan-runtime.sh (ADR-085).
+/vulkan-1.dll
+
+# Machine-local cargo overrides (e.g. a short target-dir for the ggml-vulkan MAX_PATH budget).
+/.cargo/

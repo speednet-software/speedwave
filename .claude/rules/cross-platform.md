@@ -33,7 +33,7 @@ Every change must work on **both** platforms. `make check` compiles the host tar
 - Never set file modes directly — `fs_perms::set_owner_only{_dir}` is the SSOT (Unix chmod 0o600/0o700 ↔ Windows DACL). `PermissionsExt` does not compile on Windows; mode bits mean nothing on NTFS.
 - Windows drvfs automount needs `metadata,uid=1000,gid=1000,umask=022` (written by `provision::ensure_wsl_distro_metadata` via `consts::wsl_automount_options()`) — containers run as UID 1000; `EACCES` on `/workspace` means missing automount metadata, not a container bug ("cannot exec in a stopped state" is the symptom).
 - macOS: `EPERM` from `read_dir` under `~/Library/CloudStorage` or `~/OneDrive*` is a TCC permission gap, not an fs error — route through `cloudstorage.rs` detection so the remediation modal surfaces.
-- macOS virtiofs can serve the guest a stale or torn view of a just-written host file — field-specific compose schema errors (`networks.X.driver must be a string`, `…limits.cpus must be a number or string`, or a bare `yaml:` parse error) go through the `is_propagation_error` retry heuristic (`runtime/mod.rs`); never shrink its retry window or treat these as fatal without a retry. A _bare_ `must be a string` is deliberately NOT retried, and network-reference integrity is a render-time check (`validate_compose_network_refs` in compose/mod.rs), not a retry class.
+- macOS virtiofs can serve the guest a stale or torn view of a just-written host file — field-specific compose schema errors (`networks.X.driver must be a string`, `…limits.cpus must be a number or string`, or a bare `yaml:` parse error) and ENOENT on the freshly renamed compose file (fragment `compose.yml: no such file or directory` — a stale guest dentry, the file exists host-side) go through the `is_propagation_error` retry heuristic (`runtime/mod.rs`); never shrink its retry window or treat these as fatal without a retry. A _bare_ `must be a string` is deliberately NOT retried, ENOENT on any other path is deliberately NOT retried (a missing token/binary is a real error), and network-reference integrity is a render-time check (`validate_compose_network_refs` in compose/mod.rs), not a retry class.
 
 ## Processes & encodings
 
@@ -42,11 +42,35 @@ Every change must work on **both** platforms. `make check` compiles the host tar
 - Validate shell command strings via `shlex::split`, never by shelling to `bash -n` — Git Bash on Windows mangles UTF-8 (claude-code#31295); a bash-based validator regresses Windows only.
 - Never hand-concatenate `PATH` entries with `:` — Windows uses `;`; use the cfg-gated `binary::PATH_SEP` separator (the pattern in `binary.rs::command`), never a hardcoded `:`.
 - CRLF is three-sided: preserve the user's line endings (and bail on UTF-16 from PowerShell `Out-File`) when merging `.wslconfig`/`wsl.conf`; reject control chars incl. `\r\n` in any secret/token value (header injection); repo files are LF-only via `.gitattributes` — a CRLF shebang exits 127 in the container (issue #603; CI re-clones with `autocrlf=true` to assert it).
-- BOM polarity is asymmetric: `.ps1` files must be UTF-8 **with** BOM (PowerShell falls back to the system locale reading a BOM-less `.ps1`; editing one requires `make generate-installer-nsh`); `.vbs` and `.sh` must be BOM-**free** (wscript and shebangs choke on it). Note: only `sweep.ps1` currently carries the BOM in-repo; nothing test-pins `.ps1` BOMs (only `run-hidden.vbs`'s BOM-freeness is pinned).
+- BOM polarity is asymmetric: `.ps1` files must be UTF-8 **with** BOM (PowerShell falls back to the system locale reading a BOM-less `.ps1`; editing one requires `make generate-installer-nsh`); `.vbs` and `.sh` must be BOM-**free** (wscript and shebangs choke on it). Note: `sweep.ps1`, `setup-dev-windows.ps1`, `install-vulkan-sdk.ps1`, and `sign-windows-binaries.ps1` carry the BOM in-repo; only `sign-windows-binaries.ps1` and `setup-dev-windows.ps1` have theirs test-pinned (`_tests/desktop/sign-windows-binaries.bats`, `_tests/desktop/setup-dev-windows.bats`), plus `run-hidden.vbs`'s BOM-freeness.
+- Windows built-in account names are localized — never pass `BUILTIN\Administrators` or `NT AUTHORITY\SYSTEM` to `icacls`/`Get-Acl` comparisons (a pl-PL host has `Administratorzy` and `ZARZĄDZANIE NT\SYSTEM`; `icacls` then fails 1332 and leaves the DACL untouched, silently). Use well-known SIDs with the `*` prefix (`*S-1-5-32-544`, `*S-1-5-18`) and `WindowsIdentity::GetCurrent().User` for the invoking user; compare owners as `GetOwner([SecurityIdentifier])`, never `.Owner`. Guarded for `setup-dev-windows.ps1` by `_tests/desktop/setup-dev-windows.bats`.
 
 ## Platform asymmetries to keep in mind
 
 - VM sizing (`resources.rs`, host/2) applies to Lima on macOS only — WSL2 memory/CPU is deliberately unmanaged and Windows RAM detection falls back to 16 GiB; never assume symmetric VM capacity or add Windows-side sizing.
+- Windows Vulkan build hazards (ADR-085):
+  1. Path length limits (>260 chars):
+     - `ggml-vulkan` shader `ExternalProject` nests ~250 chars under `CARGO_TARGET_DIR` (248 measured for the MSBuild-generator TryCompile's `cmTC_*.tlog\ParallelCustomBuild.command.1.tlog`; Ninja is shallower).
+     - Neither `cl.exe` front-end nor MSBuild `GetOutOfDateItems` can handle >260-char paths **even with `LongPathsEnabled`** (enabled by `setup-dev-windows` for Ninja).
+     - Symptoms: `ninja: GetLastError() = 3` then `C1083`, or `error MSB4018` `GetOutOfDateItems`/`%(FullPath)` in CMake TryCompile.
+     - Gate: `scripts/check-vulkan-path-budget.sh` gates bundle paths (`prepare-desktop-bundle` in CI, `stage-vulkan-windows` in `Makefile`).
+     - Bypasses: CI jobs pinning short `CARGO_TARGET_DIR` (`test.yml`'s `desktop-windows-check` `D:\st`, e2e rig `C:\cb`).
+     - Escapes: short `CARGO_TARGET_DIR`, gitignored crate-local `desktop/src-tauri/.cargo/config.toml` `target-dir` (provisioned by `setup-dev-windows`; mandatory as budget leaves 9 chars and default crate target dir never fits), or shorter clone path.
+  2. Generator and environment constraints:
+     - Force `CMAKE_GENERATOR=Ninja` (choco-provisioned). VS generator dies on `MSB6003` node-reuse cwd confusion in nested `ExternalProject` TryCompile (and Build Tools-only boxes lack a registered VS instance).
+     - Ninja needs Windows SDK bin dir (`rc.exe`/`mt.exe`) on `PATH`. e2e rig sets it machine-wide; `setup-dev-windows` writes both into `~/msvc-env.sh`.
+  3. Vulkan SDK and runtime requirements:
+     - Every Windows build with `audio-transcription` needs pinned Vulkan SDK (`VULKAN_SDK` env; installed via `scripts/install-vulkan-sdk.ps1` in CI and setup-dev).
+     - Executable carries load-time `vulkan-1.dll` import; bundled loader staged by `scripts/stage-vulkan-runtime.sh` must never be dropped from Windows resources.
+- `bats` execution on Windows:
+  - `bats` suites never run on host Windows: no `bats`/`bats-core` package exists on Chocolatey.
+  - Windows e2e rig installs `bats` inside WSL (`apt-get install bats`), not on host.
+  - `setup-dev-windows` does not provision it. `make setup-dev` reports it as not-applicable (`BATS_HINT`).
+  - Do not add `bats` back to the toolchain list (guarded by `_tests/desktop/setup-dev-windows.bats`).
+- MSVC linker resolution on Git Bash:
+  - MSVC `link.exe` must win over Git's `/usr/bin/link` on `PATH` (symptoms: `link: extra operand`, `LNK1146`-class failures).
+  - Sole mechanism: `PATH` prepend in generated `~/msvc-env.sh`.
+  - No `[target.x86_64-pc-windows-msvc] linker` pin in committed `<repo>/.cargo/config.toml` (repo policy, guards `SPEEDWAVE_DATA_DIR`).
 - Windows MSVC links the dynamic CRT (`/MD`) everywhere — never set `-C target-feature=+crt-static` or `CMAKE_MSVC_RUNTIME_LIBRARY`. Any new native prebuilt dependency must ship an MD/dynamic-CRT variant; an `/MT` static-lib in the link is a hard LNK2038 failure, invisible from a macOS host until Windows CI runs (it kept the Windows CI matrix failing; sherpa-onnx removal, ADR-075, eliminated the last CRT workaround).
 - Desktop UI runs on two engines: WebView2 (Chromium — strict CSP; `blob:`/`data:` images need explicit `img-src`) vs WKWebView (lenient CSP, own SVG/CSS quirks). A feature verified on macOS is not verified on Windows.
 - nerdctl versions move in lockstep (macOS via `.lima-version`, Windows via `consts::NERDCTL_FULL_VERSION`) — but they are NOT string-equal (e.g. Lima 2.1.2 ships nerdctl 2.2.2); alignment is via the known lima→nerdctl table in `consts.rs`, test-guarded. The SHA256 values stay manual.

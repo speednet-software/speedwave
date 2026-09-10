@@ -758,7 +758,8 @@ func restartMicEngine(session: RecordSession, selector: MicSelector, streamIndex
     do {
         try startMicEngine(session: session, selector: selector, streamIndex: streamIndex)
     } catch {
-        // The Rust side degrades a dead mic side gracefully and warns the user.
+        // A mixed run degrades to system audio; a mic-only run is ended by the Rust side's
+        // single-stream give-up once nothing lands for its deadline.
         logErr("mic restart failed: \(error.localizedDescription) — continuing without the microphone")
     }
 }

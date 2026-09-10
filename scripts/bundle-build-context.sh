@@ -143,7 +143,7 @@ stage_host_worker() {
   # Production deps only; the workspace package-lock.json has workspace-relative entries
   # that don't resolve in isolation, hence standalone lockfile then deterministic npm ci.
   cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/$bundle/shared/"
-  (cd "$DEST/$bundle/shared" && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
+  (cd "$DEST/$bundle/shared" && npm pkg delete devDependencies && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
   mkdir -p "$DEST/$bundle/$worker/node_modules/@speedwave"
   cp -r "$DEST/$bundle/shared" "$DEST/$bundle/$worker/node_modules/@speedwave/mcp-shared"
 }

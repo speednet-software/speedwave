@@ -567,7 +567,7 @@ fn list_conversations_impl(
                     && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
                 // Tag-only match is safe: SYNTHETIC_MODEL is Claude Code's own wire
                 // value, emitted only as the confirmation reply to a control command
-                // (ADR-085) — never reused for other assistant turns.
+                // (ADR-087) — never reused for other assistant turns.
                 let is_synthetic_chip_reply = msg.role == "assistant"
                     && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
                 if is_control_chip_user || is_synthetic_chip_reply {
@@ -1988,7 +1988,7 @@ mod tests {
         // Pins the SYNTHETIC_MODEL tag-match invariant (see comment at the
         // `is_synthetic_chip_reply` site): Claude Code only ever emits
         // `model == "<synthetic>"` as the immediate confirmation reply to a
-        // `/model` or `/effort` control-chip user line (ADR-085), so a bare
+        // `/model` or `/effort` control-chip user line (ADR-087), so a bare
         // tag match is safe without an adjacency check. Two chip exchanges
         // back-to-back — both immediately preceded by their own control
         // line — are excluded; the surrounding real turns are counted.

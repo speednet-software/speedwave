@@ -46,11 +46,14 @@ WORKDIR /app
 # Document toolchain. `--no-install-recommends` keeps the image down; `libreoffice-l10n-*` and
 # `-base`/`-draw`/`-math` are deliberately omitted. tzdata is required — keep aligned with
 # crates/speedwave-runtime/src/tz.rs (see CLAUDE.md SSOT-alignment).
+# WeasyPrint dlopens pango/pangoft2 at import; libharfbuzz-subset0 is the one native dep pango
+# does not pull in. Without these they arrive only as LibreOffice transitives (upstream's list).
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libreoffice-writer libreoffice-calc libreoffice-impress \
       poppler-utils \
       pandoc \
       python3 python3-pip python3-venv \
+      libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
       fonts-liberation fonts-dejavu-core \
       curl ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*

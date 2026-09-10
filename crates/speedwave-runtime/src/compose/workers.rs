@@ -424,6 +424,47 @@ pub(crate) fn worker_gateway_url(port: u16) -> String {
     format!("http://{}:{port}", consts::HOST_GATEWAY_ALIAS)
 }
 
+/// Whether a rendered compose's hub `WORKER_OS_URL` already targets the current mcp-os port.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WorkerOsUrlState {
+    /// `mcp-hub` carries no `WORKER_OS_URL` (OS integration not wired in).
+    Absent,
+    /// The hub URL equals the container-facing URL for the current port.
+    Current,
+    /// The hub URL targets another port, or the compose cannot be parsed.
+    Stale,
+}
+
+/// Exact match against the URL the renderer injects for `current_port`; a substring
+/// probe (`:80` inside `:8080`) or an unparsable compose never counts as current.
+pub fn worker_os_url_state(yaml: &str, current_port: u16) -> WorkerOsUrlState {
+    let doc: serde_yaml_ng::Value = match serde_yaml_ng::from_str(yaml) {
+        Ok(doc) => doc,
+        Err(e) => {
+            log::warn!("compose is not parsable ({e}); treating WORKER_OS_URL as stale");
+            return WorkerOsUrlState::Stale;
+        }
+    };
+    let expected = worker_gateway_url(current_port);
+    match hub_env_value(&doc, "WORKER_OS_URL") {
+        None => WorkerOsUrlState::Absent,
+        Some(value) if value == expected => WorkerOsUrlState::Current,
+        Some(_) => WorkerOsUrlState::Stale,
+    }
+}
+
+/// Value of `<env_name>=<value>` in the `mcp-hub` `environment` sequence, if present.
+fn hub_env_value(doc: &serde_yaml_ng::Value, env_name: &str) -> Option<String> {
+    doc.get("services")?
+        .get("mcp-hub")?
+        .get("environment")?
+        .as_sequence()?
+        .iter()
+        .filter_map(serde_yaml_ng::Value::as_str)
+        .find_map(|entry| entry.strip_prefix(env_name)?.strip_prefix('='))
+        .map(str::to_string)
+}
+
 /// Test-only alias — implementation is `worker_gateway_url`.
 #[cfg(test)]
 pub(crate) fn mcp_os_gateway_url(port: u16) -> String {
@@ -595,6 +636,79 @@ mod credentials_digest_tests {
             env_of(&before, "mcp-slack"),
             env_of(&after, "mcp-slack"),
             "access_token (volatile) must not change the digest either"
+        );
+    }
+}
+
+#[cfg(test)]
+mod worker_os_url_state_tests {
+    use super::*;
+
+    /// Minimal rendered-compose shape: the hub's `environment` sequence with `entries`.
+    fn hub_compose(entries: &[&str]) -> String {
+        let mut yaml = String::from("services:\n  mcp-hub:\n    image: hub\n    environment:\n");
+        for entry in entries {
+            yaml.push_str("      - ");
+            yaml.push_str(entry);
+            yaml.push('\n');
+        }
+        yaml
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn reports_current_when_hub_url_targets_the_port() {
+        let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
+        let yaml = hub_compose(&[
+            "PORT=4000",
+            "WORKER_OS_URL=http://host.docker.internal:54321",
+        ]);
+        assert_eq!(worker_os_url_state(&yaml, 54321), WorkerOsUrlState::Current);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn reports_stale_when_hub_url_targets_another_port() {
+        let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
+        let yaml = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:54321"]);
+        assert_eq!(worker_os_url_state(&yaml, 54322), WorkerOsUrlState::Stale);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn reports_stale_when_current_port_is_a_decimal_prefix_of_the_hub_port() {
+        let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
+        let yaml = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:8080"]);
+        assert_eq!(worker_os_url_state(&yaml, 80), WorkerOsUrlState::Stale);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn reports_absent_when_hub_has_no_os_url() {
+        let _direct = crate::compose::pin_direct_addressing(crate::consts::LIMA_VZ_HOST_IP);
+        let yaml = hub_compose(&["PORT=4000"]);
+        assert_eq!(worker_os_url_state(&yaml, 54321), WorkerOsUrlState::Absent);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn compares_against_the_relay_port_under_mirrored_addressing() {
+        let _mirrored = crate::compose::pin_mirrored_addressing();
+        // Bind port 60123 rides relay port 43739 (ADR-080: bind XOR 0x4000).
+        let relayed = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:43739"]);
+        assert_eq!(
+            worker_os_url_state(&relayed, 60123),
+            WorkerOsUrlState::Current
+        );
+        let raw = hub_compose(&["WORKER_OS_URL=http://host.docker.internal:60123"]);
+        assert_eq!(worker_os_url_state(&raw, 60123), WorkerOsUrlState::Stale);
+    }
+
+    #[test]
+    fn treats_an_unparsable_compose_as_stale() {
+        assert_eq!(
+            worker_os_url_state("services: [", 54321),
+            WorkerOsUrlState::Stale
         );
     }
 }

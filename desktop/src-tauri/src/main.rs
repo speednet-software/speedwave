@@ -908,6 +908,9 @@ fn main() {
                 .level_for("hyper", log::LevelFilter::Warn)
                 .level_for("tungstenite", log::LevelFilter::Warn)
                 .level_for("tokio_tungstenite", log::LevelFilter::Warn)
+                // whisper.cpp debug builds (-DWHISPER_DEBUG) log decoded tokens per decode step:
+                // meeting speech must never reach the log file / diagnostics ZIP (security.md).
+                .level_for("whisper_rs", log::LevelFilter::Info)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepSome(10))
                 .format(move |callback, message, record| {
@@ -1111,10 +1114,10 @@ fn main() {
             )?;
             let tray_icon = tray::load_tray_icon()?;
 
-            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+            let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
                 .icon(tray_icon)
                 .icon_as_template(true)
-                .tooltip("Speedwave")
+                .tooltip(tray::TOOLTIP_IDLE)
                 .menu(&tray_menu)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "open" => {
@@ -1291,6 +1294,7 @@ fn main() {
             containers_cmd::is_setup_complete,
             containers_cmd::build_images,
             containers_cmd::start_containers,
+            containers_cmd::retry_bundle_reconcile,
             containers_cmd::defer_container_start,
             containers_cmd::check_containers_running,
             // Settings

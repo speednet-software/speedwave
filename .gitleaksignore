@@ -19,6 +19,7 @@ crates/speedwave-runtime/src/log_sanitizer.rs:gitlab-pat:783
 crates/speedwave-runtime/src/log_sanitizer.rs:slack-legacy-workspace-token:486
 crates/speedwave-runtime/src/log_sanitizer.rs:slack-legacy-workspace-token:500
 crates/speedwave-runtime/src/log_sanitizer.rs:jwt:230
+crates/speedwave-runtime/src/log_sanitizer.rs:generic-api-key:291
 
 # Sanitizer test fixtures in Desktop test modules — fake secrets.
 desktop/src-tauri/src/ide_bridge.rs:generic-api-key:1803
@@ -44,3 +45,7 @@ crates/speedwave-runtime/src/transcription/model_catalog.rs:generic-api-key:176
 
 # Whisper model key "large-v3-turbo" in a download-tracking test — not a secret.
 desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:605
+desktop/src/src/app/services/transcription.service.spec.ts:generic-api-key:961
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:110
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:139
+desktop/src/src/app/settings/transcription-section/transcription-section.component.spec.ts:generic-api-key:152

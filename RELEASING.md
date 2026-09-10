@@ -17,8 +17,21 @@ Before your first release, ensure these GitHub repository secrets are configured
 | `APPLE_ID`                           | No       | Apple ID email for notarization                                                                            |
 | `APPLE_PASSWORD`                     | No       | App-specific password for notarization                                                                     |
 | `APPLE_TEAM_ID`                      | No       | Apple Developer Team ID                                                                                    |
-| `WINDOWS_CERTIFICATE`                | No       | Windows code signing (.pfx, base64)                                                                        |
-| `WINDOWS_CERTIFICATE_PASSWORD`       | No       | Passphrase for Windows certificate                                                                         |
+
+Windows code signing uses no secret: it runs through Azure Artifact Signing with an OIDC federated credential ([ADR-086](docs/adr/ADR-086-windows-code-signing-azure-artifact-signing.md)), configured as **variables on the `release` GitHub environment**:
+
+| Variable                                     | Purpose                                                                                                         |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `AZURE_CLIENT_ID`                            | Entra app registration whose federated credential trusts `repo:speednet-software/speedwave:environment:release` |
+| `AZURE_TENANT_ID`                            | Entra tenant id                                                                                                 |
+| `AZURE_SUBSCRIPTION_ID`                      | Subscription holding the Artifact Signing account                                                               |
+| `AZURE_ARTIFACT_SIGNING_ENDPOINT`            | Regional endpoint of the account, e.g. `https://plc.codesigning.azure.net`                                      |
+| `AZURE_ARTIFACT_SIGNING_ACCOUNT`             | Artifact Signing account name                                                                                   |
+| `AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE` | Public Trust certificate profile name                                                                           |
+
+All six empty = unsigned Windows build. `AZURE_CLIENT_ID` set while any other is empty = the release job fails on purpose.
+
+The `release` environment only admits runs whose ref is the `main` branch (deployment branch policy; tags are deliberately not allowed, because tag creation is not protected). The federated credential in Azure trusts only the `environment:release` OIDC subject, so no other branch, tag, fork or manual run can obtain a signing session. A `workflow_dispatch` of `desktop-release.yml` must therefore select `main` as the run ref (the build still checks out the release tag it is given); any other ref fails at the `publish-tauri` job with an environment rejection.
 
 Generate the Tauri signing keypair (one-time setup):
 
@@ -32,10 +45,11 @@ Store the private key as `TAURI_SIGNING_PRIVATE_KEY`. The public key is already 
 
 - `RELEASE_TOKEN` missing — release-please cannot create PRs or push to `main`. The workflow fails with a permissions error.
 - `TAURI_SIGNING_PRIVATE_KEY` missing — tauri-action produces unsigned bundles. The Tauri updater will **refuse to install** them (signature verification fails). Users cannot auto-update.
-- Apple/Windows signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open). Windows SmartScreen shows a warning.
+- Apple signing secrets missing — builds succeed but produce unsigned binaries. macOS Gatekeeper blocks the app (users must right-click > Open).
+- Windows signing variables missing — builds succeed but produce unsigned binaries; Windows SmartScreen shows a warning. A partially filled set fails the release job instead (see the variables table above).
 - Entitlements plists missing — builds and notarization succeed, but binaries crash at runtime when they attempt to use restricted platform APIs (Virtualization.framework, Apple Events, EventKit for Calendars/Reminders). This is NOT caught by CI — only by manual testing. The accompanying `Info.plist` TCC usage-description keys (`NSFileProviderDomainUsageDescription`, `NSAppleEventsUsageDescription`, `NSCalendarsUsageDescription`, etc.) are equally critical — without them macOS silently blocks the API without displaying a consent dialog.
 
-The architectural rationale for signing — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md).
+The architectural rationale for signing — including why every Mach-O binary in `Contents/Resources/` is signed individually — is in [ADR-037](docs/adr/ADR-037-code-signing-and-bundled-binary-signing.md); the Windows counterpart (Azure Artifact Signing, OIDC login, in-build `signCommand`) is [ADR-086](docs/adr/ADR-086-windows-code-signing-azure-artifact-signing.md).
 
 ## How release-please Works
 
@@ -403,6 +417,9 @@ Or use `desktop-build.yml` which runs automatically on PRs to `main` or `dev` (m
 | `.github/workflows/release-please-lockfile.yml`     | Regenerates Cargo.lock on release-please PRs                   |
 | `.github/workflows/release-please-npm-lockfile.yml` | Regenerates npm package-lock.json files on release-please PRs  |
 | `.github/workflows/desktop-release.yml`             | Matrix build, code signing, CLI cross-compile, publish         |
+| `.github/actions/azure-signing-login/action.yml`    | OIDC login to Azure + `AZURE_ARTIFACT_SIGNING_*` env export    |
+| `scripts/sign-windows-binaries.ps1`                 | Windows signing script (Tauri `signCommand` + `-Bundled` pass) |
+| `desktop/src-tauri/tauri.windows.conf.json`         | Windows hooks: `beforeBundleCommand`, `signCommand`, resources |
 | `.github/workflows/desktop-build.yml`               | PR/push CI build (unsigned)                                    |
 | `.github/workflows/backmerge.yml`                   | Automated main → dev backmerge after release publish           |
 | `.github/workflows/merge-strategy-check.yml`        | Enforces conventional commit PR titles on PRs to main          |
@@ -447,11 +464,11 @@ Breakdown by platform:
 
 **Total: 18 assets, 6 `.sig` companions.**
 
-Asset names use `assetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
+Asset names use `releaseAssetNamePattern: [name]_[version]_{arch_label}[setup][ext]` from `tauri-apps/tauri-action` (see `.github/workflows/desktop-release.yml`).
 
 The `publish-release` job runs three steps:
 
-1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://github.com/<repo>/releases/` prefix.
+1. **Pre-publish gate:** `scripts/verify-release-assets.sh` enumerates every required asset, verifies each `.sig` is non-empty, validates `latest.json` reports the expected bare semver version (no `v` prefix), and checks all 7 required `platforms.*` keys (`darwin-*`, `windows-*`) have non-empty `signature` and `url` fields with the expected `https://api.github.com/repos/<repo>/releases/assets/` prefix (the URL shape tauri-action >= 1.0.0 writes).
 2. **Publish:** flips the draft release to live via `gh api --method PATCH … -f draft=false`.
 3. **Post-publish safety net:** re-runs `scripts/verify-release-assets.sh` against the live release; if it fails, the workflow reverts back to draft so the broken release is not user-visible.
 
@@ -459,7 +476,7 @@ At PR time, `_tests/desktop/updater-config.bats` enforces `tauri.conf.json` upda
 
 ### Changing release artifact naming or target set
 
-When changing `bundle.targets` in `tauri.conf.json`, bumping `tauri-action`, or modifying `assetNamePattern` in `desktop-release.yml`:
+When changing `bundle.targets` in `tauri.conf.json`, bumping `tauri-action`, or modifying `releaseAssetNamePattern` in `desktop-release.yml`:
 
 1. Update the expected-asset list in `scripts/verify-release-assets.sh`.
 2. Regenerate the happy-case fixture `_tests/desktop/fixtures/verify-release-assets/assets-happy.json`.

@@ -48,7 +48,7 @@ Adding a future bundled binary that needs a restricted API = add its entitlement
 
 ## Notes
 
-- macOS only — the script has no Windows branch today. Windows signing (Azure Trusted Signing) is tracked separately and would add a Windows branch to this or a sibling script.
+- macOS only — the script has no Windows branch. Windows signing lives in [ADR-086](ADR-086-windows-code-signing-azure-artifact-signing.md): a sibling script, `scripts/sign-windows-binaries.ps1`, hooked from `tauri.windows.conf.json`.
 - Per-architecture signing: builds are per-arch (aarch64 + x86_64), so universal-binary slice signing is not needed.
 - Developer ID Application certificates expire after 5 years[^3]; an expired cert blocks new releases until reissued.
 

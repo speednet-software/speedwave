@@ -1,4 +1,4 @@
-# ADR-085: Chat UI Slash-Command Allowlist and Composer Model/Effort Control
+# ADR-087: Chat UI Slash-Command Allowlist and Composer Model/Effort Control
 
 **Status:** Accepted
 

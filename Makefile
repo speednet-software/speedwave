@@ -15,7 +15,8 @@
 #   - cargo-tauri CLI (cargo install tauri-cli) — for desktop dev/build
 #   - cargo-llvm-cov (cargo install cargo-llvm-cov) — for Rust coverage
 #   - cargo-audit (cargo install cargo-audit) — for dependency audit
-#   - bats-core (brew install bats-core) — for E2E tests (optional)
+#   - bats-core (brew install bats-core; macOS/CI only) — for E2E + script test suites
+#   - gitleaks (brew install gitleaks / choco install gitleaks) — required by the pre-commit hook
 #   - Swift 5.9+ (macOS only, for native OS CLI binaries)
 
 # Ensure cargo and Homebrew are in PATH even in non-interactive shells
@@ -39,6 +40,15 @@ SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-dev
 export SPEEDWAVE_DATA_DIR
 
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
+
+# No bats on a Windows host (no Chocolatey package; the rig runs it inside WSL), so the
+# hint is platform-picked once here and shared by the probe and all ten bats gates.
+ifeq ($(OS),Windows_NT)
+BATS_HINT = echo "     Windows: not provisioned — the bats suites run on macOS + CI"
+else
+BATS_HINT = echo "     Install: brew install bats-core"
+endif
+REQUIRE_BATS = command -v bats >/dev/null 2>&1 || { echo "❌ bats not found."; $(BATS_HINT); exit 1; }
 
 # bats runs serially. `--jobs N` is unsafe here: bundle-build-context.bats mutates
 # shared repo paths (mcp-servers/{os,shared}/dist) that cannot be tempdir-isolated,
@@ -67,7 +77,7 @@ guard-not-prod-data-dir:
 
 .PHONY: all build test check clean dev install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
-        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets \
+        build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
         test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
@@ -83,7 +93,6 @@ guard-not-prod-data-dir:
 
 # ── Developer setup (run once after cloning) ─────────────────────────────────
 
-REQUIRED_NODE_MAJOR := 20
 REQUIRED_RUST_MINOR := 70
 
 setup-dev:
@@ -114,21 +123,7 @@ setup-dev:
 	\
 	echo ""; \
 	echo "── Node.js ──"; \
-	if command -v node >/dev/null 2>&1; then \
-		NODE_VER=$$(node --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'); \
-		NODE_MAJOR=$$(echo "$$NODE_VER" | cut -d. -f1); \
-		if [ "$$NODE_MAJOR" -ge $(REQUIRED_NODE_MAJOR) ]; then \
-			echo "  ✅ node $$NODE_VER"; \
-		else \
-			echo "  ❌ node $$NODE_VER (requires $(REQUIRED_NODE_MAJOR)+)"; \
-			echo "     Install: https://nodejs.org or brew install node"; \
-			FAIL=1; \
-		fi; \
-	else \
-		echo "  ❌ node not found"; \
-		echo "     Install: https://nodejs.org or brew install node"; \
-		FAIL=1; \
-	fi; \
+	bash scripts/check-node-version.sh "$(NODE_VERSION)" || FAIL=1; \
 	\
 	if command -v npm >/dev/null 2>&1; then \
 		echo "  ✅ npm $$(npm --version)"; \
@@ -147,12 +142,22 @@ setup-dev:
 	fi; \
 	\
 	echo ""; \
+	echo "── Git hooks ──"; \
+	if command -v gitleaks >/dev/null 2>&1; then \
+		echo "  ✅ gitleaks $$(gitleaks version 2>/dev/null || echo installed)"; \
+	else \
+		echo "  ❌ gitleaks not found — the pre-commit hook rejects every commit without it"; \
+		echo "     Install: brew install gitleaks (macOS) / make setup-dev-windows (Windows)"; \
+		FAIL=1; \
+	fi; \
+	\
+	echo ""; \
 	echo "── Optional tools ──"; \
 	if command -v bats >/dev/null 2>&1; then \
 		echo "  ✅ bats $$(bats --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
 	else \
 		echo "  ⬚  bats not found (needed for: make test-e2e)"; \
-		echo "     Install: brew install bats-core"; \
+		$(BATS_HINT); \
 	fi; \
 	\
 	echo ""; \
@@ -183,6 +188,10 @@ setup-dev:
 	else \
 		echo "  ⬚  skipped (not macOS)"; \
 	fi; \
+	\
+	echo ""; \
+	echo "── Windows build deps (whisper Vulkan + MSVC) ──"; \
+	bash scripts/check-windows-build-deps.sh; \
 	\
 	echo ""; \
 	if [ "$$FAIL" -eq 1 ]; then \
@@ -247,8 +256,11 @@ test: guard-not-prod-data-dir
 check: check-clippy check-desktop-clippy check-proxy-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
 	@echo "\n✅ All checks passed"
 
+# `cargo clean` twice: desktop/src-tauri is its own workspace, and on Windows its
+# target-dir is redirected out of the tree entirely (ADR-085 path budget).
 clean:
 	cargo clean
+	cd desktop/src-tauri && cargo clean
 	rm -rf desktop/src/dist desktop/src/node_modules/.cache
 	cd mcp-servers && rm -rf node_modules/*/dist */dist
 	rm -rf native/macos/*/.build
@@ -291,6 +303,7 @@ generate-installer-nsh:
 	@bash scripts/generate-installer-nsh.sh
 
 build-desktop: generate-installer-nsh
+	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	cd desktop/src-tauri && cargo build
 
 build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
@@ -302,6 +315,7 @@ build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nod
 	mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@"$(MAKE)" stage-vulkan-windows
 else
 	cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
@@ -350,6 +364,12 @@ bundle-static-licenses:
 	@mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
 	@cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
 	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
+
+# Windows only: gate the ggml-vulkan shader build's path budget, then stage the pinned
+# vulkan-1.dll (ADR-085). CI runs the same pair as two steps in prepare-desktop-bundle.
+stage-vulkan-windows:
+	@bash scripts/check-vulkan-path-budget.sh
+	@bash scripts/stage-vulkan-runtime.sh
 
 verify-bundled-assets:
 ifeq ($(OS),Windows_NT)
@@ -408,16 +428,18 @@ test-build-phase: generate-installer-nsh build-cli build-angular build-mcp build
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@"$(MAKE)" stage-vulkan-windows
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@echo "✅ Build phase complete"
 
 # Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -427,13 +449,18 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
+# Shared by test-desktop-build and test-desktop-build-run so the two can't drift.
+DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
+  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
+  _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
+  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
+  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+
 test-desktop-build-run:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats
+	@$(REQUIRE_BATS)
+	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run: guard-not-prod-data-dir
@@ -462,7 +489,9 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli)
+	@# `test-support` is required, not cosmetic: the `required-features = ["test-support"]`
+	@# integration suites (apply_transaction_behaviour, lock suites) are silently skipped without it.
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
 	@# doesn't compile the `transcription` module. Test it explicitly here.
@@ -477,6 +506,8 @@ test-transcription: guard-not-prod-data-dir
 	@# without the feature and is already exercised by `test-rust`. Without the
 	@# `transcription::` filter, cargo re-runs the whole suite a second time
 	@# (~100 compose tests at ~5s each), which alone blows past the CI job budget.
+	@# `transcription::` filter without `--lib` on purpose: this target is the RUN_STT_E2E
+	@# opt-in runner for transcription_pipeline_e2e.rs (CI's windows step uses --lib).
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
 
@@ -507,10 +538,12 @@ test-desktop: build-cli build-angular build-mcp build-os-cli generate-installer-
 	@mkdir -p desktop/src-tauri/cli
 ifeq ($(OS),Windows_NT)
 	@cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@"$(MAKE)" stage-vulkan-windows
 else
 	@cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@# The bundle is staged above (bundle-build-context.sh + build-mcp), so run
@@ -547,8 +580,8 @@ test-mcp-office-py:
 	"$$PY" -m venv --clear "$$VENV"; \
 	"$$VENV/bin/pip" install -q --upgrade pip; \
 	"$$VENV/bin/pip" install -q -r mcp-servers/office/requirements.txt pytest; \
-	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; \
-	rm -rf "$$VENV"
+	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
+	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
@@ -583,7 +616,7 @@ coverage-html: build-mcp
 # ── E2E tests (requires bats-core) ──────────────────────────────────────────
 
 test-e2e: build-cli
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/e2e/e2e-vm-excludes.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
@@ -592,7 +625,7 @@ test-e2e: build-cli
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
 # compiled out — see ADR-051 ("Build hygiene").
 test-e2e-plugin-tamper-release: build-cli-release
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
 
 # `env` prefix is load-bearing (word-split at use sites, not a shell assignment); the
@@ -600,7 +633,7 @@ test-e2e-plugin-tamper-release: build-cli-release
 ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave-dev -- sudo
 
 test-engine-contract:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" bats --print-output-on-failure _tests/e2e/engine-contract.bats
 
 test-e2e-update-dirty: build-cli
@@ -610,36 +643,35 @@ test-e2e-update-dirty: build-cli
 	bats --print-output-on-failure _tests/e2e/update-dirty-state.bats
 
 test-entrypoint:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/entrypoint/entrypoint.bats _tests/entrypoint/install-claude.bats \
 	  _tests/entrypoint/statusline.bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats
+	@$(REQUIRE_BATS)
+	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
+	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
+	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
+	  _tests/ci/bats-assertion-hygiene.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats
+	@$(REQUIRE_BATS)
+	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
 test-desktop-config:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
-	  _tests/desktop/backmerge-alignment.bats
+	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats
 	@echo "✅ Desktop config tests passed"
 
 # Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
 # edge cases from breaking unrelated PRs.
 test-release-gate:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
 	bats _tests/desktop/verify-release-assets.bats
 	@echo "✅ Release-gate tests passed"
@@ -660,10 +692,12 @@ test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@cargo build -p speedwave-cli --release
 ifeq ($(OS),Windows_NT)
 	@cp target/release/speedwave.exe desktop/src-tauri/cli/speedwave.exe 2>/dev/null || true
+	@"$(MAKE)" stage-vulkan-windows
 else
 	@cp target/release/speedwave desktop/src-tauri/cli/speedwave
 	@chmod +x desktop/src-tauri/cli/speedwave
 endif
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@echo "── Building release binary with bundle (e2e feature = WebDriver on :4445)..."
 	cd desktop/src-tauri && cargo tauri build --features e2e $(if $(TAURI_SIGNING_PRIVATE_KEY),,--no-sign)
@@ -676,7 +710,9 @@ test-e2e-desktop: test-e2e-desktop-build
 	@"$(MAKE)" _e2e-run
 	@echo "✅ Desktop E2E tests passed"
 
-E2E_BINARY = desktop/src-tauri/target/release/speedwave-desktop
+# Resolve the effective target dir: on Windows the desktop crate builds into a short
+# crate-local target-dir (ADR-085), which CARGO_TARGET_DIR alone does not describe.
+E2E_BINARY = $(shell bash scripts/cargo-target-dir.sh desktop/src-tauri)/release/speedwave-desktop
 
 # All platforms: app embeds tauri-plugin-webdriver on port 4445.
 # Launch app, wait for WebDriver ready, run wdio, cleanup.
@@ -759,6 +795,7 @@ check-clippy:
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
+	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	@bash scripts/bundle-build-context.sh
 	@bash scripts/create-desktop-stubs.sh
 	cd desktop/src-tauri && SPEEDWAVE_ALLOW_BUNDLE_STUBS=1 cargo clippy -- -D warnings
@@ -783,7 +820,7 @@ check-mcp:
 
 check-angular:
 	cd desktop/src && $(NPX) ng build --configuration production
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/desktop/desktop-build.bats
 	@echo "✅ Angular production build + desktop path verification OK"
 
@@ -813,7 +850,10 @@ audit: audit-rust audit-mcp audit-desktop
 # quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update only,
 # parses GitHub's release feed over pinned TLS). No fixed self_update release (pins ^0.37).
 # Remove both when self_update bumps quick-xml to >=0.41.
-AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+#
+# glib unsoundness: informational, never fails cargo audit. glib 0.18.5 comes only via the
+# Linux+BSD-gated GTK stack, so it is never built for macOS/Windows. Drop at Tauri glib 0.20+.
+AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
 
 audit-rust:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "❌ cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
@@ -821,12 +861,15 @@ audit-rust:
 	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
+# Shared with CI, which runs these targets rather than its own npm audit line.
+NPM_AUDIT_LEVEL := high
+
 audit-mcp:
-	cd mcp-servers && $(NPM) audit --omit=dev
+	cd mcp-servers && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ MCP dependencies: no vulnerabilities"
 
 audit-desktop:
-	cd desktop/src && $(NPM) audit --omit=dev
+	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ Desktop dependencies: no vulnerabilities"
 
 # ── Full quality gate (run before push) ──────────────────────────────────────
@@ -888,7 +931,7 @@ clean-lima:
 
 # ── Node.js bundling (all platforms — mcp-os worker) ─────────────────────────
 
-NODE_VERSION := $(shell cat .node-version 2>/dev/null || echo 24.14.0)
+NODE_VERSION := $(shell cat .node-version)
 
 download-nodejs:
 	@NODE_BIN=desktop/src-tauri/nodejs/bin/node; \
@@ -986,6 +1029,8 @@ dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-ins
 	@bash scripts/bundle-build-context.sh
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave.exe desktop/src-tauri/cli/speedwave.exe
+	@"$(MAKE)" stage-vulkan-windows
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
@@ -998,15 +1043,16 @@ dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs ge
 	mkdir -p desktop/src-tauri/cli
 	cp target/debug/speedwave desktop/src-tauri/cli/speedwave
 	chmod +x desktop/src-tauri/cli/speedwave
+	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
 endif
 
 # ── Quick status ─────────────────────────────────────────────────────────────
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
-	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli 2>&1 | grep "test result" || true)
+	@$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support 2>&1 | grep "test result" || true)
 	@echo "\n=== Clippy ==="
 	@echo "Warnings: $$(cargo clippy -p speedwave-runtime -p speedwave-cli 2>&1 | grep -c '^warning' || echo 0)"
 	@echo "\n=== MCP Servers ==="

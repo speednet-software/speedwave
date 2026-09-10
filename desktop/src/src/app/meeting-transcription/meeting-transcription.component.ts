@@ -13,14 +13,14 @@ import { RouterLink } from '@angular/router';
 
 import { TranscriptionService } from '../services/transcription.service';
 import { LoggerService } from '../services/logger.service';
-import type { TranscriptSession } from '../models/transcript';
+import type { CaptureWarning, TranscriptSession } from '../models/transcript';
 import { RecordingControlsComponent } from './recording-controls/recording-controls.component';
 import { LiveTranscriptComponent } from './live-transcript/live-transcript.component';
 import { SessionListComponent } from './session-list/session-list.component';
 
 /**
  * Meeting transcription tab (beta-gated): recordings list + controls/live transcript. Transcription
- * is local; only "Send to Claude" uses the network. No model yet → gate points to Settings.
+ * is local; only sending the transcript to chat uses the network. No model yet → gate points to Settings.
  */
 @Component({
   selector: 'app-meeting-transcription',
@@ -54,7 +54,8 @@ import { SessionListComponent } from './session-list/session-list.component';
           <div>
             <h1 class="text-lg font-semibold">Meeting transcription</h1>
             <p class="text-sm text-[var(--ink-mute)]">
-              Audio is transcribed locally on this machine. "Send to chat" uses the network.
+              Audio is transcribed locally on this machine. Sending the transcript to chat uses the
+              network.
             </p>
             <p class="mt-1 text-xs text-[var(--ink-mute)]" data-testid="quality-disclaimer">
               Quality varies by content: read speech (e.g. dictation) is ~5% word error rate;
@@ -82,14 +83,14 @@ import { SessionListComponent } from './session-list/session-list.component';
             }
           </div>
         }
-        @if (captureWarningText(); as warning) {
+        @for (warning of captureWarnings(); track warning) {
           <div
             class="mx-6 mt-3 rounded ring-1 ring-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-amber-300"
             role="alert"
             data-testid="capture-warning"
           >
-            {{ warning }}
-            @if (captureWarning() === 'system_audio_silent') {
+            {{ captureWarningText(warning) }}
+            @if (warning === 'system_audio_silent') {
               <button
                 type="button"
                 class="mono ml-2 underline"
@@ -142,23 +143,27 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     const e = this.error().toLowerCase();
     return e.includes('permission') || e.includes('privacy') || e.includes('microphone');
   });
-  /** Capture-health warning for the active session (from the live event stream). */
-  readonly captureWarning = this.transcription.captureWarning;
-  /** Banner copy for the active capture warning. */
-  readonly captureWarningText = computed(() => {
-    switch (this.captureWarning()) {
+  /** Capture-health warnings raised for the active session (snapshot, then the event stream). */
+  readonly captureWarnings = this.transcription.captureWarnings;
+  /**
+   * Banner copy for one raised capture warning.
+   * @param warning - the raised warning to describe.
+   * @returns the banner text.
+   */
+  captureWarningText(warning: CaptureWarning): string {
+    switch (warning) {
       case 'system_audio_silent':
         return 'No system audio captured so far — the meeting voice may be missing. Check the System Audio Recording permission.';
       case 'microphone_stalled':
         return 'The microphone stopped delivering audio — recording continues with system audio only.';
       case 'system_audio_stalled':
         return 'System audio stopped delivering — recording continues with the microphone only.';
+      case 'audio_dropped':
+        return 'Some captured audio was dropped before it reached the recording — that span is missing from the recording and the transcript.';
       case 'recording_part_missing':
         return 'A resumed part of this recording contributed no audio — the transcript may be missing that span.';
-      default:
-        return null;
     }
-  });
+  }
 
   /** Refreshes the recordings list once the active session settles (snapshot is one-shot). */
   constructor() {
@@ -192,11 +197,11 @@ export class MeetingTranscriptionComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Detaches the live-stream listener and removes activation listeners. */
+  /** Detaches the live-stream listener unless a recording still needs it. */
   async ngOnDestroy(): Promise<void> {
     window.removeEventListener('focus', this.onActivate);
     document.removeEventListener('visibilitychange', this.onActivate);
-    await this.transcription.detach();
+    if (!this.transcription.recording()) await this.transcription.detach();
   }
 
   /**

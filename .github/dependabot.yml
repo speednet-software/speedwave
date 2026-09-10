@@ -1,32 +1,32 @@
 version: 2
 updates:
+  # One cargo entry for all three workspaces: shared path-dependency manifests
+  # (crates/*) otherwise yield per-directory half-PRs that leave the other lockfiles stale.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /desktop/src-tauri
+      - /containers/proxy
     target-branch: dev
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     labels:
       - dependencies
     groups:
       rust-minor-patch:
+        patterns:
+          - "*"
         update-types:
           - minor
           - patch
-
-  - package-ecosystem: cargo
-    directory: /desktop/src-tauri
-    target-branch: dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-    groups:
-      rust-desktop-minor-patch:
+        group-by: dependency-name
+      rust-major:
+        patterns:
+          - "*"
         update-types:
-          - minor
-          - patch
+          - major
+        group-by: dependency-name
 
   - package-ecosystem: npm
     directory: /
@@ -78,14 +78,43 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    # Angular packages peer-pin each other to the exact version: a single-package major can
+    # never install, so every Angular update (any level) travels in one PR.
     groups:
+      angular:
+        patterns:
+          - "@angular/*"
+          - "angular-eslint"
+          - "@angular-eslint/*"
       npm-desktop-minor-patch:
         update-types:
           - minor
           - patch
+    ignore:
+      # @angular/compiler-cli caps TypeScript (>=6.0 <6.1 for v22); lift with the next Angular major.
+      - dependency-name: "typescript"
+        versions: [">=6.1"]
 
+  - package-ecosystem: npm
+    directory: /desktop/e2e
+    target-branch: dev
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      npm-e2e-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # `/` scans only .github/workflows and a root action.yml, so composite actions under
+  # .github/actions need their own directory; group-by keeps one PR per action across both.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - "/.github/actions/*"
     target-branch: dev
     schedule:
       interval: weekly
@@ -94,9 +123,18 @@ updates:
       - dependencies
     groups:
       actions-minor-patch:
+        patterns:
+          - "*"
         update-types:
           - minor
           - patch
+        group-by: dependency-name
+      actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
+        group-by: dependency-name
 
   - package-ecosystem: docker
     directory: /mcp-servers/hub

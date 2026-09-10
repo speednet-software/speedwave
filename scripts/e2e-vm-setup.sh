@@ -79,14 +79,28 @@ $ErrorActionPreference = 'Stop'
 # whisper-rs-sys drives a real cmake.exe via the `cmake` crate (VS's bundled cmake is not on
 # PATH); install Kitware's build to `C:\Program Files\CMake\bin` on the Machine PATH. Idempotent.
 $cmakeBin = 'C:\Program Files\CMake\bin'
+$pinned = '3.31.5'
+$haveVer = ''
 if (Test-Path "$cmakeBin\cmake.exe") {
-    Write-Host "CMake already installed: $cmakeBin"
+    $haveVer = ((& "$cmakeBin\cmake.exe" --version | Select-Object -First 1) -replace '[^0-9.]', '')
+}
+if ($haveVer -eq $pinned) {
+    Write-Host "CMake $pinned already installed: $cmakeBin"
 } else {
+    # A foreign version masks the pin (a machine-resident 4.3.2 once shadowed it); replace it.
+    if ($haveVer) {
+        Write-Host "Replacing foreign CMake $haveVer with pinned $pinned..."
+        $u = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -like 'CMake*' } | Select-Object -First 1
+        if ($u -and $u.UninstallString -match '\{[0-9A-F-]+\}') {
+            Start-Process msiexec -ArgumentList '/x', $Matches[0], '/qn', '/norestart' -Wait
+        }
+    }
     $arch = $env:PROCESSOR_ARCHITECTURE
     if ($arch -eq 'ARM64') {
-        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-arm64.msi'
+        $url = "https://github.com/Kitware/CMake/releases/download/v$pinned/cmake-$pinned-windows-arm64.msi"
     } else {
-        $url = 'https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-windows-x86_64.msi'
+        $url = "https://github.com/Kitware/CMake/releases/download/v$pinned/cmake-$pinned-windows-x86_64.msi"
     }
     Write-Host "Downloading $url..."
     Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\cmake-installer.msi"
@@ -167,6 +181,13 @@ $currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
 if (-not $currentPath.Contains($linkDir)) {
     [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$linkDir", 'Machine')
 }
+# SDK bin carries rc.exe/mt.exe — without it every CMake TryCompile link step
+# dies (ninja: vs_link_exe "RC Pass 1 ... no such file"; MSBuild: MSB6003).
+$sdkBin = "$sdkBase\bin\$sdkVer\x64"
+$currentPath = [System.Environment]::GetEnvironmentVariable('Path','Machine')
+if (-not $currentPath.Contains($sdkBin)) {
+    [System.Environment]::SetEnvironmentVariable('Path', "$currentPath;$sdkBin", 'Machine')
+}
 [System.Environment]::SetEnvironmentVariable('INCLUDE', "$msvcDir\include;$sdkBase\Include\$sdkVer\ucrt;$sdkBase\Include\$sdkVer\um;$sdkBase\Include\$sdkVer\shared", 'Machine')
 [System.Environment]::SetEnvironmentVariable('LIB', "$msvcDir\lib\$libArch;$sdkBase\Lib\$sdkVer\ucrt\$libArch;$sdkBase\Lib\$sdkVer\um\$libArch", 'Machine')
 Write-Host "MSVC environment configured"
@@ -182,6 +203,21 @@ Start-Process -Wait -FilePath "$env:TEMP\rustup-init.exe" -ArgumentList '-y'
 Remove-Item "$env:TEMP\rustup-init.exe"
 SCRIPT
 
+    echo "[windows] Installing Ninja (cmake-crate generator for whisper-rs-sys)..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+if (Get-Command ninja -ErrorAction SilentlyContinue) { Write-Host 'Ninja already installed' }
+else { choco install ninja -y --no-progress }
+SCRIPT
+
+    echo "[windows] Adding Defender exclusions for build dirs..."
+    windows_ps <<'SCRIPT'
+$ErrorActionPreference = 'Stop'
+# Real-time scanning races the CMake TryCompile create/delete cycle (MSB6003
+# DirectoryNotFoundException on fresh tlog dirs); CI runners run with it off.
+Add-MpPreference -ExclusionPath 'C:\cb','C:\speedwave-e2e',"$env:USERPROFILE\.cargo","$env:USERPROFILE\.rustup"
+SCRIPT
+
     echo "[windows] Installing tauri-cli..."
     windows_ps <<'SCRIPT'
 $ErrorActionPreference = 'Stop'
@@ -190,10 +226,21 @@ $env:INCLUDE = [System.Environment]::GetEnvironmentVariable('INCLUDE','Machine')
 $env:LIB = [System.Environment]::GetEnvironmentVariable('LIB','Machine')
 # Use a non-temp directory for cargo builds to avoid AppLocker blocking
 # executables in %TEMP% (Windows Application Control error 4551).
-$env:CARGO_TARGET_DIR = 'C:\cargo-build'
+$env:CARGO_TARGET_DIR = 'C:\cb'
 New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
 cargo install tauri-cli --locked
 SCRIPT
+
+    echo "[windows] Installing pinned Vulkan SDK (whisper-rs-sys needs VULKAN_SDK — ADR-085)..."
+    local vsdk_ps1
+    vsdk_ps1="$(dirname "$0")/install-vulkan-sdk.ps1"
+    # Run the repo's pinned installer verbatim (the SSOT for the SDK hashes); strip its
+    # on-disk BOM first — windows_ps prepends its own.
+    if [ "$(head -c 3 "$vsdk_ps1")" = $'\xef\xbb\xbf' ]; then
+        tail -c +4 "$vsdk_ps1" | windows_ps
+    else
+        windows_ps < "$vsdk_ps1"
+    fi
 
     echo "[windows] Installing WSL2 distro $WINDOWS_WSL_DISTRO..."
     local wsl_distro="$WINDOWS_WSL_DISTRO"
@@ -225,6 +272,7 @@ Write-Host "Cargo: $(cargo --version)"
 Write-Host "tauri-cli: $(cargo tauri --version 2>&1)"
 Write-Host "cmake: $(cmake --version 2>&1 | Select-Object -First 1)"
 Write-Host "LIBCLANG_PATH: $([System.Environment]::GetEnvironmentVariable('LIBCLANG_PATH','Machine'))"
+Write-Host "VULKAN_SDK: $([System.Environment]::GetEnvironmentVariable('VULKAN_SDK','Machine'))"
 Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
 SCRIPT
 

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.206";
+pub const CLAUDE_VERSION: &str = "2.1.252";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -40,7 +40,7 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Sent to Claude Code via
-    /// `ANTHROPIC_MODEL`.
+    /// `ANTHROPIC_DEFAULT_MODEL` (a startup default a `/model` pick outranks).
     pub id: &'static str,
     /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,
@@ -82,7 +82,8 @@ pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
     })
 }
 
-// Published per-MTok rates: platform.claude.com/docs/en/pricing.
+// Published per-MTok rates: platform.claude.com/docs/en/about-claude/pricing.
+// Claude 4.6+ bills the full 1M window at standard rates — [1m] reuses the base const.
 const FABLE_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
     cached_input: 1.0,
@@ -95,25 +96,17 @@ const OPUS_PRICING: ModelPricing = ModelPricing {
     cache_write: 6.25,
     output: 25.0,
 };
-// Introductory rate, valid through 2026-08-31 per platform.claude.com/docs/en/about-claude/pricing.
 const SONNET_5_PRICING: ModelPricing = ModelPricing {
     input: 2.0,
     cached_input: 0.2,
     cache_write: 2.5,
     output: 10.0,
 };
-const SONNET_4_6_PRICING: ModelPricing = ModelPricing {
+const SONNET_46_PRICING: ModelPricing = ModelPricing {
     input: 3.0,
     cached_input: 0.3,
     cache_write: 3.75,
     output: 15.0,
-};
-// Legacy long-context premium (deployed usage rows depend on this exact rate).
-const SONNET_4_6_PRICING_1M: ModelPricing = ModelPricing {
-    input: 6.0,
-    cached_input: 0.6,
-    cache_write: 7.5,
-    output: 22.5,
 };
 const HAIKU_PRICING: ModelPricing = ModelPricing {
     input: 1.0,
@@ -201,8 +194,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         context_tokens: 1_000_000,
         latest: false,
         premium: false,
-        pricing: SONNET_4_6_PRICING,
-        pricing_1m: Some(SONNET_4_6_PRICING_1M),
+        pricing: SONNET_46_PRICING,
+        pricing_1m: Some(SONNET_46_PRICING),
         selectable: false,
     },
 ];
@@ -323,12 +316,13 @@ mod tests {
     #[test]
     fn base_env_does_not_set_model() {
         let env = base_env();
-        assert!(
-            !env.contains_key("ANTHROPIC_MODEL"),
-            "base_env() must not set ANTHROPIC_MODEL — the user's Claude Code model \
-             selection must not be overridden. Users who want a specific model can set \
-             claude.env.ANTHROPIC_MODEL in .speedwave.json or ~/.speedwave/config.json."
-        );
+        for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"] {
+            assert!(
+                !env.contains_key(key),
+                "base_env() must not set {key} — the model comes from the LLM provider config \
+                 (Settings default) or the user's own claude.env override, never from defaults."
+            );
+        }
     }
 
     #[test]
@@ -547,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn sonnet_5_carries_intro_pricing_and_4_6_keeps_standard() {
+    fn sonnet_5_and_4_6_carry_their_catalog_rates() {
         let s5 = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-sonnet-5")
@@ -560,20 +554,6 @@ mod tests {
             .unwrap();
         assert_eq!(s46.pricing.input, 3.0);
         assert_eq!(s46.pricing.output, 15.0);
-    }
-
-    #[test]
-    fn sonnet_4_6_1m_variant_keeps_its_legacy_long_context_premium() {
-        // Deployed usage rows for sonnet-4-6[1m] were priced at this rate;
-        // unlike current-gen models, its pricing_1m must NOT collapse to base.
-        let s46 = ANTHROPIC_MODELS
-            .iter()
-            .find(|m| m.id == "claude-sonnet-4-6")
-            .unwrap();
-        assert_ne!(s46.pricing_1m, Some(s46.pricing));
-        let p = s46.pricing_1m.unwrap();
-        assert_eq!(p.input, 6.0);
-        assert_eq!(p.output, 22.5);
     }
 
     #[test]

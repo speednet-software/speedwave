@@ -62,7 +62,7 @@ import { DetectedIde } from '../../models/health';
                     }
                   </td>
                   <td class="px-3 py-2 text-right">
-                    @if (selectedIde?.ide_name === ide.ide_name && selectedIde?.port === ide.port) {
+                    @if (selectedIde?.ide_name === ide.ide_name && selectedIde.port === ide.port) {
                       <button
                         type="button"
                         class="pill green hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed"

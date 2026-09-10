@@ -76,7 +76,6 @@ pub use tokens::{
 pub(crate) use tokens::{init_secrets_dir_in, resolve_tokens_dir_in};
 
 // Host-side worker + integrations-filter wiring.
-pub use workers::enabled_hub_service_ids;
 pub(crate) use workers::{
     apply_integrations_filter, apply_worker_auth_tokens_in, apply_worker_config, worker_gateway_url,
 };
@@ -84,6 +83,7 @@ pub(crate) use workers::{
 use workers::{
     apply_worker_auth_tokens_with_dir, mcp_os_gateway_url, read_lock_port, remove_env_from,
 };
+pub use workers::{enabled_hub_service_ids, worker_os_url_state, WorkerOsUrlState};
 
 // Test-only bundle build root override; thread-local for parallel test safety.
 #[cfg(test)]
@@ -680,12 +680,17 @@ pub(crate) const INVALID_COMPOSE_PROJECT_ERROR_FRAGMENT: &str = "invalid compose
 /// SSOT for compose schema/parse error fragments seen on a stale/torn virtiofs
 /// read; recognised by `runtime::is_propagation_error` for retry-on-propagation-lag.
 pub(crate) const COMPOSE_SCHEMA_VALIDATION_ERROR_FRAGMENTS: &[&str] = &[
-    // Field-specific fragments (path + type), never bare "must be a string". See ADR-068.
+    // Field-specific fragments (path + type), never bare "must be a string". See ADR-066.
     "driver must be a string",         // networks.<n>.driver torn
     "cpus must be a number or string", // deploy.resources.limits.cpus torn
     "memory must be a string",         // deploy.resources.limits.memory torn
     "yaml:", // any yaml-go parse error: rendered YAML is always valid, so torn read
 ];
+
+/// ENOENT on a compose.yml the host just renamed into place: a stale virtiofs
+/// dentry, not a missing file. Contiguous because `open <path>:` ends in the name.
+pub(crate) const COMPOSE_FILE_ENOENT_ERROR_FRAGMENT: &str =
+    "compose.yml: no such file or directory";
 
 /// Asserts every `services.<svc>.networks: [name]` resolves to a declared top-level
 /// `networks.<name>`. Catches render bugs and torn writes with missing network entries.
@@ -2482,6 +2487,144 @@ services:
     }
 
     #[test]
+    fn test_security_check_allows_context_window_pin_on_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - CLAUDE_VERSION=1.0.3
+      - CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072
+"#;
+        let violations = SecurityCheck::run_with_data_dir(
+            yaml,
+            "test",
+            &[],
+            &test_expected_paths(),
+            data_dir.path(),
+        );
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.rule == SecurityRule::NoTokensClaude),
+            "window pin is not a token: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn test_security_check_rejects_real_token_env_on_claude() {
+        let data_dir = tempfile::tempdir().unwrap();
+        for env in [
+            "SLACK_BOT_TOKEN=xoxb-1",
+            "GITLAB_TOKEN=glpat-1",
+            "SPEEDWAVE_SECRET=s",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS_EXTRA=1",
+        ] {
+            let yaml = format!(
+                r#"
+version: "3"
+services:
+  claude:
+    image: speedwave-claude:latest
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=512m
+    environment:
+      - {env}
+"#
+            );
+            let violations = SecurityCheck::run_with_data_dir(
+                &yaml,
+                "test",
+                &[],
+                &test_expected_paths(),
+                data_dir.path(),
+            );
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.rule == SecurityRule::NoTokensClaude),
+                "{env} must stay forbidden on claude"
+            );
+        }
+    }
+
+    /// A routed provider with a probed window injects `CLAUDE_CODE_MAX_CONTEXT_TOKENS`;
+    /// the start gate must accept its own render (regression: containers never started).
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_rendered_compose_with_routed_window_passes_security_check() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "openrouter".into(),
+                kind: crate::config::LlmProviderKind::OpenRouter,
+                base_url: None,
+                model: Some("openai/gpt-4o".into()),
+                has_api_key: true,
+                context_tokens: Some(131_072),
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "openrouter".into(),
+                model: Some("openai/gpt-4o".into()),
+            }),
+            proxy_enabled: Some(true),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        assert!(
+            yaml.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072"),
+            "window pin must be rendered for the gate to be exercised: {yaml}"
+        );
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        let violations = SecurityCheck::run_with_data_dir(
+            &yaml,
+            "test-project",
+            &[],
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
+            data_dir.path(),
+        );
+        assert!(
+            violations.is_empty(),
+            "routed-provider render must pass the start gate. Violations: {:?}",
+            violations
+                .iter()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_security_check_external_llm_keys_covers_major_providers() {
         let data_dir = tempfile::tempdir().unwrap();
         // One violation per leaked key; covers every major third-party LLM vendor.
@@ -3628,14 +3771,15 @@ services:
         )
         .unwrap();
         // Expected paths must derive from the render's data_dir; compute() reads the production singleton.
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         // The mount-source checks (policy, managed-settings) compare the rendered
         // volume against `data_dir` — must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
             data_dir.path(),
         );
         assert!(
@@ -3670,14 +3814,15 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
         // The mount-source checks (policy, audit, managed-settings) compare the
         // rendered volume against `data_dir`: must be the SAME data_dir the render used.
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",
             &[],
-            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy()),
+            &SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir),
             data_dir.path(),
         );
         assert!(
@@ -4466,9 +4611,62 @@ services:
         .unwrap();
         let env = get_claude_env(&yaml);
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
             "foreign model must not be injected on the direct anthropic path: {env:?}"
         );
+        assert_model_not_forced(&env);
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn test_kill_switch_anthropic_model_is_a_default_on_direct_path() {
+        // Kill-switch + anthropic: the Settings model is a startup default on the legacy
+        // path too, never a forced ANTHROPIC_MODEL that would override a /model pick.
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            proxy_enabled: Some(false),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicOauth,
+                base_url: None,
+                model: Some("claude-sonnet-4-6".to_string()),
+                has_api_key: false,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("claude-sonnet-4-6".to_string()),
+            }),
+            ..Default::default()
+        };
+        let config = ResolvedClaudeConfig {
+            env: crate::defaults::base_env(),
+            flags: default_flags(),
+            llm,
+            ..Default::default()
+        };
+        let yaml = render_compose_isolated(
+            data_dir.path(),
+            "test-project",
+            tmp_project_dir(),
+            &config,
+            &ResolvedIntegrationsConfig::default(),
+            None,
+            &HostBridgesInfo::default(),
+        )
+        .unwrap();
+        let env = get_claude_env(&yaml);
+        assert!(
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-6"),
+            "direct anthropic path must inject the Settings model as the default: {env:?}"
+        );
+        assert_model_not_forced(&env);
     }
 
     #[test]
@@ -4599,6 +4797,15 @@ services:
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
+    }
+
+    /// Anthropic kinds never force a model: in Claude Code `ANTHROPIC_MODEL` outranks a
+    /// persisted `/model` pick, `ANTHROPIC_DEFAULT_MODEL` yields to it (ADR-073 amendment).
+    fn assert_model_not_forced(env: &[String]) {
+        assert!(
+            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
+            "anthropic path must not force ANTHROPIC_MODEL, got: {env:?}"
+        );
     }
 
     /// ADR-073: proxy renders in every compose with the local image, hardened mounts (config ro,
@@ -5530,9 +5737,10 @@ services:
     }
 
     #[test]
-    fn test_anthropic_with_model_injects_anthropic_model_env() {
+    fn test_anthropic_with_model_injects_default_model_env() {
         let data_dir = tempfile::tempdir().unwrap();
-        // claude.llm.model must translate into the ANTHROPIC_MODEL env var so Claude Code respects the pick.
+        // claude.llm.model is the session's starting model (ANTHROPIC_DEFAULT_MODEL); a /model
+        // pick persisted in settings.json outranks it, so it is never forced via ANTHROPIC_MODEL.
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
@@ -5547,9 +5755,11 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            env.iter().any(|e| e == "ANTHROPIC_MODEL=claude-sonnet-4-6"),
-            "Anthropic + explicit model must inject ANTHROPIC_MODEL, got: {env:?}"
+            env.iter()
+                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-6"),
+            "Anthropic + explicit model must inject ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
+        assert_model_not_forced(&env);
         // ADR-073: anthropic sessions route through the proxy passthrough, so
         // ANTHROPIC_BASE_URL points at it (never a foreign/local URL).
         assert!(
@@ -5560,10 +5770,10 @@ services:
     }
 
     #[test]
-    fn test_anthropic_without_model_does_not_inject_anthropic_model() {
+    fn test_anthropic_without_model_injects_no_model_default() {
         let data_dir = tempfile::tempdir().unwrap();
-        // Empty/unset model = let Claude Code pick its default: base_env() must stay free of
-        // ANTHROPIC_MODEL (fallback path per defaults.rs::base_env_does_not_set_model).
+        // Empty/unset model = let Claude Code pick its plan default: neither model key may be
+        // set (base_env() stays model-free too, defaults.rs::base_env_does_not_set_model).
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: None,
@@ -5578,9 +5788,11 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "Anthropic + no model must not set ANTHROPIC_MODEL, got: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "Anthropic + no model must not set ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
+        assert_model_not_forced(&env);
 
         // An empty string after trim should behave the same as None — a
         // user clearing the dropdown from the UI sends "" through Tauri.
@@ -5603,15 +5815,18 @@ services:
         .unwrap();
         let env_blank = get_claude_env(&rendered_blank);
         assert!(
-            !env_blank.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "Anthropic + whitespace-only model must not set ANTHROPIC_MODEL, got: {env_blank:?}"
+            !env_blank
+                .iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "Anthropic + whitespace-only model must not set ANTHROPIC_DEFAULT_MODEL, got: {env_blank:?}"
         );
+        assert_model_not_forced(&env_blank);
     }
 
     #[test]
     fn test_anthropic_foreign_model_falls_back_to_account_default() {
-        // Corrupted v2 config: anthropic entry + active both hold an OR id.
-        // The render-guard must drop it (no ANTHROPIC_MODEL) instead of 404ing.
+        // Corrupted v2 config: anthropic entry + active both hold an OR id. The render-guard
+        // must drop it (Claude Code sends a foreign ANTHROPIC_DEFAULT_MODEL verbatim → 404).
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -5634,9 +5849,11 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
-            "foreign model under anthropic must NOT set ANTHROPIC_MODEL, got: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "foreign model under anthropic must NOT set ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
+        assert_model_not_forced(&env);
         assert!(
             env.iter()
                 .any(|e| e == "ANTHROPIC_BASE_URL=http://proxy:4000"),
@@ -5667,11 +5884,14 @@ services:
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
+        // `[1m]` rides ANTHROPIC_DEFAULT_MODEL intact: CC 2.1.252 strips it into the
+        // `context-1m` beta and sends the bare id (verified on the binary, ADR-073 amendment).
         assert!(
             env.iter()
-                .any(|e| e == "ANTHROPIC_MODEL=claude-opus-4-8[1m]"),
+                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-opus-4-8[1m]"),
             "valid claude model must inject verbatim: {env:?}"
         );
+        assert_model_not_forced(&env);
     }
 
     #[test]
@@ -5755,7 +5975,7 @@ services:
             "Anthropic must route through the proxy passthrough, got: {env_anthropic:?}"
         );
         // ADR-073: the proxy path sets this for every provider kind (prompt-cache only,
-        // OAuth-neutral), not just local — see login_unset_keys_cover_local_proxy_env's list.
+        // OAuth-neutral), not just local — see login_unset_keys_cover_local_and_anthropic_proxy_env.
         assert!(
             env_anthropic
                 .iter()
@@ -6011,7 +6231,10 @@ services:
             result
         );
 
-        let expected_mount = format!("{}:/secrets/os-auth-token:ro", token_path.display());
+        let expected_mount = format!(
+            "{}:/secrets/os-auth-token:ro",
+            to_engine_path(&token_path).unwrap()
+        );
         assert!(
             result.contains(&expected_mount),
             "Token file must be mounted into hub.\nExpected: {}\nGot:\n{}",
@@ -8479,9 +8702,9 @@ services:
             &HostBridgesInfo::default(),
         )
         .unwrap();
-        let tokens_dir = data_dir.path().join("tokens").join("test-project");
-        let expected =
-            SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir.to_string_lossy());
+        let tokens_dir =
+            to_engine_path(&data_dir.path().join("tokens").join("test-project")).unwrap();
+        let expected = SecurityExpectedPaths::from_raw(tmp_project_dir(), &tokens_dir);
         let violations = SecurityCheck::run_with_data_dir(
             &yaml,
             "test-project",

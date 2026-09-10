@@ -1584,7 +1584,7 @@ impl ChatSession {
     /// Build the argv + container name for a spawn; `resume_session_id` adds
     /// `--resume`, `resume_at_uuid` adds `--resume-session-at` (ADR-046).
     /// `model_override` adds `--model` so a pre-session pick governs the FIRST
-    /// turn (a wire `/model` can only apply from the next turn; ADR-085 amendment).
+    /// turn (a wire `/model` can only apply from the next turn; ADR-087 amendment).
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
@@ -1611,7 +1611,7 @@ impl ChatSession {
 
         let mut flags = resolved.flags.clone();
         // Explicit --effort releases CC's premium launch-effort hold, making the
-        // wire `/effort` live for the session (empirical; ADR-085 amendment).
+        // wire `/effort` live for the session (empirical; ADR-087 amendment).
         flags.push("--effort".to_string());
         flags.push(launch_effort_level(project_name));
         if let Some(model) = model_override {

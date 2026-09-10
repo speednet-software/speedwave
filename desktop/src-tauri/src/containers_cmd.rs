@@ -103,6 +103,14 @@ pub(crate) fn ensure_images_ready() -> Result<(), String> {
     crate::reconcile::wait_for_images_ready(RECONCILE_WAIT_TIMEOUT)
 }
 
+/// Re-enters the startup bundle reconcile after a failure (error-banner Retry).
+/// Returns whether a re-entry started: false when the gate is not `Failed`, or
+/// when the CAS lost to a reconcile still in flight / winding down.
+#[tauri::command]
+pub(crate) fn retry_bundle_reconcile(app_handle: tauri::AppHandle) -> bool {
+    crate::reconcile::retry_bundle_reconcile_if_failed(&app_handle)
+}
+
 // Project switch transaction helpers
 // ---------------------------------------------------------------------------
 
@@ -243,8 +251,10 @@ fn spawn_background_teardown_with_in(
             Err(e) => log::warn!("background compose_down('{project}') failed: {e}"),
         }
     });
-    if let Some(old) = pending_teardowns_lock().insert(prev, handle) {
-        // Replaced entry already finished; join() is a no-op cleanup.
+    let replaced = pending_teardowns_lock().insert(prev, handle);
+    if let Some(old) = replaced {
+        // The replaced teardown may still be running: joining it under the registry
+        // lock would block every other teardown call for a whole `compose down`.
         let _ = old.join();
     }
 }
@@ -4360,6 +4370,50 @@ mod tests {
         spawn_background_teardown_with_in(data_dir, "bg-dup-proj".to_string(), |_p| Ok(()));
         wait_for_pending_teardown("bg-dup-proj");
         assert!(!pending_teardowns_lock().contains_key("bg-dup-proj"));
+    }
+
+    #[test]
+    #[serial_test::serial(teardown_intents)]
+    fn replacing_a_live_teardown_does_not_join_it_under_the_registry_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let project = format!("bg-live-dup-{}", std::process::id());
+
+        // The teardown being replaced parks, then takes the registry lock itself: a
+        // replacing insert that joined it under that lock would deadlock, not return.
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        spawn_background_teardown_with_in(data_dir.clone(), project.clone(), move |_p| {
+            started_tx.send(()).ok();
+            go_rx.recv().ok();
+            drop(pending_teardowns_lock());
+            Ok(())
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("first teardown must start");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let replacing_dir = data_dir.clone();
+        let replacing_project = project.clone();
+        let replacing = std::thread::spawn(move || {
+            spawn_background_teardown_with_in(replacing_dir, replacing_project, |_p| Ok(()));
+            done_tx.send(()).ok();
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        go_tx.send(()).ok();
+
+        let finished = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        if finished {
+            replacing.join().expect("replacing thread must not panic");
+            wait_for_pending_teardown(&project);
+        }
+        assert!(
+            finished,
+            "replacing a still-running teardown must release the registry lock before joining it"
+        );
     }
 
     /// Structural: the build script must gate the build-context hash root on

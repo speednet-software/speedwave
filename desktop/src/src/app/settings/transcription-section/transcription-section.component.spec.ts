@@ -9,6 +9,7 @@ import type {
   DownloadProgress,
   MicPermissionStatus,
   RecommendedModelAck,
+  RecommendedModelEntry,
 } from '../../models/transcript';
 
 describe('TranscriptionSectionComponent', () => {
@@ -31,15 +32,22 @@ describe('TranscriptionSectionComponent', () => {
   };
   let platform: string;
 
-  const notDownloaded: RecommendedModelAck = {
+  const liveEntry: RecommendedModelEntry = {
     key: 'large-v3',
     display_name: 'Large v3 (multilingual)',
     size_bytes: 3_100_000_000,
     downloaded: false,
     downloading: false,
-    accel_label: 'Metal (GPU)',
   };
-  const downloaded: RecommendedModelAck = { ...notDownloaded, downloaded: true };
+  const notDownloaded: RecommendedModelAck = {
+    live: liveEntry,
+    accel_label: 'Metal (GPU)',
+    finalize: null,
+  };
+  const downloaded: RecommendedModelAck = {
+    ...notDownloaded,
+    live: { ...liveEntry, downloaded: true },
+  };
 
   beforeEach(async () => {
     downloadingModelKey = signal<string | null>(null);
@@ -75,6 +83,83 @@ describe('TranscriptionSectionComponent', () => {
     component = fixture.componentInstance;
   });
 
+  describe('model rows', () => {
+    it('renders a single row when one model serves both passes', async () => {
+      await component.ngOnInit();
+      fixture.detectChanges();
+      expect(component.modelRows().length).toBe(1);
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-state-finalize"]')
+      ).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-state"]').textContent
+      ).toContain('best quality for your hardware');
+    });
+
+    it('renders live and final rows when the host needs two different models', async () => {
+      svc.recommendedModel.mockResolvedValue({
+        ...notDownloaded,
+        live: {
+          ...liveEntry,
+          key: 'small',
+          display_name: 'Small (multilingual)',
+          size_bytes: 487_601_967,
+        },
+        accel_label: 'CPU',
+        finalize: {
+          key: 'large-v3-turbo',
+          display_name: 'Large v3 Turbo',
+          size_bytes: 1_624_555_275,
+          downloaded: true,
+          downloading: false,
+        },
+      });
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(component.modelRows().map((r) => r.entry.key)).toEqual(['small', 'large-v3-turbo']);
+      // The live row is still the one the original test ids point at.
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="model-state"]').textContent
+      ).toContain('Not downloaded');
+      expect(fixture.nativeElement.querySelector('[data-testid="download-model"]')).not.toBeNull();
+      // The offline model is already on disk, so its row offers removal, not download.
+      const finalizeState = fixture.nativeElement.querySelector(
+        '[data-testid="model-state-finalize"]'
+      );
+      expect(finalizeState.textContent).toContain('Large v3 Turbo');
+      expect(finalizeState.textContent).toContain('runs after you stop recording');
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="remove-model-finalize"]')
+      ).not.toBeNull();
+    });
+
+    it('shows progress only on the model actually downloading', async () => {
+      const finalize = {
+        key: 'large-v3-turbo',
+        display_name: 'Large v3 Turbo',
+        size_bytes: 1_624_555_275,
+        downloaded: false,
+        downloading: true,
+      };
+      svc.recommendedModel.mockResolvedValue({
+        ...notDownloaded,
+        live: { ...liveEntry, key: 'small' },
+        finalize,
+      });
+      downloadingModelKey.set('large-v3-turbo');
+      downloadProgress.set({
+        model_key: 'large-v3-turbo',
+        downloaded_bytes: 50,
+        total_bytes: 100,
+      });
+      await component.ngOnInit();
+      fixture.detectChanges();
+
+      expect(component.downloadLabel({ ...liveEntry, key: 'small' })).toBe('download model');
+      expect(component.downloadLabel(finalize)).toBe('downloading 50%');
+    });
+  });
   describe('permissions block', () => {
     it('shows a granted mic state on macOS', async () => {
       await component.ngOnInit();
@@ -178,7 +263,7 @@ describe('TranscriptionSectionComponent', () => {
     svc.recommendedModel.mockResolvedValueOnce(downloaded);
     await component.download('large-v3');
     expect(svc.downloadModel).toHaveBeenCalledWith('large-v3');
-    expect(component.model()?.downloaded).toBe(true);
+    expect(component.model()?.live.downloaded).toBe(true);
     expect(component.busy()).toBe(false);
   });
 
@@ -188,7 +273,7 @@ describe('TranscriptionSectionComponent', () => {
     svc.recommendedModel.mockResolvedValueOnce(notDownloaded);
     await component.remove('large-v3');
     expect(svc.deleteModel).toHaveBeenCalledWith('large-v3');
-    expect(component.model()?.downloaded).toBe(false);
+    expect(component.model()?.live.downloaded).toBe(false);
   });
 
   it('reports a download error and clears busy', async () => {
@@ -229,7 +314,10 @@ describe('TranscriptionSectionComponent', () => {
   });
 
   it('resumes progress tracking when the backend reports an untracked download', async () => {
-    svc.recommendedModel.mockResolvedValueOnce({ ...notDownloaded, downloading: true });
+    svc.recommendedModel.mockResolvedValueOnce({
+      ...notDownloaded,
+      live: { ...liveEntry, downloading: true },
+    });
     await component.ngOnInit();
     expect(svc.resumeDownloadTracking).toHaveBeenCalledWith('large-v3');
   });
@@ -270,7 +358,7 @@ describe('TranscriptionSectionComponent', () => {
   });
 
   it('size() formats GB and MB', () => {
-    expect(component.size({ ...notDownloaded, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
-    expect(component.size({ ...notDownloaded, size_bytes: 488_000_000 })).toBe('465.4 MB');
+    expect(component.size({ ...liveEntry, size_bytes: 3_100_000_000 })).toBe('2.9 GB');
+    expect(component.size({ ...liveEntry, size_bytes: 488_000_000 })).toBe('465.4 MB');
   });
 });

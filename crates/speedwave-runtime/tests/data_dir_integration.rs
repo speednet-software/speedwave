@@ -7,6 +7,13 @@
 
 use std::process::Command;
 
+/// Platform-absolute fixture: `data_dir_from` rejects a non-absolute path,
+/// and `/tmp/...` is not absolute on Windows.
+#[cfg(windows)]
+const TEST_DATA_DIR: &str = r"C:\tmp\test-speedwave-xyz";
+#[cfg(not(windows))]
+const TEST_DATA_DIR: &str = "/tmp/test-speedwave-xyz";
+
 /// Spawns a child process that sets `SPEEDWAVE_DATA_DIR` and verifies
 /// the OnceLock-backed functions return correct derived values.
 #[test]
@@ -20,7 +27,7 @@ fn data_dir_respects_env_var_and_derives_names() {
     // Parent: re-exec this test binary with the env var set
     let exe = std::env::current_exe().expect("current_exe");
     let output = Command::new(&exe)
-        .env("SPEEDWAVE_DATA_DIR", "/tmp/test-speedwave-xyz")
+        .env("SPEEDWAVE_DATA_DIR", TEST_DATA_DIR)
         .env("__SPEEDWAVE_INTEGRATION_CHILD", "1")
         .arg("data_dir_respects_env_var_and_derives_names")
         .arg("--exact")
@@ -44,7 +51,7 @@ fn child_assertions() {
     let dd = consts::data_dir();
     assert_eq!(
         dd.as_path(),
-        std::path::Path::new("/tmp/test-speedwave-xyz"),
+        std::path::Path::new(TEST_DATA_DIR),
         "data_dir() should return SPEEDWAVE_DATA_DIR value"
     );
 

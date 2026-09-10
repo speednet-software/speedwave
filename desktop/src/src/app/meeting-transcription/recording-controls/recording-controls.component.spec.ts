@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { signal } from '@angular/core';
+import { computed, signal, type Signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RecordingControlsComponent } from './recording-controls.component';
 import { TranscriptionService } from '../../services/transcription.service';
+import { LoggerService } from '../../services/logger.service';
 import type {
   AudioSource,
   AudioSourceInfo,
@@ -55,17 +56,29 @@ describe('RecordingControlsComponent', () => {
   let recordingSessionId: ReturnType<typeof signal<string | null>>;
   let recordingSource: ReturnType<typeof signal<AudioSource | null>>;
   let recordingLanguage: ReturnType<typeof signal<Language | null>>;
+  let recordingLive: ReturnType<typeof signal<boolean | null>>;
   let svc: {
     getCapabilities: ReturnType<typeof vi.fn>;
+    liveTranscriptPreferred: ReturnType<typeof vi.fn>;
+    setLiveTranscriptPreferred: ReturnType<typeof vi.fn>;
     listAudioSources: ReturnType<typeof vi.fn>;
     listModels: ReturnType<typeof vi.fn>;
+    recommendedModel: ReturnType<typeof vi.fn>;
     startRecording: ReturnType<typeof vi.fn>;
     stopRecording: ReturnType<typeof vi.fn>;
     requestMicrophonePermission: ReturnType<typeof vi.fn>;
     openMicrophonePrivacyPane: ReturnType<typeof vi.fn>;
     recordingSessionId: typeof recordingSessionId;
+    recording: Signal<boolean>;
     recordingSource: typeof recordingSource;
     recordingLanguage: typeof recordingLanguage;
+    recordingLive: typeof recordingLive;
+  };
+  let logger: {
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    debug: ReturnType<typeof vi.fn>;
   };
 
   const caps: CapabilitiesAck = {
@@ -74,7 +87,8 @@ describe('RecordingControlsComponent', () => {
       supports_microphone: false,
       note: 'Requires macOS 14.4+',
     },
-    backends: ['cpu', 'metal'],
+    gpu_class: 'discrete' as const,
+    accel_label: 'Metal (GPU)',
   };
   /** A model list with at least one downloaded Whisper model. */
   const modelsWithSmall = {
@@ -86,16 +100,44 @@ describe('RecordingControlsComponent', () => {
     whisper: [{ key: 'small', downloaded: false, size_bytes: 488_000_000, path: null }],
     total_bytes_used: 0,
   };
+  /** Recommended pair with both passes covered — no finalize warning. */
+  const recAllDownloaded = {
+    live: {
+      key: 'small',
+      display_name: 'Small',
+      size_bytes: 1,
+      downloaded: true,
+      downloading: false,
+    },
+    finalize: {
+      key: 'large-v3',
+      display_name: 'Large v3',
+      size_bytes: 1,
+      downloaded: true,
+      downloading: false,
+    },
+    accel_label: 'CPU',
+  };
+  /** Recommended pair whose finalize model is absent and not downloading. */
+  const recFinalizeMissing = {
+    ...recAllDownloaded,
+    finalize: { ...recAllDownloaded.finalize, downloaded: false },
+  };
 
   beforeEach(async () => {
     recordingSessionId = signal<string | null>(null);
     recordingSource = signal<AudioSource | null>(null);
     recordingLanguage = signal<Language | null>(null);
+    recordingLive = signal<boolean | null>(null);
     svc = {
       getCapabilities: vi.fn(async () => caps),
+      liveTranscriptPreferred: vi.fn(() => true),
+      setLiveTranscriptPreferred: vi.fn(),
       listAudioSources: vi.fn(async () => SOURCES),
       listModels: vi.fn(async () => modelsWithSmall),
-      // Mirror the real service: start/stop drive the shared recording signal.
+      recommendedModel: vi.fn(async () => recAllDownloaded),
+      // Mirror the real service: start/stop drive the shared recording signals. `recordingLive`
+      // is left to each test, since the real value comes from the host snapshot, not the request.
       startRecording: vi.fn(async (source: AudioSource, language: Language): Promise<StartAck> => {
         recordingSessionId.set('sess-1');
         recordingSource.set(source);
@@ -111,17 +153,24 @@ describe('RecordingControlsComponent', () => {
           recordingSessionId.set(null);
           recordingSource.set(null);
           recordingLanguage.set(null);
+          recordingLive.set(null);
         }
       }),
       requestMicrophonePermission: vi.fn(async (): Promise<MicPermission> => 'granted'),
       openMicrophonePrivacyPane: vi.fn(async () => undefined),
       recordingSessionId,
+      recording: computed(() => recordingSessionId() !== null),
       recordingSource,
       recordingLanguage,
+      recordingLive,
     };
+    logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [RecordingControlsComponent],
-      providers: [{ provide: TranscriptionService, useValue: svc }],
+      providers: [
+        { provide: TranscriptionService, useValue: svc },
+        { provide: LoggerService, useValue: logger },
+      ],
     }).compileComponents();
     fixture = TestBed.createComponent(RecordingControlsComponent);
     component = fixture.componentInstance;
@@ -131,7 +180,67 @@ describe('RecordingControlsComponent', () => {
     await component.ngOnInit();
     expect(component.sources().length).toBe(2);
     expect(component.sourceIndex()).toBe(0); // system_wide
-    expect(component.accel()).toBe('Acceleration: Metal');
+    expect(component.accel()).toBe('Acceleration: Metal (GPU)');
+  });
+
+  it('live toggle: defaults from the service preference, persists a change, and gates start()', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(false);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).not.toBeNull();
+
+    component.onLiveToggle(true);
+    fixture.detectChanges();
+    expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).toBeNull();
+
+    await component.start();
+    const call = svc.startRecording.mock.calls.at(-1);
+    expect(call?.[2]).toBe(true);
+
+    component.onLiveToggle(false);
+    await component.start();
+    expect(svc.startRecording.mock.calls.at(-1)?.[2]).toBe(false);
+  });
+
+  it('live-transcript checkbox: reflects the signal, disables while recording, persists on change', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(false);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const box = (): HTMLInputElement =>
+      fixture.nativeElement.querySelector('[data-testid="live-transcript-toggle"]');
+    expect(box().checked).toBe(false);
+    expect(box().disabled).toBe(false);
+
+    // A real DOM change event drives the (change) binding, not a direct method call.
+    box().checked = true;
+    box().dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(true);
+    expect(svc.setLiveTranscriptPreferred).toHaveBeenCalledWith(true);
+    expect(box().checked).toBe(true);
+
+    // While recording, the choice is locked in.
+    recordingSessionId.set('sess-1');
+    fixture.detectChanges();
+    expect(box().disabled).toBe(true);
+  });
+
+  it('renders the host-computed acceleration label verbatim, never re-deriving it', async () => {
+    // The label is Rust's `accel_label()` (SSOT) — the badge renders it as sent, so a
+    // gpu_class that contradicts the label changes nothing.
+    svc.getCapabilities.mockResolvedValueOnce({
+      ...caps,
+      gpu_class: 'none' as const,
+      accel_label: 'Vulkan (integrated GPU)',
+    });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: Vulkan (integrated GPU)');
+
+    svc.getCapabilities.mockResolvedValueOnce({ ...caps, accel_label: 'CPU' });
+    await component.ngOnInit();
+    expect(component.accel()).toBe('Acceleration: CPU');
   });
 
   it('defaults to the "Whole meeting" mixed source when the backend offers it', async () => {
@@ -180,7 +289,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MIXED);
     await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl', true);
   });
 
   it('derives named mics from the source list and strips the "Microphone:" prefix', async () => {
@@ -214,7 +323,8 @@ describe('RecordingControlsComponent', () => {
         kind: 'mixed',
         mic: 'AppleUSBAudioEngine:USB MIC:1',
       },
-      'pl'
+      'pl',
+      true
     );
   });
 
@@ -226,7 +336,8 @@ describe('RecordingControlsComponent', () => {
     await component.start();
     expect(svc.startRecording).toHaveBeenCalledWith(
       { kind: 'microphone', device: 'AppleUSBAudioEngine:USB MIC:1' },
-      'pl'
+      'pl',
+      true
     );
   });
 
@@ -234,7 +345,7 @@ describe('RecordingControlsComponent', () => {
     svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
     await component.ngOnInit();
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl');
+    expect(svc.startRecording).toHaveBeenCalledWith({ kind: 'mixed', mic: null }, 'pl', true);
   });
 
   it('shows the acceleration badge and language toggle', async () => {
@@ -253,7 +364,7 @@ describe('RecordingControlsComponent', () => {
     const spy = vi.fn();
     component.started.subscribe(spy);
     await component.start();
-    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en');
+    expect(svc.startRecording).toHaveBeenCalledWith(SOURCES[1].source, 'en', true);
     expect(component.recording()).toBe(true);
     expect(spy).toHaveBeenCalledWith('sess-1');
   });
@@ -305,6 +416,65 @@ describe('RecordingControlsComponent', () => {
     fixture.detectChanges();
     expect(component.sources()[component.sourceIndex()].source.kind).toBe('mixed');
     expect(component.micDevice()).toBe('AppleUSBAudioEngine:USB MIC:1');
+  });
+
+  it('a freshly-mounted control restores the live mode from the session, not the preference', async () => {
+    // The preference says live; this session is record-only, so the session must win.
+    svc.liveTranscriptPreferred.mockReturnValue(true);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: null });
+    recordingLive.set(false);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).not.toBeNull();
+  });
+
+  it('a freshly-mounted control with no recording ignores the session signal', async () => {
+    // A stale `recordingLive` must not beat the preference when nothing is actually recording.
+    svc.liveTranscriptPreferred.mockReturnValue(false);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingLive.set(true);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="record-only-note"]')).not.toBeNull();
+  });
+
+  it('a rejected stop still hands the toggle back to the preference', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(true);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: null });
+    recordingLive.set(false);
+    await component.ngOnInit();
+    expect(component.liveTranscript()).toBe(false);
+    // The service clears its recording signals in a `finally`, so the session is gone either way.
+    svc.stopRecording.mockImplementationOnce(async () => {
+      recordingSessionId.set(null);
+      recordingSource.set(null);
+      recordingLive.set(null);
+      throw new Error('stop failed');
+    });
+    await component.stop();
+    fixture.detectChanges();
+    expect(component.liveTranscript()).toBe(true);
+    expect(component.recording()).toBe(false);
+  });
+
+  it('stopping hands the toggle back to the preference the session mode borrowed it from', async () => {
+    svc.liveTranscriptPreferred.mockReturnValue(true);
+    svc.listAudioSources.mockResolvedValueOnce(SOURCES_WITH_MICS);
+    recordingSessionId.set('sess-live');
+    recordingSource.set({ kind: 'mixed', mic: null });
+    recordingLive.set(false);
+    await component.ngOnInit();
+    expect(component.liveTranscript()).toBe(false);
+    await component.stop();
+    fixture.detectChanges();
+    // Otherwise the finished session's record-only mode would silently start the next recording.
+    expect(component.liveTranscript()).toBe(true);
   });
 
   it('a freshly-mounted control with no recording keeps the compile-time defaults', async () => {
@@ -420,5 +590,55 @@ describe('RecordingControlsComponent', () => {
     svc.listModels.mockRejectedValueOnce(new Error('boom'));
     await component.refreshModelAvailability();
     expect(component.modelsKnown()).toBe(false);
+  });
+
+  it('a recommendedModel failure clears the finalize warning and is logged, never silent', async () => {
+    await component.ngOnInit();
+    svc.recommendedModel.mockRejectedValueOnce(new Error('ipc down'));
+    await component.refreshModelAvailability();
+    expect(component.missingFinalizeModel()).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('ipc down'));
+  });
+
+  it('warns when the finalize model is missing: Start stays enabled, the quality cost is named', async () => {
+    svc.recommendedModel.mockResolvedValue(recFinalizeMissing);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const warn = fixture.nativeElement.querySelector('[data-testid="finalize-model-warning"]');
+    expect(warn).not.toBeNull();
+    expect(warn.textContent).toContain('Large v3');
+    expect(warn.textContent).toContain('lower-quality live model');
+    expect(fixture.nativeElement.querySelector('[data-testid="start-btn"]').disabled).toBe(false);
+  });
+
+  it('no finalize warning when the pair is downloaded, downloading, or single-model', async () => {
+    await component.ngOnInit();
+    fixture.detectChanges();
+    const sel = '[data-testid="finalize-model-warning"]';
+    expect(fixture.nativeElement.querySelector(sel)).toBeNull();
+    // Mid-download: the Settings row already shows progress — no nag here.
+    svc.recommendedModel.mockResolvedValue({
+      ...recAllDownloaded,
+      finalize: { ...recAllDownloaded.finalize, downloaded: false, downloading: true },
+    });
+    await component.refreshModelAvailability();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector(sel)).toBeNull();
+    // Live model serves both passes (finalize: null).
+    svc.recommendedModel.mockResolvedValue({ ...recAllDownloaded, finalize: null });
+    await component.refreshModelAvailability();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector(sel)).toBeNull();
+  });
+
+  it('finalize warning is suppressed while no model at all is downloaded (the no-model note owns that)', async () => {
+    svc.listModels.mockResolvedValue(modelsEmpty);
+    svc.recommendedModel.mockResolvedValue(recFinalizeMissing);
+    await component.ngOnInit();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="no-model-note"]')).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-testid="finalize-model-warning"]')
+    ).toBeNull();
   });
 });

@@ -97,7 +97,7 @@ pub(crate) fn detokenize_transcript(
                 MessageBlock::Error { content } => {
                     *content = detokenize_for_display(policy, content)
                 }
-                MessageBlock::ToolUse { .. } | MessageBlock::ControlChip { .. } => {}
+                MessageBlock::ToolUse { .. } => {}
             }
         }
     }
@@ -296,7 +296,6 @@ mod tests {
                 | MessageBlock::ToolResult { content, .. }
                 | MessageBlock::Error { content } => content,
                 MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 4"),
-                MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 4"),
             };
             assert_eq!(content.as_str(), "jan@example.com");
         }

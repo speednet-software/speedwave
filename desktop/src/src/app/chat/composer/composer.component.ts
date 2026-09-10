@@ -102,6 +102,26 @@ const PLAN_MODE_PREFIX =
       [attachments]="attachmentViewModels()"
       (remove)="removeAttachment($event)"
     />
+    @if (transcriptAttached()) {
+      <div
+        data-testid="composer-transcript"
+        class="mono mb-2 flex items-center gap-2 rounded ring-1 ring-[var(--accent)]/40 bg-[var(--accent)]/[0.06] px-3 py-1.5 text-[11px] text-[var(--ink-dim)]"
+      >
+        <span class="text-[var(--accent)]">transcript:</span>
+        <span class="truncate"
+          >goes out with your next message, to your configured LLM provider</span
+        >
+        <button
+          type="button"
+          data-testid="composer-transcript-detach"
+          class="ml-auto rounded px-1 text-[var(--ink-mute)] hover:text-[var(--ink)]"
+          aria-label="Detach meeting transcript"
+          (click)="transcriptDetached.emit()"
+        >
+          ×
+        </button>
+      </div>
+    }
     @if (attachmentError()) {
       <div
         data-testid="composer-attachment-error"
@@ -330,6 +350,12 @@ export class ComposerComponent implements AfterViewInit {
   /** Context window hint (e.g. "128k") — shown next to the model on lg+. */
   readonly contextLabel = input('');
 
+  /** True when a meeting transcript rides along with the next submit. */
+  readonly transcriptAttached = input(false);
+
+  /** Text to load into the field, replacing its content once ('' = nothing to load). */
+  readonly draftText = input('');
+
   /** `attachments` are pre-saved to `<project>/.speedwave/pastes/`. */
   readonly submitted = output<{
     payload: string;
@@ -345,6 +371,12 @@ export class ComposerComponent implements AfterViewInit {
 
   /** ADR-045 — emits when the user clicks the X on the queued preview. */
   readonly queueCancelled = output<void>();
+
+  /** Emits when the user unpins the attached transcript. */
+  readonly transcriptDetached = output<void>();
+
+  /** Emits once `draftText` has been loaded into the field; the parent clears it. */
+  readonly draftApplied = output<void>();
 
   /** Emits when the user clicks the inline Stop button while streaming. */
   readonly stopRequested = output<void>();
@@ -445,6 +477,13 @@ export class ComposerComponent implements AfterViewInit {
         for (const r of current) URL.revokeObjectURL(r.previewUrl);
       });
     });
+    // Load a parent-supplied draft; the emit clears the input, so edits survive later renders.
+    effect(() => {
+      const draft = this.draftText();
+      if (!draft) return;
+      this.setText(draft);
+      this.draftApplied.emit();
+    });
   }
 
   /** Auto-focus the textarea on mount so the user can start typing immediately. */
@@ -460,6 +499,20 @@ export class ComposerComponent implements AfterViewInit {
     // New-conversation path: drop any manual height so the fresh composer starts auto-sized.
     this.restoreAutoSize();
     queueMicrotask(() => this.textareaRef?.nativeElement?.focus());
+  }
+
+  /**
+   * Replaces the field content and puts the caret at the end, ready to edit.
+   * @param value - the text to load.
+   */
+  setText(value: string): void {
+    this.text.setValue(value);
+    queueMicrotask(() => {
+      const ta = this.textareaRef?.nativeElement;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(value.length, value.length);
+    });
   }
 
   /**

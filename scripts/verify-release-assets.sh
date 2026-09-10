@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies a draft Release has every updater asset. Idempotent/read-only/retry-safe; portable
-# Bash (no mapfile, bash 3.2). Names ← desktop-release.yml assetNamePattern; version bare semver.
+# Bash (no mapfile, bash 3.2). Names ← desktop-release.yml releaseAssetNamePattern; version bare semver.
 set -euo pipefail
 
 : "${VERSION:?VERSION required}"
@@ -86,7 +86,8 @@ required_keys = (
     "darwin-aarch64", "darwin-aarch64-app",
     "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis",
 )
-url_prefix = f"https://github.com/{repo}/releases/"
+# tauri-action >= 1.0.0 writes GitHub API asset URLs (repos/.../releases/assets/<id>).
+url_prefix = f"https://api.github.com/repos/{repo}/releases/assets/"
 for key in required_keys:
     entry = platforms.get(key)
     if not entry:
