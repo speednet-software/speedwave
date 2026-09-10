@@ -12,7 +12,10 @@ use super::audio::{
     AudioCapture, AudioChunk, AudioSource, AudioSourceInfo, AudioStream, CaptureCapabilities,
     CaptureError,
 };
-use super::mix::{MixBuffer, MixSource, PairedPcm, CHUNK_SAMPLES, KEEPALIVE_AFTER, STALL_GIVE_UP};
+use super::mix::{
+    MixBuffer, MixSource, PairedPcm, SingleStreamWatchdog, CHUNK_SAMPLES, KEEPALIVE_AFTER,
+    STALL_GIVE_UP,
+};
 
 /// Name of the bundled CLI (resolved via `binary::command`).
 const CLI_NAME: &str = "audio-capture-cli";
@@ -167,6 +170,7 @@ impl AudioCapture for MacOsAudioCapture {
                 raw,
                 zero: is_system.then(super::audio::ZeroStreakDetector::default),
                 health: Vec::new(),
+                mic_watchdog: (!is_system).then(SingleStreamWatchdog::new),
             }))
         }
     }
@@ -354,6 +358,9 @@ struct PassthroughCliStream {
     /// Silence detector — present only when stream 0 is system audio.
     zero: Option<super::audio::ZeroStreakDetector>,
     health: Vec<super::audio::CaptureHealth>,
+    /// Liveness deadline, present only for a microphone-only capture and running from stream
+    /// open, so a mic that never delivers at all also gives up. `None` = system audio.
+    mic_watchdog: Option<SingleStreamWatchdog>,
 }
 
 impl AudioStream for PassthroughCliStream {
@@ -364,12 +371,20 @@ impl AudioStream for PassthroughCliStream {
         loop {
             match self.raw.read_frame()? {
                 // Alive but silent — keepalive keeps the ingest loop's stop check responsive.
-                RawRead::Pending => return Ok(Some(AudioChunk::keepalive())),
+                RawRead::Pending => {
+                    if let Some(w) = &self.mic_watchdog {
+                        w.check()?;
+                    }
+                    return Ok(Some(AudioChunk::keepalive()));
+                }
                 RawRead::Eof => {
                     self.raw.reap_at_eof()?;
                     return Ok(None);
                 }
                 RawRead::Frame(0, offset_ns, samples) => {
+                    if let Some(w) = self.mic_watchdog.as_mut() {
+                        w.delivered();
+                    }
                     if let Some(t) = self.zero.as_mut().and_then(|z| z.feed(&samples)) {
                         self.health.push(t);
                     }
@@ -675,6 +690,7 @@ mod tests {
             raw: raw_reader_exiting(0),
             zero: None,
             health: Vec::new(),
+            mic_watchdog: None,
         };
         assert!(next_real_chunk(&mut s).unwrap().is_none());
         // The `done` latch holds: later polls stay ended instead of re-reaping.
@@ -687,6 +703,7 @@ mod tests {
             raw: raw_reader_exiting(3),
             zero: None,
             health: Vec::new(),
+            mic_watchdog: None,
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let err = loop {
@@ -807,6 +824,7 @@ mod tests {
             raw: raw_reader_over(&bytes),
             zero: None,
             health: Vec::new(),
+            mic_watchdog: None,
         };
         let c1 = next_real_chunk(&mut stream).unwrap().unwrap();
         assert_eq!(c1.samples, vec![1.0, 2.0]);
@@ -824,10 +842,71 @@ mod tests {
             raw: raw_reader_silent(),
             zero: None,
             health: Vec::new(),
+            mic_watchdog: None,
         };
         // Bounded next_chunk: an empty keepalive hands control back so stop stays honoured.
         let c = stream.next_chunk().unwrap().unwrap();
         assert!(c.samples.is_empty());
+    }
+
+    use super::super::mix::SINGLE_STREAM_GIVE_UP;
+
+    /// A watchdog whose deadline has already elapsed.
+    fn expired_watchdog() -> SingleStreamWatchdog {
+        aged_watchdog(SINGLE_STREAM_GIVE_UP)
+    }
+
+    /// A watchdog wound back by `age`.
+    fn aged_watchdog(age: Duration) -> SingleStreamWatchdog {
+        let mut w = SingleStreamWatchdog::new();
+        w.rewind(age);
+        w
+    }
+
+    #[test]
+    fn a_microphone_only_stream_gives_up_after_a_sustained_silence() {
+        let mut stream = PassthroughCliStream {
+            raw: raw_reader_silent(),
+            zero: None,
+            health: Vec::new(),
+            mic_watchdog: Some(expired_watchdog()),
+        };
+        let err = stream.next_chunk().unwrap_err();
+        assert!(matches!(err, CaptureError::Failed(_)), "got {err:?}");
+        assert!(err.to_string().contains("microphone"), "got: {err}");
+    }
+
+    #[test]
+    fn a_system_only_stream_keeps_waiting_through_the_same_silence() {
+        // Nothing playing is a legitimate state for a system capture, so it has no deadline.
+        let mut stream = PassthroughCliStream {
+            raw: raw_reader_silent(),
+            zero: None,
+            health: Vec::new(),
+            mic_watchdog: None,
+        };
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert!(c.samples.is_empty(), "expected a keepalive, not a give-up");
+    }
+
+    #[test]
+    fn a_delivered_frame_restarts_the_microphone_deadline() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&frame(0, 100, &[1.0, 2.0]));
+        let mut stream = PassthroughCliStream {
+            raw: raw_reader_over(&bytes),
+            zero: None,
+            health: Vec::new(),
+            // Half the budget: the reader thread needs a moment to parse, and that first
+            // `Pending` must not already be a give-up.
+            mic_watchdog: Some(aged_watchdog(SINGLE_STREAM_GIVE_UP / 2)),
+        };
+        let c = next_real_chunk(&mut stream).unwrap().unwrap();
+        assert_eq!(c.samples, vec![1.0, 2.0]);
+        assert!(
+            stream.mic_watchdog.unwrap().since_delivery() < SINGLE_STREAM_GIVE_UP / 2,
+            "a landed frame must restart the deadline"
+        );
     }
 
     #[test]
@@ -906,6 +985,7 @@ mod tests {
             raw: raw_reader_over(&bytes),
             zero: Some(super::super::audio::ZeroStreakDetector::default()),
             health: Vec::new(),
+            mic_watchdog: None,
         };
         for _ in 0..4 {
             let _ = next_real_chunk(&mut stream).unwrap().unwrap();

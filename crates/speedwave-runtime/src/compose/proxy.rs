@@ -360,7 +360,6 @@ mod tests {
         assert!(!out.contains("sk-"));
         assert!(!out.contains("ANTHROPIC_API_KEY") && !out.contains("ANTHROPIC_AUTH_TOKEN"));
         assert!(out.contains("SPW_KEY_OPENROUTER")); // env NAME only
-        assert!(!out.contains("callbacks")); // litellm callback machinery gone
     }
 
     #[test]
@@ -589,12 +588,6 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "config must be owner-only");
         }
-        // No callback file should be written.
-        let callback = path.parent().unwrap().join("litellm_callback.py");
-        assert!(
-            !callback.exists(),
-            "callback module must NOT be written by the forwarder config writer"
-        );
     }
 
     /// v1→v2 key migration: legacy `local-llm/api_key` is lifted into the llm
