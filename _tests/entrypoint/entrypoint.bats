@@ -1211,7 +1211,8 @@ setup_integrations_fixture() {
     ENABLED_SERVICES="" run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ ! -e "${TEST_HOME}/.claude/skills/office" ]
-    ! grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+    run grep -q "skills/office$" "${TEST_HOME}/.claude/.speedwave-managed-links"
+    [ "$status" -ne 0 ]
     # Core entries survive the toggle.
     [ -L "${TEST_HOME}/.claude/skills/code-review-basic" ]
 }

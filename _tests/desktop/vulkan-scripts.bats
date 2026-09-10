@@ -137,7 +137,8 @@ stage_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri"
     cp "$RESOLVER_SCRIPT" "$WORK/repo/scripts/cargo-target-dir.sh"
     sealed="$(dirname "$(command -v bash)")"
-    ! PATH="$sealed" command -v cargo >/dev/null 2>&1
+    run env PATH="$sealed" bash -c 'command -v cargo'
+    [ "$status" -ne 0 ]
     expected="$(cd "$WORK/repo" && pwd)/desktop/src-tauri/target"
 
     cd "$WORK/repo"

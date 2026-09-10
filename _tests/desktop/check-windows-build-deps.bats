@@ -35,7 +35,10 @@ deps_rig() {
         esac
     done
     # The absent-ninja tests are only meaningful while the sealed PATH really has none.
-    ! PATH="$SEALED_PATH" command -v ninja >/dev/null 2>&1
+    if PATH="$SEALED_PATH" command -v ninja >/dev/null 2>&1; then
+        echo "sealed PATH leaks a ninja: $SEALED_PATH" >&2
+        return 1
+    fi
 }
 
 with_ninja() {

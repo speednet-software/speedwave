@@ -61,7 +61,11 @@ package_loop() {
 }
 
 @test "a package still missing after a 3010 reboot code stays a reported failure" {
-    ! package_loop | grep -qE '3010.*continue'
+    # Counted, not `! grep`: a leading `!` is exempt from set -e, so such an assertion is
+    # dead weight anywhere but the last line of a test.
+    local hits
+    hits="$(package_loop | grep -cE '3010.*continue' || true)"
+    [ "$hits" -eq 0 ]
     package_loop | grep -qF '$failedItems += @{ Name = $pkg.Name'
 }
 
@@ -99,9 +103,9 @@ package_loop() {
 @test "every ACL principal is a well-known SID, never an account name" {
     # Verified on a pl-PL host: 'BUILTIN\Administrators' does not resolve there, so icacls
     # fails 1332 and leaves the inherited DACL fully intact (cross-platform rules).
-    local code
-    code="$(grep -vE '^[[:space:]]*#' "$SETUP_SCRIPT")"
-    ! printf '%s\n' "$code" | grep -qE 'BUILTIN.|NT AUTHORITY.'
+    local hits
+    hits="$(grep -vE '^[[:space:]]*#' "$SETUP_SCRIPT" | grep -cE 'BUILTIN.|NT AUTHORITY.' || true)"
+    [ "$hits" -eq 0 ]
     grep -qF "\$SID_ADMINISTRATORS = '*S-1-5-32-544'" "$SETUP_SCRIPT"
     grep -qF "\$SID_LOCAL_SYSTEM = '*S-1-5-18'" "$SETUP_SCRIPT"
     grep -qF '([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value' "$SETUP_SCRIPT"
