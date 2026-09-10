@@ -1655,13 +1655,13 @@ describe('ChatStateService', () => {
         chunk_type: 'SystemInit',
         data: { model: 'claude-sonnet-5', session_id: 'sess-1' },
       });
-      await Promise.resolve();
-
-      const modelSendCall = invokeSpy.mock.calls.find(
-        ([cmd, args]) =>
-          cmd === 'send_message' && JSON.stringify(args).includes('/model claude-opus-4-8[1m]')
-      );
-      expect(modelSendCall).toBeTruthy();
+      await vi.waitFor(() => {
+        const modelSendCall = invokeSpy.mock.calls.find(
+          ([cmd, args]) =>
+            cmd === 'send_message' && JSON.stringify(args).includes('/model claude-opus-4-8[1m]')
+        );
+        expect(modelSendCall).toBeTruthy();
+      });
       expect(service.pendingModelOverride()).toBeNull();
     });
 
@@ -1673,14 +1673,19 @@ describe('ChatStateService', () => {
         chunk_type: 'SystemInit',
         data: { model: 'claude-sonnet-5', session_id: 'sess-1' },
       });
-      await Promise.resolve();
+      await vi.waitFor(() => {
+        const sent = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+        );
+        expect(sent).toBeTruthy();
+      });
       invokeSpy.mockClear();
 
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-opus-4-8[1m]', session_id: 'sess-1' },
       });
-      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 0));
 
       expect(invokeSpy).not.toHaveBeenCalled();
     });
@@ -1725,11 +1730,12 @@ describe('ChatStateService', () => {
         chunk_type: 'Result',
         data: { session_id: 'sess-live' },
       } as never);
-      await Promise.resolve();
-      effortSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort xhigh')
-      );
-      expect(effortSend).toBeDefined();
+      await vi.waitFor(() => {
+        effortSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort xhigh')
+        );
+        expect(effortSend).toBeDefined();
+      });
     });
 
     it('applyEffortSelection without a live session sends nothing (the spawn --effort covers it)', async () => {
@@ -1763,11 +1769,12 @@ describe('ChatStateService', () => {
         chunk_type: 'Result',
         data: { session_id: 'sess-restart' },
       } as never);
-      await Promise.resolve();
-      modelSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
-      expect(modelSend).toBeDefined();
+      await vi.waitFor(() => {
+        modelSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+        );
+        expect(modelSend).toBeDefined();
+      });
       expect(JSON.stringify(modelSend?.[1])).toContain('/model claude-haiku-4-5');
       expect(service.pendingModelOverride()).toBeNull();
     });
@@ -1808,12 +1815,13 @@ describe('ChatStateService', () => {
         chunk_type: 'SystemInit',
         data: { model: 'claude-opus-4-8', session_id: 'sess-new' },
       });
-      await Promise.resolve();
-
-      const modelSendCall = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
-      );
-      expect(modelSendCall).toBeDefined();
+      let modelSendCall: unknown[] | undefined;
+      await vi.waitFor(() => {
+        modelSendCall = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+        );
+        expect(modelSendCall).toBeDefined();
+      });
       expect(JSON.stringify(modelSendCall?.[1])).toContain('/model claude-haiku-4-5');
       expect(service.pendingModelOverride()).toBeNull();
     });

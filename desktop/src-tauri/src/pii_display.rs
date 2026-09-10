@@ -97,6 +97,11 @@ pub(crate) fn detokenize_transcript(
                 MessageBlock::Error { content } => {
                     *content = detokenize_for_display(policy, content)
                 }
+                // The chip's argument is a model id or effort level, but it came from a
+                // user line the tokenizer had already rewritten.
+                MessageBlock::ControlChip { argument, .. } => {
+                    *argument = detokenize_for_display(policy, argument)
+                }
                 MessageBlock::ToolUse { .. } => {}
             }
         }
@@ -296,6 +301,7 @@ mod tests {
                 | MessageBlock::ToolResult { content, .. }
                 | MessageBlock::Error { content } => content,
                 MessageBlock::ToolUse { .. } => panic!("unexpected ToolUse in first 4"),
+                MessageBlock::ControlChip { .. } => panic!("unexpected ControlChip in first 4"),
             };
             assert_eq!(content.as_str(), "jan@example.com");
         }
