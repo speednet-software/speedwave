@@ -7,49 +7,20 @@ use crate::transcription::model_catalog::{
     ModelRole, Quantization, WhisperModelInfo, WHISPER_MODELS,
 };
 
-/// A whisper.cpp acceleration backend compiled into this binary: CPU everywhere,
-/// Metal on macOS, Vulkan on Windows (ADR-085). CUDA stays deferred (ADR-056).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Backend {
-    /// CPU (always present).
-    Cpu,
-    /// Apple Metal GPU (macOS builds).
-    Metal,
-    /// Vulkan (Windows builds; vendor-neutral).
-    Vulkan,
-}
-
-impl Backend {
-    /// `true` for GPU backends (anything but `Cpu`).
-    pub fn is_gpu(self) -> bool {
-        !matches!(self, Backend::Cpu)
-    }
-
-    /// Short UI label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Backend::Cpu => "CPU",
-            Backend::Metal => "Metal",
-            Backend::Vulkan => "Vulkan",
-        }
-    }
-}
-
-/// The acceleration backends compiled into this binary (not what the host
-/// hardware supports — backends are a build-time choice).
-pub fn compiled_backends() -> Vec<Backend> {
+/// The GPU backend whisper.cpp was compiled against, or `None` for a CPU-only build: Metal on
+/// macOS, Vulkan on Windows (ADR-085). CUDA stays deferred (ADR-056). CPU is always compiled in.
+fn compiled_gpu_backend() -> Option<&'static str> {
     #[cfg(all(feature = "audio-transcription", target_os = "macos"))]
     {
-        vec![Backend::Cpu, Backend::Metal]
+        Some("Metal")
     }
     #[cfg(all(feature = "audio-transcription", windows))]
     {
-        vec![Backend::Cpu, Backend::Vulkan]
+        Some("Vulkan")
     }
     #[cfg(not(all(feature = "audio-transcription", any(target_os = "macos", windows))))]
     {
-        vec![Backend::Cpu]
+        None
     }
 }
 
@@ -91,11 +62,7 @@ pub fn gpu_class() -> GpuClass {
 /// Acceleration label for the UI: the runtime truth, not the compile-time hope — a Vulkan build
 /// with no usable device says `CPU`.
 pub fn accel_label() -> String {
-    let gpu_name = compiled_backends()
-        .into_iter()
-        .find(|b| b.is_gpu())
-        .map(Backend::label);
-    match (gpu_class(), gpu_name) {
+    match (gpu_class(), compiled_gpu_backend()) {
         (GpuClass::Discrete, Some(name)) => format!("{name} (GPU)"),
         (GpuClass::Integrated, Some(name)) => format!("{name} (integrated GPU)"),
         _ => "CPU".to_string(),
@@ -139,12 +106,12 @@ pub(super) fn finalize_model_for_class(class: GpuClass) -> &'static WhisperModel
     })
 }
 
-/// The live-pass model for this host (compiled backends + probed GPU class).
+/// The live-pass model for this host, from the probed GPU class.
 pub fn live_model_for_this_build() -> &'static WhisperModelInfo {
     live_model_for_class(gpu_class())
 }
 
-/// The finalize-pass model for this host (compiled backends + probed GPU class).
+/// The finalize-pass model for this host, from the probed GPU class.
 pub fn finalize_model_for_this_build() -> &'static WhisperModelInfo {
     finalize_model_for_class(gpu_class())
 }
@@ -155,13 +122,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cpu_is_always_compiled_in() {
-        assert!(compiled_backends().contains(&Backend::Cpu));
+    fn compiled_gpu_backend_matches_the_platform_this_build_targets() {
+        let expected = if cfg!(all(feature = "audio-transcription", target_os = "macos")) {
+            Some("Metal")
+        } else if cfg!(all(feature = "audio-transcription", windows)) {
+            Some("Vulkan")
+        } else {
+            None
+        };
+        assert_eq!(compiled_gpu_backend(), expected);
     }
 
     #[test]
     fn gpu_backend_features_are_pinned_in_the_manifest() {
-        // compiled_backends() keys on cfg(platform), not on how whisper-rs was built — pin the
+        // compiled_gpu_backend() keys on cfg(platform), not on how whisper-rs was built — pin the
         // manifest so silently dropping a GPU feature cannot leave `accel_label` lying.
         fn target_deps<'a>(manifest: &'a str, header: &str) -> &'a str {
             let start = manifest.find(header).expect("target dep section present");
@@ -272,11 +246,7 @@ mod tests {
         }
         // A GPU label always names the compiled backend, never a bare "GPU".
         if label != "CPU" {
-            let name = compiled_backends()
-                .into_iter()
-                .find(|b| b.is_gpu())
-                .unwrap()
-                .label();
+            let name = compiled_gpu_backend().unwrap();
             assert!(label.starts_with(name), "got {label}");
         }
     }
@@ -296,43 +266,6 @@ mod tests {
         // The whole point: never the whisper.cpp default of 4 on a host with more cores.
         if num_cpus::get_physical() >= 8 {
             assert!(t >= 8, "an 8-core host should get 8 threads, got {t}");
-        }
-    }
-
-    #[test]
-    fn backend_helpers() {
-        assert!(!Backend::Cpu.is_gpu());
-        assert!(Backend::Metal.is_gpu());
-        assert!(Backend::Vulkan.is_gpu());
-        assert_eq!(Backend::Cpu.label(), "CPU");
-        assert_eq!(Backend::Metal.label(), "Metal");
-        assert_eq!(Backend::Vulkan.label(), "Vulkan");
-    }
-
-    #[test]
-    fn backend_round_trips_through_serde_and_matches_ts_union() {
-        for b in [Backend::Cpu, Backend::Metal, Backend::Vulkan] {
-            assert_eq!(
-                serde_json::from_str::<Backend>(&serde_json::to_string(&b).unwrap()).unwrap(),
-                b
-            );
-        }
-        // The TS union must stay in sync; today only test fixtures read `backends` — the UI
-        // renders `accel_label` verbatim.
-        let src = include_str!("../../../../desktop/src/src/app/models/transcript.ts");
-        for (b, tag) in [
-            (Backend::Cpu, "'cpu'"),
-            (Backend::Metal, "'metal'"),
-            (Backend::Vulkan, "'vulkan'"),
-        ] {
-            assert_eq!(
-                serde_json::to_string(&b).unwrap(),
-                tag.replace('\x27', "\"")
-            );
-            assert!(
-                src.contains(tag),
-                "models/transcript.ts Backend union must carry {tag}"
-            );
         }
     }
 

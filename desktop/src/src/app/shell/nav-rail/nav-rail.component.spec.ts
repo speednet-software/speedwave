@@ -115,4 +115,32 @@ describe('NavRailComponent', () => {
     fixture.detectChanges();
     expect(host.opens).toBe(1);
   });
+
+  it('renders the pulsing dot only on the entry flagged as recording', () => {
+    host.entries.set(ENTRIES.map((e) => (e.id === 'chat' ? { ...e, recording: true } : e)));
+    fixture.detectChanges();
+
+    const dots = fixture.nativeElement.querySelectorAll('[data-testid^="nav-recording-dot-"]');
+    expect(dots.length).toBe(1);
+    expect(dots[0].getAttribute('data-testid')).toBe('nav-recording-dot-chat');
+    expect(dots[0].className).toContain('animate-record-pulse');
+    expect(dots[0].className).toContain('motion-reduce:animate-none');
+    expect(dots[0].getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('suffixes the label and tooltip of a recording entry', () => {
+    host.entries.set(ENTRIES.map((e) => (e.id === 'chat' ? { ...e, recording: true } : e)));
+    fixture.detectChanges();
+
+    const recording = fixture.nativeElement.querySelector('[data-testid="nav-chat"]');
+    const idle = fixture.nativeElement.querySelector('[data-testid="nav-settings"]');
+    expect(recording.getAttribute('aria-label')).toBe('Chat (recording)');
+    expect(recording.getAttribute('title')).toBe('Chat (recording)');
+    expect(idle.getAttribute('aria-label')).toBe('Settings');
+  });
+
+  it('renders no dot when no entry carries the flag', () => {
+    const dots = fixture.nativeElement.querySelectorAll('[data-testid^="nav-recording-dot-"]');
+    expect(dots.length).toBe(0);
+  });
 });

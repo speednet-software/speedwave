@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { signal, type WritableSignal } from '@angular/core';
+import { computed, signal, type Signal, type WritableSignal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { SessionListComponent } from './session-list.component';
 import { TranscriptionService } from '../../services/transcription.service';
@@ -32,9 +32,11 @@ describe('SessionListComponent', () => {
     resumeRecording: ReturnType<typeof vi.fn>;
     liveTranscriptPreferred: ReturnType<typeof vi.fn>;
     recordingSessionId: WritableSignal<string | null>;
+    recording: Signal<boolean>;
   };
 
   beforeEach(async () => {
+    const recordingSessionId = signal<string | null>(null);
     svc = {
       list: vi.fn(async () => [
         session('a', '2026-05-10T00:00:00Z', true),
@@ -43,7 +45,8 @@ describe('SessionListComponent', () => {
       delete: vi.fn(async () => undefined),
       resumeRecording: vi.fn(async () => undefined),
       liveTranscriptPreferred: vi.fn(() => true),
-      recordingSessionId: signal<string | null>(null),
+      recordingSessionId: recordingSessionId,
+      recording: computed(() => recordingSessionId() !== null),
     };
     await TestBed.configureTestingModule({
       imports: [SessionListComponent],

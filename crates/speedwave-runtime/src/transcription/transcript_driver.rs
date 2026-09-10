@@ -34,12 +34,16 @@ const DECODE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// jump is a corrupt offset and splices without padding (it must not snowball pad per chunk).
 const MAX_GAP_SAMPLES: u64 = SAMPLE_RATE_HZ as u64 * 3600;
 
+/// One silence block per `stop` check while honouring a gap, so a Stop lands within a block
+/// instead of waiting out the whole pad.
+const SILENCE_BLOCK_FRAMES: u64 = SAMPLE_RATE_HZ as u64;
+
 /// Cadence of `TranscriptEvent::AudioLevel` while chunks flow — fast enough for a lively meter,
 /// slow enough to stay negligible next to the ~200 ms capture chunks (ADR-056 Am. 13).
 const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 /// A stop signal shared with the driver task; flip to `true` to wind down at the next chunk
-/// boundary. Carries a `Notify` pulsed on `run()` exit, so callers `await` instead of spin-polling.
+/// boundary or mid-pad. A `Notify` pulses on `run()` exit, so callers `await` instead of polling.
 #[derive(Debug, Clone, Default)]
 pub struct StopSignal {
     stopped: Arc<AtomicBool>,
@@ -328,8 +332,8 @@ fn run_ingest(
         g.error = Some(e);
     }
 }
-/// Pumps capture chunks into `wav` and the shared rings. Every chunk is placed at the absolute
-/// position its offset declares, so a source that went idle leaves silence rather than a splice.
+/// Pumps capture chunks into `wav` and the shared rings; each lands at the position its offset
+/// declares, so an idle source leaves silence, and a `stop` mid-pad truncates that silence.
 fn ingest_loop(
     audio: &mut dyn AudioStream,
     env: &IngestEnv<'_>,
@@ -412,16 +416,32 @@ fn ingest_loop(
                 );
             }
         } else if gap > 0 {
-            log::debug!(
-                "padding {:.1}s of silence for a capture gap",
-                gap as f32 / SAMPLE_RATE_HZ as f32
-            );
-            writer.write_silence(gap, channels as u16)?;
-            written += gap;
+            let had_frames = written > 0;
+            let mut padded: u64 = 0;
+            while padded < gap && !stop.is_stopped() {
+                let block = SILENCE_BLOCK_FRAMES.min(gap - padded);
+                writer.write_silence(block, channels as u16)?;
+                padded += block;
+            }
+            written += padded;
             let mut g = lock_ingest(shared);
             for lane in g.lanes.iter_mut() {
-                lane.push_silence(gap);
+                lane.push_silence(padded);
             }
+            if padded < gap {
+                log::warn!(
+                    "stop cut a capture-gap pad short: padded {padded} of {gap} frames — the recording ends here"
+                );
+                // With frames already on the timeline, ending here drops the chunk in hand:
+                // splicing it at `written` would stamp it earlier than the offset it declares.
+                if had_frames {
+                    return Ok(());
+                }
+            }
+            log::debug!(
+                "padded {:.1}s of silence for a capture gap",
+                padded as f32 / SAMPLE_RATE_HZ as f32
+            );
         }
         // A backwards offset correction re-declares audio already written; only its tail is new.
         let skip = written
@@ -1145,7 +1165,7 @@ impl WavWriter {
     }
 
     /// Writes `frames` silent frames across `channels` — an honoured capture gap, so the file
-    /// length keeps matching the wall-clock length of the recording.
+    /// length keeps matching wall-clock time unless a stop cuts the pad short.
     fn write_silence(&mut self, frames: u64, channels: u16) -> Result<(), DriverError> {
         let samples = frames.saturating_mul(u64::from(channels.max(1)));
         for _ in 0..samples {
@@ -1415,6 +1435,12 @@ mod tests {
         }
     }
 
+    /// Offset in ms implying half the gap cap: comfortably inside the honoured-pad branch, so
+    /// these tests keep testing padding rather than splicing if `MAX_GAP_SAMPLES` moves.
+    fn half_gap_cap_ms() -> u64 {
+        (MAX_GAP_SAMPLES / 2) * 1000 / SAMPLE_RATE_HZ as u64
+    }
+
     fn run_driver_expecting_capture_error(
         chunks: Vec<crate::transcription::audio::AudioChunk>,
     ) -> (Arc<TranscriptStore>, Uuid, DriverError) {
@@ -1523,6 +1549,219 @@ mod tests {
         // Keepalives must not pad the timeline: the WAV holds exactly the one real chunk.
         let reader = hound::WavReader::open(&out_wav).unwrap();
         assert_eq!(reader.duration(), 1600);
+    }
+
+    /// Two chunks with a long declared gap between them; `stop` trips as the second is handed
+    /// over, so ingest meets the pad with a Stop already pending.
+    struct GapWithStopStream {
+        chunks: Vec<crate::transcription::audio::AudioChunk>,
+        stop: StopSignal,
+    }
+    impl AudioStream for GapWithStopStream {
+        fn next_chunk(
+            &mut self,
+        ) -> Result<Option<crate::transcription::audio::AudioChunk>, CaptureError> {
+            if self.chunks.is_empty() {
+                return Ok(None);
+            }
+            let chunk = self.chunks.remove(0);
+            if self.chunks.is_empty() {
+                self.stop.stop();
+            }
+            Ok(Some(chunk))
+        }
+    }
+
+    #[test]
+    fn a_stop_pending_when_a_gap_pad_begins_writes_no_silence_at_all() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        // Half the gap cap, so the second chunk takes the honoured-pad branch rather than the
+        // corrupt-offset splice; the fixture trips `stop` as it hands that chunk over.
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(GapWithStopStream {
+                chunks: vec![
+                    chunk_at(0, 3_200, None),
+                    chunk_at(half_gap_cap_ms(), 3_200, None),
+                ],
+                stop: stop.clone(),
+            }),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let runner = std::thread::spawn({
+            let out_wav = out_wav.clone();
+            move || driver.run(&out_wav)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !runner.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver.run() must return without writing out the whole pad"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        runner.join().unwrap().unwrap();
+        // No block was written and the chunk that declared the gap was dropped, so the WAV holds
+        // the pre-gap chunk alone — `written` never claimed silence that never reached the file.
+        let reader = hound::WavReader::open(&out_wav).unwrap();
+        assert_eq!(reader.duration(), 3_200);
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Finalizing { .. }
+        ));
+    }
+
+    #[test]
+    fn a_stop_pending_before_the_first_chunk_still_leaves_that_chunk_in_the_wav() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        // The very first real chunk declares a long gap (an idle loopback that finally played),
+        // and the stop lands in that pad — nothing is on the timeline yet.
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(GapWithStopStream {
+                chunks: vec![chunk_at(half_gap_cap_ms(), 3_200, None)],
+                stop: stop.clone(),
+            }),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let runner = std::thread::spawn({
+            let out_wav = out_wav.clone();
+            move || driver.run(&out_wav)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !runner.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver.run() must return without writing out the whole pad"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        runner.join().unwrap().unwrap();
+        // A zero-sample WAV would be classified as "carries no samples" and reported to the user
+        // as a permissions failure, so the chunk is kept at the start of the timeline instead.
+        let reader = hound::WavReader::open(&out_wav).unwrap();
+        assert_eq!(reader.duration(), 3_200);
+        assert!(matches!(
+            store.get(id).unwrap().status,
+            TranscriptStatus::Finalizing { .. }
+        ));
+    }
+
+    #[test]
+    fn a_stop_mid_pad_truncates_on_a_block_boundary() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream {
+                chunks: vec![
+                    chunk_at(0, 3_200, None),
+                    chunk_at(half_gap_cap_ms(), 3_200, None),
+                ],
+            }),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let runner = std::thread::spawn({
+            let out_wav = out_wav.clone();
+            move || driver.run(&out_wav)
+        });
+        // Let the pad get going before stopping: growth past several blocks of bytes proves the
+        // loop is mid-pad, so the stop lands between blocks rather than before the first one.
+        let padding_started = wait_until(Duration::from_secs(10), || {
+            std::fs::metadata(&out_wav).map(|m| m.len()).unwrap_or(0) > 200_000
+        });
+        assert!(padding_started, "the gap pad never started writing");
+        stop.stop();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !runner.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver.run() must return shortly after a stop issued mid-pad"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        runner.join().unwrap().unwrap();
+        let full_gap = offset_to_samples(Duration::from_millis(half_gap_cap_ms())) - 3_200;
+        let padded = u64::from(hound::WavReader::open(&out_wav).unwrap().duration()) - 3_200;
+        assert!(padded > 0, "some silence must have been written");
+        assert!(
+            padded < full_gap,
+            "the pad must stop short of the declared gap, padded {padded} of {full_gap}"
+        );
+        // `stop` is only read between blocks, so a truncated pad is always whole blocks.
+        assert_eq!(padded % SILENCE_BLOCK_FRAMES, 0, "padded {padded} frames");
+    }
+
+    #[test]
+    fn a_stop_mid_pad_before_the_first_chunk_still_leaves_that_chunk_in_the_wav() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
+        let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
+        let stop = StopSignal::new();
+        let driver = TranscriptDriver::new(DriverConfig {
+            id,
+            store: store.clone(),
+            audio: Box::new(ScriptedChunkStream {
+                chunks: vec![chunk_at(half_gap_cap_ms(), 3_200, None)],
+            }),
+            transcriber: None,
+            transcribe_opts: TranscribeOptions::for_language(Language::Pl),
+            stop: stop.clone(),
+            time_base: Duration::ZERO,
+        });
+        let out_wav = store.session_dir(id).join("audio.wav");
+        let runner = std::thread::spawn({
+            let out_wav = out_wav.clone();
+            move || driver.run(&out_wav)
+        });
+        let padding_started = wait_until(Duration::from_secs(10), || {
+            std::fs::metadata(&out_wav).map(|m| m.len()).unwrap_or(0) > 200_000
+        });
+        assert!(padding_started, "the gap pad never started writing");
+        stop.stop();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !runner.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver.run() must return shortly after a stop issued mid-pad"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        runner.join().unwrap().unwrap();
+        let full_gap = offset_to_samples(Duration::from_millis(half_gap_cap_ms()));
+        let duration = u64::from(hound::WavReader::open(&out_wav).unwrap().duration());
+        assert!(
+            duration < full_gap,
+            "the pad must stop short of the declared gap, wrote {duration} of {full_gap}"
+        );
+        assert_eq!(
+            duration % SILENCE_BLOCK_FRAMES,
+            3_200,
+            "the chunk in hand must sit on top of whole silence blocks, got {duration} frames"
+        );
     }
 
     #[test]
@@ -3115,7 +3354,7 @@ mod tests {
 
     #[test]
     fn a_capture_gap_on_a_paired_capture_pads_both_channels_in_lockstep() {
-        // Chunks carry paired system+mic lanes (via stereo_chunk_at): `write_silence(gap,
+        // Chunks carry paired system+mic lanes (via stereo_chunk_at): `write_silence(block,
         // channels)` is where a frame/sample mix-up would desync the two WAV channels for good.
         let store_dir = tempfile::tempdir().unwrap();
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));

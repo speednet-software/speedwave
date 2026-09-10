@@ -33,6 +33,71 @@
 
 > **Amendment 15 (editable prompt, transcript rides the next message):** The Amendment 14 buttons sent immediately, with the summarization instruction compiled in as one constant per session language, so the user never saw the prompt and could not adapt it: the fixed "topics, decisions, action items" request fits a status meeting and not a code review, a client call, or a retro, and there was nowhere to name who is who or what an internal codename means (speech recognition mangles proper nouns, and the model was left guessing from the transcript alone). Both buttons now stage instead of send. `TranscriptionService.stageForChat` reads the transcript, opens a fresh conversation when the target asks for it, then puts the same per-language default into `chatPromptDraft` and the markdown into `stagedTranscript`; the transcript pane navigates to the chat tab and stops there. The composer loads the draft through a `draftText` input and emits `draftApplied`, which clears the service signal — a signal-driven input rather than a `ViewChild` call because the chat view mounts after the navigation and a pushed value would race the mount. The markdown never enters the text field: it would bury the prompt in a wall of text the user has to scroll past to edit. Instead a row above the field states that the transcript goes out with the next message, to the configured LLM provider, and carries an × that unstages it; `chat.component` appends the staged markdown after a blank line to whatever the user submits (queued sends included, ADR-045) and clears the staging afterwards. The privacy boundary gets stronger, not weaker: the `window.confirm` is gone because Enter on a prompt the user just read and edited is the explicit action the confirm was standing in for, and an empty field submits nothing, so clearing the prompt cannot send a bare transcript. The default text is unchanged, so a user who edits nothing gets exactly the Amendment 14 request. Not persisted between meetings, and no glossary of names or terms as a separate surface: both were considered and left out until the free-form field proves too little.
 
+> **Amendment 16 (concurrent capture warnings):**
+>
+> **Problem:**
+> Capture health was previously carried as a single "latest warning" slot in the UI. When two conditions were live at once (such as a stalled microphone and dropped audio), the second overwrote the first. A recovery event for the newer warning cleared the slot outright, retracting a warning that was still true. Window reloads or snapshot activations also blanked the slot, reporting healthy during degraded captures.
+>
+> **Decision:**
+> Raised warnings are now stored as a per-session set on `TranscriptSession.active_warnings` and persisted in `transcript.json`.
+>
+> - **Persistence:** Serde-defaulted with `skip_serializing_if = "Vec::is_empty"` so older transcripts load unchanged and healthy sessions add no field.
+> - **UI Rendering:** The UI derives its banners from the session snapshot, rendering one row per raised warning.
+> - **Lifecycle:**
+>   - Leaving `Recording` drains the set and emits one `CaptureWarningCleared` per warning, keeping subscribed windows and fresh snapshots in agreement.
+>   - `resume` drains the set because `RecordingPartMissing` is raised by the offline pass and never retracted by producers.
+>   - A resume whose capture never starts restores the drained set in `rollback_resume` (stashed like `prior_live_model`) and re-raises each warning, so a failed attempt is a true no-op rather than a silent loss of a warning nothing re-raises.
+>   - Transitions are gated on pre-transition status so late repeats cannot wipe offline pass warnings.
+>   - Warnings raised after finalizing survive to `Done` to describe the finished recording.
+>   - `AudioDropped` keeps no recovery event because dropped audio does not return.
+>
+> **Rejected Alternatives:**
+> Splitting `AudioDropped` per channel was rejected as new enum variants on both sides of the mirror for a distinction no user action depends on. A drop counter in banner text is the cheaper answer if ever needed.
+
+> **Amendment 17 (single-stream capture deadline):**
+>
+> **Problem:**
+> Mixed capture ends the stream after `STALL_GIVE_UP` (Amendment 4), but single-stream capture had no deadline. A microphone dying mid-recording left the ingest loop waiting indefinitely on an unclosed channel, hanging the recording without a message.
+>
+> **Decision:**
+> Microphone-only capture now fails after `SINGLE_STREAM_GIVE_UP` (5 s) via the existing stream-error path rather than a new warning variant or UI surface.
+>
+> - **Timeout Threshold:** Set to 5 s (looser than mixed capture) because no second stream carries the recording, making false positives fatal rather than degrading.
+> - **Scope:** Runs from stream open to catch devices that never deliver a first frame.
+> - **Three-Way Asymmetric Policy:**
+>   - **Microphone-only:** Fails after 5 s via standard stream error.
+>   - **System-audio-only:** No deadline, as silence is a legitimate state and consent issues are covered by Amendment 4 zero-streak warnings.
+>   - **Mixed capture:** Degrades to the healthy side with a `MicrophoneStalled` warning instead of failing.
+>
+> **Platform Specifics (Windows):**
+> On Windows, the cpal error callback raises an abort flag instead of only logging. This separates disconnects from clean stops when cpal ends its worker thread on fatal device errors and drops the sender[^19]. The flag is not a standalone failure because cpal routes recoverable buffer discontinuities (`ErrorKind::Xrun`) through the same callback while continuing to stream[^19].
+
+> **Amendment 18 (recording indicator in the tray and the app window):**
+>
+> **Problem:**
+> Recording state lived only in the Meeting transcription tab. Unintentional background capture continued when users navigated away, as reported on the 2026-09-08 daily.
+>
+> **Tray Indicator Implementation:**
+>
+> - `tray::refresh_tray_icon` queues a repaint and `apply_recording_state` re-derives the icon and tooltip ("Speedwave" / "Speedwave (recording)") from the driver registry (`transcription_cmd::DriversHandle`).
+> - The registry serves as authority because it outlives the webview, keeping the indicator accurate when the window is closed onto the tray.
+> - Registry mutations route through `register_driver_and_repaint_tray` / `unregister_driver_and_repaint_tray` so error rollbacks never strand a red icon. A source-structure test (`every_registry_mutation_repaints_the_tray`) enforces this pairing because wiring requires a live `AppHandle`.
+> - Sampling and applies run in one `run_on_main_thread` task. `set_icon` and `set_tooltip` each marshal to the main thread on their own[^20], so reading on the caller thread risks out-of-order execution during concurrent repaints. The badge pulse obeys the same rule: every repaint mints a pulse generation (`BADGE_PULSE_GENERATION`) that retires the previous loop, and the loop re-reads generation and registry inside its main-thread closure, so a stop landing mid-tick cannot strand a recording badge.
+> - Both states use `set_icon_with_as_template(.., true)`. In `tray-icon`, plain `set_icon` passes `is_template: false` internally[^28], leaving glyphs unadapted and turning white idle icons permanently black.
+>
+> **Window Indicator Implementation:**
+>
+> - Meeting transcription nav-rail entry carries a pulsing red dot (`--animate-record-pulse`, disabled under `prefers-reduced-motion`) with `aria-label` accessibility text.
+> - Nav-rail entry remains visible during active recording even with beta off, avoiding removal of controls when toggled from tray. The route guard (`transcriptionRouteGuard`) and the `⌘4` shortcut carry the same exception, so the visible entry stays reachable.
+> - `TranscriptionService.recording` is the predicate read by all consumers. `applyEvent` clears tracked recordings when sessions leave recording state, handling unexpected device loss across both indicators. The record tab keeps its event listener while a recording runs, and `activateSnapshot` clears the tracked recording when a re-subscribed snapshot is no longer recording, so a driver ending on its own cannot leave the window indicator on.
+>
+> **Platform Design Choices:**
+>
+> - **macOS Monochrome vs. Windows Red:** macOS template images render from alpha alone[^21], recolored by the menu bar[^22]. Keeping red requires dropping template flags, making non-template images unadapted[^23] and invisible in one appearance mode.
+> - **Theme Detection Constraints:** `Window::theme()` pins to in-app Appearance mode via `NativeThemeAdapter.syncWindowTheme`. On Windows, tao derives the app theme from `AppsUseLightTheme`[^29], while the notification area follows the separate `SystemUsesLightTheme` value (unverified — no Microsoft documentation for it).
+> - **Motion Rule:** macOS loses color cues, turning monochrome dots into unnoticed shape changes. Motion goes where color is unavailable: macOS pulses the badge via a 35%-opacity frame swapped every 800 ms (`BADGE_PULSES`, half the window indicator's 1.6 s breathe). Windows keeps its colored badge static per Microsoft guidance against long-running notification animations[^26].
+> - **Animation Engine:** Neither platform animates natively (`NSStatusItem` exposes no animation API without a custom view[^24]; `Shell_NotifyIcon` carries a single `HICON` per call[^25]). The pulse uses a self-driven image swap active only during capture, matching Apple's static colored screen recording indicator[^27].
+
 ## Decision
 
 Build "Meeting transcription" as a **built-in Desktop module** behind the beta-features gate (ADR-058). All non-UI logic lives in `crates/speedwave-runtime/src/transcription/` behind a Cargo feature `audio-transcription`; the Tauri command layer is thin; the UI is a new top-level Angular tab. Transcription uses whisper.cpp (via `whisper-rs`); audio inference is fully local — only the final transcript text leaves the machine, and only when the user explicitly sends it to Claude.
@@ -43,7 +108,9 @@ The supporting sub-decisions:
 - **macOS capture = CoreAudio process taps (macOS 14.4+)[^7], not ScreenCaptureKit.** Apple recommends Core Audio taps for audio-only capture; ScreenCaptureKit has audio-only defects on macOS 15 (unverified). The feature floor is macOS 14.4+ (runtime-gated via `if #available`); older macOS gets a clean "14.4+ required" message and the rest of the app still works.
 - **macOS permissions.** Microphone uses the public `AVCaptureDevice.requestAccess(for: .audio)`, called in-process by the main app before any capture spawn (Amendment 5): the prompt does not fire from the headless CLI. The system-audio consent prompt has no public trigger, so the native CLI uses the private TCC API (`TCCAccessRequest`, service `kTCCServiceAudioCapture`) behind a `dlopen`/`dlsym`-guarded path that degrades gracefully; a System-Settings deep-link plus silence-detection is the fallback if it reports denied.
 - **Windows capture = WASAPI loopback** (system-wide). Per-app (single-process) capture was removed — see Amendment 3.
-- **Transcription engine** = whisper.cpp (MIT)[^8] via `whisper-rs`; acceleration backends are compile-time, so the runtime reports which backends were compiled in. v1 ships CPU (all platforms) + Metal (macOS); CUDA/Vulkan deferred.
+- **Transcription engine**: Powered by whisper.cpp (MIT)[^8] via `whisper-rs`.
+  - **Acceleration:** Hardware acceleration backends are configured at compile time. The runtime reports its build configuration as a single acceleration label.
+  - **Supported Targets (v1):** CPU (all platforms) and Metal (macOS). CUDA and Vulkan support are deferred.
 - **PL/EN strategy** = forced language (never auto-detected, picked per-recording), with a live pass plus a higher-quality offline re-pass after recording stops. A single model is downloaded per the hardware (see Amendment 2); on GPU builds the live and offline passes share `large-v3`. The promise is "local best-effort live + higher-quality offline final pass", not "perfect Polish/English".
 - **Model store** = download-on-demand, SHA256-verified, streamed to disk, into `<data_dir>/models/`. Hugging Face[^9] and GitHub[^10] `302`-redirect downloads to signed CDN URLs, so the downloader uses a redirect-host allowlist rather than `redirect::Policy::none()`. Otherwise it reuses the ADR-041 host-HTTP hardening.
 - **Live-transcript transport** = an append-only event stream with a monotonic `seq` plus snapshot recovery, reusing the _delivery semantics_ of `MsgStore::history_plus_stream()` (ADR-043) — not the full JSON-patch protocol (ADR-042).
@@ -61,12 +128,16 @@ The supporting sub-decisions:
 ## Where it lives in code
 
 - **Runtime SSOT (feature-gated)** — `crates/speedwave-runtime/src/transcription/` (`mod.rs`, `audio.rs`, `audio_macos.rs`, `audio_windows.rs`, `mix.rs`, `transcriber.rs`, `transcript_driver.rs`, `transcript_store.rs`, `transcript.rs`, `gpu_probe.rs` — the runtime Vulkan device probe, ADR-085).
-- **Compiled backend reporting + model selection** — `crates/speedwave-runtime/src/transcription/accel.rs` (`compiled_backends()`, `live_model_for_this_build()`, `finalize_model_for_this_build()`, `decode_threads()`).
+- **Acceleration labelling + model selection**: Managed in `crates/speedwave-runtime/src/transcription/accel.rs`.
+  - Exposed functions: `accel_label()`, `gpu_class()`, `live_model_for_this_build()`, `finalize_model_for_this_build()`, and `decode_threads()`.
 - **Model catalog SSOT** — `crates/speedwave-runtime/src/transcription/model_catalog.rs` (the Whisper GGML model entries; see [ADR-075](ADR-075-remove-speaker-diarization.md) for the removal of the former speaker-embedding/segmentation entries).
 - **Download/verify** — `crates/speedwave-runtime/src/transcription/model_store.rs` (streamed download, on-the-fly SHA256, atomic rename, redirect-host allowlist).
 - **Settings UI** — `desktop/src/src/app/settings/transcription-section/` (acceleration label + per-pass download/remove rows — live and, where the host class splits the pair, finalize — driven by the `recommended_transcription_model` command).
 - **Feature wiring** — `crates/speedwave-runtime/Cargo.toml` (`audio-transcription` feature) and `desktop/src-tauri/Cargo.toml` (Desktop enables it).
 - **Tauri command layer** — `desktop/src-tauri/src/transcription_cmd.rs`.
+- **Recording indicator (Amendment 18)**:
+  - Backend: `desktop/src-tauri/src/tray.rs` (`refresh_tray_icon`, `apply_recording_state`, and assets `tray-icon-recording.png` / `tray-icon-white-recording.png`).
+  - Frontend: `desktop/src/src/app/shell/nav-rail/nav-rail.component.ts` (`NavRailEntry.recording`) and `visibleEntries` in `shell.component.ts`.
 - **Mic consent (Amendment 5):** `desktop/src-tauri/src/mic_permission_cmd.rs` (the sole `objc2-av-foundation` FFI boundary) plus the pre-start gate in `recording-controls.component.ts`; the main-app entitlement rides `tauri.macos.conf.json` `bundle.macOS.entitlements`.
 - **macOS capture CLI** — `native/macos/audio-capture/` (embedded `Info.plist` with `NSAudioCaptureUsageDescription` + `NSMicrophoneUsageDescription` via the `-sectcreate __TEXT __info_plist` linker flag). It is signed by `scripts/sign-bundled-binaries.sh`, which calls `codesign --sign` _without_ an explicit `--identifier` — the signing identifier comes from the embedded `CFBundleIdentifier`, and the script then verifies that identifier equals `pl.speedwave.desktop.audio-capture` (so TCC binds the row to the right identifier, per ADR-049). Bundle membership is the `tauri.macos.conf.json` ↔ `sign-bundled-binaries.sh` SSOT-alignment pair.
 
@@ -120,3 +191,25 @@ The supporting sub-decisions:
 [^17]: `large-v3-turbo` is a pruned, finetuned `large-v3` whose decoder drops from 32 layers to 4, which is where its CPU speedup comes from: <https://huggingface.co/openai/whisper-large-v3-turbo>.
 
 [^18]: whisper.cpp pads/truncates every `whisper_full` input to a fixed 30 s chunk (`WHISPER_CHUNK_SIZE`), so the encoder runs over 30 s regardless of the audio's real length; its stream example counteracts exactly this with a reduced `audio_ctx` (`--audio-ctx`, "speed up encoder by trading accuracy"): <https://github.com/ggml-org/whisper.cpp/tree/master/examples/stream>.
+
+[^19]: In cpal's WASAPI backend a fatal device error goes through the error callback and then breaks the worker loop (`process_commands_and_await_signal` returns `ControlFlow::Break`), ending the thread and dropping the data sender, while a recoverable buffer discontinuity is reported as `ErrorKind::Xrun` through that same callback with the loop still running: <https://github.com/RustAudio/cpal/blob/v0.18.2/src/host/wasapi/stream.rs>. Verified against cpal 0.18.2, the version this workspace pins.
+
+[^20]: Every `TrayIcon` setter in Tauri 2.11 dispatches through `run_item_main_thread!`, which posts the call to the main thread and blocks on the reply: <https://docs.rs/tauri/2.11.5/tauri/tray/struct.TrayIcon.html>.
+
+[^21]: "Images you mark as template images should consist of only black and clear colors. You can use the alpha channel in the image to adjust the opacity of black content": <https://developer.apple.com/documentation/appkit/nsimage/istemplate>.
+
+[^22]: "Both interface icons and symbols use black and clear colors to define their shapes; the system can apply other colors to the black areas in each image so it looks good on both dark and light menu bars": <https://developer.apple.com/design/human-interface-guidelines/the-menu-bar>.
+
+[^23]: Full-colour assets are the app's own responsibility across appearances: "Use the same asset if it looks good in both the light and dark appearances. If an asset looks good in only one mode, modify the asset or create separate light and dark assets": <https://developer.apple.com/design/human-interface-guidelines/dark-mode>.
+
+[^24]: `NSStatusItem` exposes no animation-related property or method; its documented customization path is a custom view that "is responsible for drawing itself and providing its own behaviors": <https://developer.apple.com/documentation/appkit/nsstatusitem> and <https://developer.apple.com/documentation/appkit/nsstatusitem/view>.
+
+[^25]: `NOTIFYICONDATA` carries a single `hIcon` ("A handle to the icon to be added, modified, or deleted") with no frame list or animation flag: <https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataa>.
+
+[^26]: "Don't use long-running animations to show continuous activities. Such animations are a distraction. An icon's presence in the notification area sufficiently indicates continuous activity. ... Don't flash the icon": <https://learn.microsoft.com/en-us/windows/win32/uxguide/winenv-notification>.
+
+[^27]: macOS screen recording is stopped from a static menu-bar control: "To stop recording, click the Stop button in the menu bar": <https://support.apple.com/en-us/102618>.
+
+[^28]: `tray-icon`'s macOS `set_icon` calls `set_icon_for_ns_status_item_button` with `icon_is_template: false`, and that helper ends with `nsimage.setTemplate(icon_is_template)`; `set_icon_with_as_template` is the variant that forwards the flag: <https://docs.rs/tray-icon/0.24.2/src/tray_icon/platform_impl/macos/mod.rs.html>. Verified against the copy Tauri 2.11.5 vendors.
+
+[^29]: tao's `read_apps_use_light_theme` reads `AppsUseLightTheme` under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, and `should_use_dark_mode` inverts it: <https://github.com/tauri-apps/tao/blob/tao-v0.35.3/src/platform_impl/windows/dark_mode.rs>. Verified against tao 0.35.3, the copy Tauri 2.11.5 vendors.

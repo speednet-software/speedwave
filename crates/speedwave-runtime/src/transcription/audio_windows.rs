@@ -13,7 +13,9 @@ use super::audio::{
     CaptureError, CaptureHealth, CaptureWarning, ZeroStreakDetector, DEFAULT_MIXED_SOURCE_LABEL,
     SAMPLE_RATE_HZ,
 };
-use super::mix::{poll_paired_chunk, MixBuffer, MixSource, CHUNK_SAMPLES, KEEPALIVE_AFTER};
+use super::mix::{
+    poll_paired_chunk, MixBuffer, MixSource, SingleStreamWatchdog, CHUNK_SAMPLES, KEEPALIVE_AFTER,
+};
 
 /// Channel depth for chunks in flight from the capture thread to the consumer — a few seconds of
 /// audio, enough to absorb a slow consumer without unbounded growth (a full channel drops chunks).
@@ -174,7 +176,7 @@ impl AudioCapture for WasapiAudioCapture {
                 let dev = resolve_mic(&host, device)?;
                 let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
                 let dropped = DropCounter::default();
-                let stream = open_capture_stream(
+                let (stream, failed) = open_capture_stream(
                     &dev,
                     ResamplerSink::Channel {
                         tx,
@@ -185,6 +187,8 @@ impl AudioCapture for WasapiAudioCapture {
                     _streams: vec![stream],
                     rx,
                     dropped,
+                    failed,
+                    watchdog: SingleStreamWatchdog::new(),
                 }))
             }
             AudioSource::Mixed { mic } => {
@@ -223,7 +227,9 @@ impl AudioCapture for WasapiAudioCapture {
                         None
                     }
                 };
-                let mic_stream = open_capture_stream(
+                // A dead mic degrades by design here (ADR-056 Am. 4): the mix keeps flowing
+                // from the system side and raises MicrophoneStalled, so nothing reads this flag.
+                let (mic_stream, _mic_failed) = open_capture_stream(
                     &mic_dev,
                     ResamplerSink::Mixed {
                         buf: Arc::clone(&buf),
@@ -242,16 +248,21 @@ impl AudioCapture for WasapiAudioCapture {
     }
 }
 
-/// Builds the cpal input stream for the given sample format, wiring its data
-/// callback to down-mix → resample → deliver chunks to `sink`.
+/// Builds the cpal input stream for the given sample format, wiring its data callback to
+/// down-mix → resample → deliver chunks to `sink`. The flag is raised by any cpal stream error.
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     mut resampler: Resampler,
     sink: ResamplerSink,
-) -> Result<cpal::Stream, CaptureError> {
-    let err_fn = |e| log::warn!(target: "transcription::capture", "wasapi stream error: {e}");
+) -> Result<(cpal::Stream, Arc<AtomicBool>), CaptureError> {
+    let failed = Arc::new(AtomicBool::new(false));
+    let err_flag = Arc::clone(&failed);
+    let err_fn = move |e| {
+        log::warn!(target: "transcription::capture", "wasapi stream error: {e}");
+        err_flag.store(true, Ordering::SeqCst);
+    };
     macro_rules! make {
         ($t:ty, $to_f32:expr) => {{
             let to_f32 = $to_f32;
@@ -276,15 +287,16 @@ fn build_stream(
             )));
         }
     };
-    stream.map_err(|e| CaptureError::Failed(format!("build input stream: {e}")))
+    let stream = stream.map_err(|e| CaptureError::Failed(format!("build input stream: {e}")))?;
+    Ok((stream, failed))
 }
 
-/// Opens a cpal capture stream on a microphone `device`, resampling to 16 kHz
-/// mono into `sink`. Returns the running `Stream` (dropping it stops capture).
+/// Opens a cpal capture stream on a microphone `device`, resampling to 16 kHz mono into `sink`.
+/// Returns the running `Stream` (dropping it stops capture) and its device-error flag.
 fn open_capture_stream(
     device: &cpal::Device,
     sink: ResamplerSink,
-) -> Result<cpal::Stream, CaptureError> {
+) -> Result<(cpal::Stream, Arc<AtomicBool>), CaptureError> {
     let supported = device
         .default_input_config()
         .map_err(|e| CaptureError::Failed(format!("default input config: {e}")))?;
@@ -293,11 +305,11 @@ fn open_capture_stream(
     let src_channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.into();
     let resampler = Resampler::new(src_rate, src_channels);
-    let stream = build_stream(device, &config, sample_format, resampler, sink)?;
+    let (stream, failed) = build_stream(device, &config, sample_format, resampler, sink)?;
     stream
         .play()
         .map_err(|e| CaptureError::Failed(format!("start stream: {e}")))?;
-    Ok(stream)
+    Ok((stream, failed))
 }
 
 /// Resolves a mic device name (`None` = default input) to a cpal input device.
@@ -779,6 +791,11 @@ struct CpalAudioStream {
     rx: Receiver<AudioChunk>,
     /// Chunks a full channel forced the callback to drop (carries the one-shot report latch).
     dropped: DropCounter,
+    /// Raised by any cpal stream error, recoverable xruns included — so it only decides *why*
+    /// `rx` disconnected, never whether a still-delivering stream is healthy.
+    failed: Arc<AtomicBool>,
+    /// Liveness deadline running from stream open, so a mic that never delivers gives up too.
+    watchdog: SingleStreamWatchdog,
 }
 
 impl AudioStream for CpalAudioStream {
@@ -786,8 +803,19 @@ impl AudioStream for CpalAudioStream {
         // Bounded recv + keepalive: a hung/removed device must not wedge the ingest loop's stop
         // handling. A disconnected channel = stream dropped/callback stopped (EOF).
         match self.rx.recv_timeout(KEEPALIVE_AFTER) {
-            Ok(chunk) => Ok(Some(chunk)),
-            Err(RecvTimeoutError::Timeout) => Ok(Some(AudioChunk::keepalive())),
+            Ok(chunk) => {
+                self.watchdog.delivered();
+                Ok(Some(chunk))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.watchdog.check()?;
+                Ok(Some(AudioChunk::keepalive()))
+            }
+            // cpal ends its worker thread on a fatal device error, dropping the sender; the flag
+            // is what separates that from the clean stop of a dropped stream.
+            Err(RecvTimeoutError::Disconnected) if self.failed.load(Ordering::SeqCst) => Err(
+                CaptureError::Failed("microphone capture stopped on a device error".to_string()),
+            ),
             Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
@@ -935,6 +963,80 @@ mod tests {
         assert!((gi[2] + 1.0).abs() < 1e-3);
         // Zero bytes-per-sample is a safe no-op.
         assert!(decode_pcm_to_f32(&[0, 1, 2, 3], 0, true).is_empty());
+    }
+
+    use super::super::mix::SINGLE_STREAM_GIVE_UP;
+
+    /// A mic stream with nothing queued, its liveness deadline wound back by `age`.
+    fn idle_mic_stream(age: Duration, failed: bool) -> (SyncSender<AudioChunk>, CpalAudioStream) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AudioChunk>(CHANNEL_DEPTH);
+        let mut watchdog = SingleStreamWatchdog::new();
+        watchdog.rewind(age);
+        let stream = CpalAudioStream {
+            _streams: Vec::new(),
+            rx,
+            dropped: DropCounter::default(),
+            failed: Arc::new(AtomicBool::new(failed)),
+            watchdog,
+        };
+        (tx, stream)
+    }
+
+    #[test]
+    fn a_microphone_stream_gives_up_after_a_sustained_silence() {
+        let (_tx, mut stream) = idle_mic_stream(SINGLE_STREAM_GIVE_UP, false);
+        let err = stream.next_chunk().unwrap_err();
+        assert!(matches!(err, CaptureError::Failed(_)), "got {err:?}");
+        assert!(err.to_string().contains("microphone"), "got: {err}");
+    }
+
+    #[test]
+    fn a_microphone_stream_keepalives_while_it_is_only_briefly_quiet() {
+        let (_tx, mut stream) = idle_mic_stream(Duration::ZERO, false);
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert!(c.samples.is_empty(), "expected a keepalive, not a give-up");
+    }
+
+    #[test]
+    fn a_raised_error_flag_alone_does_not_end_a_still_delivering_stream() {
+        // cpal reports recoverable xruns through the same callback and keeps streaming, so the
+        // flag must not end a capture whose channel is still open.
+        let (_tx, mut stream) = idle_mic_stream(Duration::ZERO, true);
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert!(c.samples.is_empty(), "a glitch must not abort the capture");
+    }
+
+    #[test]
+    fn a_disconnect_after_an_error_fails_instead_of_finalizing_as_complete() {
+        // cpal drops its data callback (and the sender) when the worker thread dies, so the flag
+        // is what separates a device failure from a clean stop.
+        let (tx, mut stream) = idle_mic_stream(Duration::ZERO, true);
+        drop(tx);
+        let err = stream.next_chunk().unwrap_err();
+        assert!(err.to_string().contains("device error"), "got: {err}");
+    }
+
+    #[test]
+    fn a_disconnect_without_an_error_is_a_clean_end_of_stream() {
+        let (tx, mut stream) = idle_mic_stream(Duration::ZERO, false);
+        drop(tx);
+        assert!(stream.next_chunk().unwrap().is_none(), "expected EOF");
+    }
+
+    #[test]
+    fn a_delivered_chunk_restarts_the_microphone_deadline() {
+        let (tx, mut stream) = idle_mic_stream(SINGLE_STREAM_GIVE_UP / 2, false);
+        tx.send(AudioChunk {
+            samples: vec![0.5],
+            mic: None,
+            offset: Duration::ZERO,
+        })
+        .unwrap();
+        let c = stream.next_chunk().unwrap().unwrap();
+        assert_eq!(c.samples, vec![0.5]);
+        // The observable consequence: the next idle poll is a keepalive, not a give-up.
+        let next = stream.next_chunk().unwrap().unwrap();
+        assert!(next.samples.is_empty(), "the deadline must have restarted");
     }
 
     /// Drains a channel sink into a flat sample vector.
