@@ -84,6 +84,8 @@ pub struct TranscriptSession {
     /// `rollback_resume` so the invariant lives in the store, not at call sites.
     #[serde(skip, default)]
     pub(crate) prior_live_model: Option<String>,
+    #[serde(skip, default)]
+    pub(crate) prior_active_warnings: Vec<CaptureWarning>,
 }
 
 impl TranscriptSession {
@@ -115,6 +117,7 @@ impl TranscriptSession {
             last_seq: 0,
             live_draft: String::new(),
             prior_live_model: None,
+            prior_active_warnings: Vec::new(),
         }
     }
 

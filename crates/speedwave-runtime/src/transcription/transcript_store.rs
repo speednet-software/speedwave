@@ -456,6 +456,7 @@ impl TranscriptStore {
             resumable = true;
             // A resumed capture starts healthy: the previous pass's warnings (including a
             // `RecordingPartMissing` no producer ever retracts) must not carry into it.
+            s.prior_active_warnings = s.active_warnings.clone();
             let mut events = drain_capture_warnings(s, seq);
             if let Some(finals) = s.final_segments.take() {
                 s.live_segments = finals;
@@ -482,7 +483,7 @@ impl TranscriptStore {
     }
 
     /// Reverts a [`Self::resume`] whose capture never started: drops the just-registered
-    /// part, restores the finals baseline and the pre-resume live model, and returns to `Done`.
+    /// part, restores the finals baseline, live model and capture warnings, and returns to `Done`.
     pub fn rollback_resume(&self, id: Uuid, expected_part: &Path) -> Result<u64, StoreError> {
         let mut seq_out = 0;
         // Guarded under the session lock like `resume`: only a session still in
@@ -495,17 +496,28 @@ impl TranscriptStore {
                 return Vec::new();
             }
             rolled_back = true;
-            seq_out = seq;
             s.audio_parts.pop();
             // Inverse of `resume`: the live baseline moves back to finals, so
             // `effective_segments()` is unchanged and a later resume works again.
             s.final_segments = Some(std::mem::take(&mut s.live_segments));
             s.models_used.live = s.prior_live_model.take();
+            s.active_warnings = std::mem::take(&mut s.prior_active_warnings);
             s.status = TranscriptStatus::Done;
-            vec![TranscriptEvent::StatusChanged {
-                seq,
+            let mut events: Vec<TranscriptEvent> = s
+                .active_warnings
+                .iter()
+                .enumerate()
+                .map(|(i, warning)| TranscriptEvent::CaptureWarning {
+                    seq: seq + i as u64,
+                    warning: *warning,
+                })
+                .collect();
+            seq_out = seq + events.len() as u64;
+            events.push(TranscriptEvent::StatusChanged {
+                seq: seq_out,
                 status: TranscriptStatus::Done,
-            }]
+            });
+            events
         })?;
         if !rolled_back {
             return Err(StoreError::InvalidState(
@@ -799,6 +811,64 @@ mod tests {
             store.get(id).unwrap().active_warnings.is_empty(),
             "nothing retracts RecordingPartMissing, so a new capture would carry it forever"
         );
+    }
+
+    #[tokio::test]
+    async fn rolling_back_a_resume_restores_the_warnings_it_drained() {
+        use crate::transcription::CaptureWarning;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store
+            .set_status(id, TranscriptStatus::Finalizing { progress: 0.0 })
+            .unwrap();
+        store
+            .capture_warning(id, CaptureWarning::RecordingPartMissing)
+            .unwrap();
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+
+        let part2 = dir.path().join("audio-2.wav");
+        store.resume(id, part2.clone(), None).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        store.rollback_resume(id, &part2).unwrap();
+
+        assert_eq!(
+            store.get(id).unwrap().active_warnings,
+            vec![CaptureWarning::RecordingPartMissing]
+        );
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::CaptureWarning { warning, .. } => {
+                assert_eq!(warning, CaptureWarning::RecordingPartMissing);
+            }
+            other => panic!("expected the warning to be re-raised first, got {other:?}"),
+        }
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::StatusChanged { status, .. } => {
+                assert!(matches!(status, TranscriptStatus::Done));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rolled_back_resume_does_not_re_raise_on_a_healthy_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::with_root(dir.path());
+        let id = store.create(mk_session(&dir.path().join("a.wav"))).unwrap();
+        store.set_status(id, TranscriptStatus::Done).unwrap();
+
+        let part2 = dir.path().join("audio-2.wav");
+        store.resume(id, part2.clone(), None).unwrap();
+        let mut sub = store.subscribe(id).unwrap();
+        store.rollback_resume(id, &part2).unwrap();
+
+        assert!(store.get(id).unwrap().active_warnings.is_empty());
+        match sub.events.try_recv().unwrap() {
+            TranscriptEvent::StatusChanged { status, .. } => {
+                assert!(matches!(status, TranscriptStatus::Done));
+            }
+            other => panic!("a healthy session must emit no warning, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]

@@ -46,6 +46,7 @@
 > - **Lifecycle:**
 >   - Leaving `Recording` drains the set and emits one `CaptureWarningCleared` per warning, keeping subscribed windows and fresh snapshots in agreement.
 >   - `resume` drains the set because `RecordingPartMissing` is raised by the offline pass and never retracted by producers.
+>   - A resume whose capture never starts restores the drained set in `rollback_resume` (stashed like `prior_live_model`) and re-raises each warning, so a failed attempt is a true no-op rather than a silent loss of a warning nothing re-raises.
 >   - Transitions are gated on pre-transition status so late repeats cannot wipe offline pass warnings.
 >   - Warnings raised after finalizing survive to `Done` to describe the finished recording.
 >   - `AudioDropped` keeps no recovery event because dropped audio does not return.
