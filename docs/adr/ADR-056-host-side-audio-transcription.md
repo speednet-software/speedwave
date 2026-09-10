@@ -33,6 +33,27 @@
 
 > **Amendment 15 (editable prompt, transcript rides the next message):** The Amendment 14 buttons sent immediately, with the summarization instruction compiled in as one constant per session language, so the user never saw the prompt and could not adapt it: the fixed "topics, decisions, action items" request fits a status meeting and not a code review, a client call, or a retro, and there was nowhere to name who is who or what an internal codename means (speech recognition mangles proper nouns, and the model was left guessing from the transcript alone). Both buttons now stage instead of send. `TranscriptionService.stageForChat` reads the transcript, opens a fresh conversation when the target asks for it, then puts the same per-language default into `chatPromptDraft` and the markdown into `stagedTranscript`; the transcript pane navigates to the chat tab and stops there. The composer loads the draft through a `draftText` input and emits `draftApplied`, which clears the service signal — a signal-driven input rather than a `ViewChild` call because the chat view mounts after the navigation and a pushed value would race the mount. The markdown never enters the text field: it would bury the prompt in a wall of text the user has to scroll past to edit. Instead a row above the field states that the transcript goes out with the next message, to the configured LLM provider, and carries an × that unstages it; `chat.component` appends the staged markdown after a blank line to whatever the user submits (queued sends included, ADR-045) and clears the staging afterwards. The privacy boundary gets stronger, not weaker: the `window.confirm` is gone because Enter on a prompt the user just read and edited is the explicit action the confirm was standing in for, and an empty field submits nothing, so clearing the prompt cannot send a bare transcript. The default text is unchanged, so a user who edits nothing gets exactly the Amendment 14 request. Not persisted between meetings, and no glossary of names or terms as a separate surface: both were considered and left out until the free-form field proves too little.
 
+> **Amendment 16 (concurrent capture warnings):**
+>
+> **Problem:**
+> Capture health was previously carried as a single "latest warning" slot in the UI. When two conditions were live at once (such as a stalled microphone and dropped audio), the second overwrote the first. A recovery event for the newer warning cleared the slot outright, retracting a warning that was still true. Window reloads or snapshot activations also blanked the slot, reporting healthy during degraded captures.
+>
+> **Decision:**
+> Raised warnings are now stored as a per-session set on `TranscriptSession.active_warnings` and persisted in `transcript.json`.
+>
+> - **Persistence:** Serde-defaulted with `skip_serializing_if = "Vec::is_empty"` so older transcripts load unchanged and healthy sessions add no field.
+> - **UI Rendering:** The UI derives its banners from the session snapshot, rendering one row per raised warning.
+> - **Lifecycle:**
+>   - Leaving `Recording` drains the set and emits one `CaptureWarningCleared` per warning, keeping subscribed windows and fresh snapshots in agreement.
+>   - `resume` drains the set because `RecordingPartMissing` is raised by the offline pass and never retracted by producers.
+>   - A resume whose capture never starts restores the drained set in `rollback_resume` (stashed like `prior_live_model`) and re-raises each warning, so a failed attempt is a true no-op rather than a silent loss of a warning nothing re-raises.
+>   - Transitions are gated on pre-transition status so late repeats cannot wipe offline pass warnings.
+>   - Warnings raised after finalizing survive to `Done` to describe the finished recording.
+>   - `AudioDropped` keeps no recovery event because dropped audio does not return.
+>
+> **Rejected Alternatives:**
+> Splitting `AudioDropped` per channel was rejected as new enum variants on both sides of the mirror for a distinction no user action depends on. A drop counter in banner text is the cheaper answer if ever needed.
+
 > **Amendment 18 (recording indicator in the tray and the app window):**
 >
 > **Problem:**
