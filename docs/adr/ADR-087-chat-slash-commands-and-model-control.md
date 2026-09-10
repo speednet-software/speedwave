@@ -229,6 +229,13 @@ and Claude Code records per-model release flags (`unpinOpus48LaunchEffort`
 etc.) in `~/.claude.json`, after which even flag-less sessions accept live
 changes.
 
+**Amendment (Claude Code 2.1.267 re-verification):** the same probes on the
+2.1.267 pin reproduce the behaviour above unchanged, so the design holds. Two
+refinements: the hold covers Opus 4.8 and Fable 5 but NOT Fable 5.1 or Sonnet
+5, whose sessions accept a wire `/effort` even without a launch flag; and
+`maxEffortLevel` (new in 2.1.267) is a settings key an organization can use to
+cap the level, which the composer control does not yet read.
+
 The shipped design therefore: every chat spawn passes `--effort <pin>`
 (`chat.rs::launch_effort_level`: the persisted pin, else `high`), which both
 sets the launch effort and releases the hold; the composer effort control

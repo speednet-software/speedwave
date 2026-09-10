@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Pinned Claude Code version installed inside the container.
-pub const CLAUDE_VERSION: &str = "2.1.252";
+pub const CLAUDE_VERSION: &str = "2.1.267";
 /// Path inside the container where entrypoint.sh generates the MCP config.
 pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 
@@ -53,9 +53,7 @@ pub struct AnthropicModelInfo {
     /// Price of the base model id (e.g. `claude-sonnet-5`).
     pub pricing: ModelPricing,
     /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-5[1m]`),
-    /// present when context_tokens >= 1_000_000, OR (documented exception)
-    /// claude-fable-5, whose bare id reports a 200k session window despite
-    /// shipping a priced [1m] alias.
+    /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
     pub pricing_1m: Option<ModelPricing>,
     /// Offered by the composer selector; legacy entries stay for pricing history.
     pub selectable: bool,
@@ -90,6 +88,14 @@ const FABLE_PRICING: ModelPricing = ModelPricing {
     cache_write: 12.5,
     output: 50.0,
 };
+// Fable 5.1 cache hits are 0.025x base input (every other model is 0.1x) — pricing
+// page footnote, "Prompt caching" section.
+const FABLE_5_1_PRICING: ModelPricing = ModelPricing {
+    input: 10.0,
+    cached_input: 0.25,
+    cache_write: 12.5,
+    output: 50.0,
+};
 const OPUS_PRICING: ModelPricing = ModelPricing {
     input: 5.0,
     cached_input: 0.5,
@@ -119,13 +125,13 @@ const HAIKU_PRICING: ModelPricing = ModelPricing {
 /// **Order matters** — frontend renders this list as-is.
 pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
     AnthropicModelInfo {
-        id: "claude-fable-5",
-        family: "Fable 5",
-        context_tokens: 200_000,
+        id: "claude-fable-5-1",
+        family: "Fable 5.1",
+        context_tokens: 1_000_000,
         latest: true,
         premium: true,
-        pricing: FABLE_PRICING,
-        pricing_1m: Some(FABLE_PRICING),
+        pricing: FABLE_5_1_PRICING,
+        pricing_1m: Some(FABLE_5_1_PRICING),
         selectable: true,
     },
     AnthropicModelInfo {
@@ -156,6 +162,16 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
+        selectable: true,
+    },
+    AnthropicModelInfo {
+        id: "claude-fable-5",
+        family: "Fable 5",
+        context_tokens: 1_000_000,
+        latest: false,
+        premium: true,
+        pricing: FABLE_PRICING,
+        pricing_1m: Some(FABLE_PRICING),
         selectable: true,
     },
     AnthropicModelInfo {
@@ -519,15 +535,18 @@ mod tests {
     }
 
     #[test]
-    fn fable_entry_present_with_million_context() {
-        // Settings dropdown + cost meter need the Fable 5 entry ($10/$50).
+    fn fable_5_1_is_the_latest_fable_entry() {
+        // CC 2.1.257+ made Fable 5.1 the default Fable model; the FABLE alias pin
+        // resolves to the first `latest: true` Fable, so 5.1 must lead the tier.
         let fable = ANTHROPIC_MODELS
             .iter()
-            .find(|m| m.id == "claude-fable-5")
-            .expect("claude-fable-5 must be in the catalog");
-        assert!(fable.latest, "Fable 5 must be in the Latest group");
-        assert_eq!(fable.context_tokens, 200_000);
+            .find(|m| m.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in the catalog");
+        assert!(fable.latest, "Fable 5.1 must be in the Latest group");
+        assert!(fable.premium);
+        assert_eq!(fable.context_tokens, 1_000_000);
         assert_eq!(fable.pricing.input, 10.0);
+        assert_eq!(fable.pricing.cache_write, 12.5);
         assert_eq!(fable.pricing.output, 50.0);
     }
 
@@ -572,6 +591,7 @@ mod tests {
     #[test]
     fn current_entries_are_selectable() {
         for id in [
+            "claude-fable-5-1",
             "claude-fable-5",
             "claude-opus-5",
             "claude-sonnet-5",
@@ -582,19 +602,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fable_5_bare_id_reports_its_actual_session_window() {
-        // claude-fable-5's bare id has a 200k session window but still ships
-        // a priced `[1m]` alias — an explicit exception, asserted here.
-        let fable = ANTHROPIC_MODELS
+    fn fable_5_is_demoted_to_legacy() {
+        // Fable 5.1 replaces Fable 5 as the Latest Fable entry; Fable 5 keeps its
+        // pricing but must no longer be the alias-pin target.
+        let fable_5 = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-fable-5")
-            .unwrap();
-        assert_eq!(fable.context_tokens, 200_000);
-        assert!(
-            fable.pricing_1m.is_some(),
-            "claude-fable-5 must still price its [1m] alias"
-        );
+            .expect("claude-fable-5 must remain in the catalog");
+        assert!(!fable_5.latest, "Fable 5 must be demoted to Legacy");
+        assert_eq!(fable_5.pricing.cached_input, 1.0);
     }
 
     #[test]
@@ -770,15 +786,13 @@ mod tests {
 
     #[test]
     fn one_m_pricing_present_iff_million_token_context() {
-        // `pricing_1m` present iff 1M-token context, except claude-fable-5
-        // (200k bare id, still exposes a priced `[1m]` alias).
+        // `pricing_1m` must be present iff the model has a 1M-token context.
         for m in ANTHROPIC_MODELS {
             let is_million = m.context_tokens >= 1_000_000;
-            let expected = is_million || m.id == "claude-fable-5";
             assert_eq!(
                 m.pricing_1m.is_some(),
-                expected,
-                "{}: pricing_1m presence must mirror context_tokens >= 1M (was {}), except the documented claude-fable-5 exception",
+                is_million,
+                "{}: pricing_1m presence must mirror context_tokens >= 1M (was {})",
                 m.id,
                 m.context_tokens
             );
@@ -787,15 +801,14 @@ mod tests {
 
     #[test]
     fn has_1m_mirrors_pricing_1m_presence() {
-        // claude-fable-5 is the documented exception: 200k context, still has_1m.
         let fable = ANTHROPIC_MODELS
             .iter()
-            .find(|m| m.id == "claude-fable-5")
-            .expect("claude-fable-5 must be in the catalog");
-        assert_eq!(fable.context_tokens, 200_000);
+            .find(|m| m.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in the catalog");
+        assert_eq!(fable.context_tokens, 1_000_000);
         assert!(
             fable.has_1m(),
-            "claude-fable-5 must report has_1m() == true"
+            "claude-fable-5-1 must report has_1m() == true"
         );
 
         let haiku = ANTHROPIC_MODELS
