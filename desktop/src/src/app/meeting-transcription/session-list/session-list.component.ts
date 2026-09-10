@@ -4,7 +4,6 @@ import {
   Component,
   OnDestroy,
   OnInit,
-  computed,
   inject,
   output,
   signal,
@@ -99,8 +98,6 @@ export class SessionListComponent implements OnInit, OnDestroy {
   readonly opened = output<TranscriptSession>();
   /** Forwards errors to the parent banner. */
   readonly errorOccurred = output<string>();
-  /** `true` while any recording is in flight — resume is hidden then. */
-  readonly recordingInProgress = computed(() => this.transcription.recordingSessionId() !== null);
 
   /** Recorded sessions on disk (newest first). */
   readonly sessions = signal<TranscriptSession[]>([]);
@@ -110,6 +107,7 @@ export class SessionListComponent implements OnInit, OnDestroy {
   readonly error = signal('');
 
   private readonly transcription = inject(TranscriptionService);
+  readonly recordingInProgress = this.transcription.recording;
   private readonly cdr = inject(ChangeDetectorRef);
   /** Poll timer, active only while a session is still recording/finalizing. */
   private poll: ReturnType<typeof setInterval> | undefined;

@@ -4,9 +4,6 @@
 /** PL/EN (forced; never auto-detected). */
 export type Language = 'pl' | 'en';
 
-/** Compiled whisper.cpp acceleration backends (build-time, not host-probe). */
-export type Backend = 'cpu' | 'metal' | 'vulkan';
-
 /** Probed host GPU class — mirrors Rust `GpuClass` (ADR-085). */
 export type GpuClass = 'none' | 'integrated' | 'discrete';
 
@@ -76,6 +73,8 @@ export interface TranscriptSession {
   audio_path: string | null;
   /** Extra audio parts recorded by resumes (absent on never-resumed sessions). */
   audio_parts?: string[];
+  /** Capture warnings currently raised, in arrival order (absent when none are). */
+  active_warnings?: CaptureWarning[];
   models_used: ModelsUsed;
   last_seq: number;
 }
@@ -113,7 +112,6 @@ export type TranscriptEvent =
 /** `transcription_capabilities` command return type. */
 export interface CapabilitiesAck {
   capabilities: CaptureCapabilities;
-  backends: Backend[];
   gpu_class: GpuClass;
   /** Acceleration label computed host-side (`accel::accel_label()`) — render verbatim. */
   accel_label: string;
