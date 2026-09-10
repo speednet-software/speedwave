@@ -4,6 +4,7 @@
 
 STAGE_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/stage-vulkan-runtime.sh"
 BUDGET_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/check-vulkan-path-budget.sh"
+RESOLVER_SCRIPT="$BATS_TEST_DIRNAME/../../scripts/cargo-target-dir.sh"
 
 setup() {
     WORK="$(mktemp -d "${BATS_TEST_TMPDIR}/vulkan.XXXXXX")"
@@ -106,7 +107,7 @@ stage_rig() {
 }
 
 @test "check-vulkan-path-budget rejects a target dir past the MAX_PATH budget" {
-    # 259 - 220 = 39 usable chars; 80 chars is safely over the budget.
+    # 259 - 250 = 9 usable chars; 80 chars is safely over the budget.
     local deep
     deep="/$(printf 'x%.0s' {1..80})"
     CARGO_TARGET_DIR="$deep" run bash "$BUDGET_SCRIPT"
@@ -121,6 +122,7 @@ stage_rig() {
     deep="$WORK/$(printf 'x%.0s' {1..80})"
     mkdir -p "$deep/repo/scripts" "$deep/repo/desktop/src-tauri"
     cp "$BUDGET_SCRIPT" "$deep/repo/scripts/check-vulkan-path-budget.sh"
+    cp "$RESOLVER_SCRIPT" "$deep/repo/scripts/cargo-target-dir.sh"
 
     CARGO_TARGET_DIR="t" run bash "$deep/repo/scripts/check-vulkan-path-budget.sh"
 
@@ -128,10 +130,35 @@ stage_rig() {
     [[ "$output" == *"too deep"* ]]
 }
 
+@test "cargo-target-dir resolves a relative crate dir without doubling it" {
+    # Makefile's E2E_BINARY passes a repo-relative crate dir: the no-cargo fallback used to
+    # re-prefix it into <crate>/<crate>/target and print a path nothing ever builds into.
+    local sealed expected
+    mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri"
+    cp "$RESOLVER_SCRIPT" "$WORK/repo/scripts/cargo-target-dir.sh"
+    sealed="$(dirname "$(command -v bash)")"
+    run env PATH="$sealed" bash -c 'command -v cargo'
+    [ "$status" -ne 0 ]
+    expected="$(cd "$WORK/repo" && pwd)/desktop/src-tauri/target"
+
+    cd "$WORK/repo"
+    run env -u CARGO_TARGET_DIR PATH="$sealed" bash scripts/cargo-target-dir.sh desktop/src-tauri
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "$expected" ]
+}
+
+@test "cargo-target-dir fails loud on a crate dir that does not exist" {
+    run bash "$RESOLVER_SCRIPT" "$WORK/absent"
+
+    [ "$status" -ne 0 ]
+}
+
 # Fabricates a minimal crate so `cargo metadata` (the config-layer resolver) works in isolation.
 budget_rig() {
     mkdir -p "$WORK/repo/scripts" "$WORK/repo/desktop/src-tauri/.cargo" "$WORK/repo/desktop/src-tauri/src"
     cp "$BUDGET_SCRIPT" "$WORK/repo/scripts/check-vulkan-path-budget.sh"
+    cp "$RESOLVER_SCRIPT" "$WORK/repo/scripts/cargo-target-dir.sh"
     printf '[package]\nname = "budget-rig"\nversion = "0.0.0"\nedition = "2021"\n' \
         > "$WORK/repo/desktop/src-tauri/Cargo.toml"
     : > "$WORK/repo/desktop/src-tauri/src/lib.rs"

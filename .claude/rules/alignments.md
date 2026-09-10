@@ -23,6 +23,12 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 - ~~Rust `PiiCategory` serde wire strings ↔ TS `PIIType` enum~~ — removed: the resolver (`pii_policy.rs`) moved to an open rule-id set (no fixed enum) in the v3 PII policy migration; `pii_category_serde_matches_policy_engine_ts` no longer exists. The orphaned TS `PIIType` enum (`mcp-servers/policies/src/types.ts`) has been deleted (design decision 2.3, `SPEED-311-yaml-rules-design.md`) — done. The Desktop Settings UI now sources categories dynamically via `list_pii_rules` (`rule_library()`) instead of a fixed enum; see `rules_yaml_is_ssot_for_pii_categories` (`pii_policy.rs`).
 - `POLICY_FILE`/`POLICY_DIGEST` env names ↔ `compose.template.yml` mcp-hub env ↔ `mcp-servers/hub/src/policy.ts` reader: `spw_policy_env_names_appear_in_compose_template`, `hub_policy_volume_appears_in_compose_template` (`security_check.rs`).
 - `desktop/src/angular.json` serve `port` ↔ `desktop/src-tauri/tauri.conf.json` `devUrl` port, and `make dev` strips `PORT` before launching Tauri — `_tests/desktop/dev-server-port.bats`.
+- Windows dev setup path budget alignment:
+  - `setup-dev-windows.ps1` generates a crate-local `target-dir` that must fit `check-vulkan-path-budget.sh` limits (`SUFFIX_BUDGET`/`MAX_PATH`).
+  - Allowed script outputs: `~/msvc-env.sh`, `~/.bashrc`, and `desktop/src-tauri/.cargo/config.toml`.
+  - Never write to the committed `<repo>/.cargo/config.toml` (pins `SPEEDWAVE_DATA_DIR`).
+  - Shared resolver: `scripts/cargo-target-dir.sh` serves both the path budget gate and `Makefile`'s `E2E_BINARY`.
+  - Tests: `_tests/desktop/setup-dev-windows.bats`, `_tests/desktop/vulkan-scripts.bats` and `_tests/desktop/check-windows-build-deps.bats`.
 - `.node-version` ↔ every `node-version-file:` in `.github` ↔ Makefile `NODE_VERSION` (bundled Node, `make setup-dev` gate via `scripts/check-node-version.sh`) — `_tests/ci/node-version-pin.bats` (also forbids a `.nvmrc` shadow copy and inline `node-version:` literals).
 - No hardcoded loopback binds — drift detector `tests/no_hardcoded_loopback_bind.rs`; no raw engine paths — `tests/no_raw_engine_path.rs` (escape hatch for both: `// SSOT-allow: <reason>`).
 - `LockedRuntime` encapsulation (trait stays `pub(crate)`, no lock re-exports) — `tests/ssot_enforcement.rs`.

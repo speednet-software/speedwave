@@ -15,7 +15,8 @@
 #   - cargo-tauri CLI (cargo install tauri-cli) — for desktop dev/build
 #   - cargo-llvm-cov (cargo install cargo-llvm-cov) — for Rust coverage
 #   - cargo-audit (cargo install cargo-audit) — for dependency audit
-#   - bats-core (brew install bats-core) — for E2E tests (optional)
+#   - bats-core (brew install bats-core; macOS/CI only) — for E2E + script test suites
+#   - gitleaks (brew install gitleaks / choco install gitleaks) — required by the pre-commit hook
 #   - Swift 5.9+ (macOS only, for native OS CLI binaries)
 
 # Ensure cargo and Homebrew are in PATH even in non-interactive shells
@@ -39,6 +40,15 @@ SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-dev
 export SPEEDWAVE_DATA_DIR
 
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
+
+# No bats on a Windows host (no Chocolatey package; the rig runs it inside WSL), so the
+# hint is platform-picked once here and shared by the probe and all ten bats gates.
+ifeq ($(OS),Windows_NT)
+BATS_HINT = echo "     Windows: not provisioned — the bats suites run on macOS + CI"
+else
+BATS_HINT = echo "     Install: brew install bats-core"
+endif
+REQUIRE_BATS = command -v bats >/dev/null 2>&1 || { echo "❌ bats not found."; $(BATS_HINT); exit 1; }
 
 # bats runs serially. `--jobs N` is unsafe here: bundle-build-context.bats mutates
 # shared repo paths (mcp-servers/{os,shared}/dist) that cannot be tempdir-isolated,
@@ -132,12 +142,22 @@ setup-dev:
 	fi; \
 	\
 	echo ""; \
+	echo "── Git hooks ──"; \
+	if command -v gitleaks >/dev/null 2>&1; then \
+		echo "  ✅ gitleaks $$(gitleaks version 2>/dev/null || echo installed)"; \
+	else \
+		echo "  ❌ gitleaks not found — the pre-commit hook rejects every commit without it"; \
+		echo "     Install: brew install gitleaks (macOS) / make setup-dev-windows (Windows)"; \
+		FAIL=1; \
+	fi; \
+	\
+	echo ""; \
 	echo "── Optional tools ──"; \
 	if command -v bats >/dev/null 2>&1; then \
 		echo "  ✅ bats $$(bats --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"; \
 	else \
 		echo "  ⬚  bats not found (needed for: make test-e2e)"; \
-		echo "     Install: brew install bats-core"; \
+		$(BATS_HINT); \
 	fi; \
 	\
 	echo ""; \
@@ -168,6 +188,10 @@ setup-dev:
 	else \
 		echo "  ⬚  skipped (not macOS)"; \
 	fi; \
+	\
+	echo ""; \
+	echo "── Windows build deps (whisper Vulkan + MSVC) ──"; \
+	bash scripts/check-windows-build-deps.sh; \
 	\
 	echo ""; \
 	if [ "$$FAIL" -eq 1 ]; then \
@@ -232,8 +256,11 @@ test: guard-not-prod-data-dir
 check: check-clippy check-desktop-clippy check-proxy-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
 	@echo "\n✅ All checks passed"
 
+# `cargo clean` twice: desktop/src-tauri is its own workspace, and on Windows its
+# target-dir is redirected out of the tree entirely (ADR-085 path budget).
 clean:
 	cargo clean
+	cd desktop/src-tauri && cargo clean
 	rm -rf desktop/src/dist desktop/src/node_modules/.cache
 	cd mcp-servers && rm -rf node_modules/*/dist */dist
 	rm -rf native/macos/*/.build
@@ -422,15 +449,18 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
+# Shared by test-desktop-build and test-desktop-build-run so the two can't drift.
+DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
+  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
+  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
+  _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
+  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
+  _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
+
 test-desktop-build-run:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/sign-windows-binaries.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
-	  _tests/desktop/dev-server-port.bats
+	@$(REQUIRE_BATS)
+	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run: guard-not-prod-data-dir
@@ -586,7 +616,7 @@ coverage-html: build-mcp
 # ── E2E tests (requires bats-core) ──────────────────────────────────────────
 
 test-e2e: build-cli
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/e2e/e2e-vm-excludes.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
@@ -595,7 +625,7 @@ test-e2e: build-cli
 # so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
 # compiled out — see ADR-051 ("Build hygiene").
 test-e2e-plugin-tamper-release: build-cli-release
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
 
 # `env` prefix is load-bearing (word-split at use sites, not a shell assignment); the
@@ -603,7 +633,7 @@ test-e2e-plugin-tamper-release: build-cli-release
 ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave-dev -- sudo
 
 test-engine-contract:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	ENGINE_EXEC="$(ENGINE_CONTRACT_EXEC)" bats --print-output-on-failure _tests/e2e/engine-contract.bats
 
 test-e2e-update-dirty: build-cli
@@ -613,32 +643,27 @@ test-e2e-update-dirty: build-cli
 	bats --print-output-on-failure _tests/e2e/update-dirty-state.bats
 
 test-entrypoint:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/entrypoint/entrypoint.bats _tests/entrypoint/install-claude.bats \
 	  _tests/entrypoint/statusline.bats _tests/entrypoint/osc52-copy.bats
 	@echo "✅ Entrypoint tests passed"
 
 test-ci:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
-	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats
+	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
+	  _tests/ci/bats-assertion-hygiene.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
-	bats _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
-	  _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
-	  _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
-	  _tests/desktop/sign-windows-binaries.bats \
-	  _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
-	  _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
-	  _tests/desktop/dev-server-port.bats
+	@$(REQUIRE_BATS)
+	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 # Fast config validation — stable, runs in `make test`.
 test-desktop-config:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
 	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats
 	@echo "✅ Desktop config tests passed"
@@ -646,7 +671,7 @@ test-desktop-config:
 # Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
 # edge cases from breaking unrelated PRs.
 test-release-gate:
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
 	bats _tests/desktop/verify-release-assets.bats
 	@echo "✅ Release-gate tests passed"
@@ -685,8 +710,9 @@ test-e2e-desktop: test-e2e-desktop-build
 	@"$(MAKE)" _e2e-run
 	@echo "✅ Desktop E2E tests passed"
 
-# Honour the CARGO_TARGET_DIR escape (Windows MAX_PATH) when locating the built app.
-E2E_BINARY = $(or $(CARGO_TARGET_DIR),desktop/src-tauri/target)/release/speedwave-desktop
+# Resolve the effective target dir: on Windows the desktop crate builds into a short
+# crate-local target-dir (ADR-085), which CARGO_TARGET_DIR alone does not describe.
+E2E_BINARY = $(shell bash scripts/cargo-target-dir.sh desktop/src-tauri)/release/speedwave-desktop
 
 # All platforms: app embeds tauri-plugin-webdriver on port 4445.
 # Launch app, wait for WebDriver ready, run wdio, cleanup.
@@ -794,7 +820,7 @@ check-mcp:
 
 check-angular:
 	cd desktop/src && $(NPX) ng build --configuration production
-	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not found. Install: brew install bats-core"; exit 1; }
+	@$(REQUIRE_BATS)
 	bats _tests/desktop/desktop-build.bats
 	@echo "✅ Angular production build + desktop path verification OK"
 

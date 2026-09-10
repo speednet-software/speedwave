@@ -185,6 +185,15 @@ EOF
     [ -d "$DEST/mcp-os/shared/node_modules/express" ]
 }
 
+@test "bundle script strips devDependencies from the staged shared package.json" {
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -q '"devDependencies"' "$DEST/mcp-os/shared/package.json"
+    [ "$status" -ne 0 ]
+    run grep -q '"devDependencies"' "$DEST/oauth/shared/package.json"
+    [ "$status" -ne 0 ]
+}
+
 @test "bundle script creates @speedwave/mcp-shared directory in mcp-os/os" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]

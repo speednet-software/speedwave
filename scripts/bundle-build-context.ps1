@@ -179,6 +179,7 @@ function Stage-Host-Worker {
     # Install production deps only — standalone lockfile, then deterministic npm ci.
     Copy-Item "mcp-servers\shared\package.json" "$dest\$bundle\shared\"
     Push-Location "$dest\$bundle\shared"
+    npm pkg delete devDependencies
     npm install --package-lock-only --ignore-scripts
     npm ci --omit=dev --ignore-scripts
     Pop-Location
