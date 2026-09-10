@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { signal } from '@angular/core';
+import { computed, signal, type Signal } from '@angular/core';
 import { MeetingTranscriptionComponent } from './meeting-transcription.component';
 import { TranscriptionService } from '../services/transcription.service';
 import type {
@@ -31,14 +31,17 @@ describe('MeetingTranscriptionComponent', () => {
     openAudioCapturePrivacyPane: ReturnType<typeof vi.fn>;
     captureWarnings: typeof captureWarningsSig;
     recordingSessionId: typeof recordingSessionIdSig;
+    recording: Signal<boolean>;
     recordingSource: typeof recordingSourceSig;
     recordingLanguage: typeof recordingLanguageSig;
+    recordingLive: typeof recordingLiveSig;
   };
   const activeSig = signal<TranscriptSession | null>(null);
   const captureWarningsSig = signal<readonly CaptureWarning[]>([]);
   const recordingSessionIdSig = signal<string | null>(null);
   const recordingSourceSig = signal<AudioSource | null>(null);
   const recordingLanguageSig = signal<Language | null>(null);
+  const recordingLiveSig = signal<boolean | null>(null);
 
   const recommended = (downloaded: boolean) => ({
     key: 'large-v3',
@@ -59,6 +62,7 @@ describe('MeetingTranscriptionComponent', () => {
     recordingSessionIdSig.set(null);
     recordingSourceSig.set(null);
     recordingLanguageSig.set(null);
+    recordingLiveSig.set(null);
     svc = {
       active: vi.fn(() => activeSig()),
       detach: vi.fn(async () => undefined),
@@ -71,7 +75,6 @@ describe('MeetingTranscriptionComponent', () => {
           supports_microphone: false,
           note: null,
         },
-        backends: ['cpu'],
         gpu_class: 'none' as const,
         accel_label: 'CPU',
       })),
@@ -85,8 +88,10 @@ describe('MeetingTranscriptionComponent', () => {
       openAudioCapturePrivacyPane: vi.fn(async () => undefined),
       captureWarnings: captureWarningsSig,
       recordingSessionId: recordingSessionIdSig,
+      recording: computed(() => recordingSessionIdSig() !== null),
       recordingSource: recordingSourceSig,
       recordingLanguage: recordingLanguageSig,
+      recordingLive: recordingLiveSig,
     };
     await TestBed.configureTestingModule({
       imports: [MeetingTranscriptionComponent],
@@ -197,6 +202,12 @@ describe('MeetingTranscriptionComponent', () => {
   it('detaches the live stream on destroy', async () => {
     await component.ngOnDestroy();
     expect(svc.detach).toHaveBeenCalled();
+  });
+
+  it('keeps the live stream attached on destroy while a recording runs', async () => {
+    recordingSessionIdSig.set('a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d');
+    await component.ngOnDestroy();
+    expect(svc.detach).not.toHaveBeenCalled();
   });
 
   it('renders no capture-warning banner without a warning', () => {

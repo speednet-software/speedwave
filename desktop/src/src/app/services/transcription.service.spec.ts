@@ -155,6 +155,53 @@ describe('TranscriptionService', () => {
     });
   });
 
+  describe('recordingLive tracks how the recording actually started', () => {
+    async function startWithLiveModel(live: string | null): Promise<void> {
+      const ack = {
+        session_id: 'sess-1',
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot({ models_used: { live, finalize: null } }),
+      };
+      mockTauri.invokeHandler = async (cmd) => (cmd === 'start_transcription' ? ack : undefined);
+      await svc.startRecording({ kind: 'system_wide' }, 'pl', true);
+    }
+
+    it('is null while nothing is recording', () => {
+      expect(svc.recordingLive()).toBeNull();
+    });
+
+    it('is true when the session snapshot names a live model', async () => {
+      await startWithLiveModel('small');
+      expect(svc.recordingLive()).toBe(true);
+    });
+
+    it('is false for a record-only session even though live was requested', async () => {
+      // `models_used.live: null` is the host saying record-only; the request does not win.
+      await startWithLiveModel(null);
+      expect(svc.recordingLive()).toBe(false);
+    });
+
+    it('clears on stopRecording', async () => {
+      await startWithLiveModel('small');
+      mockTauri.invokeHandler = async () => undefined;
+      await svc.stopRecording('sess-1');
+      expect(svc.recordingLive()).toBeNull();
+    });
+
+    it('clears when a failed start rolls back successfully', async () => {
+      // Start for real first, or the assertion passes on the initial `null` either way.
+      await startWithLiveModel('small');
+      expect(svc.recordingLive()).toBe(true);
+      mockTauri.listen = vi.fn(async () => {
+        throw new Error('ipc down');
+      });
+      await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
+        'ipc down'
+      );
+      expect(svc.recordingLive()).toBeNull();
+    });
+  });
+
   describe('recording state survives a tab switch', () => {
     async function startWith(id: string): Promise<void> {
       const ack = {
@@ -186,6 +233,64 @@ describe('TranscriptionService', () => {
       };
       await expect(svc.stopRecording('sess-1')).rejects.toThrow('already stopping');
       expect(svc.recordingSessionId()).toBeNull();
+    });
+
+    it('clears the tracked recording when the driver fails on its own', async () => {
+      await startWith('sess-1');
+      expect(svc.recording()).toBe(true);
+
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'failed', reason: 'capture device lost' },
+      });
+
+      expect(svc.recording()).toBe(false);
+      expect(svc.recordingSessionId()).toBeNull();
+      expect(svc.recordingSource()).toBeNull();
+      expect(svc.recordingLanguage()).toBeNull();
+    });
+
+    it('clears the tracked recording when the session finishes', async () => {
+      await startWith('sess-1');
+      mockTauri.dispatchEvent('transcript_event::sess-1', { kind: 'finished', seq: 1 });
+      expect(svc.recording()).toBe(false);
+    });
+
+    it('keeps the tracked recording while the status stays recording', async () => {
+      await startWith('sess-1');
+      mockTauri.dispatchEvent('transcript_event::sess-1', {
+        kind: 'status_changed',
+        seq: 1,
+        status: { state: 'recording' },
+      });
+      expect(svc.recordingSessionId()).toBe('sess-1');
+      expect(svc.recording()).toBe(true);
+    });
+
+    it('clears the tracked recording when a snapshot shows it already ended', async () => {
+      await startWith('sess-1');
+      await svc.detach();
+      mockTauri.invokeHandler = async () => ({
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot({ id: 'sess-1', status: { state: 'done' } }),
+      });
+      await svc.subscribeToTranscript('sess-1');
+      expect(svc.recording()).toBe(false);
+      expect(svc.recordingSessionId()).toBeNull();
+      expect(svc.liveDraft()).toBe('');
+      expect(svc.audioLevels()).toBeNull();
+    });
+
+    it('keeps the tracked recording when the snapshot is still recording', async () => {
+      await startWith('sess-1');
+      await svc.detach();
+      mockTauri.invokeHandler = async () => ({
+        event_name: 'transcript_event::sess-1',
+        snapshot: snapshot({ id: 'sess-1' }),
+      });
+      await svc.subscribeToTranscript('sess-1');
+      expect(svc.recordingSessionId()).toBe('sess-1');
     });
 
     it('resumeActiveRecording re-subscribes to a still-running recording', async () => {
@@ -461,14 +566,14 @@ describe('TranscriptionService', () => {
     it('defaults from the probed GPU class when nothing is stored', async () => {
       mockTauri.invokeHandler = async (cmd) =>
         cmd === 'transcription_capabilities'
-          ? { capabilities: {}, backends: ['cpu', 'vulkan'], gpu_class: 'integrated' }
+          ? { capabilities: {}, gpu_class: 'integrated' }
           : undefined;
       await svc.getCapabilities();
       expect(svc.liveTranscriptPreferred()).toBe(false);
 
       mockTauri.invokeHandler = async (cmd) =>
         cmd === 'transcription_capabilities'
-          ? { capabilities: {}, backends: ['cpu', 'metal'], gpu_class: 'discrete' }
+          ? { capabilities: {}, gpu_class: 'discrete' }
           : undefined;
       await svc.getCapabilities();
       expect(svc.liveTranscriptPreferred()).toBe(true);
@@ -476,9 +581,7 @@ describe('TranscriptionService', () => {
 
     it('a stored choice beats the hardware default and round-trips', async () => {
       mockTauri.invokeHandler = async (cmd) =>
-        cmd === 'transcription_capabilities'
-          ? { capabilities: {}, backends: ['cpu'], gpu_class: 'none' }
-          : undefined;
+        cmd === 'transcription_capabilities' ? { capabilities: {}, gpu_class: 'none' } : undefined;
       await svc.getCapabilities();
       svc.setLiveTranscriptPreferred(true);
       expect(svc.liveTranscriptPreferred()).toBe(true);
