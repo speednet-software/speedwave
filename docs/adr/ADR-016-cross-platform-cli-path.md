@@ -28,6 +28,8 @@ The suffix rule matches `derive_wsl_distro_name_from`: `~/.speedwave` → `speed
 
 One-time leftover: a machine where a dev build already overwrote `~/.local/bin/speedwave` keeps that file. Starting the production app restores it; a machine with no production install has to delete it by hand.
 
+The name is also what an installed CLI resolves its data dir from when `SPEEDWAVE_DATA_DIR` is unset (ADR-031 §9), which is why `data_dir_from_cli_exe` is pinned against `cli_install_path_for` by a round-trip test rather than re-deriving the rule.
+
 ### Shell config file selection (Unix)
 
 `detect_shell` maps `$SHELL` to a `UserShell` enum (`Zsh`, `Bash`, `Unknown`), and `shell_config_targets` picks the file:
@@ -49,6 +51,7 @@ When `$SHELL` is _empty_ (common when the Desktop app launches from Dock/Finder 
 - Shell config file selection — `setup_wizard.rs::shell_config_targets`; idempotent PATH append in `ensure_local_bin_on_path` / `ensure_local_bin_on_path_for_shell`.
 - Windows CLI subdir (`bin`) — `crates/speedwave-runtime/src/consts.rs::CLI_BIN_SUBDIR` (SSOT; see CLAUDE.md alignment with `sweep.ps1` and the pinned-CLI launch path).
 - Unix CLI filename — `crates/speedwave-runtime/src/consts.rs::derive_cli_binary_name_from`, consumed by `cli_install_path_for` (SSOT for the full path on both platforms).
+- Reading the instance back off the install path — `consts::data_dir_from_cli_exe`, the second level of `data_dir()` resolution (ADR-031 §9), so an installed CLI needs no `SPEEDWAVE_DATA_DIR`.
 - Cleanup — `setup_wizard.rs::factory_reset` removes the Unix CLI binary at the install path for _its own_ data dir, so resetting a dev instance leaves the production binary alone; on Windows the CLI lives inside the data dir (`<data_dir>/bin/`) and is removed by the data-dir wipe. The shell `export` line is intentionally left in place to avoid destructively editing user dotfiles.
 
 ## Rejected alternatives
