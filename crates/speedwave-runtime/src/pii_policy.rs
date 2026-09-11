@@ -355,17 +355,19 @@ fn validate_own_rule(r: &OwnRuleV3, library_ids: &HashSet<&str>) -> Result<(), S
 /// Validates one keyword's own fields (length, alias shape, match != alias);
 /// cross-policy checks (uniqueness, alias/match collisions) run at merge time.
 fn validate_keyword_fields(kw: &KeywordV3) -> Result<(), String> {
+    let min = crate::consts::PII_KEYWORD_MIN_CHARS;
+    let max = crate::consts::PII_KEYWORD_MAX_CHARS;
     let match_len = kw.r#match.chars().count();
-    if !(3..=128).contains(&match_len) {
+    if !(min..=max).contains(&match_len) {
         return Err(format!(
-            "keyword match \"{}\" must be 3-128 characters",
+            "keyword match \"{}\" must be {min}-{max} characters",
             kw.r#match
         ));
     }
     let alias_len = kw.alias.chars().count();
-    if !(3..=128).contains(&alias_len) {
+    if !(min..=max).contains(&alias_len) {
         return Err(format!(
-            "keyword alias \"{}\" must be 3-128 characters",
+            "keyword alias \"{}\" must be {min}-{max} characters",
             kw.alias
         ));
     }
