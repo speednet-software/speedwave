@@ -73,6 +73,27 @@ The same per-data-dir isolation extends to WSL2 on Windows via `wsl_distro_name(
 
 Every runtime consumer (`runtime/wsl.rs`, `project.rs::add_project_with_data_dir`, `setup_wizard.rs`) calls `consts::wsl_distro_name()` instead of duplicating the literal, so prod and dev distros never collide on containerd image namespace, compose project prefix, or `host.docker.internal` resolution.
 
+### 8. Per-worktree dev instances (`DEV_INSTANCE`)
+
+Sections 1-7 isolate a dev build from production, not two dev builds from each other. Two worktrees running `make dev` shared the data-dir default, the bundle identifier `pl.speedwave.desktop.dev` and the Angular dev-server port. The identifier is the binding one: `tauri-plugin-single-instance` keys its singleton socket on `config.identifier` (`/tmp/<identifier>_si.sock`), so the second process exits and focuses the first window instead of starting.
+
+`DEV_INSTANCE` (default `dev`) is the one knob; the `Makefile` derives the rest from it:
+
+| Derived              | `DEV_INSTANCE=dev` (default)       | `DEV_INSTANCE=speed-533`         |
+| -------------------- | ---------------------------------- | -------------------------------- |
+| `SPEEDWAVE_DATA_DIR` | `~/.speedwave-dev`                 | `~/.speedwave-speed-533`         |
+| Bundle identifier    | `pl.speedwave.desktop.dev`         | `pl.speedwave.desktop.speed-533` |
+| Product name         | `Speedwave Dev`                    | `Speedwave speed-533`            |
+| Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name            |
+
+The default instance overrides no port, so `angular.json` and `tauri.conf.json` remain its single source (the pair is pinned equal by `_tests/desktop/dev-server-port.bats`). Every other instance takes 24 bits of `sha256` over its own name folded into 20000-39999: the same worktree keeps the same URL across restarts, nobody tracks which port is free, and the window stays clear of the Angular defaults below it and the macOS ephemeral range (49152+) above it. `DEV_PORT` overrides that when the derived one is inconvenient or taken.
+
+`guard-dev-instance` refuses a `DEV_INSTANCE` that `derive_instance_name_from` would reject and a non-numeric `DEV_PORT`. `guard-dev-port` runs only on the way into `make dev`: it prints what the instance resolved to and binds the port once to fail now rather than after the build, in `ng serve`. Resolving the configuration (`make dev-config`) never binds anything.
+
+The override has two consumers: `tauri-build` merges `TAURI_CONFIG` into the compiled config (identifier, product name), and the Tauri CLI reads `--config` for `build.devUrl` and `build.beforeDevCommand`. The `Makefile` hands the same JSON to both and exports it as `DEV_TAURI_CONFIG`, so `scripts/dev-tauri-windows.sh` consumes that one definition rather than keeping a copy.
+
+What an extra instance costs follows from the sections above: its own Lima VM with its own containerd image store and BuildKit cache (a full image build on first start), and its own config, credentials and plugins, because none of that lives outside the data dir. The setup wizard has to run once from the Desktop app; the CLI starts an existing VM but does not create one.
+
 ## Consequences
 
 ### Positive
@@ -80,6 +101,7 @@ Every runtime consumer (`runtime/wsl.rs`, `project.rs::add_project_with_data_dir
 - Full isolation between production and dev instances: separate Lima VM, data files, compose projects, tokens, plugins, and MCP OS worker
 - Default behavior (without the env var) is identical to before — no migration required for existing users
 - Pure helper functions make the resolution logic easy to unit-test without process-level mutation
+- Several dev builds run side by side, one per worktree, so testing a branch does not stop the instance the developer works in
 
 ### Negative
 

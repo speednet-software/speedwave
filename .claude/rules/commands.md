@@ -14,6 +14,12 @@ make check-fmt      # fmt (root + desktop + proxy) + prettier — the pre-push h
 make check          # lint + clippy + type-check + format — thorough local pass; CI runs the same checks as separate steps
 make check-all      # check + test + coverage + audit
 make dev            # desktop dev mode (Tauri + Angular hot reload)
+make dev DEV_INSTANCE=speed-533
+                    # second dev instance: own data dir (~/.speedwave-speed-533, own Lima VM),
+                    # own bundle id (pl.speedwave.desktop.speed-533) and an ng serve port
+                    # derived from the name (DEV_PORT=<port> overrides it).
+                    # One per worktree, so testing a branch does not stop the instance you work in.
+make dev-config     # print the resolved data dir / identifier / TAURI_CONFIG without starting anything
 make build          # build everything
 make fmt / status / audit / coverage-html
 ```

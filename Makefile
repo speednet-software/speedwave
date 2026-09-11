@@ -8,6 +8,8 @@
 #   make coverage-html— generate & open HTML coverage reports
 #   make audit        — check dependencies for known vulnerabilities
 #   make dev          — start desktop in dev mode (Tauri + Angular)
+#                       add DEV_INSTANCE=<name> for a second, isolated instance
+#                       alongside it (its port is derived from the name)
 #
 # Prerequisites:
 #   - Rust toolchain (rustup)
@@ -33,10 +35,50 @@ NPM := npm
 NPX := npx
 endif
 
+# Dev instance selection (ADR-031). One `make dev` per worktree: DEV_INSTANCE
+# names the instance and everything that would otherwise collide between two
+# concurrent dev builds is derived from it. The data dir (and through its
+# basename the Lima VM, compose prefix and WSL distro), the bundle identifier
+# (tauri-plugin-single-instance keys its singleton socket on it, so a shared one
+# makes the second process exit and only focus the first window) and, for any
+# instance but the default, the Angular dev-server port.
+#   make dev                          : today's dev instance
+#   make dev DEV_INSTANCE=speed-533   : a second one, side by side
+DEV_INSTANCE ?= dev
+DEV_IDENTIFIER ?= pl.speedwave.desktop.$(DEV_INSTANCE)
+ifeq ($(DEV_INSTANCE),dev)
+DEV_PRODUCT_NAME ?= Speedwave Dev
+else
+DEV_PRODUCT_NAME ?= Speedwave $(DEV_INSTANCE)
+endif
+# The default instance keeps the port where it is declared, in angular.json's
+# serve options and tauri.conf.json's devUrl (pinned equal by
+# dev-server-port.bats). Any other instance derives one from its own name, so a
+# worktree keeps the same URL across restarts and nobody has to track which port
+# is free: 24 bits of sha256 folded into 20000-39999, clear of the Angular
+# defaults below and of the macOS ephemeral range (49152+) above. Computed once,
+# and only when DEV_PORT was not given; `shasum` is the macOS spelling of
+# `sha256sum` (same fallback as the Lima tarball check below).
+ifneq ($(DEV_INSTANCE),dev)
+ifeq ($(origin DEV_PORT),undefined)
+DEV_PORT := $(shell printf '%s' '$(DEV_INSTANCE)' | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-6 | { read h; echo $$((20000 + 0x$$h % 20000)); })
+endif
+endif
+# Overriding the port means overriding both files at once, from here.
+ifeq ($(strip $(DEV_PORT)),)
+DEV_PORT_CONFIG :=
+else
+DEV_PORT_CONFIG := ,"build":{"devUrl":"http://localhost:$(DEV_PORT)","beforeDevCommand":{"script":"npx ng serve --port $(DEV_PORT)","cwd":"../src"}}
+endif
+# Exported rather than interpolated into the recipes: GnuWin32 make 3.81
+# mishandles inline JSON quoting, the same reason dev-tauri-windows.sh exists.
+DEV_TAURI_CONFIG = {"identifier":"$(DEV_IDENTIFIER)","productName":"$(DEV_PRODUCT_NAME)"$(DEV_PORT_CONFIG)}
+export DEV_TAURI_CONFIG
+
 # Isolate dev builds from production (~/.speedwave/).
 # Unit tests use fake_home/tmpdir — they ignore this variable.
 # E2E tests backup/restore this directory (not production ~/.speedwave/).
-SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-dev
+SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-$(DEV_INSTANCE)
 export SPEEDWAVE_DATA_DIR
 
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
@@ -75,7 +117,55 @@ guard-not-prod-data-dir:
 	    exit 1; \
 	fi
 
-.PHONY: all build test check clean dev install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir \
+# DEV_INSTANCE ends up as the SPEEDWAVE_DATA_DIR basename, so it must satisfy the
+# same rule as consts::derive_instance_name_from (^[a-z][a-z0-9-]{0,63}$ once the
+# leading dot is stripped) or the app panics at startup instead of reporting a
+# typo. DEV_PORT is checked here too: the derived value is always a number, but an
+# explicitly passed one is whatever the caller typed.
+guard-dev-instance:
+	@name='$(DEV_INSTANCE)'; \
+	case "$$name" in \
+	  ''|*[!a-z0-9-]*|[!a-z]*) \
+	    echo "❌ Refusing: DEV_INSTANCE='$$name' must match ^[a-z][a-z0-9-]*$$ (it becomes the Lima VM name via the data-dir basename)." >&2; \
+	    exit 1;; \
+	esac; \
+	if [ $${#name} -gt 54 ]; then \
+	    echo "❌ Refusing: DEV_INSTANCE='$$name' is too long (max 54, because 'speedwave-' plus the name must fit 64 chars)." >&2; \
+	    exit 1; \
+	fi
+	@if [ "$(DEV_INSTANCE)" != "dev" ] && [ -z "$(strip $(DEV_PORT))" ]; then \
+	    echo "❌ Refusing: DEV_INSTANCE=$(DEV_INSTANCE) resolved to an empty DEV_PORT, so it would reuse the default instance's port." >&2; \
+	    echo "   Pass one explicitly: make dev DEV_INSTANCE=$(DEV_INSTANCE) DEV_PORT=4271" >&2; \
+	    exit 1; \
+	fi
+	@case "$(strip $(DEV_PORT))" in \
+	  ''|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9]) ;; \
+	  *) echo "❌ Refusing: DEV_PORT='$(DEV_PORT)' must be a port number." >&2; exit 1;; \
+	esac
+	@if [ "$(DEV_INSTANCE)" != "dev" ] && [ "$(SPEEDWAVE_DATA_DIR)" != "$(HOME)/.speedwave-$(DEV_INSTANCE)" ]; then \
+	    echo "⚠️  DEV_INSTANCE=$(DEV_INSTANCE) but SPEEDWAVE_DATA_DIR=$(SPEEDWAVE_DATA_DIR) comes from the environment, so that is the data dir this instance gets." >&2; \
+	fi
+
+# Startup-only checks, split from guard-dev-instance so that resolving the config
+# (dev-config, and the tests that read it) never has to bind a port. A taken port
+# otherwise surfaces minutes later, in ng serve, after the whole build. Node is a
+# setup-dev prerequisite; where it is missing, skip the probe rather than refuse.
+guard-dev-port: guard-dev-instance
+	@if [ "$(DEV_INSTANCE)" != "dev" ]; then \
+	    echo "▶ dev instance $(DEV_INSTANCE): $(SPEEDWAVE_DATA_DIR), $(DEV_IDENTIFIER), http://localhost:$(DEV_PORT)"; \
+	fi
+	@if [ -n "$(strip $(DEV_PORT))" ] && command -v node >/dev/null 2>&1; then \
+	    node -e 'const s=require("net").createServer();s.once("error",e=>{console.error("❌ Refusing: port "+process.argv[1]+" is already in use ("+e.code+"). Pick another: make dev DEV_INSTANCE=$(DEV_INSTANCE) DEV_PORT=<port>");process.exit(1)});s.once("listening",()=>s.close());s.listen(Number(process.argv[1]),"127.0.0.1")' $(DEV_PORT) || exit 1; \
+	fi
+
+# What `make dev` would use right now. Read-only, and the fixture the
+# dev-server-port bats suite asserts against.
+dev-config: guard-dev-instance
+	@printf 'DEV_INSTANCE=%s\n' '$(DEV_INSTANCE)'
+	@printf 'SPEEDWAVE_DATA_DIR=%s\n' '$(SPEEDWAVE_DATA_DIR)'
+	@printf 'TAURI_CONFIG=%s\n' "$$DEV_TAURI_CONFIG"
+
+.PHONY: all build test check clean dev dev-config install-deps setup-dev setup-dev-windows install-hooks guard-not-prod-data-dir guard-dev-instance guard-dev-port \
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
@@ -1022,7 +1112,7 @@ clean-wsl-resources:
 # ── Development ──────────────────────────────────────────────────────────────
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
@@ -1034,7 +1124,7 @@ dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-ins
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
-dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
+dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."
@@ -1045,7 +1135,7 @@ dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs ge
 	chmod +x desktop/src-tauri/cli/speedwave
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
-	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}' cargo tauri dev
+	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
 endif
 
 # ── Quick status ─────────────────────────────────────────────────────────────
