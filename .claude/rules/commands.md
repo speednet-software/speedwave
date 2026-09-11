@@ -17,7 +17,9 @@ make dev            # desktop dev mode (Tauri + Angular hot reload)
 make dev DEV_INSTANCE=speed-533
                     # second dev instance: own data dir (~/.speedwave-speed-533, own Lima VM),
                     # own bundle id (pl.speedwave.desktop.speed-533) and an ng serve port
-                    # derived from the name (DEV_PORT=<port> overrides it).
+                    # derived from the name (DEV_PORT=<port> overrides it), and its own
+                    # CLI on PATH (~/.local/bin/speedwave-speed-533; production keeps
+                    # ~/.local/bin/speedwave).
                     # One per worktree, so testing a branch does not stop the instance you work in.
 make dev-config     # print the resolved data dir / identifier / TAURI_CONFIG without starting anything
 make build          # build everything

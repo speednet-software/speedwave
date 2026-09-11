@@ -1210,8 +1210,19 @@ pub fn data_dir() -> &'static std::path::PathBuf {
     })
 }
 
-/// CLI install path as a platform-shaped string (Windows backslashes, not
-/// `PathBuf::join`, so it is host-independent). Unix ignores `data_dir`. ADR-016.
+/// Unix CLI filename from a data-dir path: `.speedwave`→`speedwave`, else `speedwave-<suffix>`
+/// ([`derive_wsl_distro_name_from`]'s rule), so a dev build never overwrites production. ADR-016.
+pub fn derive_cli_binary_name_from(data_dir: &std::path::Path) -> String {
+    let basename = derive_instance_name_from(data_dir);
+    if basename == CLI_BINARY {
+        return CLI_BINARY.to_string();
+    }
+    let suffix = basename.strip_prefix("speedwave-").unwrap_or(&basename);
+    format!("{CLI_BINARY}-{suffix}")
+}
+
+/// CLI install path as a platform-shaped string (Windows backslashes, not `PathBuf::join`, so it
+/// is host-independent). Per-instance on both: Windows by directory, Unix by filename. ADR-016.
 pub fn cli_install_path_for(
     is_windows: bool,
     home: &std::path::Path,
@@ -1225,7 +1236,11 @@ pub fn cli_install_path_for(
             cli_binary_filename(true)
         )
     } else {
-        format!("{}/.local/bin/{}", home.to_string_lossy(), CLI_BINARY)
+        format!(
+            "{}/.local/bin/{}",
+            home.to_string_lossy(),
+            derive_cli_binary_name_from(data_dir)
+        )
     }
 }
 
@@ -2231,12 +2246,11 @@ mod tests {
     }
 
     #[test]
-    fn cli_install_path_for_unix_ignores_data_dir() {
+    fn cli_install_path_for_unix_is_per_instance() {
         let home = std::path::Path::new("/Users/alice");
-        let expected = "/Users/alice/.local/bin/speedwave";
         assert_eq!(
             cli_install_path_for(false, home, std::path::Path::new("/Users/alice/.speedwave")),
-            expected
+            "/Users/alice/.local/bin/speedwave"
         );
         assert_eq!(
             cli_install_path_for(
@@ -2244,9 +2258,61 @@ mod tests {
                 home,
                 std::path::Path::new("/Users/alice/.speedwave-dev")
             ),
-            expected,
-            "unix path must ignore data_dir (install is ~/.local/bin regardless)"
+            "/Users/alice/.local/bin/speedwave-dev",
+            "a dev instance must not install over the production binary"
         );
+        assert_eq!(
+            cli_install_path_for(false, home, std::path::Path::new("/opt/sw-test")),
+            "/Users/alice/.local/bin/speedwave-sw-test"
+        );
+    }
+
+    #[test]
+    fn test_derive_cli_binary_name_production_is_bare() {
+        assert_eq!(
+            derive_cli_binary_name_from(std::path::Path::new("/home/user/.speedwave")),
+            CLI_BINARY
+        );
+        assert_eq!(
+            derive_cli_binary_name_from(std::path::Path::new("/home/user/.speedwave")),
+            "speedwave"
+        );
+    }
+
+    #[test]
+    fn test_derive_cli_binary_name_strips_speedwave_prefix() {
+        // `.speedwave-dev` → `speedwave-dev`, not `speedwave-speedwave-dev`.
+        assert_eq!(
+            derive_cli_binary_name_from(std::path::Path::new("/home/user/.speedwave-dev")),
+            "speedwave-dev"
+        );
+        assert_eq!(
+            derive_cli_binary_name_from(std::path::Path::new("/home/user/.speedwave-speed-533")),
+            "speedwave-speed-533"
+        );
+    }
+
+    #[test]
+    fn test_derive_cli_binary_name_custom_basename() {
+        assert_eq!(
+            derive_cli_binary_name_from(std::path::Path::new("/opt/sw-test")),
+            "speedwave-sw-test"
+        );
+    }
+
+    #[test]
+    fn test_derive_cli_binary_names_are_unique_per_instance() {
+        let names: Vec<String> = [
+            "/home/user/.speedwave",
+            "/home/user/.speedwave-dev",
+            "/home/user/.speedwave-speed-533",
+            "/opt/sw-test",
+        ]
+        .iter()
+        .map(|d| derive_cli_binary_name_from(std::path::Path::new(d)))
+        .collect();
+        let unique: std::collections::BTreeSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "instances collided: {names:?}");
     }
 
     #[test]

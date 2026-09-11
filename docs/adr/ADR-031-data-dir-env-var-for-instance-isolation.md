@@ -79,18 +79,21 @@ Sections 1-7 isolate a dev build from production, not two dev builds from each o
 
 `DEV_INSTANCE` (default `dev`) is the one knob; the `Makefile` derives the rest from it:
 
-| Derived              | `DEV_INSTANCE=dev` (default)       | `DEV_INSTANCE=speed-533`         |
-| -------------------- | ---------------------------------- | -------------------------------- |
-| `SPEEDWAVE_DATA_DIR` | `~/.speedwave-dev`                 | `~/.speedwave-speed-533`         |
-| Bundle identifier    | `pl.speedwave.desktop.dev`         | `pl.speedwave.desktop.speed-533` |
-| Product name         | `Speedwave Dev`                    | `Speedwave speed-533`            |
-| Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name            |
+| Derived              | `DEV_INSTANCE=dev` (default)       | `DEV_INSTANCE=speed-533`           |
+| -------------------- | ---------------------------------- | ---------------------------------- |
+| `SPEEDWAVE_DATA_DIR` | `~/.speedwave-dev`                 | `~/.speedwave-speed-533`           |
+| Bundle identifier    | `pl.speedwave.desktop.dev`         | `pl.speedwave.desktop.speed-533`   |
+| Product name         | `Speedwave Dev`                    | `Speedwave speed-533`              |
+| Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name              |
+| CLI on PATH (Unix)   | `~/.local/bin/speedwave-dev`       | `~/.local/bin/speedwave-speed-533` |
 
 The default instance overrides no port, so `angular.json` and `tauri.conf.json` remain its single source (the pair is pinned equal by `_tests/desktop/dev-server-port.bats`). Every other instance takes 24 bits of `sha256` over its own name folded into 20000-39999: the same worktree keeps the same URL across restarts, nobody tracks which port is free, and the window stays clear of the Angular defaults below it and the macOS ephemeral range (49152+) above it. `DEV_PORT` overrides that when the derived one is inconvenient or taken.
 
 `guard-dev-instance` refuses a `DEV_INSTANCE` that `derive_instance_name_from` would reject and a non-numeric `DEV_PORT`. `guard-dev-port` runs only on the way into `make dev`: it prints what the instance resolved to and binds the port once to fail now rather than after the build, in `ng serve`. Resolving the configuration (`make dev-config`) never binds anything.
 
 The override has two consumers: `tauri-build` merges `TAURI_CONFIG` into the compiled config (identifier, product name), and the Tauri CLI reads `--config` for `build.devUrl` and `build.beforeDevCommand`. The `Makefile` hands the same JSON to both and exports it as `DEV_TAURI_CONFIG`, so `scripts/dev-tauri-windows.sh` consumes that one definition rather than keeping a copy.
+
+The CLI name comes from section 7's suffix rule, applied to `~/.local/bin` (ADR-016). Before that, `link_cli` copied every instance's build over the single `~/.local/bin/speedwave` on each app start, so `speedwave` on PATH was whichever instance launched last, production included.
 
 What an extra instance costs follows from the sections above: its own Lima VM with its own containerd image store and BuildKit cache (a full image build on first start), and its own config, credentials and plugins, because none of that lives outside the data dir. The setup wizard has to run once from the Desktop app; the CLI starts an existing VM but does not create one.
 
