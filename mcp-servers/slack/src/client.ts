@@ -401,22 +401,54 @@ async function resolveChannelId(clients: SlackClients, channel: string): Promise
 // ── Tool Implementations ──────────────────────────────────────────────────
 
 /**
- * Send a message to a channel as the signed-in user; returns ok status, timestamp, and channel ID; throws if sending fails.
+ * Send a message to a channel as the signed-in user, at channel level or as a reply in a thread;
+ * returns ok status, timestamp, and channel ID; throws if sending fails or a thread parameter is malformed.
  * @param clients - The Slack client container.
- * @param params - Message target and body.
+ * @param params - Message target, body, and optional thread placement.
  * @param params.channel - Channel name (with or without `#`) or channel ID.
  * @param params.message - Message text.
+ * @param params.thread_ts - Thread parent's Slack timestamp; omit to post at channel level.
+ * @param params.reply_broadcast - Also surface the thread reply in the channel; requires `thread_ts`.
  */
 export async function sendChannel(
   clients: SlackClients,
-  params: { channel: string; message: string }
+  params: { channel: string; message: string; thread_ts?: string; reply_broadcast?: boolean }
 ): Promise<{ ok: boolean; ts?: string; channel?: string }> {
+  if (params.thread_ts && !looksLikeSlackTs(params.thread_ts)) {
+    throw new Error(
+      `thread_ts "${params.thread_ts}" does not look like a Slack timestamp (expected e.g. ` +
+        '"1717000000.000100"). Copy it exactly from a getChannelMessages/getThreadMessages ' +
+        'result — do not reformat or round it. Slack accepts a malformed thread_ts silently and ' +
+        'posts the message to the channel instead of the thread.'
+    );
+  }
+  const broadcast = params.reply_broadcast ?? false;
+  if (typeof broadcast !== 'boolean') {
+    throw new Error(
+      `reply_broadcast must be a boolean, got ${typeof broadcast}. Pass true or false; the ` +
+        'string "false" would be read as true and surface the reply to the whole channel.'
+    );
+  }
+  if (broadcast && !params.thread_ts) {
+    throw new Error(
+      'reply_broadcast requires thread_ts: it surfaces a thread reply in the channel, so there ' +
+        'must be a thread. Pass the thread parent ts, or drop reply_broadcast to post at channel level.'
+    );
+  }
+
   const channelId = await resolveChannelId(clients, params.channel);
+
+  const threadArgs = params.thread_ts
+    ? broadcast
+      ? { thread_ts: params.thread_ts, reply_broadcast: true }
+      : { thread_ts: params.thread_ts }
+    : {};
 
   const result = (await slackCall(clients, (c) =>
     c.chat.postMessage({
       channel: channelId,
       text: params.message,
+      ...threadArgs,
     })
   )) as ChatPostMessageResponse;
 

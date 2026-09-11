@@ -26,6 +26,8 @@ import {
 interface SendChannelParams {
   channel: string;
   message: string;
+  thread_ts?: string;
+  reply_broadcast?: boolean;
 }
 
 interface GetChannelMessagesParams {
@@ -48,7 +50,7 @@ interface GetThreadMessagesParams {
 const sendChannelTool: Tool = {
   name: 'sendChannel',
   description:
-    "Send a message to a Slack channel or DM conversation as the signed-in user (their name and avatar). Irreversible and instantly visible — requires the user's explicit confirmation of the exact recipient and verbatim text, in the current conversation, before calling.",
+    "Send a message to a Slack channel or DM conversation as the signed-in user (their name and avatar). Pass `thread_ts` to reply inside a thread instead of at channel level, in channels and DMs alike; add `reply_broadcast: true` to also surface that reply in the channel, which widens who sees it and needs its own confirmation. Irreversible and instantly visible — requires the user's explicit confirmation of the exact recipient and verbatim text, in the current conversation, before calling.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -58,6 +60,16 @@ const sendChannelTool: Tool = {
           'Channel name (e.g., #general), channel ID (C…), or DM conversation ID (D…/G…)',
       },
       message: { type: 'string', description: 'Message text to send' },
+      thread_ts: {
+        type: 'string',
+        description:
+          'Reply inside this thread instead of at channel level. The exact `ts` of the thread parent, copied VERBATIM from a prior getChannelMessages/getThreadMessages result (e.g. "1717000000.000100") — never reformat, round, or convert it to a number. Omit to post at channel level.',
+      },
+      reply_broadcast: {
+        type: 'boolean',
+        description:
+          'Also surface the thread reply in the channel, so everyone in it sees the reply and not just thread followers. Requires `thread_ts`. Widens the audience beyond the thread, so confirm it with the user separately from the message text.',
+      },
     },
     required: ['channel', 'message'],
   },
@@ -67,7 +79,17 @@ const sendChannelTool: Tool = {
     [META_KEYS.USER_SCOPED]: true,
     [META_KEYS.CURRENT_USER_TOOL]: 'getCurrentUser',
   },
-  keywords: ['slack', 'send', 'message', 'channel', 'post', 'write'],
+  keywords: [
+    'slack',
+    'send',
+    'message',
+    'channel',
+    'post',
+    'write',
+    'thread',
+    'reply',
+    'broadcast',
+  ],
   example: 'await slack.sendChannel({ channel: "#general", message: "Hello!" })',
   outputSchema: {
     type: 'object',
@@ -87,6 +109,23 @@ const sendChannelTool: Tool = {
     {
       description: 'Full: send to specific channel ID',
       input: { channel: 'C0123ABC456', message: 'Deployment completed successfully! :rocket:' },
+    },
+    {
+      description: 'Reply inside a thread',
+      input: {
+        channel: 'C0123ABC456',
+        message: 'Picking this up now.',
+        thread_ts: '1717000000.000100',
+      },
+    },
+    {
+      description: 'Reply inside a thread and surface it in the channel',
+      input: {
+        channel: 'C0123ABC456',
+        message: 'Resolved, details in the thread.',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      },
     },
   ],
 };

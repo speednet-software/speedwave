@@ -690,6 +690,148 @@ describe('slack client', () => {
         text: 'Group message',
       });
     });
+
+    it('replies in a thread when thread_ts is given', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({
+        ok: true,
+        ts: '1717000000.000200',
+        channel: 'C12345678',
+      });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'C12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+
+      expect(mockPostMessage).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        text: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+    });
+
+    it('replies in a DM thread', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({
+        ok: true,
+        ts: '1717000000.000200',
+        channel: 'D12345678',
+      });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'D12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+
+      expect(mockPostMessage).toHaveBeenCalledWith({
+        channel: 'D12345678',
+        text: 'Reply',
+        thread_ts: '1717000000.000100',
+      });
+    });
+
+    it('omits thread_ts from the API call when not given', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({ ok: true, channel: 'C12345678' });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, { channel: 'C12345678', message: 'Top level' });
+
+      expect(Object.keys(mockPostMessage.mock.calls[0][0])).toEqual(['channel', 'text']);
+    });
+
+    it('rejects a thread_ts that is not a genuine Slack timestamp before calling the API', async () => {
+      const mockPostMessage = vi.fn();
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          thread_ts: '1717000000',
+        })
+      ).rejects.toThrow(/does not look like a Slack timestamp/);
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          thread_ts: 1717000000.0001 as unknown as string,
+        })
+      ).rejects.toThrow(/does not look like a Slack timestamp/);
+      expect(mockPostMessage).not.toHaveBeenCalled();
+    });
+
+    it('broadcasts a thread reply to the channel when reply_broadcast is true', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({
+        ok: true,
+        ts: '1717000000.000200',
+        channel: 'C12345678',
+      });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'C12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      });
+
+      expect(mockPostMessage).toHaveBeenCalledWith({
+        channel: 'C12345678',
+        text: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: true,
+      });
+    });
+
+    it('omits reply_broadcast from the API call when false', async () => {
+      const mockPostMessage = vi.fn().mockResolvedValue({ ok: true, channel: 'C12345678' });
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await sendChannel(mockClients, {
+        channel: 'C12345678',
+        message: 'Reply',
+        thread_ts: '1717000000.000100',
+        reply_broadcast: false,
+      });
+
+      expect(Object.keys(mockPostMessage.mock.calls[0][0])).toEqual([
+        'channel',
+        'text',
+        'thread_ts',
+      ]);
+    });
+
+    it('rejects a reply_broadcast that is not a boolean before calling the API', async () => {
+      const mockPostMessage = vi.fn();
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          thread_ts: '1717000000.000100',
+          reply_broadcast: 'false' as unknown as boolean,
+        })
+      ).rejects.toThrow(/reply_broadcast must be a boolean/);
+      expect(mockPostMessage).not.toHaveBeenCalled();
+    });
+
+    it('rejects reply_broadcast without thread_ts before calling the API', async () => {
+      const mockPostMessage = vi.fn();
+      mockClients.user.chat.postMessage = mockPostMessage;
+
+      await expect(
+        sendChannel(mockClients, {
+          channel: 'C12345678',
+          message: 'Reply',
+          reply_broadcast: true,
+        })
+      ).rejects.toThrow(/reply_broadcast requires thread_ts/);
+      expect(mockPostMessage).not.toHaveBeenCalled();
+    });
   });
 
   describe('readChannel', () => {
