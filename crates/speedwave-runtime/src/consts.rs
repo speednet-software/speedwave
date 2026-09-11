@@ -1226,10 +1226,28 @@ pub fn data_dir() -> &'static std::path::PathBuf {
     })
 }
 
+/// Instance name from a data-dir path, split on both separators so a Windows-shaped path
+/// resolves the same on a Unix build host. Same rule and same panics as [`derive_instance_name_from`].
+fn instance_basename_any_separator(data_dir: &std::path::Path) -> String {
+    let raw = data_dir.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    let basename = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    let name = basename.trim_start_matches('.');
+    assert!(
+        !name.is_empty(),
+        "SPEEDWAVE_DATA_DIR basename is empty after stripping dots: {basename}"
+    );
+    assert!(
+        is_valid_instance_name(name),
+        "SPEEDWAVE_DATA_DIR basename '{name}' must match ^[a-z][a-z0-9-]{{0,63}}$"
+    );
+    name.to_string()
+}
+
 /// Unix CLI filename from a data-dir path: `.speedwave`→`speedwave`, else `speedwave-<suffix>`
 /// ([`derive_wsl_distro_name_from`]'s rule), so a dev build never overwrites production. ADR-016.
 pub fn derive_cli_binary_name_from(data_dir: &std::path::Path) -> String {
-    let basename = derive_instance_name_from(data_dir);
+    let basename = instance_basename_any_separator(data_dir);
     if basename == CLI_BINARY {
         return CLI_BINARY.to_string();
     }
@@ -1237,8 +1255,8 @@ pub fn derive_cli_binary_name_from(data_dir: &std::path::Path) -> String {
     format!("{CLI_BINARY}-{suffix}")
 }
 
-/// Data dir an installed CLI implies from its own path: `<data_dir>\bin\speedwave.exe` on Windows,
-/// `~/.local/bin/speedwave[-<suffix>]` on Unix, `None` anywhere else. ADR-031 §9.
+/// Data dir an installed CLI implies from its own path: `<data_dir>\bin\<name>.exe` on Windows,
+/// `~/.local/bin/<name>` on Unix, `None` anywhere else. Inverse of [`cli_install_path_for`].
 pub fn data_dir_from_cli_exe(
     is_windows: bool,
     exe: &std::path::Path,
@@ -1248,12 +1266,17 @@ pub fn data_dir_from_cli_exe(
     let parent = exe.parent()?;
 
     if is_windows {
-        if !file_name.eq_ignore_ascii_case(&cli_binary_filename(true))
-            || parent.file_name()?.to_str()? != CLI_BIN_SUBDIR
-        {
+        if parent.file_name()?.to_str()? != CLI_BIN_SUBDIR {
             return None;
         }
-        return Some(parent.parent()?.to_path_buf());
+        let candidate = parent.parent()?;
+        let basename = candidate.file_name()?.to_str()?.trim_start_matches('.');
+        if !is_valid_instance_name(basename) {
+            return None;
+        }
+        return file_name
+            .eq_ignore_ascii_case(&installed_cli_filename(true, candidate))
+            .then(|| candidate.to_path_buf());
     }
 
     let mut bin_dir = home.to_path_buf();
@@ -1269,8 +1292,19 @@ pub fn data_dir_from_cli_exe(
     is_valid_instance_name(&instance).then(|| home.join(format!(".{instance}")))
 }
 
+/// Filename the CLI is installed under, instance included (`.exe` on Windows). The bundled
+/// asset keeps [`cli_binary_filename`]; this is the destination, never the source. ADR-016.
+pub fn installed_cli_filename(is_windows: bool, data_dir: &std::path::Path) -> String {
+    let name = derive_cli_binary_name_from(data_dir);
+    if is_windows {
+        format!("{name}.exe")
+    } else {
+        name
+    }
+}
+
 /// CLI install path as a platform-shaped string (Windows backslashes, not `PathBuf::join`, so it
-/// is host-independent). Per-instance on both: Windows by directory, Unix by filename. ADR-016.
+/// is host-independent). The filename carries the instance on both platforms. ADR-016.
 pub fn cli_install_path_for(
     is_windows: bool,
     home: &std::path::Path,
@@ -1281,14 +1315,14 @@ pub fn cli_install_path_for(
             "{}\\{}\\{}",
             data_dir.to_string_lossy(),
             CLI_BIN_SUBDIR,
-            cli_binary_filename(true)
+            installed_cli_filename(true, data_dir)
         )
     } else {
         format!(
             "{}/{}/{}",
             home.to_string_lossy(),
             UNIX_CLI_BIN_SUBPATH,
-            derive_cli_binary_name_from(data_dir)
+            installed_cli_filename(false, data_dir)
         )
     }
 }
@@ -2384,6 +2418,94 @@ mod tests {
         assert_eq!(
             data_dir_from_cli_exe(
                 true,
+                &data_dir.join(CLI_BIN_SUBDIR).join("speedwave-dev.exe"),
+                home
+            ),
+            Some(data_dir.to_path_buf())
+        );
+        assert_eq!(
+            data_dir_from_cli_exe(
+                true,
+                &data_dir.join(CLI_BIN_SUBDIR).join("speedwave.exe"),
+                home
+            ),
+            None,
+            "the pre-SPEED-533 filename no longer names this instance"
+        );
+        assert_eq!(
+            data_dir_from_cli_exe(true, std::path::Path::new("/tmp/speedwave.exe"), home),
+            None
+        );
+        // A directory whose basename is not an instance name must not panic.
+        assert_eq!(
+            data_dir_from_cli_exe(
+                true,
+                std::path::Path::new("C:\\Program Files\\bin\\speedwave.exe"),
+                home
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn data_dir_from_cli_exe_windows_round_trips_the_install_path() {
+        let home = std::path::Path::new("C:\\Users\\alice");
+        for dir in [".speedwave", ".speedwave-dev", ".speedwave-speed-533"] {
+            let data_dir = home.join(dir);
+            let installed = cli_install_path_for(true, home, &data_dir);
+            let exe = data_dir
+                .join(CLI_BIN_SUBDIR)
+                .join(installed_cli_filename(true, &data_dir));
+            assert!(
+                installed.ends_with(&installed_cli_filename(true, &data_dir)),
+                "install path {installed} must end with the installed filename"
+            );
+            assert_eq!(
+                data_dir_from_cli_exe(true, &exe, home),
+                Some(data_dir.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn installed_cli_filename_reads_a_windows_path_on_any_host() {
+        // cli_install_path_for builds Windows strings on the macOS CI host, so the
+        // basename must be split on both separators, not by std::path.
+        assert_eq!(
+            installed_cli_filename(true, std::path::Path::new("C:\\Users\\alice\\.speedwave")),
+            "speedwave.exe"
+        );
+        assert_eq!(
+            installed_cli_filename(
+                true,
+                std::path::Path::new("C:\\Users\\alice\\.speedwave-speed-533")
+            ),
+            "speedwave-speed-533.exe"
+        );
+        assert_eq!(
+            installed_cli_filename(true, std::path::Path::new("C:\\Users\\alice\\.speedwave\\")),
+            "speedwave.exe",
+            "a trailing separator must not swallow the basename"
+        );
+    }
+
+    #[test]
+    fn installed_cli_filename_adds_exe_on_windows_only() {
+        let prod = std::path::Path::new("/home/u/.speedwave");
+        let dev = std::path::Path::new("/home/u/.speedwave-dev");
+        assert_eq!(installed_cli_filename(false, prod), "speedwave");
+        assert_eq!(installed_cli_filename(true, prod), "speedwave.exe");
+        assert_eq!(installed_cli_filename(false, dev), "speedwave-dev");
+        assert_eq!(installed_cli_filename(true, dev), "speedwave-dev.exe");
+    }
+
+    #[test]
+    fn data_dir_from_cli_exe_windows_uses_the_exe_location() {
+        let home = std::path::Path::new("/Users/alice");
+        let data_dir = std::path::Path::new("/Users/alice/.speedwave-dev");
+        assert_eq!(
+            data_dir_from_cli_exe(
+                true,
                 &data_dir.join(CLI_BIN_SUBDIR).join("speedwave.exe"),
                 home
             ),
@@ -2514,6 +2636,15 @@ mod tests {
             ),
             "C:\\Users\\alice\\.speedwave\\bin\\speedwave.exe",
             "windows path must use backslashes so it is host-independent on the CI host"
+        );
+        assert_eq!(
+            cli_install_path_for(
+                true,
+                home,
+                std::path::Path::new("C:\\Users\\alice\\.speedwave-dev")
+            ),
+            "C:\\Users\\alice\\.speedwave-dev\\bin\\speedwave-dev.exe",
+            "a dev instance is addressable by name on PATH, not only by directory"
         );
     }
 

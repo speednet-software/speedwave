@@ -2,8 +2,8 @@
 # Consumed by: NSIS PREINSTALL hook, WiX CustomAction, setup_wizard::link_cli.
 # Env: SPW_INSTDIR (Tauri app dir) + SPW_DATA_DIR (speedwave data dir).
 # Args: -Mode full|runtime
-#   full    (default; install-time): kill Speedwave.exe + nodejs\*.exe + bin\speedwave.exe.
-#   runtime (Tauri Desktop pre-link): kill only bin\speedwave.exe — Tauri must NOT
+#   full    (default; install-time): kill Speedwave.exe + nodejs\*.exe + the instance CLI.
+#   runtime (Tauri Desktop pre-link): kill only bin\<instance>.exe — Tauri must NOT
 #           target its own workers or itself or the sweep deadlocks on its own locks.
 # Exits: 0 ok, 2 missing env, 3 enum failed, 4 lock timeout.
 # See ADR-048 for design constraints (string concat, OrdinalIgnoreCase, CIM).
@@ -30,7 +30,15 @@ $dataDir = $dataDir.TrimEnd('\')
 # String concat per ADR-048.
 $nodePrefix = $instDir + '\nodejs\'
 $desktopExe = $instDir + '\Speedwave.exe'
-$cliExe = $dataDir + '\bin\speedwave.exe'
+
+# Installed CLI filename carries the instance; mirrors consts::installed_cli_filename.
+$instance = (Split-Path $dataDir -Leaf) -replace '^\.+', ''
+if ($instance -eq 'speedwave') {
+  $cliName = 'speedwave.exe'
+} else {
+  $cliName = 'speedwave-' + ($instance -replace '^speedwave-', '') + '.exe'
+}
+$cliExe = $dataDir + '\bin\' + $cliName
 
 # Runtime mode: scope to the CLI binary only (Tauri Desktop is itself running
 # the sweep — killing its own workers / self deadlocks the lock-poll).

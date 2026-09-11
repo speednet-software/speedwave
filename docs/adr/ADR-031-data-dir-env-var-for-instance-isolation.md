@@ -86,13 +86,13 @@ Sections 1-7 isolate a dev build from production, not two dev builds from each o
 
 `DEV_INSTANCE` (default `dev`) is the one knob; the `Makefile` derives the rest from it:
 
-| Derived              | `DEV_INSTANCE=dev` (default)       | `DEV_INSTANCE=speed-533`           |
-| -------------------- | ---------------------------------- | ---------------------------------- |
-| `SPEEDWAVE_DATA_DIR` | `~/.speedwave-dev`                 | `~/.speedwave-speed-533`           |
-| Bundle identifier    | `pl.speedwave.desktop.dev`         | `pl.speedwave.desktop.speed-533`   |
-| Product name         | `Speedwave Dev`                    | `Speedwave speed-533`              |
-| Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name              |
-| CLI on PATH (Unix)   | `~/.local/bin/speedwave-dev`       | `~/.local/bin/speedwave-speed-533` |
+| Derived              | `DEV_INSTANCE=dev` (default)       | `DEV_INSTANCE=speed-533`         |
+| -------------------- | ---------------------------------- | -------------------------------- |
+| `SPEEDWAVE_DATA_DIR` | `~/.speedwave-dev`                 | `~/.speedwave-speed-533`         |
+| Bundle identifier    | `pl.speedwave.desktop.dev`         | `pl.speedwave.desktop.speed-533` |
+| Product name         | `Speedwave Dev`                    | `Speedwave speed-533`            |
+| Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name            |
+| CLI command on PATH  | `speedwave-dev`                    | `speedwave-speed-533`            |
 
 The default instance overrides no port, so `angular.json` and `tauri.conf.json` remain its single source (the pair is pinned equal by `_tests/desktop/dev-server-port.bats`). Every other instance takes 24 bits of `sha256` over its own name folded into 20000-39999: the same worktree keeps the same URL across restarts, nobody tracks which port is free, and the window stays clear of the Angular defaults below it and the macOS ephemeral range (49152+) above it. `DEV_PORT` overrides that when the derived one is inconvenient or taken.
 
@@ -100,7 +100,7 @@ The default instance overrides no port, so `angular.json` and `tauri.conf.json` 
 
 The override has two consumers: `tauri-build` merges `TAURI_CONFIG` into the compiled config (identifier, product name), and the Tauri CLI reads `--config` for `build.devUrl` and `build.beforeDevCommand`. The `Makefile` hands the same JSON to both and exports it as `DEV_TAURI_CONFIG`, so `scripts/dev-tauri-windows.sh` consumes that one definition rather than keeping a copy.
 
-The CLI name comes from section 7's suffix rule, applied to `~/.local/bin` (ADR-016). Before that, `link_cli` copied every instance's build over the single `~/.local/bin/speedwave` on each app start, so `speedwave` on PATH was whichever instance launched last, production included.
+The CLI name comes from section 7's suffix rule (ADR-016): `~/.local/bin/speedwave-dev` on macOS, `~/.speedwave-dev\bin\speedwave-dev.exe` on Windows. Before that, macOS copied every instance's build over the single `~/.local/bin/speedwave` on each app start, and Windows kept the files apart but put every `<data_dir>\bin` on PATH under the same `speedwave.exe`, so on both the command resolved to an arbitrary instance.
 
 What an extra instance costs follows from the sections above: its own Lima VM with its own containerd image store and BuildKit cache (a full image build on first start), and its own config, credentials and plugins, because none of that lives outside the data dir. The setup wizard has to run once from the Desktop app; the CLI starts an existing VM but does not create one.
 
@@ -108,11 +108,11 @@ What an extra instance costs follows from the sections above: its own Lima VM wi
 
 Section 8 gives each instance its own CLI name on Unix (`~/.local/bin/speedwave-dev`) and its own directory on Windows (`<data_dir>\bin\speedwave.exe`), but the name alone changed nothing at runtime: the binary still read `SPEEDWAVE_DATA_DIR` and fell back to `~/.speedwave`, so `speedwave-dev` without the variable operated on production. Every CLI invocation had to carry the variable, and forgetting it was silent.
 
-`data_dir_from_cli_exe` closes that. It reverses the naming of section 8 on Unix (`~/.local/bin/speedwave-<suffix>` → `~/.speedwave-<suffix>`, the bare `speedwave` → `~/.speedwave`) and reads the path directly on Windows, where the exe already sits under `<data_dir>/bin`. A round-trip test pins it against `cli_install_path_for`, so the producer and the reader cannot drift apart.
+`data_dir_from_cli_exe` closes that. On Unix it reverses the naming of section 8 (`~/.local/bin/speedwave-<suffix>` → `~/.speedwave-<suffix>`, the bare `speedwave` → `~/.speedwave`). On Windows it takes the data dir from the exe's own path, where it already sits under `<data_dir>/bin`, and then checks the filename against what would be installed there, so a stale pre-rename `speedwave.exe` is not mistaken for the instance's CLI. A round-trip test pins both against `cli_install_path_for`, so the producer and the reader cannot drift apart.
 
 The rule is deliberately narrow, and returns `None` outside these cases:
 
-- The exe must sit in the install location: `$HOME/.local/bin` on Unix, a `bin` directory on Windows. `target/debug/speedwave` from a worktree resolves to nothing and falls through to `~/.speedwave`, so an uninstalled build never claims an instance by accident. Running a build straight out of `target/` still needs the variable.
+- The exe must sit in the install location under the filename that belongs there: `$HOME/.local/bin` on Unix, a `bin` directory on Windows. `target/debug/speedwave` from a worktree resolves to nothing and falls through to `~/.speedwave`, so an uninstalled build never claims an instance by accident. Running a build straight out of `target/` still needs the variable.
 - A data dir whose basename is not `.speedwave` or `.speedwave-<suffix>` cannot be recovered from a filename. `/opt/sw-test` installs as `speedwave-sw-test`, which would read back as `~/.speedwave-sw-test`, so the round-trip is asserted only for the `$HOME/.speedwave*` family; a custom path stays env-only. Every in-repo consumer of a custom path (`scripts/e2e-vm.sh`, the `RUN_CARGO_ISOLATED` Makefile macro, the bats suites) already sets the variable on every call.
 
 The Desktop app is unaffected: its executable is neither `speedwave` in `~/.local/bin` nor `speedwave.exe` under a `bin` directory, so it keeps resolving from the variable (which `make dev` exports) or from `~/.speedwave`.

@@ -1071,13 +1071,26 @@ fn link_cli_from(
 
         // Already-current CLI: skip the sweep AND the copy — the runtime sweep
         // would kill a user's live `speedwave` session for nothing (ADR-048).
-        let target = cli_dir.join(consts::cli_binary_filename(true));
+        let installed_name = consts::installed_cli_filename(true, data_dir);
+        let target = cli_dir.join(&installed_name);
         if files_identical(cli_source, &target) {
             log::info!("installed CLI already current — sweep/copy skipped");
         } else {
             // Kill any stale process holding the exe before overwrite (ADR-048).
             run_pre_link_sweep(data_dir);
             copy_cli_binary(cli_source, &target)?;
+        }
+
+        // Pre-SPEED-533 installs of this instance left a speedwave.exe in the same
+        // directory, which is on PATH and shadows another instance's command.
+        let legacy = cli_dir.join(consts::cli_binary_filename(true));
+        if legacy != target && legacy.exists() {
+            if let Err(e) = std::fs::remove_file(&legacy) {
+                log::warn!(
+                    "could not remove the pre-rename CLI at {}: {e}",
+                    legacy.display()
+                );
+            }
         }
 
         let script = format!(
