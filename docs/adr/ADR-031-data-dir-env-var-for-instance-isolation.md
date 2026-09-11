@@ -22,7 +22,13 @@ A single environment variable `SPEEDWAVE_DATA_DIR` overrides the default `~/.spe
 
 ### 1. Resolution via `OnceLock`
 
-`consts::data_dir()` reads `SPEEDWAVE_DATA_DIR` once per process using `OnceLock<PathBuf>`.[^1] This guarantees thread safety and process-wide consistency — every call returns the same path.
+`consts::data_dir()` resolves once per process using `OnceLock<PathBuf>`.[^1] This guarantees thread safety and process-wide consistency: every call returns the same path.
+
+Three levels, highest first (see §9 for why the middle one exists):
+
+1. `SPEEDWAVE_DATA_DIR`, which must be absolute.
+2. The instance implied by the running CLI's own install path (`data_dir_from_cli_exe`).
+3. `~/.speedwave`.
 
 ### 2. Instance name derived from basename
 
@@ -40,7 +46,8 @@ The instance name must match `^[a-z][a-z0-9-]{0,63}$` — the same validation us
 
 Two pure functions enable unit testing without process-level side effects:
 
-- `data_dir_from(env_val, home)` — resolves the data directory from an optional env value and a home path
+- `data_dir_from(env_val, exe, is_windows, home)` — applies the three levels above to an optional env value, an optional executable path and a home path
+- `data_dir_from_cli_exe(is_windows, exe, home)` — the instance an installed CLI implies, `None` for any other location
 - `derive_instance_name_from(data_dir)` — extracts and validates the instance name from a path
 
 The `OnceLock`-based `data_dir()`, `lima_vm_name()`, and `compose_prefix()` functions call these pure functions internally.
@@ -73,6 +80,43 @@ The same per-data-dir isolation extends to WSL2 on Windows via `wsl_distro_name(
 
 Every runtime consumer (`runtime/wsl.rs`, `project.rs::add_project_with_data_dir`, `setup_wizard.rs`) calls `consts::wsl_distro_name()` instead of duplicating the literal, so prod and dev distros never collide on containerd image namespace, compose project prefix, or `host.docker.internal` resolution.
 
+### 8. Per-worktree dev instances (`DEV_INSTANCE`)
+
+Sections 1-7 isolate a dev build from production, not two dev builds from each other. Two worktrees running `make dev` shared the data-dir default, the bundle identifier `pl.speedwave.desktop.dev` and the Angular dev-server port. The identifier is the binding one: `tauri-plugin-single-instance` keys its singleton socket on `config.identifier` (`/tmp/<identifier>_si.sock`), so the second process exits and focuses the first window instead of starting.
+
+`DEV_INSTANCE` (default `dev`) is the one knob; the `Makefile` derives the rest from it:
+
+| Derived              | `DEV_INSTANCE=dev` (default)       | `DEV_INSTANCE=speed-533`         |
+| -------------------- | ---------------------------------- | -------------------------------- |
+| `SPEEDWAVE_DATA_DIR` | `~/.speedwave-dev`                 | `~/.speedwave-speed-533`         |
+| Bundle identifier    | `pl.speedwave.desktop.dev`         | `pl.speedwave.desktop.speed-533` |
+| Product name         | `Speedwave Dev`                    | `Speedwave speed-533`            |
+| Dev-server port      | `angular.json` / `tauri.conf.json` | derived from the name            |
+| CLI command on PATH  | `speedwave-dev`                    | `speedwave-speed-533`            |
+
+The default instance overrides no port, so `angular.json` and `tauri.conf.json` remain its single source (the pair is pinned equal by `_tests/desktop/dev-server-port.bats`). Every other instance takes 24 bits of `sha256` over its own name folded into 20000-39999: the same worktree keeps the same URL across restarts, nobody tracks which port is free, and the window stays clear of the Angular defaults below it and the macOS ephemeral range (49152+) above it. `DEV_PORT` overrides that when the derived one is inconvenient or taken.
+
+`guard-dev-instance` refuses a `DEV_INSTANCE` that `derive_instance_name_from` would reject and a non-numeric `DEV_PORT`. `guard-dev-port` runs only on the way into `make dev`: it prints what the instance resolved to and binds the port once to fail now rather than after the build, in `ng serve`. Resolving the configuration (`make dev-config`) never binds anything.
+
+The override has two consumers: `tauri-build` merges `TAURI_CONFIG` into the compiled config (identifier, product name), and the Tauri CLI reads `--config` for `build.devUrl` and `build.beforeDevCommand`. The `Makefile` hands the same JSON to both and exports it as `DEV_TAURI_CONFIG`, so `scripts/dev-tauri-windows.sh` consumes that one definition rather than keeping a copy.
+
+The CLI name comes from section 7's suffix rule (ADR-016): `~/.local/bin/speedwave-dev` on macOS, `~/.speedwave-dev\bin\speedwave-dev.exe` on Windows. Before that, macOS copied every instance's build over the single `~/.local/bin/speedwave` on each app start, and Windows kept the files apart but put every `<data_dir>\bin` on PATH under the same `speedwave.exe`, so on both the command resolved to an arbitrary instance.
+
+What an extra instance costs follows from the sections above: its own Lima VM with its own containerd image store and BuildKit cache (a full image build on first start), and its own config, credentials and plugins, because none of that lives outside the data dir. The setup wizard has to run once from the Desktop app; the CLI starts an existing VM but does not create one.
+
+### 9. An installed CLI knows its own instance
+
+Section 8 gives each instance its own CLI name on Unix (`~/.local/bin/speedwave-dev`) and its own directory on Windows (`<data_dir>\bin\speedwave.exe`), but the name alone changed nothing at runtime: the binary still read `SPEEDWAVE_DATA_DIR` and fell back to `~/.speedwave`, so `speedwave-dev` without the variable operated on production. Every CLI invocation had to carry the variable, and forgetting it was silent.
+
+`data_dir_from_cli_exe` closes that. On Unix it reverses the naming of section 8 (`~/.local/bin/speedwave-<suffix>` → `~/.speedwave-<suffix>`, the bare `speedwave` → `~/.speedwave`). On Windows it takes the data dir from the exe's own path, where it already sits under `<data_dir>/bin`, and then checks the filename against what would be installed there, so a stale pre-rename `speedwave.exe` is not mistaken for the instance's CLI. A round-trip test pins both against `cli_install_path_for`, so the producer and the reader cannot drift apart.
+
+The rule is deliberately narrow, and returns `None` outside these cases:
+
+- The exe must sit in the install location under the filename that belongs there: `$HOME/.local/bin` on Unix, a `bin` directory on Windows. `target/debug/speedwave` from a worktree resolves to nothing and falls through to `~/.speedwave`, so an uninstalled build never claims an instance by accident. Running a build straight out of `target/` still needs the variable.
+- A data dir whose basename is not `.speedwave` or `.speedwave-<suffix>` cannot be recovered from a filename. `/opt/sw-test` installs as `speedwave-sw-test`, which would read back as `~/.speedwave-sw-test`, so the round-trip is asserted only for the `$HOME/.speedwave*` family; a custom path stays env-only. Every in-repo consumer of a custom path (`scripts/e2e-vm.sh`, the `RUN_CARGO_ISOLATED` Makefile macro, the bats suites) already sets the variable on every call.
+
+The Desktop app is unaffected: its executable is neither `speedwave` in `~/.local/bin` nor `speedwave.exe` under a `bin` directory, so it keeps resolving from the variable (which `make dev` exports) or from `~/.speedwave`.
+
 ## Consequences
 
 ### Positive
@@ -80,6 +124,7 @@ Every runtime consumer (`runtime/wsl.rs`, `project.rs::add_project_with_data_dir
 - Full isolation between production and dev instances: separate Lima VM, data files, compose projects, tokens, plugins, and MCP OS worker
 - Default behavior (without the env var) is identical to before — no migration required for existing users
 - Pure helper functions make the resolution logic easy to unit-test without process-level mutation
+- Several dev builds run side by side, one per worktree, so testing a branch does not stop the instance the developer works in
 
 ### Negative
 

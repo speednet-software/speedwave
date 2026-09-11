@@ -15,8 +15,23 @@ The CLI binary is placed on PATH using **user-scope mechanisms only** — no pri
 
 ## How it works
 
-- **macOS** — the binary is copied to `~/.local/bin/speedwave` (the XDG standard location for user executables[^2], not on the default macOS PATH built by `/usr/libexec/path_helper`[^8]). `detect_shell` reads `$SHELL`, and an `export PATH="$HOME/.local/bin:$PATH"` line is appended to the right shell config file. The append is idempotent — files already containing `.local/bin` are skipped.
-- **Windows** — the binary is copied to `~/.speedwave/bin/speedwave.exe`, that directory is added to `HKCU\Environment\Path` via PowerShell's `[Environment]::SetEnvironmentVariable('Path', …, 'User')` (per-user registry, no UAC)[^4], and a `WM_SETTINGCHANGE`[^5] broadcast (via `SendMessageTimeoutW` with `HWND_BROADCAST`[^6]) tells running shells to pick up the new PATH without a restart.
+- **macOS** — the binary is copied to `~/.local/bin/<name>` (the XDG standard location for user executables[^2], not on the default macOS PATH built by `/usr/libexec/path_helper`[^8]), where `<name>` is `speedwave` for the production data dir and `speedwave-<suffix>` for any other instance (`consts::derive_cli_binary_name_from`, same suffix rule as the WSL distro name in ADR-031 §7). `detect_shell` reads `$SHELL`, and an `export PATH="$HOME/.local/bin:$PATH"` line is appended to the right shell config file. The append is idempotent — files already containing `.local/bin` are skipped.
+- **Windows** — the binary is copied to `<data_dir>/bin/<name>.exe` (`~/.speedwave/bin/speedwave.exe` by default), the same `<name>` as macOS, that directory is added to `HKCU\Environment\Path` via PowerShell's `[Environment]::SetEnvironmentVariable('Path', …, 'User')` (per-user registry, no UAC)[^4], and a `WM_SETTINGCHANGE`[^5] broadcast (via `SendMessageTimeoutW` with `HWND_BROADCAST`[^6]) tells running shells to pick up the new PATH without a restart.
+
+### Why the filename carries the instance
+
+`consts::installed_cli_filename` derives it from the data dir: `~/.speedwave` → `speedwave`, `~/.speedwave-dev` → `speedwave-dev` (no doubled prefix), `/opt/sw-test` → `speedwave-sw-test`, plus `.exe` on Windows. The suffix rule is `derive_wsl_distro_name_from`'s, and the basename is split on both separators so the Windows string resolves the same when it is built on a macOS CI host.
+
+The two platforms failed differently before that:
+
+- **macOS** — `~/.local/bin` is one directory per machine, so the production app and every `make dev` build copied over the same `~/.local/bin/speedwave`, on every startup and unconditionally (`link_cli` runs on each launch). The binary on PATH was whichever instance started last, so a developer with a production install ended up running a debug CLI: a different build of a different branch, with the `SPEEDWAVE_ALLOW_UNSIGNED` plugin-signature bypass compiled in (`signing.rs`, `#[cfg(debug_assertions)]`) where the release build has none.
+- **Windows** — the data dir already separated the files, so nothing was overwritten, but each instance adds its own `<data_dir>\bin` to `HKCU\Environment\Path` and every one of those directories held a file called `speedwave.exe`. Bare `speedwave` resolved to whichever instance linked first, and no instance was addressable by name. Deriving the filename there too makes `speedwave-dev` unambiguous on PATH regardless of entry order, because only one directory carries that name.
+
+Every consumer then follows from the one SSOT: the login command the Desktop emits, the `ensure_cli_installed` check, the factory-reset removal, and the ADR-048 sweep that kills a running CLI before the overwrite (`windows/sweep.ps1` mirrors the rule in PowerShell, pinned by `installer_hooks.rs`).
+
+Leftovers from before the rename: on Windows the old `speedwave.exe` sits inside the instance's own data dir, so `link_cli` deletes it after a successful copy (best effort — it warns if the file is locked). On macOS the equivalent file is `~/.local/bin/speedwave`, which may be a genuine production install, so it is left alone: starting the production app restores it, and a machine with no production install has to delete it by hand.
+
+The name is also what an installed CLI resolves its data dir from when `SPEEDWAVE_DATA_DIR` is unset (ADR-031 §9), which is why `data_dir_from_cli_exe` is pinned against `cli_install_path_for` by a round-trip test rather than re-deriving the rule.
 
 ### Shell config file selection (Unix)
 
@@ -38,12 +53,16 @@ When `$SHELL` is _empty_ (common when the Desktop app launches from Dock/Finder 
 - Shell detection / parsing — `setup_wizard.rs::detect_shell` and `parse_shell_env`.
 - Shell config file selection — `setup_wizard.rs::shell_config_targets`; idempotent PATH append in `ensure_local_bin_on_path` / `ensure_local_bin_on_path_for_shell`.
 - Windows CLI subdir (`bin`) — `crates/speedwave-runtime/src/consts.rs::CLI_BIN_SUBDIR` (SSOT; see CLAUDE.md alignment with `sweep.ps1` and the pinned-CLI launch path).
-- Cleanup — `setup_wizard.rs::factory_reset` removes the Unix CLI binary at `~/.local/bin/speedwave`; on Windows the CLI lives inside the data dir (`~/.speedwave/bin/`) and is removed by the data-dir wipe. The shell `export` line is intentionally left in place to avoid destructively editing user dotfiles.
+- Installed CLI filename — `crates/speedwave-runtime/src/consts.rs::installed_cli_filename` (over `derive_cli_binary_name_from`), consumed by `cli_install_path_for` (SSOT for the full path on both platforms).
+- Reading the instance back off the install path — `consts::data_dir_from_cli_exe`, the second level of `data_dir()` resolution (ADR-031 §9), so an installed CLI needs no `SPEEDWAVE_DATA_DIR`.
+- Cleanup — `setup_wizard.rs::factory_reset` removes the Unix CLI binary at the install path for _its own_ data dir, so resetting a dev instance leaves the production binary alone; on Windows the CLI lives inside the data dir (`<data_dir>/bin/`) and is removed by the data-dir wipe. The shell `export` line is intentionally left in place to avoid destructively editing user dotfiles.
 
 ## Rejected alternatives
 
 - **`/usr/local/bin/` on macOS** — although `/usr/local/` is exempt from System Integrity Protection[^7], writing to it requires `sudo`. Using `~/.local/bin/` avoids privilege escalation entirely and keeps the binary per-user under the home directory, aligned with XDG conventions.
 - **Symlink instead of copy** — a symlink into the app bundle breaks if the bundle is moved or renamed; the copy-based approach survives that and is refreshed on every Desktop startup.
+- **Only the production instance links the CLI** — the simplest way to stop the overwrite, but it leaves a dev-only machine with no `speedwave` on PATH: `ensure_cli_installed` would fail and the Desktop login command would point at a binary that is not there. Naming the binary per instance keeps that flow working for every instance.
+- **`<data_dir>/bin` on Unix too** — symmetric with Windows, but it puts one PATH entry per instance into the user's shell config, and each has to be removed by hand afterwards. One directory with distinct filenames costs a single PATH entry.
 
 ---
 

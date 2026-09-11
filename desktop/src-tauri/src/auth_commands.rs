@@ -692,7 +692,10 @@ mod tests {
         )));
         assert!(cmd.contains("/Users/test/.speedwave-dev"));
         assert!(cmd.contains("cd '/Users/test/Projects'"));
-        assert!(cmd.ends_with("speedwave' login --project 'myproj'"));
+        assert!(
+            cmd.ends_with("'/Users/test/.local/bin/speedwave-dev' login --project 'myproj'"),
+            "a dev data dir must invoke its own CLI, not the production one: {cmd}"
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@ set -euo pipefail
 cd desktop/src-tauri
 export SPEEDWAVE_RESOURCES_DIR="$(pwd)"
 export SPEEDWAVE_ALLOW_UNSIGNED=1
-export TAURI_CONFIG='{"identifier":"pl.speedwave.desktop.dev","productName":"Speedwave Dev"}'
+# Built by the Makefile from DEV_INSTANCE/DEV_PORT and exported to us. No default
+# here: a second copy of the JSON is a second thing to keep in sync.
+export TAURI_CONFIG="${DEV_TAURI_CONFIG:?DEV_TAURI_CONFIG must be exported by the Makefile; run make dev}"
 
-exec env -u PORT cargo tauri dev
+exec env -u PORT cargo tauri dev --config "$TAURI_CONFIG"
