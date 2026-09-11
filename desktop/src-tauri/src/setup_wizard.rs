@@ -992,7 +992,7 @@ pub(crate) use speedwave_runtime::binary::system_powershell_path;
 /// Kills stale Speedwave/Node/CLI processes holding binaries about to be overwritten.
 /// Runs at every Desktop startup, fails open. Kill predicate SSOT: `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
-fn run_pre_link_sweep() {
+fn run_pre_link_sweep(data_dir: &std::path::Path) {
     let Some(sweep) = resolve_sweep_script() else {
         log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
         return;
@@ -1001,10 +1001,10 @@ fn run_pre_link_sweep() {
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
-    let data_dir = consts::data_dir();
     let powershell = system_powershell_path();
 
-    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe (full mode is install-time only).
+    // Runtime mode: kill only this instance's <data_dir>/bin/speedwave.exe
+    // (full mode is install-time only).
     let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
@@ -1016,7 +1016,7 @@ fn run_pre_link_sweep() {
         .arg(&sweep)
         .args(["-Mode", "runtime"])
         .env("SPW_INSTDIR", &inst_dir)
-        .env("SPW_DATA_DIR", &data_dir)
+        .env("SPW_DATA_DIR", data_dir)
         .output();
     match result {
         Ok(out) if out.status.success() => {
@@ -1076,7 +1076,7 @@ fn link_cli_from(
             log::info!("installed CLI already current — sweep/copy skipped");
         } else {
             // Kill any stale process holding the exe before overwrite (ADR-048).
-            run_pre_link_sweep();
+            run_pre_link_sweep(data_dir);
             copy_cli_binary(cli_source, &target)?;
         }
 
