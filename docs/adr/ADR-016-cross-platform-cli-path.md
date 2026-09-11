@@ -55,7 +55,7 @@ When `$SHELL` is _empty_ (common when the Desktop app launches from Dock/Finder 
 - Windows CLI subdir (`bin`) — `crates/speedwave-runtime/src/consts.rs::CLI_BIN_SUBDIR` (SSOT; see CLAUDE.md alignment with `sweep.ps1` and the pinned-CLI launch path).
 - Installed CLI filename — `crates/speedwave-runtime/src/consts.rs::installed_cli_filename` (over `derive_cli_binary_name_from`), consumed by `cli_install_path_for` (SSOT for the full path on both platforms).
 - Reading the instance back off the install path — `consts::data_dir_from_cli_exe`, the second level of `data_dir()` resolution (ADR-031 §9), so an installed CLI needs no `SPEEDWAVE_DATA_DIR`.
-- Cleanup — `setup_wizard.rs::factory_reset` removes the Unix CLI binary at the install path for _its own_ data dir, so resetting a dev instance leaves the production binary alone; on Windows the CLI lives inside the data dir (`<data_dir>/bin/`) and is removed by the data-dir wipe. The shell `export` line is intentionally left in place to avoid destructively editing user dotfiles.
+- Cleanup — `setup_wizard.rs::factory_reset` removes the Unix CLI binary at the install path for _its own_ data dir, so resetting a dev instance leaves the production binary alone; on Windows the CLI lives inside the data dir (`<data_dir>/bin/`) and is removed by the data-dir wipe. The PATH entry survives on both platforms: the shell `export` line is intentionally left in place to avoid destructively editing user dotfiles, and its Windows counterpart, the `HKCU\Environment\Path` entry `link_cli` appends, is likewise never removed — not by factory reset and not by the uninstaller, which never wrote it. After an uninstall the registry keeps an entry pointing at a directory that no longer exists.
 
 ## Rejected alternatives
 
