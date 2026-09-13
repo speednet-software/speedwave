@@ -430,24 +430,18 @@ describe('ModelSelectorComponent', () => {
     expect(el.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
   });
 
-  it('a pick persists the pin, updates the highlight immediately, and emits effortSelected', async () => {
+  it('a pick updates the highlight immediately and emits effortSelected (write-through moved to ChatStateService)', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     const emitted: string[] = [];
     fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
-    tauriInvoke.mockImplementation((cmd: string) => {
-      if (cmd === 'set_effort_pin') return Promise.resolve(undefined);
-      return Promise.reject(new Error(`unexpected: ${cmd}`));
-    });
     const lowOption = fixture.nativeElement.querySelector(
       '[data-testid="effort-option-low"]'
     ) as HTMLElement;
     lowOption.click();
-    await fixture.whenStable();
     fixture.detectChanges();
     expect(emitted).toEqual(['low']);
-    const setCall = tauriInvoke.mock.calls.find(([cmd]) => cmd === 'set_effort_pin');
-    expect(setCall?.[1]).toMatchObject({ level: 'low' });
+    expect(tauriInvoke).not.toHaveBeenCalledWith('set_effort_pin', expect.anything());
     // Live semantics: the picked level is current at once; no pending badge exists.
     expect(fixture.nativeElement.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
     const el = fixture.nativeElement.querySelector(
@@ -463,17 +457,34 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
     const emitted: string[] = [];
     fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
-    tauriInvoke.mockImplementation((cmd: string) => {
-      if (cmd === 'set_effort_pin') return Promise.resolve(undefined);
-      return Promise.reject(new Error(`unexpected: ${cmd}`));
-    });
     const option = fixture.nativeElement.querySelector(
       '[data-testid="effort-option-low"]'
     ) as HTMLButtonElement;
     expect(option.disabled).toBe(false);
     option.click();
-    await fixture.whenStable();
+    fixture.detectChanges();
     expect(emitted).toEqual(['low']);
+    expect(tauriInvoke).not.toHaveBeenCalledWith('set_effort_pin', expect.anything());
+  });
+
+  it('a failed write-through resyncs the pin from the backend instead of trusting the optimistic pick', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const lowOption = fixture.nativeElement.querySelector(
+      '[data-testid="effort-option-low"]'
+    ) as HTMLElement;
+    lowOption.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('low');
+
+    tauriInvoke.mockClear();
+    fixture.componentRef.setInput('modelError', 'locked config');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(tauriInvoke).toHaveBeenCalledWith('get_effort_pin', { projectId: 'proj-1' });
+    expect(fixture.nativeElement.textContent).toContain('high');
   });
 
   it('closes the combobox on a backdrop click and on Escape', async () => {

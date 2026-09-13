@@ -180,14 +180,35 @@ export class ChatStateService {
   }
 
   /**
-   * Applies an effort pick to the CURRENT session via a wire `/effort` (the pin
-   * is already persisted and the spawn's `--effort` released CC's launch hold).
-   * @param level - One of the persistable effort levels.
+   * Persists the effort pin (spawn's `--effort` reads it next time), then
+   * wires the CURRENT session: an idle live session gets `/effort` now, a
+   * streaming turn queues it, and no live session respawns the eager
+   * pre-first-turn process so the first reply honours the pin just written
+   * (ADR-087 amendment, SPEED-538).
+   * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
-    if (!this.hasLiveSession()) return;
-    if (this.isStreaming) this._pendingEffortOverride.set(level);
-    else await this.sendMessage(`/effort ${level}`);
+    this._modelSelectionError.set('');
+    try {
+      await this.tauri.invoke('set_effort_pin', {
+        projectId: this.projectState.activeProject() ?? '',
+        level,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`effort pin write-through failed: ${msg}`);
+      this._modelSelectionError.set(msg);
+      return;
+    }
+    if (this.hasLiveSession()) {
+      if (this.isStreaming) this._pendingEffortOverride.set(level);
+      else await this.sendMessage(`/effort ${level}`);
+    } else if (!this.isStreaming && !this._resumeInProgress) {
+      // The eager idle pre-first-turn process already read its --effort at
+      // spawn; respawn so the first reply honours the pin just written.
+      this.resetForNewConversation();
+      await this.startChatSession();
+    }
   }
 
   /** Surface for a failed write-through from the composer model selector. */

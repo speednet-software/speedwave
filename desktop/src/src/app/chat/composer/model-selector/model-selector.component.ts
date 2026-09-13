@@ -223,6 +223,9 @@ export class ModelSelectorComponent {
   /** Last `sessionModel` seen by the reload effect; detects a genuine session-start transition. */
   private lastSessionModel = '';
 
+  /** Last `modelError` seen by the resync effect; detects a genuine new failure. */
+  private lastModelError = '';
+
   /** Reloads the active-provider summary whenever the project id changes. */
   constructor() {
     effect(() => {
@@ -247,6 +250,15 @@ export class ModelSelectorComponent {
         this.lastPicked.set('');
         if (id && !this.summary()?.model) void this.loadModelHint(id);
       }
+    });
+    // A failed pin write-through (ChatStateService.applyEffortSelection)
+    // must not leave the optimistic badge on a level that never persisted.
+    effect(() => {
+      const err = this.modelError();
+      const changed = err !== '' && err !== this.lastModelError;
+      this.lastModelError = err;
+      const id = this.projectId();
+      if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
     });
   }
 
@@ -470,19 +482,15 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Persists the pin (spawn passes it via `--effort`) and emits the level so the
-   * chat layer applies it to the CURRENT session with a wire `/effort`.
-   * @param level - One of `PERSISTABLE_EFFORT_LEVELS`, from an `effort-option-*` click.
+   * Optimistically shows the picked level and emits it; `ChatStateService`
+   * persists the pin then wires the CURRENT session (SPEED-538). A write
+   * failure surfaces via `modelError`, which the constructor's effect uses
+   * to resync the pin from the backend instead of trusting this guess.
+   * @param level - One of the model's supported effort levels, from an
+   * `effort-option-*` click.
    */
-  protected async selectEffortLevel(level: string): Promise<void> {
-    const projectId = this.projectId();
-    try {
-      await this.tauri.invoke('set_effort_pin', { projectId, level });
-      this.currentEffortPin.set(level);
-      this.effortSelected.emit(level);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.log.warn(`model-selector: set_effort_pin failed: ${msg}`);
-    }
+  protected selectEffortLevel(level: string): void {
+    this.currentEffortPin.set(level);
+    this.effortSelected.emit(level);
   }
 }

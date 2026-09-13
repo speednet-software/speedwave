@@ -1694,7 +1694,7 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    it('applyEffortSelection with a live idle session sends the wire /effort immediately', async () => {
+    it('applyEffortSelection with a live idle session writes the pin then sends the wire /effort', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
@@ -1704,10 +1704,12 @@ describe('ChatStateService', () => {
       invokeSpy.mockClear();
 
       await service.applyEffortSelection('low');
-      const effortSend = invokeSpy.mock.calls.find(
+      const pinCallIdx = invokeSpy.mock.calls.findIndex(([cmd]) => cmd === 'set_effort_pin');
+      const effortSendIdx = invokeSpy.mock.calls.findIndex(
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort low')
       );
-      expect(effortSend).toBeDefined();
+      expect(pinCallIdx).toBeGreaterThanOrEqual(0);
+      expect(effortSendIdx).toBeGreaterThan(pinCallIdx);
     });
 
     it('applyEffortSelection mid-stream queues and flushes the wire /effort after the turn', async () => {
@@ -1738,11 +1740,43 @@ describe('ChatStateService', () => {
       });
     });
 
-    it('applyEffortSelection without a live session sends nothing (the spawn --effort covers it)', async () => {
-      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+    it('applyEffortSelection blocks the wire and sets an error when the pin write fails', async () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'set_effort_pin') throw new Error('locked config');
+        return undefined;
+      });
+
       await service.applyEffortSelection('low');
+
       const effortSend = invokeSpy.mock.calls.find(
-        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort ')
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+      );
+      expect(effortSend).toBeUndefined();
+      expect(service.modelSelectionError()).toContain('locked config');
+    });
+
+    it('applyEffortSelection without a live session respawns the idle pre-first-turn process', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyEffortSelection('low');
+      await new Promise((r) => setTimeout(r, 0));
+
+      const pinCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'set_effort_pin');
+      expect(pinCall).toBeDefined();
+      const startCalls = invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat');
+      expect(startCalls.length).toBeGreaterThan(0);
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
       );
       expect(effortSend).toBeUndefined();
     });
