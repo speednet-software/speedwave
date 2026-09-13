@@ -16,6 +16,8 @@ const FIXTURE: AnthropicModel[] = [
     premium: true,
     selectable: true,
     has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
 ];
 

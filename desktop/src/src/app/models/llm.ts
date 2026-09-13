@@ -10,11 +10,7 @@ export interface AnthropicModel {
   id: string;
   /** Display label for dropdowns and labels (e.g. `"Opus 4.7"`). */
   family: string;
-  /**
-   * Context window in tokens. `1_000_000` for 1M-context families, except
-   * `claude-fable-5`: its bare id reports a 200k session window despite
-   * shipping a priced `[1m]` alias.
-   */
+  /** Context window in tokens (`1_000_000` for 1M-context families, `200_000` otherwise). */
   context_tokens: number;
   /** Whether this entry belongs to the "Latest" optgroup; `false` for legacy snapshots. */
   latest: boolean;
@@ -24,10 +20,13 @@ export interface AnthropicModel {
   selectable: boolean;
   /**
    * True when a priced `[1m]` alias exists (backend `pricing_1m.is_some()`). The
-   * SSOT for offering the `[1m]` combobox option — NOT `context_tokens >= 1_000_000`
-   * (claude-fable-5 reports a 200k bare context yet still has a priced `[1m]` alias).
+   * SSOT for offering the `[1m]` combobox option, independent of `context_tokens`.
    */
   has_1m: boolean;
+  /** Effort levels this model supports (`low`→`max` order); empty when unsupported (Haiku 4.5). */
+  effort_levels: string[];
+  /** Catalog default effort; `null` exactly when `effort_levels` is empty (SSOT for the slider). */
+  default_effort: string | null;
 }
 
 /** Default fallback context window for a model the SSOT doesn't know. */

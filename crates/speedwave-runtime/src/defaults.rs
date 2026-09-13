@@ -25,6 +25,13 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
 /// (`low` → `max`); `ultracode`/`auto` are not model effort levels.
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
+/// Effort levels for models without `xhigh` (Opus 4.6, Sonnet 4.6) — a subset
+/// of `EFFORT_LEVELS` preserving its `low` → `max` order.
+const EFFORT_LEVELS_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
+
+/// Models that don't support effort at all (Haiku 4.5).
+const NO_EFFORT_LEVELS: &[&str] = &[];
+
 /// Per-model price list, USD per 1 million tokens. SSOT for the Desktop
 /// cost meter (`chat/pricing.ts` derives from this via `list_anthropic_models`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -61,6 +68,13 @@ pub struct AnthropicModelInfo {
     pub pricing_1m: Option<ModelPricing>,
     /// Offered by the composer selector; legacy entries stay for pricing history.
     pub selectable: bool,
+    /// Effort levels this model accepts, a subset of `EFFORT_LEVELS` in the same
+    /// `low`→`max` order; empty when the model doesn't support effort (Haiku 4.5).
+    #[serde(skip_deserializing)]
+    pub effort_levels: &'static [&'static str],
+    /// Default effort with no pin set; `None` exactly when `effort_levels` is
+    /// empty. `high` on every model that supports effort, except Opus 4.7 (`xhigh`).
+    pub default_effort: Option<&'static str>,
 }
 
 impl AnthropicModelInfo {
@@ -164,6 +178,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: FABLE_5_1_PRICING,
         pricing_1m: Some(FABLE_5_1_PRICING),
         selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-opus-5",
@@ -174,6 +190,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-5",
@@ -184,6 +202,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: SONNET_5_PRICING,
         pricing_1m: Some(SONNET_5_PRICING),
         selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
@@ -194,6 +214,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: HAIKU_PRICING,
         pricing_1m: None,
         selectable: true,
+        effort_levels: NO_EFFORT_LEVELS,
+        default_effort: None,
     },
     AnthropicModelInfo {
         id: "claude-fable-5",
@@ -204,6 +226,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
         selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-8",
@@ -214,6 +238,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         selectable: false,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
@@ -224,6 +250,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         selectable: false,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("xhigh"),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-6",
@@ -234,6 +262,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
         selectable: false,
+        effort_levels: EFFORT_LEVELS_NO_XHIGH,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-4-6",
@@ -244,6 +274,8 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         pricing: SONNET_46_PRICING,
         pricing_1m: Some(SONNET_46_PRICING),
         selectable: false,
+        effort_levels: EFFORT_LEVELS_NO_XHIGH,
+        default_effort: Some("high"),
     },
 ];
 
@@ -959,5 +991,121 @@ mod tests {
     fn resolve_model_alias_fable_1m_is_selectable_because_latest_fable_has_a_1m_price() {
         let resolved = resolve_model_alias("fable[1m]");
         assert!(is_selectable_anthropic_model_id(&resolved));
+    }
+
+    #[test]
+    fn anthropic_models_effort_levels_are_subsets_of_effort_levels_in_order() {
+        // AC: every model's effort_levels is a subset of EFFORT_LEVELS preserving
+        // the low -> max order (never a second master list).
+        for m in ANTHROPIC_MODELS {
+            let mut last_idx: Option<usize> = None;
+            for level in m.effort_levels {
+                let idx = EFFORT_LEVELS
+                    .iter()
+                    .position(|l| l == level)
+                    .unwrap_or_else(|| {
+                        panic!("{}: effort level '{level}' is not in EFFORT_LEVELS", m.id)
+                    });
+                if let Some(last) = last_idx {
+                    assert!(
+                        idx > last,
+                        "{}: effort_levels must preserve EFFORT_LEVELS order, got {:?}",
+                        m.id,
+                        m.effort_levels
+                    );
+                }
+                last_idx = Some(idx);
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_models_effort_table_matches_docs() {
+        // Pins the table from code.claude.com/docs/en/model-config.md#adjust-effort-level:
+        // "The available effort levels depend on the model. Models not listed here do
+        // not support effort" -- Fable 5.1/5, Opus 5/4.8/4.7, and Sonnet 5 get the full
+        // five; Opus 4.6 and Sonnet 4.6 get four (no `xhigh`); Haiku 4.5 gets none.
+        let full_five: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+        let four_no_xhigh: &[&str] = &["low", "medium", "high", "max"];
+        let find = |id: &str| {
+            ANTHROPIC_MODELS
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from catalog"))
+        };
+        for id in [
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            assert_eq!(
+                find(id).effort_levels,
+                full_five,
+                "{id} must support the full low..max effort range"
+            );
+        }
+        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            assert_eq!(
+                find(id).effort_levels,
+                four_no_xhigh,
+                "{id} must support every level except xhigh"
+            );
+        }
+        assert_eq!(
+            find("claude-haiku-4-5").effort_levels,
+            &[] as &[&str],
+            "claude-haiku-4-5 must not support effort"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_default_effort_is_high_except_opus_4_7() {
+        // "The model's default effort: `high` on every model that supports effort,
+        // except that Opus 4.7 defaults to `xhigh`" -- model-config.md.
+        for m in ANTHROPIC_MODELS {
+            if m.effort_levels.is_empty() {
+                continue;
+            }
+            let expected = if m.id == "claude-opus-4-7" {
+                "xhigh"
+            } else {
+                "high"
+            };
+            assert_eq!(
+                m.default_effort,
+                Some(expected),
+                "{}: unexpected default effort",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_models_default_effort_none_iff_effort_levels_empty() {
+        for m in ANTHROPIC_MODELS {
+            assert_eq!(
+                m.default_effort.is_none(),
+                m.effort_levels.is_empty(),
+                "{}: default_effort must be None exactly when effort_levels is empty",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_models_default_effort_is_a_supported_level() {
+        for m in ANTHROPIC_MODELS {
+            if let Some(default) = m.default_effort {
+                assert!(
+                    m.effort_levels.contains(&default),
+                    "{}: default_effort {default} must be one of its own effort_levels {:?}",
+                    m.id,
+                    m.effort_levels
+                );
+            }
+        }
     }
 }

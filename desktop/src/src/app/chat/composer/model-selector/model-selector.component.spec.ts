@@ -30,6 +30,8 @@ describe('ModelSelectorComponent', () => {
       premium: false,
       selectable: true,
       has_1m: true,
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'high',
     } as AnthropicModel,
     {
       id: 'claude-opus-4-1',
@@ -39,6 +41,8 @@ describe('ModelSelectorComponent', () => {
       premium: true,
       selectable: false,
       has_1m: false,
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'high',
     } as AnthropicModel,
   ];
 
@@ -144,6 +148,8 @@ describe('ModelSelectorComponent', () => {
         premium: true,
         selectable: true,
         has_1m: true,
+        effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
       },
       {
         id: 'claude-haiku-4-5',
@@ -153,6 +159,8 @@ describe('ModelSelectorComponent', () => {
         premium: false,
         selectable: true,
         has_1m: false,
+        effort_levels: [],
+        default_effort: null,
       },
     ];
     tauriInvoke.mockImplementation((cmd: string) => {
@@ -680,6 +688,8 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
       premium: false,
       selectable: true,
       has_1m: true,
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'high',
     } as AnthropicModel,
   ];
 

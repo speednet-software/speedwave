@@ -47,10 +47,10 @@ fn every_catalog_entry_is_priced() {
 
 #[test]
 fn million_context_entries_have_a_priced_1m_variant() {
-    // Require `pricing_1m` exactly when 1M-context, except claude-fable-5
-    // (200k bare id, still ships a priced `[1m]` alias).
+    // Require `pricing_1m` exactly when 1M-context (every catalog entry is,
+    // including claude-fable-5 -- see ADR-087 "Anthropic model catalog facts").
     for m in ANTHROPIC_MODELS {
-        let is_million = m.context_tokens >= 1_000_000 || m.id == "claude-fable-5";
+        let is_million = m.context_tokens >= 1_000_000;
         match (&m.pricing_1m, is_million) {
             (Some(p), true) => assert_priced(m.id, "[1m]", p),
             (None, false) => {}
@@ -85,12 +85,11 @@ fn catalog_serializes_pricing_for_the_frontend() {
             .get("context_tokens")
             .and_then(|v| v.as_u64())
             .expect("each entry carries context_tokens")
-            >= 1_000_000
-            || entry.get("id").and_then(|v| v.as_str()) == Some("claude-fable-5");
+            >= 1_000_000;
         let priced_1m = entry.get("pricing_1m").is_some_and(|v| !v.is_null());
         assert_eq!(
             priced_1m, is_million,
-            "pricing_1m presence on the wire must mirror a 1M context window (or the documented claude-fable-5 exception)"
+            "pricing_1m presence on the wire must mirror a 1M context window"
         );
     }
 }

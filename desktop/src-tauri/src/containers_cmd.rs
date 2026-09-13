@@ -2353,8 +2353,9 @@ mod tests {
     }
 
     /// `list_anthropic_models` must expose `has_1m` derived from
-    /// `pricing_1m.is_some()` — the composer's SSOT for the `[1m]` option,
-    /// including the documented claude-fable-5 exception (200k context, priced 1M alias).
+    /// `pricing_1m.is_some()` — the composer's SSOT for the `[1m]` option.
+    /// claude-fable-5 always runs at the 1M window on the Anthropic API (ADR-087
+    /// "Anthropic model catalog facts"; code.claude.com/docs/en/model-config.md).
     #[test]
     fn list_anthropic_models_carries_has_1m_from_pricing() {
         let models = list_anthropic_models();
@@ -2362,7 +2363,7 @@ mod tests {
             .iter()
             .find(|m| m.info.id == "claude-fable-5")
             .expect("claude-fable-5 must be in the catalog");
-        assert_eq!(fable.info.context_tokens, 200_000);
+        assert_eq!(fable.info.context_tokens, 1_000_000);
         assert!(fable.has_1m, "claude-fable-5 must serialize has_1m=true");
 
         let haiku = models

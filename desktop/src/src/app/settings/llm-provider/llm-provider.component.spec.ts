@@ -35,10 +35,12 @@ const TEST_ANTHROPIC_MODELS = [
   {
     id: 'claude-fable-5',
     family: 'Fable 5',
-    context_tokens: 200_000,
+    context_tokens: 1_000_000,
     latest: true,
     premium: true,
     selectable: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-opus-4-8',
@@ -47,6 +49,8 @@ const TEST_ANTHROPIC_MODELS = [
     latest: true,
     premium: true,
     selectable: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-sonnet-4-6',
@@ -55,6 +59,8 @@ const TEST_ANTHROPIC_MODELS = [
     latest: true,
     premium: false,
     selectable: true,
+    effort_levels: ['low', 'medium', 'high', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-haiku-4-5',
@@ -63,6 +69,8 @@ const TEST_ANTHROPIC_MODELS = [
     latest: true,
     premium: false,
     selectable: true,
+    effort_levels: [],
+    default_effort: null,
   },
   {
     id: 'claude-opus-4-7',
@@ -71,6 +79,8 @@ const TEST_ANTHROPIC_MODELS = [
     latest: false,
     premium: true,
     selectable: false,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'xhigh',
   },
   {
     id: 'claude-opus-4-6',
@@ -79,6 +89,8 @@ const TEST_ANTHROPIC_MODELS = [
     latest: false,
     premium: true,
     selectable: false,
+    effort_levels: ['low', 'medium', 'high', 'max'],
+    default_effort: 'high',
   },
 ];
 

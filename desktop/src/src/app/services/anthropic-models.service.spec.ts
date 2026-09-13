@@ -15,6 +15,8 @@ const FIXTURE: AnthropicModel[] = [
     premium: true,
     selectable: true,
     has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-sonnet-4-6',
@@ -24,6 +26,8 @@ const FIXTURE: AnthropicModel[] = [
     premium: false,
     selectable: true,
     has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'max'],
+    default_effort: 'high',
   },
   {
     id: 'claude-haiku-4-5',
@@ -33,6 +37,8 @@ const FIXTURE: AnthropicModel[] = [
     premium: false,
     selectable: true,
     has_1m: false,
+    effort_levels: [],
+    default_effort: null,
   },
   {
     id: 'claude-opus-4-7',
@@ -42,6 +48,8 @@ const FIXTURE: AnthropicModel[] = [
     premium: true,
     selectable: false,
     has_1m: true,
+    effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    default_effort: 'xhigh',
   },
 ];
 

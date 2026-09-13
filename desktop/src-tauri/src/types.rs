@@ -803,4 +803,52 @@ mod tests {
             "TS MAX_PLUGIN_CREDENTIAL_BYTES must match Rust types::MAX_CREDENTIAL_BYTES"
         );
     }
+
+    #[test]
+    fn anthropic_model_wire_fields_match_ts_mirror() {
+        // `pricing`/`pricing_1m` are deliberately NOT in the TS `AnthropicModel`
+        // mirror (anthropic-models.service.spec.ts's PRICED_FIXTURE documents the
+        // omission); every other field must match on both sides, or a rename on
+        // either side fails here instead of drifting silently.
+        const UNMIRRORED: &[&str] = &["pricing", "pricing_1m"];
+
+        let sample = speedwave_runtime::defaults::ANTHROPIC_MODELS
+            .first()
+            .expect("catalog must not be empty");
+        let wire = AnthropicModelWire {
+            info: sample.clone(),
+            has_1m: sample.has_1m(),
+        };
+        let json = serde_json::to_value(&wire).expect("AnthropicModelWire must serialize");
+        let mut rust: Vec<&str> = json
+            .as_object()
+            .expect("wire serializes as an object")
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !UNMIRRORED.contains(k))
+            .collect();
+        rust.sort_unstable();
+
+        let ts_src = include_str!("../../src/src/app/models/llm.ts");
+        let marker = "export interface AnthropicModel {";
+        let idx = ts_src
+            .find(marker)
+            .expect("llm.ts must declare `export interface AnthropicModel`");
+        let body = ts_src[idx + marker.len()..]
+            .split('}')
+            .next()
+            .expect("the AnthropicModel interface must be closed");
+        let mut ts: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.split(':').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('/') && !s.starts_with('*'))
+            .collect();
+        ts.sort_unstable();
+
+        assert_eq!(
+            rust, ts,
+            "TS AnthropicModel must mirror AnthropicModelWire, minus pricing/pricing_1m"
+        );
+    }
 }
