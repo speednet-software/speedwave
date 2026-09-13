@@ -1,14 +1,12 @@
-//! Launch-effort pin IO for a project's claude-home `settings.json`
-//! (`effortLevel` key). The pin feeds the spawn's `--effort`, which releases
-//! CC's premium launch hold so the wire `/effort` applies live (ADR-087 am.).
+//! Accessors for a project's claude-home `settings.json` (Claude Code's user
+//! settings file): the `effortLevel` launch pin and the `model` key.
 
 use std::path::Path;
 
 use speedwave_runtime::fs_perms;
 
-/// Effort levels `effortLevel` in `settings.json` actually persists across
-/// sessions. `max` is session-only; `ultracode`/`auto` are not settings
-/// values - both are excluded even though CC's live `/effort` accepts them.
+/// The prefix of `defaults::EFFORT_LEVELS` the `effortLevel` settings key
+/// persists across sessions; `max` is session-only in that key.
 pub const PERSISTABLE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
 
 /// Reads `effortLevel` from `<data_dir>/claude-home/<project>/.claude/settings.json`.
@@ -96,6 +94,16 @@ mod tests {
         let path = settings_path(data_dir, project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, json).unwrap();
+    }
+
+    #[test]
+    fn persistable_levels_are_a_prefix_of_the_effort_level_ssot() {
+        let ssot = speedwave_runtime::defaults::EFFORT_LEVELS;
+        assert!(PERSISTABLE_EFFORT_LEVELS.len() < ssot.len());
+        assert_eq!(
+            &ssot[..PERSISTABLE_EFFORT_LEVELS.len()],
+            PERSISTABLE_EFFORT_LEVELS
+        );
     }
 
     #[test]

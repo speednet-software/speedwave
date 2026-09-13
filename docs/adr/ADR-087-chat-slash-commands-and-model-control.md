@@ -239,12 +239,12 @@ cap the level, which the composer control does not yet read.
 The shipped design therefore: every chat spawn passes `--effort <pin>`
 (`chat.rs::launch_effort_level`: the persisted pin, else `high`), which both
 sets the launch effort and releases the hold; the composer effort control
-persists the pin (`effort_pin::set_effort_pin`, next sessions) AND applies
+persists the pin (`claude_settings::set_effort_pin`, next sessions) AND applies
 the level to the CURRENT session with a wire `/effort` routed through the
 control-command path (`ChatStateService.applyEffortSelection`) - queued when
 a turn is streaming, flushed at turn end, rendering the standard control
 chip. Persistable levels remain exactly `low`, `medium`, `high`, `xhigh`
-(`effort_pin::PERSISTABLE_EFFORT_LEVELS`) - Claude Code's settings-file
+(`claude_settings::PERSISTABLE_EFFORT_LEVELS`) - Claude Code's settings-file
 contract accepts only these four, since `max` and `ultracode` are documented
 as session-only[^1]. A hand-typed `/effort <level>` in chat remains
 pass-through; Claude Code's own reply renders unmodified. The control is

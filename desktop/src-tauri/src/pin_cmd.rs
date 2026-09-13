@@ -1,5 +1,5 @@
-//! Tauri commands for the composer effort-pin control.
-//! Delegates to [`crate::effort_pin`].
+//! Tauri commands for the composer's effort pin and model hint.
+//! Delegates to [`crate::claude_settings`].
 
 use crate::types::check_project;
 use speedwave_runtime::config;
@@ -17,7 +17,7 @@ fn resolve_project_name(project_id: &str) -> Result<String, String> {
 #[tauri::command]
 pub(crate) fn get_effort_pin(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
-    Ok(crate::effort_pin::get_effort_pin(
+    Ok(crate::claude_settings::get_effort_pin(
         speedwave_runtime::consts::data_dir(),
         &project_name,
     ))
@@ -26,12 +26,16 @@ pub(crate) fn get_effort_pin(project_id: String) -> Result<Option<String>, Strin
 #[tauri::command]
 pub(crate) fn set_effort_pin(project_id: String, level: String) -> Result<(), String> {
     let project_name = resolve_project_name(&project_id)?;
-    crate::effort_pin::set_effort_pin(speedwave_runtime::consts::data_dir(), &project_name, &level)
+    crate::claude_settings::set_effort_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+        &level,
+    )
 }
 
 #[tauri::command]
 pub(crate) fn list_effort_levels() -> Result<Vec<String>, String> {
-    Ok(crate::effort_pin::PERSISTABLE_EFFORT_LEVELS
+    Ok(crate::claude_settings::PERSISTABLE_EFFORT_LEVELS
         .iter()
         .map(|s| s.to_string())
         .collect())
@@ -43,7 +47,7 @@ pub(crate) fn list_effort_levels() -> Result<Vec<String>, String> {
 pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
     Ok(
-        crate::effort_pin::get_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
+        crate::claude_settings::get_model_pin(speedwave_runtime::consts::data_dir(), &project_name)
             .or_else(|| {
                 crate::history::last_session_model(&project_name, |m| m.starts_with("claude-"))
             })

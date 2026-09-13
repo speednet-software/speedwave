@@ -21,6 +21,10 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
     "typescript-lsp",
 ];
 
+/// Effort levels Claude Code's `--effort` launch flag accepts, in slider order
+/// (`low` → `max`); `ultracode`/`auto` are not model effort levels.
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
 /// Per-model price list, USD per 1 million tokens. SSOT for the Desktop
 /// cost meter (`chat/pricing.ts` derives from this via `list_anthropic_models`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -680,6 +684,14 @@ mod tests {
             MCP_CONFIG_PATH,
             "--mcp-config must be followed by MCP_CONFIG_PATH"
         );
+    }
+
+    #[test]
+    fn effort_levels_are_unique_and_run_from_low_to_max() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(EFFORT_LEVELS.iter().all(|l| seen.insert(*l)));
+        assert_eq!(EFFORT_LEVELS.first(), Some(&"low"));
+        assert_eq!(EFFORT_LEVELS.last(), Some(&"max"));
     }
 
     #[test]

@@ -1453,8 +1453,8 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
 /// Launch effort for a spawn: the project's persisted pin, else `high`
 /// (the premium-model default); an unknown stored value falls back too.
 fn launch_effort_level(project_name: &str) -> String {
-    crate::effort_pin::get_effort_pin(speedwave_runtime::consts::data_dir(), project_name)
-        .filter(|l| crate::effort_pin::PERSISTABLE_EFFORT_LEVELS.contains(&l.as_str()))
+    crate::claude_settings::get_effort_pin(speedwave_runtime::consts::data_dir(), project_name)
+        .filter(|l| crate::claude_settings::PERSISTABLE_EFFORT_LEVELS.contains(&l.as_str()))
         .unwrap_or_else(|| "high".to_string())
 }
 

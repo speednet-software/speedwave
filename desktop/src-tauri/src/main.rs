@@ -8,6 +8,7 @@ mod auth_commands;
 mod bridges;
 mod chat;
 mod chat_session_cmd;
+mod claude_settings;
 mod clipboard_bridge;
 mod cloudstorage_cmd;
 mod container_logs_cmd;
@@ -15,8 +16,6 @@ mod containers_cmd;
 mod diagnostics;
 #[cfg(any(test, feature = "e2e"))]
 mod e2e_support;
-mod effort_pin;
-mod effort_pin_cmd;
 mod firewall;
 mod git_cmd;
 mod health;
@@ -40,6 +39,7 @@ mod oauth_loopback;
 mod oauth_providers;
 mod paste_cmd;
 mod pii_display;
+mod pin_cmd;
 mod plugin_oauth_cmd;
 mod slack_oauth_cmd;
 // `path_util` is consumed only by the Windows-only `oauth_login_cmd::open_terminal_with_command`.
@@ -1308,10 +1308,10 @@ fn main() {
             containers_cmd::set_provider_model,
             containers_cmd::clear_active_llm_provider,
             containers_cmd::restart_llm_proxy,
-            effort_pin_cmd::get_effort_pin,
-            effort_pin_cmd::set_effort_pin,
-            effort_pin_cmd::list_effort_levels,
-            effort_pin_cmd::get_model_hint,
+            pin_cmd::get_effort_pin,
+            pin_cmd::set_effort_pin,
+            pin_cmd::list_effort_levels,
+            pin_cmd::get_model_hint,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,
