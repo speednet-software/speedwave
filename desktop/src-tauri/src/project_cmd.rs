@@ -300,6 +300,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -308,6 +309,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -487,6 +489,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,

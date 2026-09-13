@@ -692,6 +692,11 @@ pub struct ProjectUserEntry {
     /// PII policy selection for this project (`None` = compiled-in default).
     #[serde(default)]
     pub policy: Option<PiiPolicyUserConfig>,
+    /// Persistent Anthropic effort pin (one of `defaults::EFFORT_LEVELS`);
+    /// `None` = no pin, spawn omits `--effort` and Claude Code applies the
+    /// model's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_pin: Option<String>,
 }
 
 /// The IDE selected for the IDE bridge.
@@ -2858,6 +2863,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3392,6 +3398,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3442,6 +3449,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3491,6 +3499,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3534,6 +3543,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3572,6 +3582,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3609,6 +3620,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3641,6 +3653,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -3705,6 +3718,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -4211,6 +4225,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             ..Default::default()
         };
@@ -4269,6 +4284,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             ..Default::default()
         };
@@ -4407,6 +4423,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![proj("with-creds", "/x"), proj("fresh", "/y")],
@@ -4616,6 +4633,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         };
         let config = SpeedwaveUserConfig {
             projects: vec![
@@ -4908,6 +4926,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5017,6 +5036,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("acme".to_string()),
             selected_ide: None,
@@ -5043,6 +5063,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5089,6 +5110,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("test".to_string()),
             selected_ide: None,
@@ -5150,6 +5172,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("durable".to_string()),
             selected_ide: None,
@@ -5182,6 +5205,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("v1".to_string()),
             selected_ide: None,
@@ -5199,6 +5223,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("v2".to_string()),
             selected_ide: None,
@@ -5243,6 +5268,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5447,6 +5473,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5677,6 +5704,7 @@ mod tests {
                 }),
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5751,6 +5779,7 @@ mod tests {
                 }),
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5790,6 +5819,7 @@ mod tests {
                 }),
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6032,6 +6062,7 @@ mod tests {
                     policies: vec!["gdpr-art32".to_string()],
                     ..Default::default()
                 }),
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6073,6 +6104,7 @@ mod tests {
                     policies: vec!["gdpr-art32".to_string()],
                     ..Default::default()
                 }),
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6110,6 +6142,7 @@ mod tests {
                     policies: vec!["no-such-policy".to_string()],
                     ..Default::default()
                 }),
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6143,6 +6176,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6186,6 +6220,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6242,6 +6277,37 @@ mod tests {
         assert_eq!(
             resolved_with,
             crate::pii_policy::ResolvedPiiPolicy::default()
+        );
+    }
+
+    #[test]
+    fn repo_speedwave_json_cannot_set_effort_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".speedwave.json"),
+            r#"{"effort_pin": "max"}"#,
+        )
+        .unwrap();
+        let repo =
+            load_repo_config(tmp.path()).expect("an unknown key must be tolerated, not rejected");
+        assert!(repo.claude.is_none());
+
+        let user_config = SpeedwaveUserConfig {
+            projects: vec![ProjectUserEntry {
+                name: "p".to_string(),
+                dir: tmp.path().to_string_lossy().to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            user_config.find_project("p").unwrap().effort_pin,
+            None,
+            "repo .speedwave.json must never set the user config's effort pin"
         );
     }
 
@@ -6406,6 +6472,7 @@ mod tests {
                 }),
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -6434,6 +6501,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -6442,6 +6510,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
             ],
             active_project: None,
@@ -6511,6 +6580,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -6519,6 +6589,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
             ],
             active_project: Some("beta".to_string()),
@@ -6547,6 +6618,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("deleted-project".to_string()),
             selected_ide: None,
@@ -6843,6 +6915,7 @@ mod plugin_order_tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,

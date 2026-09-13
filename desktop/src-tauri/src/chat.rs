@@ -1450,12 +1450,17 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Launch effort for a spawn: the project's persisted pin, else `high`
-/// (the premium-model default); an unknown stored value falls back too.
-fn launch_effort_level(project_name: &str) -> String {
-    crate::claude_settings::get_effort_pin(speedwave_runtime::consts::data_dir(), project_name)
-        .filter(|l| crate::claude_settings::PERSISTABLE_EFFORT_LEVELS.contains(&l.as_str()))
-        .unwrap_or_else(|| "high".to_string())
+/// Launch effort for a spawn: `Some` only when the project's config carries
+/// a persisted pin (`ProjectUserEntry::effort_pin`); `None` omits `--effort`
+/// so Claude Code applies the model's own default (SPEED-538).
+fn launch_effort_level(
+    user_config: &config::SpeedwaveUserConfig,
+    project_name: &str,
+) -> Option<String> {
+    user_config
+        .find_project(project_name)
+        .and_then(|p| p.effort_pin.clone())
+        .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
 /// Build Claude Code's stream-json argv: `env SPW_SESSION_INSTANCE_ID=<id>` for
@@ -1610,10 +1615,13 @@ impl ChatSession {
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
         let mut flags = resolved.flags.clone();
-        // Explicit --effort releases CC's premium launch-effort hold, making the
-        // wire `/effort` live for the session (empirical; ADR-087 amendment).
-        flags.push("--effort".to_string());
-        flags.push(launch_effort_level(project_name));
+        // A pin releases CC's premium launch-effort hold for this session too
+        // (empirical; ADR-087 amendment); without a pin, no flag is sent and
+        // Claude Code applies the model's own default effort (SPEED-538).
+        if let Some(level) = launch_effort_level(user_config, project_name) {
+            flags.push("--effort".to_string());
+            flags.push(level);
+        }
         if let Some(model) = model_override {
             flags.push("--model".to_string());
             flags.push(model.to_string());
@@ -1646,6 +1654,13 @@ impl ChatSession {
         model_override: Option<&str>,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
+        // Idempotent no-op once a project has a pin (SPEED-538); must run
+        // before prepare_args reads the pin for this spawn.
+        crate::pin_cmd::ensure_effort_pin_migrated_in(
+            speedwave_runtime::consts::data_dir(),
+            &self.project_name,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
         let user_config = config::load_user_config()?;
 
         // Reap a prior leaked process for this session before spawning a new one.
@@ -5643,6 +5658,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5670,6 +5686,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5697,6 +5714,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5708,9 +5726,43 @@ mod tests {
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
-        // Explicit launch effort releases the premium hold so wire /effort is live.
+        // No pin (SPEED-538): spawn must not carry any --effort flag.
+        assert!(!args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn prepare_args_includes_effort_flag_when_a_pin_exists() {
+        let mut user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "myproject".to_string(),
+                dir: "/home/user/myproject".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: Some("xhigh".to_string()),
+            }],
+            active_project: None,
+            selected_ide: None,
+            ui: None,
+            telemetry: None,
+        };
+        let (args, _) =
+            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None).unwrap();
+        let effort_count = args.iter().filter(|a| *a == "--effort").count();
+        assert_eq!(effort_count, 1, "exactly one --effort flag, got: {args:?}");
         let pos = args.iter().position(|a| a == "--effort").unwrap();
-        assert_eq!(args[pos + 1], "high");
+        assert_eq!(args[pos + 1], "xhigh");
+
+        // max must round-trip too: it is session-only for CC's own settings
+        // key, but --effort at launch accepts it (SPEED-538).
+        user_config.projects[0].effort_pin = Some("max".to_string());
+        let (args, _) =
+            ChatSession::prepare_args("myproject", &user_config, "inst", None, None, None).unwrap();
+        let effort_count = args.iter().filter(|a| *a == "--effort").count();
+        assert_eq!(effort_count, 1);
+        let pos = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[pos + 1], "max");
     }
 
     #[test]
@@ -5723,6 +5775,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5760,6 +5813,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -5791,6 +5845,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,

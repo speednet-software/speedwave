@@ -1137,6 +1137,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         }
     }
 
@@ -1192,6 +1193,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             ..Default::default()
         };
@@ -1208,6 +1210,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             ..Default::default()
         };
@@ -1269,6 +1272,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         }
     }
 
@@ -1356,6 +1360,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         };
         let cfg = SpeedwaveUserConfig {
             projects: vec![entry],

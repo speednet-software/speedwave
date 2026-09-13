@@ -202,6 +202,7 @@ fn add_project_with_validated_dir(
         integrations: None,
         plugin_settings: None,
         policy: None,
+        effort_pin: None,
     };
 
     user_config.projects.push(entry);
@@ -532,6 +533,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -612,6 +614,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: Some("existing".to_string()),
             selected_ide: None,
@@ -684,6 +687,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -719,6 +723,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,

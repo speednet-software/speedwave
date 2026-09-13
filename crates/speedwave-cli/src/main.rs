@@ -1912,6 +1912,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         });
         user_config
     }
@@ -2264,6 +2265,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         }
     }
 
@@ -2312,6 +2314,7 @@ mod tests {
             integrations: None,
             plugin_settings: None,
             policy: None,
+            effort_pin: None,
         };
         let cfg = config_with(vec![proj("alpha"), cwd_project], Some("alpha"));
         assert_eq!(resolve_project_fallback(&cfg).unwrap(), "alpha");

@@ -1,20 +1,9 @@
 //! Accessors for a project's claude-home `settings.json` (Claude Code's user
-//! settings file): the `effortLevel` launch pin and the `model` key.
+//! settings file): the legacy `effortLevel` migration and the `model` key.
 
 use std::path::Path;
 
 use speedwave_runtime::fs_perms;
-
-/// The prefix of `defaults::EFFORT_LEVELS` the `effortLevel` settings key
-/// persists across sessions; `max` is session-only in that key.
-pub const PERSISTABLE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
-
-/// Reads `effortLevel` from `<data_dir>/claude-home/<project>/.claude/settings.json`.
-/// Missing file or missing/non-string key both tolerate to `None`; a malformed
-/// (non-JSON-object) file also tolerates to `None` rather than erroring the caller.
-pub fn get_effort_pin(data_dir: &Path, project: &str) -> Option<String> {
-    read_settings_string_key(data_dir, project, "effortLevel")
-}
 
 /// Reads Claude Code's own saved default model (`model` key, written by an
 /// interactive `/model` save) from the project's claude-home `settings.json`.
@@ -31,38 +20,33 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
     value.get(key)?.as_str().map(str::to_string)
 }
 
-/// Writes `effortLevel` into the project's claude-home `settings.json`,
-/// preserving every other key via read-modify-write. Rejects a level
-/// outside `PERSISTABLE_EFFORT_LEVELS`.
+/// One-time migration (SPEED-538): reads and removes the legacy `effortLevel`
+/// key an earlier Speedwave version wrote into claude-home `settings.json`,
+/// preserving every other key. Returns `None` (file left untouched) when the
+/// file is missing, the key is absent, or its value is not a string.
 ///
-/// The in-container Claude Code process writes this same file live for its
-/// own `/model`/`/effort` handling; the read-modify-write runs under an
-/// exclusive advisory lock on a sibling `.settings.json.lock` file so the two
-/// writers serialize instead of racing a lost update.
-pub fn set_effort_pin(data_dir: &Path, project: &str, level: &str) -> Result<(), String> {
-    if !PERSISTABLE_EFFORT_LEVELS.contains(&level) {
-        return Err(format!("unknown effort level: {level}"));
-    }
+/// Runs under the same advisory lock the historical writer used, so it still
+/// serializes against the in-container Claude Code process's own writes.
+pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     let path = settings_path(data_dir, project);
-    if let Some(parent) = path.parent() {
-        fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
-    }
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
-        let existing = fs_perms::read_regular_file_no_follow(&path).map_err(anyhow::Error::msg)?;
-        let mut value: serde_json::Value = match existing {
-            Some(contents) => serde_json::from_str(&contents)
-                .map_err(|e| anyhow::anyhow!("malformed settings.json: {e}"))?,
-            None => serde_json::json!({}),
+        let Some(contents) =
+            fs_perms::read_regular_file_no_follow(&path).map_err(anyhow::Error::msg)?
+        else {
+            return Ok(None);
         };
+        let mut value: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| anyhow::anyhow!("malformed settings.json: {e}"))?;
         let obj = value
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("settings.json root is not an object"))?;
-        obj.insert(
-            "effortLevel".to_string(),
-            serde_json::Value::String(level.to_string()),
-        );
+        let Some(removed) = obj.remove("effortLevel") else {
+            return Ok(None);
+        };
+        let level = removed.as_str().map(str::to_string);
         let rendered = serde_json::to_string_pretty(&value)?;
-        fs_perms::write_shared_file_atomic(&path, &rendered)
+        fs_perms::write_shared_file_atomic(&path, &rendered)?;
+        Ok(level)
     })
     .map_err(|e| e.to_string())
 }
@@ -135,50 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn persistable_levels_are_a_prefix_of_the_effort_level_ssot() {
-        let ssot = speedwave_runtime::defaults::EFFORT_LEVELS;
-        assert!(PERSISTABLE_EFFORT_LEVELS.len() < ssot.len());
-        assert_eq!(
-            &ssot[..PERSISTABLE_EFFORT_LEVELS.len()],
-            PERSISTABLE_EFFORT_LEVELS
-        );
-    }
-
-    #[test]
-    fn get_effort_pin_missing_file_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(get_effort_pin(tmp.path(), "proj"), None);
-    }
-
-    #[test]
-    fn get_effort_pin_reads_existing_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", r#"{"effortLevel":"high"}"#);
-        assert_eq!(get_effort_pin(tmp.path(), "proj"), Some("high".to_string()));
-    }
-
-    #[test]
-    fn get_effort_pin_missing_key_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", r#"{"model":"foo"}"#);
-        assert_eq!(get_effort_pin(tmp.path(), "proj"), None);
-    }
-
-    #[test]
-    fn get_effort_pin_malformed_json_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", "not json");
-        assert_eq!(get_effort_pin(tmp.path(), "proj"), None);
-    }
-
-    #[test]
-    fn get_effort_pin_non_string_value_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_settings(tmp.path(), "proj", r#"{"effortLevel":5}"#);
-        assert_eq!(get_effort_pin(tmp.path(), "proj"), None);
-    }
-
-    #[test]
     fn get_model_pin_reads_the_model_key() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(tmp.path(), "proj", r#"{"model":"claude-fable-5[1m]"}"#);
@@ -197,124 +137,87 @@ mod tests {
     }
 
     #[test]
-    fn set_effort_pin_rejects_unknown_level() {
+    fn take_legacy_effort_pin_missing_file_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = set_effort_pin(tmp.path(), "proj", "not-a-level").unwrap_err();
-        assert!(err.contains("unknown effort level"));
+        assert_eq!(take_legacy_effort_pin(tmp.path(), "proj").unwrap(), None);
     }
 
     #[test]
-    fn set_effort_pin_rejects_session_only_max_level() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = set_effort_pin(tmp.path(), "proj", "max").unwrap_err();
-        assert!(err.contains("unknown effort level"));
-    }
-
-    #[test]
-    fn set_effort_pin_writes_new_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let level = PERSISTABLE_EFFORT_LEVELS[0];
-        set_effort_pin(tmp.path(), "proj", level).unwrap();
-        assert_eq!(get_effort_pin(tmp.path(), "proj"), Some(level.to_string()));
-    }
-
-    #[test]
-    fn set_effort_pin_preserves_other_keys() {
+    fn take_legacy_effort_pin_reads_and_removes_the_key() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(
             tmp.path(),
             "proj",
-            r#"{"model":"claude-sonnet-5","hooks":{"PreToolUse":[]}}"#,
+            r#"{"model":"claude-sonnet-5","effortLevel":"high"}"#,
         );
-        let level = PERSISTABLE_EFFORT_LEVELS[0];
-        set_effort_pin(tmp.path(), "proj", level).unwrap();
+        let taken = take_legacy_effort_pin(tmp.path(), "proj").unwrap();
+        assert_eq!(taken, Some("high".to_string()));
+
         let path = settings_path(tmp.path(), "proj");
         let raw = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["model"], "claude-sonnet-5");
-        assert_eq!(value["hooks"]["PreToolUse"], serde_json::json!([]));
-        assert_eq!(value["effortLevel"], level);
+        assert!(value.get("effortLevel").is_none());
     }
 
     #[test]
-    fn set_effort_pin_overwrites_previous_pin() {
+    fn take_legacy_effort_pin_missing_key_returns_none_and_leaves_file() {
         let tmp = tempfile::tempdir().unwrap();
-        set_effort_pin(tmp.path(), "proj", PERSISTABLE_EFFORT_LEVELS[0]).unwrap();
-        set_effort_pin(tmp.path(), "proj", PERSISTABLE_EFFORT_LEVELS[1]).unwrap();
-        assert_eq!(
-            get_effort_pin(tmp.path(), "proj"),
-            Some(PERSISTABLE_EFFORT_LEVELS[1].to_string())
-        );
+        write_settings(tmp.path(), "proj", r#"{"model":"claude-sonnet-5"}"#);
+        assert_eq!(take_legacy_effort_pin(tmp.path(), "proj").unwrap(), None);
+        let path = settings_path(tmp.path(), "proj");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, r#"{"model":"claude-sonnet-5"}"#);
     }
 
     #[test]
-    fn set_effort_pin_rejects_non_object_root() {
+    fn take_legacy_effort_pin_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"effortLevel":"low"}"#);
+        assert_eq!(
+            take_legacy_effort_pin(tmp.path(), "proj").unwrap(),
+            Some("low".to_string())
+        );
+        assert_eq!(take_legacy_effort_pin(tmp.path(), "proj").unwrap(), None);
+    }
+
+    #[test]
+    fn take_legacy_effort_pin_non_string_value_removed_but_not_returned() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", r#"{"effortLevel":5}"#);
+        assert_eq!(take_legacy_effort_pin(tmp.path(), "proj").unwrap(), None);
+        let path = settings_path(tmp.path(), "proj");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("effortLevel").is_none());
+    }
+
+    #[test]
+    fn take_legacy_effort_pin_rejects_non_object_root() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(tmp.path(), "proj", "[]");
-        let level = PERSISTABLE_EFFORT_LEVELS[0];
-        let err = set_effort_pin(tmp.path(), "proj", level).unwrap_err();
+        let err = take_legacy_effort_pin(tmp.path(), "proj").unwrap_err();
         assert!(err.contains("not an object"));
     }
 
     #[test]
-    fn set_effort_pin_rejects_malformed_json() {
+    fn take_legacy_effort_pin_rejects_malformed_json() {
         let tmp = tempfile::tempdir().unwrap();
         write_settings(tmp.path(), "proj", "not json");
-        let level = PERSISTABLE_EFFORT_LEVELS[0];
-        let err = set_effort_pin(tmp.path(), "proj", level).unwrap_err();
+        let err = take_legacy_effort_pin(tmp.path(), "proj").unwrap_err();
         assert!(err.contains("malformed settings.json"));
         let path = settings_path(tmp.path(), "proj");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
     }
 
-    /// Two concurrent writers (simulating the Desktop pin write racing the
-    /// in-container Claude Code process's own settings.json write) must
-    /// serialize under the lock: no torn/lost write, and the final file holds
-    /// exactly one of the two attempted values.
-    #[test]
-    fn set_effort_pin_concurrent_writers_serialize_without_lost_update() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().to_path_buf();
-        write_settings(&data_dir, "proj", r#"{"model":"claude-sonnet-5"}"#);
-
-        let iterations = 50;
-        let d1 = data_dir.clone();
-        let d2 = data_dir.clone();
-        let t1 = std::thread::spawn(move || {
-            for _ in 0..iterations {
-                set_effort_pin(&d1, "proj", "low").unwrap();
-            }
-        });
-        let t2 = std::thread::spawn(move || {
-            for _ in 0..iterations {
-                set_effort_pin(&d2, "proj", "high").unwrap();
-            }
-        });
-        t1.join().unwrap();
-        t2.join().unwrap();
-
-        let path = settings_path(&data_dir, "proj");
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&raw).expect("final file must be valid JSON, not torn");
-        assert_eq!(value["model"], "claude-sonnet-5");
-        let effort = value["effortLevel"].as_str().unwrap();
-        assert!(
-            effort == "low" || effort == "high",
-            "unexpected effortLevel: {effort}"
-        );
-
-        let read_back = get_effort_pin(&data_dir, "proj");
-        assert_eq!(read_back.as_deref(), Some(effort));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn set_effort_pin_lock_file_is_owner_only() {
+    fn take_legacy_effort_pin_lock_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        set_effort_pin(tmp.path(), "proj", PERSISTABLE_EFFORT_LEVELS[0]).unwrap();
+        write_settings(tmp.path(), "proj", r#"{"effortLevel":"low"}"#);
+        take_legacy_effort_pin(tmp.path(), "proj").unwrap();
         let lock_path = settings_lock_path(tmp.path(), "proj");
         let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

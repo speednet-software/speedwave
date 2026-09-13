@@ -1,5 +1,4 @@
 //! Tauri commands for the composer's effort pin and model hint.
-//! Delegates to [`crate::claude_settings`].
 
 use std::path::Path;
 
@@ -16,28 +15,81 @@ fn resolve_project_name(project_id: &str) -> Result<String, String> {
     Ok(project.name.clone())
 }
 
+/// One-time takeover (SPEED-538): migrates a legacy `effortLevel` from
+/// claude-home `settings.json` into the project's config pin when it has
+/// none yet, removing the key from the file either way. Idempotent - a
+/// project that already has a pin never reads the legacy file.
+pub(crate) fn ensure_effort_pin_migrated_in(
+    data_dir: &std::path::Path,
+    project_name: &str,
+) -> Result<(), String> {
+    config::with_config_lock_in(data_dir, || {
+        let config_path = data_dir.join("config.json");
+        let mut user_config = config::load_user_config_from(&config_path)?;
+        let already_pinned = user_config
+            .find_project(project_name)
+            .is_some_and(|p| p.effort_pin.is_some());
+        if already_pinned {
+            return Ok(());
+        }
+        let legacy = crate::claude_settings::take_legacy_effort_pin(data_dir, project_name)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let Some(level) =
+            legacy.filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
+        else {
+            return Ok(());
+        };
+        if let Some(project) = user_config.find_project_mut(project_name) {
+            project.effort_pin = Some(level);
+            config::save_user_config_to(&user_config, &config_path)?;
+        }
+        Ok(())
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
+/// `data_dir`-parameterized effort pin write, under the config lock; rejects a
+/// level outside `defaults::EFFORT_LEVELS`. Mirrors `containers_cmd::set_provider_model_in`.
+fn set_effort_pin_in(
+    data_dir: &std::path::Path,
+    project_name: &str,
+    level: &str,
+) -> Result<(), String> {
+    if !speedwave_runtime::defaults::EFFORT_LEVELS.contains(&level) {
+        return Err(format!("unknown effort level: {level}"));
+    }
+    config::with_config_lock_in(data_dir, || {
+        let config_path = data_dir.join("config.json");
+        let mut user_config = config::load_user_config_from(&config_path)?;
+        let project = user_config
+            .find_project_mut(project_name)
+            .ok_or_else(|| anyhow::anyhow!("project '{project_name}' not found in config"))?;
+        project.effort_pin = Some(level.to_string());
+        config::save_user_config_to(&user_config, &config_path)
+    })
+    .map_err(|e: anyhow::Error| e.to_string())
+}
+
 #[tauri::command]
 pub(crate) fn get_effort_pin(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
-    Ok(crate::claude_settings::get_effort_pin(
-        speedwave_runtime::consts::data_dir(),
-        &project_name,
-    ))
+    let data_dir = speedwave_runtime::consts::data_dir();
+    ensure_effort_pin_migrated_in(data_dir, &project_name)?;
+    let user_config = config::load_user_config().map_err(|e| e.to_string())?;
+    Ok(user_config
+        .find_project(&project_name)
+        .and_then(|p| p.effort_pin.clone()))
 }
 
 #[tauri::command]
 pub(crate) fn set_effort_pin(project_id: String, level: String) -> Result<(), String> {
     let project_name = resolve_project_name(&project_id)?;
-    crate::claude_settings::set_effort_pin(
-        speedwave_runtime::consts::data_dir(),
-        &project_name,
-        &level,
-    )
+    set_effort_pin_in(speedwave_runtime::consts::data_dir(), &project_name, &level)
 }
 
 #[tauri::command]
 pub(crate) fn list_effort_levels() -> Result<Vec<String>, String> {
-    Ok(crate::claude_settings::PERSISTABLE_EFFORT_LEVELS
+    Ok(speedwave_runtime::defaults::EFFORT_LEVELS
         .iter()
         .map(|s| s.to_string())
         .collect())
@@ -117,6 +169,22 @@ mod tests {
         .unwrap();
     }
 
+    fn user_config_with_project(data_dir: &std::path::Path, name: &str) {
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: name.to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            ..Default::default()
+        };
+        config::save_user_config_to(&user_config, &data_dir.join("config.json")).unwrap();
+    }
+
     #[test]
     fn get_effort_pin_rejects_invalid_project() {
         let res = get_effort_pin(String::new());
@@ -124,9 +192,9 @@ mod tests {
     }
 
     #[test]
-    fn list_effort_levels_returns_the_persistable_four() {
+    fn list_effort_levels_returns_all_five() {
         let levels = list_effort_levels().unwrap();
-        assert_eq!(levels, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(levels, vec!["low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]
@@ -160,8 +228,6 @@ mod tests {
 
     #[test]
     fn get_and_set_effort_pin_share_the_same_resolution_error_for_an_invalid_project() {
-        // Both commands delegate to resolve_project_name: an invalid project_id
-        // must surface the identical error class from both entry points.
         let get_err = get_effort_pin(String::new()).unwrap_err();
         let set_err = set_effort_pin(String::new(), "low".to_string()).unwrap_err();
         assert_eq!(get_err, set_err);
@@ -211,12 +277,187 @@ mod tests {
     }
 
     #[test]
+    fn set_effort_pin_in_round_trips_every_level() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        for level in speedwave_runtime::defaults::EFFORT_LEVELS {
+            set_effort_pin_in(tmp.path(), "proj", level).unwrap();
+            let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+            assert_eq!(
+                cfg.find_project("proj").unwrap().effort_pin.as_deref(),
+                Some(*level)
+            );
+        }
+    }
+
+    #[test]
+    fn set_effort_pin_in_rejects_unknown_level() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        let err = set_effort_pin_in(tmp.path(), "proj", "ultra").unwrap_err();
+        assert!(err.contains("unknown effort level"));
+    }
+
+    #[test]
+    fn set_effort_pin_in_unknown_project_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        let err = set_effort_pin_in(tmp.path(), "ghost", "low").unwrap_err();
+        assert!(err.contains("ghost"));
+    }
+
+    #[test]
+    fn set_effort_pin_in_preserves_other_project_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: Some(config::ClaudeOverrides {
+                    env: None,
+                    settings: None,
+                    llm: None,
+                }),
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: None,
+            }],
+            active_project: Some("proj".to_string()),
+            ..Default::default()
+        };
+        let config_path = tmp.path().join("config.json");
+        config::save_user_config_to(&user_config, &config_path).unwrap();
+
+        set_effort_pin_in(tmp.path(), "proj", "xhigh").unwrap();
+
+        let cfg = config::load_user_config_from(&config_path).unwrap();
+        let project = cfg.find_project("proj").unwrap();
+        assert_eq!(project.effort_pin.as_deref(), Some("xhigh"));
+        assert_eq!(project.dir, "/tmp/proj");
+        assert!(project.claude.is_some());
+        assert_eq!(cfg.active_project.as_deref(), Some("proj"));
+    }
+
+    #[test]
+    fn set_effort_pin_in_concurrent_writers_serialize_without_lost_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        user_config_with_project(&data_dir, "proj");
+
+        let iterations = 30;
+        let d1 = data_dir.clone();
+        let d2 = data_dir.clone();
+        let t1 = std::thread::spawn(move || {
+            for _ in 0..iterations {
+                set_effort_pin_in(&d1, "proj", "low").unwrap();
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for _ in 0..iterations {
+                set_effort_pin_in(&d2, "proj", "high").unwrap();
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let cfg =
+            config::load_user_config_from(&data_dir.join("config.json")).expect("valid, not torn");
+        let effort = cfg
+            .find_project("proj")
+            .unwrap()
+            .effort_pin
+            .clone()
+            .unwrap();
+        assert!(effort == "low" || effort == "high", "unexpected: {effort}");
+    }
+
+    #[test]
+    fn ensure_effort_pin_migrated_in_takes_over_legacy_effort_level_and_removes_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        let settings_path = speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj")
+            .join(".claude")
+            .join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(&settings_path, r#"{"effortLevel":"xhigh"}"#).unwrap();
+
+        ensure_effort_pin_migrated_in(tmp.path(), "proj").unwrap();
+
+        let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        assert_eq!(
+            cfg.find_project("proj").unwrap().effort_pin.as_deref(),
+            Some("xhigh")
+        );
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value.get("effortLevel").is_none());
+    }
+
+    #[test]
+    fn ensure_effort_pin_migrated_in_ignores_the_file_when_a_pin_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_config = config::SpeedwaveUserConfig {
+            projects: vec![config::ProjectUserEntry {
+                name: "proj".to_string(),
+                dir: "/tmp/proj".to_string(),
+                claude: None,
+                integrations: None,
+                plugin_settings: None,
+                policy: None,
+                effort_pin: Some("low".to_string()),
+            }],
+            ..Default::default()
+        };
+        config::save_user_config_to(&user_config, &tmp.path().join("config.json")).unwrap();
+        let settings_path = speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj")
+            .join(".claude")
+            .join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(&settings_path, r#"{"effortLevel":"xhigh"}"#).unwrap();
+
+        ensure_effort_pin_migrated_in(tmp.path(), "proj").unwrap();
+
+        let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        assert_eq!(
+            cfg.find_project("proj").unwrap().effort_pin.as_deref(),
+            Some("low"),
+            "an existing pin must never be overwritten by the legacy file"
+        );
+        let raw = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(
+            raw, r#"{"effortLevel":"xhigh"}"#,
+            "the legacy file must be left untouched when a pin already exists"
+        );
+    }
+
+    #[test]
     fn get_model_hint_in_shows_an_unrecognized_pin_value_verbatim_never_default() {
         let tmp = tempfile::tempdir().unwrap();
         write_model_pin(tmp.path(), "proj", "some-mystery-value");
         assert_eq!(
             get_model_hint_in(tmp.path(), "proj"),
             Some("some-mystery-value".to_string())
+        );
+    }
+
+    #[test]
+    fn ensure_effort_pin_migrated_in_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        let settings_path = speedwave_runtime::claude_home::claude_home_dir(tmp.path(), "proj")
+            .join(".claude")
+            .join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(&settings_path, r#"{"effortLevel":"low"}"#).unwrap();
+
+        ensure_effort_pin_migrated_in(tmp.path(), "proj").unwrap();
+        ensure_effort_pin_migrated_in(tmp.path(), "proj").unwrap();
+
+        let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        assert_eq!(
+            cfg.find_project("proj").unwrap().effort_pin.as_deref(),
+            Some("low")
         );
     }
 
@@ -243,5 +484,14 @@ mod tests {
     fn get_model_hint_in_returns_none_without_a_pin_or_history() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(get_model_hint_in(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn ensure_effort_pin_migrated_in_no_legacy_key_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        ensure_effort_pin_migrated_in(tmp.path(), "proj").unwrap();
+        let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        assert_eq!(cfg.find_project("proj").unwrap().effort_pin, None);
     }
 }
