@@ -44,7 +44,7 @@ The exact tool count is pinned by `src/tools/metadata.test.ts`; all tool names a
 | Pipeline      | 5     | listPipelineIds, getPipelineFull, getJobLog, retryPipeline, triggerPipeline                                        |
 | Repository    | 3     | getTree, getFile, getBlame                                                                                         |
 | Artifact      | 3     | listArtifacts, downloadArtifact, deleteArtifacts                                                                   |
-| Issue         | 5     | listIssues, getIssue, createIssue, updateIssue, closeIssue                                                         |
+| Issue         | 7     | listIssues, getIssue, createIssue, updateIssue, closeIssue, listIssueNotes, createIssueNote                        |
 | Label         | 2     | listLabels, createLabel                                                                                            |
 | Release       | 4     | listTags, createTag, deleteTag, createRelease                                                                      |
 

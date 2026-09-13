@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
+import { META_KEYS, notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
 import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
@@ -10,6 +10,8 @@ type MockClient = {
   createIssue: Mock;
   updateIssue: Mock;
   closeIssue: Mock;
+  listIssueNotes: Mock;
+  createIssueNote: Mock;
 };
 
 const createMockClient = (): MockClient => ({
@@ -18,6 +20,8 @@ const createMockClient = (): MockClient => ({
   createIssue: vi.fn(),
   updateIssue: vi.fn(),
   closeIssue: vi.fn(),
+  listIssueNotes: vi.fn(),
+  createIssueNote: vi.fn(),
 });
 
 describe('issue-tools', () => {
@@ -701,6 +705,47 @@ describe('issue-tools', () => {
       });
     });
 
+    it('forwards replacement assignee_ids to the client', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 1, iid: 42, assignees: [{ id: 7 }] });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')?.handler;
+      await handler!({ project_id: 'test/project', issue_iid: 42, assignee_ids: [7] });
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith('test/project', 42, {
+        assignee_ids: [7],
+      });
+    });
+
+    it('unassigns with an empty assignee_ids array', async () => {
+      mockClient.updateIssue.mockResolvedValue({ id: 1, iid: 42, assignees: [] });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'updateIssue')?.handler;
+      await handler!({ project_id: 'test/project', issue_iid: 42, assignee_ids: [] });
+
+      expect(mockClient.updateIssue).toHaveBeenCalledWith('test/project', 42, {
+        assignee_ids: [],
+      });
+    });
+
+    it('declares the identity trio because assignees depend on the caller', () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'updateIssue')?.tool;
+      const meta = tool?._meta as Record<string, unknown>;
+
+      expect(meta[META_KEYS.DEFER_LOADING]).toBe(true);
+      expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
+      expect(tool?.inputSchema.properties?.assignee_ids).toMatchObject({
+        type: 'array',
+        items: { type: 'number' },
+      });
+      expect(String(tool?.inputSchema.properties?.assignee_ids?.description)).toContain(
+        'getCurrentUser'
+      );
+    });
+
     it('works with numeric project_id', async () => {
       mockClient.updateIssue.mockResolvedValue({ id: 1, iid: 5 });
 
@@ -952,11 +997,374 @@ describe('issue-tools', () => {
     });
   });
 
+  describe('listIssueNotes', () => {
+    it('exposes read-only metadata mirroring listMrNotes', () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'listIssueNotes')?.tool;
+
+      expect(tool?.name).toBe('listIssueNotes');
+      expect(tool?.description).toBe('List notes/comments on an issue');
+      expect(tool?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+      expect(tool?.keywords).toEqual(['gitlab', 'issue', 'notes', 'comments']);
+      expect(tool?.example).toContain('listIssueNotes');
+      expect(tool?.inputSchema.required).toEqual(['project_id', 'issue_iid']);
+      expect(tool?.inputExamples?.length).toBeGreaterThan(0);
+    });
+
+    it('declares the prefixed defer-loading key and no legacy key', () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const meta = tools.find((t) => t.tool.name === 'listIssueNotes')?.tool._meta as Record<
+        string,
+        unknown
+      >;
+
+      expect(meta[META_KEYS.DEFER_LOADING]).toBe(true);
+      expect(meta.deferLoading).toBeUndefined();
+    });
+
+    it('lists notes successfully', async () => {
+      const mockNotes = [
+        {
+          id: 1,
+          body: 'Reproduced on main',
+          author: { id: 1, username: 'johndoe', name: 'John Doe' },
+          created_at: '2025-01-01T00:00:00Z',
+          system: false,
+        },
+        {
+          id: 2,
+          body: 'Fixed by !42',
+          author: { id: 2, username: 'janedoe', name: 'Jane Doe' },
+          created_at: '2025-01-02T00:00:00Z',
+          system: false,
+        },
+      ];
+
+      mockClient.listIssueNotes.mockResolvedValue(mockNotes);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 42 });
+
+      expect(mockClient.listIssueNotes).toHaveBeenCalledWith('test/project', 42, undefined);
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify(mockNotes, null, 2) }],
+      });
+    });
+
+    it('forwards the limit parameter and a numeric project_id', async () => {
+      mockClient.listIssueNotes.mockResolvedValue([]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      const result = await handler!({ project_id: 123, issue_iid: 7, limit: 15 });
+
+      expect(mockClient.listIssueNotes).toHaveBeenCalledWith(123, 7, 15);
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify([], null, 2) }],
+      });
+    });
+
+    it('accepts a numeric-string issue_iid', async () => {
+      mockClient.listIssueNotes.mockResolvedValue([]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: '42' });
+
+      expect(mockClient.listIssueNotes).toHaveBeenCalledWith('test/project', 42, undefined);
+    });
+
+    it('accepts a "#"-prefixed issue_iid', async () => {
+      mockClient.listIssueNotes.mockResolvedValue([]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: '#42' });
+
+      expect(mockClient.listIssueNotes).toHaveBeenCalledWith('test/project', 42, undefined);
+    });
+
+    it('accepts a large issue_iid', async () => {
+      mockClient.listIssueNotes.mockResolvedValue([]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      await handler!({ project_id: 'test/project', issue_iid: 2147483647 });
+
+      expect(mockClient.listIssueNotes).toHaveBeenCalledWith('test/project', 2147483647, undefined);
+    });
+
+    it('forwards an absent project_id and issue_iid unchanged, leaving rejection to the API', async () => {
+      mockClient.listIssueNotes.mockResolvedValue([]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      await handler!({});
+
+      expect(mockClient.listIssueNotes).toHaveBeenCalledWith(undefined, undefined, undefined);
+    });
+
+    it('returns a teaching error for a non-numeric issue_iid without calling the client', async () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 'not-a-number' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('issue_iid');
+      expect(mockClient.listIssueNotes).not.toHaveBeenCalled();
+    });
+
+    it.each(['', '   ', '#'])(
+      'returns a teaching error for issue_iid %j instead of coercing to 0, without calling the client',
+      async (issue_iid) => {
+        const tools = createIssueTools(mockClient as unknown as GitLabClient);
+        const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+        const result = await handler!({ project_id: 'test/project', issue_iid });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('issue_iid');
+        expect(mockClient.listIssueNotes).not.toHaveBeenCalled();
+      }
+    );
+
+    it('handles generic errors', async () => {
+      mockClient.listIssueNotes.mockRejectedValue(new Error('Something went wrong'));
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 1 });
+
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: Something went wrong' }],
+        isError: true,
+      });
+    });
+
+    it('handles a non-Error rejection', async () => {
+      mockClient.listIssueNotes.mockRejectedValue('plain string failure');
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 1 });
+
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: GitLab API error' }],
+        isError: true,
+      });
+    });
+
+    it('handles not-found errors', async () => {
+      mockClient.listIssueNotes.mockRejectedValue(new Error('404 Issue Not Found'));
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'listIssueNotes')?.handler;
+
+      const result = await handler!({ project_id: 'test/project', issue_iid: 9999 });
+
+      expectNotFoundTeachingError(result);
+    });
+  });
+
+  describe('createIssueNote', () => {
+    it('exposes write metadata mirroring createMrNote', () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const tool = tools.find((t) => t.tool.name === 'createIssueNote')?.tool;
+
+      expect(tool?.name).toBe('createIssueNote');
+      expect(tool?.description).toBe(
+        'Add a comment/note to an issue. Posted as the currently authenticated GitLab user (the configured token owner).'
+      );
+      expect(tool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+      expect(tool?.keywords).toEqual(['gitlab', 'issue', 'comment', 'note']);
+      expect(tool?.example).toContain('createIssueNote');
+      expect(tool?.inputSchema.required).toEqual(['project_id', 'issue_iid', 'body']);
+      expect(tool?.inputExamples?.length).toBeGreaterThan(0);
+    });
+
+    it('declares the identity trio so the caller can resolve the posting user', () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const meta = tools.find((t) => t.tool.name === 'createIssueNote')?.tool._meta as Record<
+        string,
+        unknown
+      >;
+
+      expect(meta[META_KEYS.DEFER_LOADING]).toBe(true);
+      expect(meta[META_KEYS.USER_SCOPED]).toBe(true);
+      expect(meta[META_KEYS.CURRENT_USER_TOOL]).toBe('getCurrentUser');
+      expect(meta.deferLoading).toBeUndefined();
+    });
+
+    it('creates a note successfully', async () => {
+      const mockNote = {
+        id: 1,
+        body: 'Taking this one',
+        author: { id: 1, username: 'johndoe', name: 'John Doe' },
+        created_at: '2025-01-01T00:00:00Z',
+      };
+
+      mockClient.createIssueNote.mockResolvedValue(mockNote);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      const result = await handler!({
+        project_id: 'test/project',
+        issue_iid: 42,
+        body: 'Taking this one',
+      });
+
+      expect(mockClient.createIssueNote).toHaveBeenCalledWith(
+        'test/project',
+        42,
+        'Taking this one'
+      );
+      expect(result).toEqual({
+        content: [{ type: 'text', text: JSON.stringify(mockNote, null, 2) }],
+      });
+    });
+
+    it('forwards a multiline Unicode body verbatim', async () => {
+      const body = '**Ważne**: sprawdź logi 🔍\nDruga linia\nTrzecia linia';
+      mockClient.createIssueNote.mockResolvedValue({ id: 2, body });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      await handler!({ project_id: 456, issue_iid: 20, body });
+
+      expect(mockClient.createIssueNote).toHaveBeenCalledWith(456, 20, body);
+    });
+
+    it('forwards an empty body verbatim', async () => {
+      mockClient.createIssueNote.mockResolvedValue({ id: 3, body: '' });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      await handler!({ project_id: 1, issue_iid: 1, body: '' });
+
+      expect(mockClient.createIssueNote).toHaveBeenCalledWith(1, 1, '');
+    });
+
+    it('forwards an absent body and project_id unchanged, leaving rejection to the API', async () => {
+      mockClient.createIssueNote.mockResolvedValue({ id: 4 });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      await handler!({ issue_iid: 5 });
+
+      expect(mockClient.createIssueNote).toHaveBeenCalledWith(undefined, 5, undefined);
+    });
+
+    it('accepts a numeric-string issue_iid', async () => {
+      mockClient.createIssueNote.mockResolvedValue({ id: 5, body: 'Note' });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      await handler!({ project_id: 1, issue_iid: '1', body: 'Note' });
+
+      expect(mockClient.createIssueNote).toHaveBeenCalledWith(1, 1, 'Note');
+    });
+
+    it('accepts a large issue_iid', async () => {
+      mockClient.createIssueNote.mockResolvedValue({ id: 6, body: 'Note' });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      await handler!({ project_id: 1, issue_iid: 2147483647, body: 'Note' });
+
+      expect(mockClient.createIssueNote).toHaveBeenCalledWith(1, 2147483647, 'Note');
+    });
+
+    it('returns a teaching error for a non-numeric issue_iid without calling the client', async () => {
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      const result = await handler!({ project_id: 1, issue_iid: 'oops', body: 'Note' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('issue_iid');
+      expect(mockClient.createIssueNote).not.toHaveBeenCalled();
+    });
+
+    it('handles generic errors', async () => {
+      mockClient.createIssueNote.mockRejectedValue(new Error('Validation failed'));
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      const result = await handler!({ project_id: 1, issue_iid: 1, body: 'test' });
+
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: Validation failed' }],
+        isError: true,
+      });
+    });
+
+    it('handles a non-Error rejection', async () => {
+      mockClient.createIssueNote.mockRejectedValue({ nope: true });
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      const result = await handler!({ project_id: 1, issue_iid: 1, body: 'test' });
+
+      expect(result).toEqual({
+        content: [{ type: 'text', text: 'Error: GitLab API error' }],
+        isError: true,
+      });
+    });
+
+    it('handles connection errors', async () => {
+      mockClient.createIssueNote.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      const result = await handler!({ project_id: 1, issue_iid: 1, body: 'test' });
+
+      expect(result).toEqual({
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${withSetupGuidance('Network error. Check your GitLab URL.')}`,
+          },
+        ],
+        isError: true,
+      });
+    });
+
+    it('handles permission errors', async () => {
+      mockClient.createIssueNote.mockRejectedValue(new Error('403 Forbidden'));
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const handler = tools.find((t) => t.tool.name === 'createIssueNote')?.handler;
+
+      const result = await handler!({ project_id: 'private/project', issue_iid: 1, body: 'hi' });
+
+      expectPermissionTeachingError(result);
+    });
+  });
+
   describe('unconfigured client', () => {
     it('returns error for all tools when client is null', async () => {
       const tools = createIssueTools(null);
 
-      expect(tools).toHaveLength(5);
+      expect(tools).toHaveLength(7);
 
       const expectedError = {
         content: [
@@ -985,6 +1393,8 @@ describe('issue-tools', () => {
         'createIssue',
         'updateIssue',
         'closeIssue',
+        'listIssueNotes',
+        'createIssueNote',
       ]);
     });
 
@@ -1001,6 +1411,8 @@ describe('issue-tools', () => {
       expect(mockClient.createIssue).not.toHaveBeenCalled();
       expect(mockClient.updateIssue).not.toHaveBeenCalled();
       expect(mockClient.closeIssue).not.toHaveBeenCalled();
+      expect(mockClient.listIssueNotes).not.toHaveBeenCalled();
+      expect(mockClient.createIssueNote).not.toHaveBeenCalled();
     });
   });
 });
