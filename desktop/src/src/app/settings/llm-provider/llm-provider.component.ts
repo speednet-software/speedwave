@@ -78,9 +78,8 @@ function fixedExtraRows(): ExtraProviderEdit[] {
 }
 
 /**
- * Fingerprint of a remote row's key state — the touched raw value, or a
- * stored-presence marker when untouched. Compared at Save time to decide
- * whether a fresh connection test is required (SPEED-555).
+ * Fingerprint of a remote row's key state (touched raw value, else a stored-presence
+ * marker); Save compares it to decide whether a fresh connection test is due (SPEED-555).
  * @param hasKey - whether a key is persisted on disk for this row
  * @param keyTouched - whether the user edited the key field this session
  * @param keyInput - the live (touched-or-not) key field value
@@ -93,10 +92,8 @@ function extraKeyFingerprint(hasKey: boolean, keyTouched: boolean, keyInput: str
 const NEVER_SAVED_LOCAL_FP = ' never-saved';
 
 /**
- * Fingerprint of the local card's connection fields (base_url + key state).
- * Compared at Save time to decide whether a fresh connection test is
- * required (SPEED-555); custom_headers is deliberately excluded — an
- * "advanced" edit never forces a retest.
+ * Fingerprint of the local card's connection fields (base_url + key state) compared at
+ * Save (SPEED-555); custom_headers is excluded so an "advanced" edit never forces a retest.
  * @param effectiveUrl - the base URL the probe would actually target
  * @param hasApiKey - whether a key is persisted on disk
  * @param apiKeyTouched - whether the user edited the key field this session
@@ -1350,9 +1347,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Whether the connection-test gate must run a fresh probe before Save: no
-   * passing test is on record for the CURRENT fingerprint, and the fields
-   * also differ from the persisted (already-trusted) configuration (SPEED-555).
+   * True when Save must probe first: no passing test for the CURRENT fingerprint and the
+   * fields differ from the persisted, already-trusted configuration (SPEED-555).
    * @param fp - the live connection fingerprint
    * @param savedFp - the fingerprint as of the last persisted save/load
    * @param lastTest - the last explicit test outcome, if any
@@ -1395,9 +1391,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.saved.set(false);
     this.cdr.markForCheck();
 
-    // Test-connection gate (ADR-087 section 8 amendment, SPEED-555): a routed active
-    // provider (local/OpenRouter) needs a passing connection test for its CURRENT
-    // field values before Save writes anything or restarts a container.
+    // Test-connection gate (ADR-087 §8 amendment, SPEED-555): a routed provider needs a
+    // passing test for its CURRENT field values before Save writes or restarts anything.
     if (localIsActive) {
       const fp = localConnectionFingerprint(
         this.baseUrl() || this.defaultBaseUrl(),
