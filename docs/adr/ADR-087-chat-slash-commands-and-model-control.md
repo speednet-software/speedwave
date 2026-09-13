@@ -225,9 +225,29 @@ an idle Claude process eagerly, at app init and on "+"
 (`ChatStateService.init`/`startNewConversation` call `startChatSession()`
 before any message exists), a no-session pick writes the pin and respawns
 that idle process so its first reply reads the file fresh, instead of
-carrying `--model` on the override queue. The `--model`/`model_override`
-plumbing in `chat.rs`/`chat_session_cmd.rs` stays for now (its removal is
-SPEED-544's contraction ticket) but a no-session pick no longer feeds it.
+carrying `--model` on the override queue.
+
+**Amendment (SPEED-544: the deferred `--model`/`model_override` removal
+above is done - the idle respawn is now the only pre-first-turn
+mechanism).** `ChatSession::prepare_args`/`start`/`start_with_retry` and the
+`start_chat` Tauri command no longer take a model override parameter at
+all, so the spawn argv never contains `--model` regardless of whether a
+`settings.json` pin exists - pinned tests cover both the absent- and
+present-pin case. The `is_selectable_anthropic_model_id` validation that
+used to gate the override moved with the parameter and is gone from
+`chat.rs`; the predicate itself stays, since `claude_settings::set_model_pin`
+still validates a written pin against the same catalog.
+`ChatStateService.startChatSession` no longer reads or clears
+`_pendingModelOverride` before a spawn, and the `SystemInit` handler no
+longer flushes it - the mid-session queue (unchanged from the SPEED-539
+amendment) now flushes exclusively on `Result` (turn end), never on
+`SystemInit`, closing the residual risk of a stale queued pick re-sending
+`/model` into a session the file pin already started on the right model.
+`resetForNewConversation` now clears the queue itself, so `resumeConversation`'s
+own explicit clear (redundant now, since it already calls
+`resetForNewConversation`) was removed - a pick queued for an old,
+still-streaming turn cannot leak into whatever session starts next. `setPendingModelOverride` had no callers outside the service and its
+own spec by this point, so it was inlined rather than kept as a shim.
 
 ### 5. Effort control: the launch hold, and its release for live wire control
 
