@@ -4,3 +4,9 @@ node_modules/
 *.lock
 package-lock.json
 CHANGELOG.md
+# Vendored skills (ADR-087) stay byte-identical to upstream; prettier never rewrites them.
+containers/claude-resources/skills/speedwave-*/
+!containers/claude-resources/skills/speedwave-code-review/
+!containers/claude-resources/skills/speedwave-product-showcase/
+!containers/claude-resources/skills/speedwave-site-audit/
+!containers/claude-resources/skills/speedwave-sitemap/
