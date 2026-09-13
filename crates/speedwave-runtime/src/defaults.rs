@@ -43,8 +43,8 @@ pub struct ModelPricing {
 /// Settings → LLM Provider dropdown and the Desktop cost meter.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
-    /// Stable API alias (no snapshot date). Sent to Claude Code via
-    /// `ANTHROPIC_DEFAULT_MODEL` (a startup default a `/model` pick outranks).
+    /// Stable API alias (no snapshot date). Never compose-injected for Anthropic (SPEED-541);
+    /// the pin persists via the in-container `settings.json` `model` key (SPEED-539/ADR-087).
     pub id: &'static str,
     /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,

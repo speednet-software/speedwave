@@ -80,18 +80,8 @@ fn apply_llm_config_proxy(
                 "ANTHROPIC_BASE_URL".to_string(),
                 super::PROXY_BASE_URL.to_string(),
             );
-            // Defense-in-depth after heal/quarantine: drop a foreign id from a
-            // not-yet-healed config → account default, not 404.
-            if crate::config::is_foreign_anthropic_model(&model) {
-                log::warn!(
-                    "ignoring foreign model '{model}' under anthropic provider '{}' — using account default",
-                    entry.id
-                );
-            } else if !model.is_empty() {
-                // Startup default, not a pin: a /model pick persisted in settings.json outranks
-                // it, whereas ANTHROPIC_MODEL would override the pick (ADR-073 amendment).
-                extra_env.insert("ANTHROPIC_DEFAULT_MODEL".to_string(), model.clone());
-            }
+            // No model env, ever: Claude Code resolves the account default; a persisted
+            // `/model` pick lives in the in-container settings.json, not compose.
         }
         LlmProviderKind::Local | LlmProviderKind::OpenRouter => {
             if model.is_empty() {
@@ -176,19 +166,9 @@ fn apply_llm_config_legacy_in(
     }
     match provider {
         "anthropic" => {
-            // Pins each ANTHROPIC_DEFAULT_*_MODEL to the SSOT-latest id, `[1m]` where supported.
-            let mut extra_env = crate::defaults::anthropic_default_models_env();
-            let model = llm.model.as_deref().map(str::trim).unwrap_or("");
-            // Provenance guard (mirrors the proxy path): a foreign id falls
-            // back to account default rather than 404 the API.
-            if crate::config::is_foreign_anthropic_model(model) {
-                log::warn!(
-                    "ignoring foreign model '{model}' on direct anthropic path — using account default"
-                );
-            } else if !model.is_empty() {
-                // Same default-not-pin semantics as the proxy path (ADR-073 amendment).
-                extra_env.insert("ANTHROPIC_DEFAULT_MODEL".to_string(), model.to_string());
-            }
+            // No model env, ever (mirrors the proxy path): Claude Code resolves the
+            // account default; a persisted `/model` pick lives in settings.json.
+            let extra_env = crate::defaults::anthropic_default_models_env();
             inject_claude_env(yaml, &extra_env)
         }
         // All `LOCAL_PROVIDERS` (SSOT) share the same env injection.

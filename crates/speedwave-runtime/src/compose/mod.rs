@@ -4620,9 +4620,9 @@ services:
 
     #[test]
     #[serial_test::serial(host_addressing)]
-    fn test_kill_switch_anthropic_model_is_a_default_on_direct_path() {
-        // Kill-switch + anthropic: the Settings model is a startup default on the legacy
-        // path too, never a forced ANTHROPIC_MODEL that would override a /model pick.
+    fn test_kill_switch_anthropic_sets_no_model_env() {
+        // Kill-switch + anthropic: even with a Settings model configured, the legacy direct
+        // path sets no ANTHROPIC_MODEL/ANTHROPIC_DEFAULT_MODEL (spec "Brak wymuszania modelu").
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -4662,11 +4662,12 @@ services:
         .unwrap();
         let env = get_claude_env(&yaml);
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-6"),
-            "direct anthropic path must inject the Settings model as the default: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "direct anthropic path must never inject ANTHROPIC_DEFAULT_MODEL: {env:?}"
         );
         assert_model_not_forced(&env);
+        assert_no_effort_level_forced(&env);
     }
 
     #[test]
@@ -4799,12 +4800,27 @@ services:
             .collect()
     }
 
-    /// Anthropic kinds never force a model: in Claude Code `ANTHROPIC_MODEL` outranks a
-    /// persisted `/model` pick, `ANTHROPIC_DEFAULT_MODEL` yields to it (ADR-073 amendment).
+    /// Anthropic kinds never force a model: no `ANTHROPIC_MODEL` (outranks a persisted `/model`
+    /// pick) and, since SPEED-541, no `ANTHROPIC_DEFAULT_MODEL` either — no model env at all.
     fn assert_model_not_forced(env: &[String]) {
         assert!(
             !env.iter().any(|e| e.starts_with("ANTHROPIC_MODEL=")),
             "anthropic path must not force ANTHROPIC_MODEL, got: {env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "anthropic path must not set ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
+        );
+    }
+
+    /// Speedwave never sets this: it outranks `--effort`/`/effort` (env-vars.md) and compose
+    /// bakes env in at container create, which would block changing effort on a live session.
+    fn assert_no_effort_level_forced(env: &[String]) {
+        assert!(
+            !env.iter()
+                .any(|e| e.starts_with("CLAUDE_CODE_EFFORT_LEVEL")),
+            "compose must never set CLAUDE_CODE_EFFORT_LEVEL, got: {env:?}"
         );
     }
 
@@ -5737,10 +5753,10 @@ services:
     }
 
     #[test]
-    fn test_anthropic_with_model_injects_default_model_env() {
+    fn test_anthropic_with_model_sets_no_model_env() {
         let data_dir = tempfile::tempdir().unwrap();
-        // claude.llm.model is the session's starting model (ANTHROPIC_DEFAULT_MODEL); a /model
-        // pick persisted in settings.json outranks it, so it is never forced via ANTHROPIC_MODEL.
+        // A configured Settings model never reaches compose: Claude Code starts on the
+        // account default, and a /model pick persists via the in-container settings.json.
         let mut llm = LlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
@@ -5755,11 +5771,12 @@ services:
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-sonnet-4-6"),
-            "Anthropic + explicit model must inject ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "Anthropic + explicit model must not inject ANTHROPIC_DEFAULT_MODEL, got: {env:?}"
         );
         assert_model_not_forced(&env);
+        assert_no_effort_level_forced(&env);
         // ADR-073: anthropic sessions route through the proxy passthrough, so
         // ANTHROPIC_BASE_URL points at it (never a foreign/local URL).
         assert!(
@@ -5825,8 +5842,8 @@ services:
 
     #[test]
     fn test_anthropic_foreign_model_falls_back_to_account_default() {
-        // Corrupted v2 config: anthropic entry + active both hold an OR id. The render-guard
-        // must drop it (Claude Code sends a foreign ANTHROPIC_DEFAULT_MODEL verbatim → 404).
+        // Corrupted v2 config: anthropic entry + active both hold an OR id. It must never
+        // reach compose (a foreign ANTHROPIC_DEFAULT_MODEL would 404 the API).
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -5862,7 +5879,7 @@ services:
     }
 
     #[test]
-    fn test_anthropic_valid_catalog_model_injected_verbatim() {
+    fn test_anthropic_valid_catalog_model_sets_no_model_env() {
         let data_dir = tempfile::tempdir().unwrap();
         let llm = LlmConfig {
             schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
@@ -5884,12 +5901,12 @@ services:
         let rendered =
             apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
         let env = get_claude_env(&rendered);
-        // `[1m]` rides ANTHROPIC_DEFAULT_MODEL intact: CC 2.1.252 strips it into the
-        // `context-1m` beta and sends the bare id (verified on the binary, ADR-073 amendment).
+        // Even a valid, non-foreign catalog id never reaches compose (spec "Brak wymuszania
+        // modelu dla Anthropic") — persistence is settings.json's job, not the renderer's.
         assert!(
-            env.iter()
-                .any(|e| e == "ANTHROPIC_DEFAULT_MODEL=claude-opus-4-8[1m]"),
-            "valid claude model must inject verbatim: {env:?}"
+            !env.iter()
+                .any(|e| e.starts_with("ANTHROPIC_DEFAULT_MODEL=")),
+            "valid claude model must not be injected: {env:?}"
         );
         assert_model_not_forced(&env);
     }
@@ -5989,6 +6006,8 @@ services:
             "Anthropic provider must NOT inject ANTHROPIC_CUSTOM_MODEL_OPTION — it is only \
              set for local providers. Got: {env_anthropic:?}"
         );
+        assert_no_effort_level_forced(&env_ollama);
+        assert_no_effort_level_forced(&env_anthropic);
     }
 
     // test_llamacpp_custom_model_option_labels / test_lmstudio_custom_model_option_labels:
