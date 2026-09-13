@@ -111,9 +111,9 @@ function setupMockTauri(mockTauri: MockTauriService, provider = 'anthropic'): vo
       case 'update_llm_config':
         return undefined;
       case 'discover_llm_models':
-        // Default: empty list so the component falls back to text input.
-        // Individual tests override this.
-        throw new Error('offline');
+        // Default: a passing connection test (SPEED-555) so save-gating tests that
+        // do not care about discovery pass through; individual tests override this.
+        return { models: [{ id: 'llama3.3' }] };
       default:
         return undefined;
     }
@@ -273,6 +273,9 @@ describe('LlmProviderComponent', () => {
         invokedArgs = args ?? {};
         return undefined;
       }
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
+      }
       return undefined;
     };
 
@@ -309,6 +312,7 @@ describe('LlmProviderComponent', () => {
     component.providerChange.subscribe(spy);
     component.provider.set('ollama');
     component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     await component.saveConfig();
 
@@ -321,6 +325,7 @@ describe('LlmProviderComponent', () => {
     projectState.status.set('ready'); // save on an already-running project
     component.provider.set('ollama');
     component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     await component.saveConfig();
 
@@ -349,6 +354,7 @@ describe('LlmProviderComponent', () => {
     const ensureSpy = vi.spyOn(projectState, 'ensureContainersRunning').mockResolvedValue();
     component.provider.set('ollama');
     component.model.set('llama3.3');
+    component.baseUrl.set('http://localhost:11434');
 
     await component.saveConfig();
 
@@ -1332,7 +1338,7 @@ describe('LlmProviderComponent', () => {
 
     expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="settings-llm-local-model-hint"]')
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-test-success"]')
     ).not.toBeNull();
   });
 
@@ -1614,7 +1620,7 @@ describe('LlmProviderComponent', () => {
     expect(component.discoveryState().kind).toBe('ready');
     expect(fixture.nativeElement.querySelector('[data-testid="settings-llm-model"]')).toBeNull();
     expect(
-      fixture.nativeElement.querySelector('[data-testid="settings-llm-local-model-hint"]')
+      fixture.nativeElement.querySelector('[data-testid="settings-llm-test-success"]')
     ).not.toBeNull();
   });
 
@@ -1883,6 +1889,9 @@ describe('LlmProviderComponent', () => {
         invokedArgs = args ?? {};
         return undefined;
       }
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
+      }
       return undefined;
     };
 
@@ -2060,7 +2069,9 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
-      if (cmd === 'discover_llm_models') throw new Error('offline');
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'deepseek/deepseek-v4-flash' }] };
+      }
       return undefined;
     };
 
@@ -2142,6 +2153,9 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'set_llm_provider_key') keyCalls.push(args ?? {});
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'qwen/qwen3-coder' }] };
+      }
       return undefined;
     };
 
@@ -2307,7 +2321,7 @@ describe('LlmProviderComponent', () => {
     ).toBeNull();
     expect(
       fixture.nativeElement.querySelector(
-        '[data-testid="settings-llm-extra-model-hint-openrouter"]'
+        '[data-testid="settings-llm-extra-test-success-openrouter"]'
       )
     ).not.toBeNull();
   });
@@ -2366,7 +2380,9 @@ describe('LlmProviderComponent', () => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
-      if (cmd === 'discover_llm_models') throw new Error('offline');
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'qwen/qwen3-coder' }] };
+      }
       return undefined;
     };
 
@@ -2401,6 +2417,9 @@ describe('LlmProviderComponent', () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
+      }
       return undefined;
     };
     let emitted = '';
@@ -2612,6 +2631,9 @@ describe('LlmProviderComponent', () => {
       calls.push(cmd);
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
+      }
       return undefined;
     };
     const projectState = TestBed.inject(ProjectStateService);
@@ -2892,6 +2914,9 @@ describe('LlmProviderComponent', () => {
       }
       if (cmd === 'get_auth_status')
         return { api_key_configured: false, provider_configured: true };
+      if (cmd === 'discover_llm_models') {
+        return { models: [{ id: 'llama3.3' }] };
+      }
       return undefined;
     };
 
@@ -3021,5 +3046,345 @@ describe('LlmProviderComponent', () => {
 
     await component.deleteAnthropicApiKey();
     expect(errors).toContain('delete failed');
+  });
+
+  // ── SPEED-555: test-connection gates Save ───────────────────────────────
+
+  describe('SPEED-555: test-connection gates Save', () => {
+    it('shows the same "test connection" label on the local card and the OpenRouter row', () => {
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.toggleExtraExpanded(component.extraProviders()[0]);
+      fixture.detectChanges();
+      const localBtn = fixture.nativeElement.querySelector("[data-testid='settings-llm-refresh']");
+      const extraBtn = fixture.nativeElement.querySelector(
+        "[data-testid='settings-llm-extra-refresh-openrouter']"
+      );
+      expect(localBtn.textContent.trim()).toContain('test connection');
+      expect(extraBtn.textContent.trim()).toContain('test connection');
+    });
+
+    it('save blocks on an offline local server (no update_llm_config, no restart)', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      const restartSpy = vi.spyOn(projectState, 'requestRestart');
+      let invoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_llm_config') invoked = true;
+        if (cmd === 'discover_llm_models') throw new Error('offline');
+        return undefined;
+      };
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.saveConfig();
+
+      expect(invoked).toBe(false);
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(component.discoveryState().kind).toBe('failed');
+      fixture.detectChanges();
+      const err = fixture.nativeElement.querySelector(
+        "[data-testid='settings-llm-discovery-error']"
+      );
+      expect(err.textContent).toContain('Fix the connection to save.');
+    });
+
+    it('save blocks when the server does not support discovery (unsupported)', async () => {
+      let invoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_llm_config') invoked = true;
+        if (cmd === 'discover_llm_models') throw new Error('unsupported');
+        return undefined;
+      };
+      component.provider.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.saveConfig();
+
+      expect(invoked).toBe(false);
+      expect(component.discoveryState()).toMatchObject({ kind: 'failed', reason: 'unsupported' });
+    });
+
+    it('save blocks on a rejected api key (auth)', async () => {
+      let invoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_llm_config') invoked = true;
+        if (cmd === 'discover_llm_models') throw new Error('auth');
+        return undefined;
+      };
+      component.provider.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.saveConfig();
+
+      expect(invoked).toBe(false);
+      expect(component.discoveryState()).toMatchObject({ kind: 'failed', reason: 'auth' });
+    });
+
+    it('save blocks on a server-error response', async () => {
+      let invoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_llm_config') invoked = true;
+        if (cmd === 'discover_llm_models') throw new Error('LLM server returned HTTP 500');
+        return undefined;
+      };
+      component.provider.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.saveConfig();
+
+      expect(invoked).toBe(false);
+      expect(component.discoveryState()).toMatchObject({
+        kind: 'failed',
+        reason: 'server-error',
+        status: 500,
+      });
+    });
+
+    it('save blocks when the server lists models but does not answer POST /v1/messages', async () => {
+      let invoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'update_llm_config') invoked = true;
+        if (cmd === 'discover_llm_models') {
+          return { models: [{ id: 'llama3.3' }], messages_endpoint_ok: false };
+        }
+        return undefined;
+      };
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.saveConfig();
+
+      expect(invoked).toBe(false);
+      expect(component.discoveryState()).toMatchObject({
+        kind: 'failed',
+        reason: 'messages-endpoint',
+      });
+      fixture.detectChanges();
+      const warn = fixture.nativeElement.querySelector(
+        "[data-testid='settings-llm-messages-endpoint-warning']"
+      );
+      expect(warn).not.toBeNull();
+      expect(warn.textContent).toContain('Fix the connection to save.');
+      expect(warn.textContent).not.toContain('Save is allowed');
+    });
+
+    it('save skips the probe entirely for an unchanged, already-persisted local config', async () => {
+      let discoverCalls = 0;
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_llm_config') {
+          return {
+            provider: 'local',
+            model: 'llama3.3',
+            base_url: 'http://host.docker.internal:11434',
+            default_base_url: 'http://host.docker.internal:11434',
+            providers: [
+              {
+                id: 'local',
+                kind: 'local',
+                base_url: 'http://host.docker.internal:11434',
+                model: 'llama3.3',
+              },
+            ],
+            active: { provider_id: 'local', model: 'llama3.3' },
+          };
+        }
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          throw new Error('offline');
+        }
+        if (cmd === 'update_llm_config') {
+          saveInvoked = true;
+          return undefined;
+        }
+        return undefined;
+      };
+
+      component.ngOnInit();
+      await fixture.whenStable();
+      await component.saveConfig();
+
+      expect(discoverCalls).toBe(0);
+      expect(saveInvoked).toBe(true);
+    });
+
+    it('save reuses a passing button-click test for identical field values', async () => {
+      let discoverCalls = 0;
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          return { models: [{ id: 'llama3.3' }] };
+        }
+        if (cmd === 'update_llm_config') {
+          saveInvoked = true;
+          return undefined;
+        }
+        return undefined;
+      };
+      component.provider.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.discoverModels(true);
+      expect(discoverCalls).toBe(1);
+
+      await component.saveConfig();
+
+      expect(discoverCalls).toBe(1);
+      expect(saveInvoked).toBe(true);
+    });
+
+    it('editing base_url after a passing test forces a fresh probe at Save', async () => {
+      let discoverCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          return { models: [{ id: 'llama3.3' }] };
+        }
+        if (cmd === 'update_llm_config') return undefined;
+        return undefined;
+      };
+      component.provider.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.discoverModels(true);
+      expect(discoverCalls).toBe(1);
+
+      component['onBaseUrlInput']('http://host.docker.internal:9999');
+      component.model.set('llama3.3');
+      await component.saveConfig();
+
+      expect(discoverCalls).toBe(2);
+    });
+
+    it('editing the api key after a passing test forces a fresh probe at Save', async () => {
+      let discoverCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          return { models: [{ id: 'llama3.3' }] };
+        }
+        if (cmd === 'update_llm_config') return undefined;
+        return undefined;
+      };
+      component.provider.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      await component.discoverModels(true);
+      expect(discoverCalls).toBe(1);
+
+      component['onApiKeyInput']('new-key');
+      await component.saveConfig();
+
+      expect(discoverCalls).toBe(2);
+    });
+
+    it('local success line names the model count, Messages API status and the first probed model (models[0], same order the Rust auto-default picks)', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          return {
+            models: [{ id: 'llama3.3' }, { id: 'qwen2.5' }],
+            messages_endpoint_ok: true,
+          };
+        }
+        return undefined;
+      };
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+
+      await component.discoverModels(true);
+      fixture.detectChanges();
+
+      const success = fixture.nativeElement.querySelector(
+        "[data-testid='settings-llm-test-success']"
+      );
+      expect(success).not.toBeNull();
+      const text = success.textContent as string;
+      expect(text).toContain('Server OK');
+      expect(text).toContain('2 models');
+      expect(text).toContain('Messages API OK');
+      // Same value the Rust ModelAutoDefaultProbe::first_local_model order would pick: models[0].
+      expect(text).toContain('new sessions start on llama3.3');
+      expect(
+        fixture.nativeElement.querySelector("[data-testid='settings-llm-discovery-error']")
+      ).toBeNull();
+    });
+
+    it('no hint sentence renders under the local fields before a test', () => {
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      fixture.detectChanges();
+
+      expect(
+        fixture.nativeElement.querySelector("[data-testid='settings-llm-test-success']")
+      ).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector("[data-testid='settings-llm-discovery-error']")
+      ).toBeNull();
+    });
+
+    it('openrouter success line names the key status and the SSOT auto-default model id, never a literal', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
+        }
+        if (cmd === 'get_openrouter_default_model') {
+          return 'anthropic/claude-sonnet-5';
+        }
+        return undefined;
+      };
+      await component['loadOpenrouterDefaultModel']();
+      const row = component.extraProviders()[0];
+      component.toggleExtraExpanded(row);
+      component.onExtraKeyInput(row, 'sk-or-x');
+      await component.discoverExtraModels(row);
+      fixture.detectChanges();
+
+      const success = fixture.nativeElement.querySelector(
+        "[data-testid='settings-llm-extra-test-success-openrouter']"
+      );
+      expect(success).not.toBeNull();
+      const text = success.textContent as string;
+      expect(text).toContain('Key OK');
+      expect(text).toContain('anthropic/claude-sonnet-5');
+    });
+
+    it('the anthropic card saves without a connection probe; badges are unchanged', async () => {
+      let discoverCalls = 0;
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          throw new Error('offline');
+        }
+        if (cmd === 'update_llm_config') {
+          saveInvoked = true;
+          return undefined;
+        }
+        return undefined;
+      };
+      component.provider.set('anthropic');
+      component.selectedTarget.set('anthropic');
+      component.oauthAuthenticated.set(true);
+      fixture.detectChanges();
+
+      await component.saveConfig();
+
+      expect(discoverCalls).toBe(0);
+      expect(saveInvoked).toBe(true);
+      const authRow = fixture.nativeElement.querySelector("[data-testid='auth-status-row']");
+      expect(authRow.textContent).toContain('connected');
+    });
   });
 });

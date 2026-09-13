@@ -428,6 +428,41 @@ clear error if the probe itself fails and no model was supplied. Repo
 entries - an Anthropic-native entry has no model field left to suggest a
 value into.
 
+**Amendment (SPEED-555: the auto-default probe is preceded by a UI
+connection test, and a missing Messages API blocks Save).** Once the
+composer became the only model picker (decision 8's own premise - Settings
+carries no model selector), the Settings discovery button's old name
+("discover models") stopped matching what it does: there is no model list
+left to populate by hand. It is renamed `test connection` on both the local
+card and the OpenRouter row
+(`desktop/src/src/app/settings/llm-provider/llm-provider.component.ts`) and
+becomes a save gate rather than an optional convenience. `saveConfig` for a
+routed active provider (local, OpenRouter) computes a fingerprint of the
+connection fields (`base_url` + key state for local; key state alone for
+OpenRouter, via `localConnectionFingerprint`/`extraKeyFingerprint`) and
+probes only when no passing test is on record for that exact fingerprint
+and the fields differ from the last-persisted configuration
+(`needsConnectionProbe`); a save whose fields are unchanged from disk never
+re-probes, and editing `base_url` or the key invalidates the recorded
+result. A probe that fails - including a local server that returns a model
+list but does not answer `POST /v1/messages` - blocks the save outright: no
+`update_llm_config` call, no proxy reload, no container restart. The prior
+behavior ("Save is allowed, but chat will fail") is removed; a missing
+Messages API is exactly as fatal to Save as an unreachable server or a
+rejected key. OpenRouter's success criterion stays narrower than the local
+card's: the catalog endpoint accepting the key is sufficient, and the
+presence of the auto-default model (`anthropic/claude-sonnet-5`) in that
+catalog response is never checked. The connection-test state (does a
+passing result exist for the current fingerprint) is component memory only
+
+- it is not persisted, and a provider switch, project switch, or reload
+  clears it. The success line for local names the first probed model, which
+  is the same value `ModelAutoDefaultProbe::first_local_model`
+  (`desktop/src-tauri/src/containers_cmd.rs`) would pick if this save omits a
+  model; OpenRouter's line names the `OPENROUTER_DEFAULT_MODEL` constant
+  (`crates/speedwave-runtime/src/consts.rs`) via the new
+  `get_openrouter_default_model` Tauri command, never a literal in Angular.
+
 ## Anthropic model catalog facts backing this ADR
 
 - `[1m]` is Claude Code's own model-alias/model-name suffix syntax for the

@@ -1302,6 +1302,7 @@ fn main() {
             containers_cmd::get_llm_config,
             containers_cmd::get_active_provider_summary,
             containers_cmd::get_default_base_url,
+            containers_cmd::get_openrouter_default_model,
             containers_cmd::list_anthropic_models,
             containers_cmd::update_llm_config,
             containers_cmd::set_llm_provider_key,

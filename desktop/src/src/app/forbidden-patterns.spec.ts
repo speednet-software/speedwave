@@ -127,6 +127,13 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
     extensions: ['.ts'],
     ignoreFiles: ['forbidden-patterns.spec.ts'],
   },
+  {
+    label:
+      'Save is allowed, but chat will fail (SPEED-555: a missing Messages API now blocks Save)',
+    regex: /Save is allowed, but chat/,
+    extensions: ['.ts'],
+    ignoreFiles: ['forbidden-patterns.spec.ts'],
+  },
 ];
 
 /**

@@ -51,6 +51,10 @@ interface ExtraProviderEdit {
   discoverError: { reason: DiscoveryFailureReason; status?: number } | null;
   /** Context window of the selected catalog model. */
   contextTokens: number | null;
+  /** Key fingerprint as of the last persisted save (see `extraKeyFingerprint`); the connection-test gate compares the live fingerprint against this. */
+  savedFp: string;
+  /** Outcome of the last explicit connection test for this row, keyed by the fingerprint it ran against; `null` after an edit invalidates it (SPEED-555). */
+  lastTest: { fp: string; passed: boolean } | null;
 }
 
 /** The permanent remote row (`openrouter`) — rendered like the anthropic/local cards; an unconfigured row is simply not persisted. */
@@ -67,8 +71,44 @@ function fixedExtraRows(): ExtraProviderEdit[] {
     discovering: false,
     discoverError: null,
     contextTokens: null,
+    savedFp: extraKeyFingerprint(false, false, ''),
+    lastTest: null,
   });
   return [empty('openrouter', 'open_router')];
+}
+
+/**
+ * Fingerprint of a remote row's key state — the touched raw value, or a
+ * stored-presence marker when untouched. Compared at Save time to decide
+ * whether a fresh connection test is required (SPEED-555).
+ * @param hasKey - whether a key is persisted on disk for this row
+ * @param keyTouched - whether the user edited the key field this session
+ * @param keyInput - the live (touched-or-not) key field value
+ */
+function extraKeyFingerprint(hasKey: boolean, keyTouched: boolean, keyInput: string): string {
+  return keyTouched ? `v:${keyInput}` : `s:${hasKey}`;
+}
+
+/** Sentinel `loadedLocalConnectionFp` for a project with no persisted local entry — never equal to a real fingerprint, so the first save always tests. */
+const NEVER_SAVED_LOCAL_FP = ' never-saved';
+
+/**
+ * Fingerprint of the local card's connection fields (base_url + key state).
+ * Compared at Save time to decide whether a fresh connection test is
+ * required (SPEED-555); custom_headers is deliberately excluded — an
+ * "advanced" edit never forces a retest.
+ * @param effectiveUrl - the base URL the probe would actually target
+ * @param hasApiKey - whether a key is persisted on disk
+ * @param apiKeyTouched - whether the user edited the key field this session
+ * @param apiKeyValue - the live key field value
+ */
+function localConnectionFingerprint(
+  effectiveUrl: string,
+  hasApiKey: boolean,
+  apiKeyTouched: boolean,
+  apiKeyValue: string
+): string {
+  return `${effectiveUrl}|${apiKeyTouched ? `v:${apiKeyValue}` : `s:${hasApiKey}`}`;
 }
 
 /**
@@ -81,7 +121,8 @@ function nullIfEmpty(value: string): string | null {
 }
 
 /** Discovery state for the LLM model listing (discriminated union). `in-flight.id` matches the monotonic counter; non-latest responses are discarded as stale. */
-type DiscoveryFailureReason = 'offline' | 'unsupported' | 'other' | 'auth' | 'server-error';
+type DiscoveryFailureReason =
+  'offline' | 'unsupported' | 'other' | 'auth' | 'server-error' | 'messages-endpoint';
 
 type DiscoveryState =
   | { kind: 'idle' }
@@ -367,52 +408,45 @@ function classifyDiscoveryFailure(msg: string): {
               class="mono mt-3 inline-flex items-center gap-1 rounded bg-[var(--accent)] px-3 py-1.5 text-[11px] font-medium text-[var(--on-accent)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               [disabled]="discoveryState().kind === 'in-flight'"
               (click)="discoverModels(true)"
-              appTooltip="Fetch the list of models from the server"
+              appTooltip="Test the connection to this server (models list + Messages API)"
               placement="top"
             >
               @if (discoveryState().kind === 'in-flight') {
-                &#8635; discovering...
+                &#8635; testing connection...
               } @else {
-                &#8635; discover models
+                &#8635; test connection
               }
             </button>
 
-            @if (discoveryState().kind === 'failed') {
+            @let discovery = discoveryState();
+            @if (discovery.kind === 'failed') {
               <p
                 class="mono mt-1 text-[11px] text-[var(--amber)]"
-                data-testid="settings-llm-discovery-error"
+                [attr.data-testid]="
+                  discovery.reason === 'messages-endpoint'
+                    ? 'settings-llm-messages-endpoint-warning'
+                    : 'settings-llm-discovery-error'
+                "
               >
-                {{ discoveryFailureMessage() }}
+                {{ discoveryFailureMessage() }} Fix the connection to save.
               </p>
             }
-            @let inflight = discoveryState();
-            @if (inflight.kind === 'in-flight') {
+            @if (discovery.kind === 'in-flight') {
               <p
                 class="mono mt-1 text-[11px] text-[var(--ink-mute)]"
                 data-testid="settings-llm-discovering"
               >
-                Probing {{ inflight.url }}...
+                Probing {{ discovery.url }}...
               </p>
             }
 
-            @if (messagesEndpointOk() === false) {
-              <div
-                class="mono mt-3 rounded border border-[var(--amber)] bg-[var(--amber)]/10 px-3 py-2 text-[11px] text-[var(--amber)]"
-                data-testid="settings-llm-messages-endpoint-warning"
-              >
-                <strong>Warning:</strong> the server returned a model list but did not respond to
-                <code>POST /v1/messages</code> (Anthropic Messages API). Save is allowed, but chat
-                will fail.
-              </div>
-            }
-
-            @if (discoveryState().kind === 'ready') {
+            @if (discovery.kind === 'ready') {
               <p
                 class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
-                data-testid="settings-llm-local-model-hint"
+                data-testid="settings-llm-test-success"
               >
-                The model for new sessions is picked automatically from the first discovery result;
-                change the model for the current session in the chat window.
+                Server OK · {{ discovery.models.length }} models · Messages API OK · new sessions
+                start on {{ discovery.models[0].id }} until you pick one in chat
               </p>
             }
 
@@ -507,7 +541,7 @@ function classifyDiscoveryFailure(msg: string): {
                 (click)="discoverExtraModels(entry)"
                 [attr.data-testid]="'settings-llm-extra-refresh-' + entry.id"
               >
-                {{ entry.discovering ? '↻ discovering...' : '↻ discover models' }}
+                {{ entry.discovering ? '↻ testing connection...' : '↻ test connection' }}
               </button>
 
               @if (entry.discoverError) {
@@ -515,17 +549,17 @@ function classifyDiscoveryFailure(msg: string): {
                   class="mono mt-1 text-[11px] text-[var(--amber)]"
                   [attr.data-testid]="'settings-llm-extra-discovery-error-' + entry.id"
                 >
-                  {{ extraDiscoveryErrorMessage(entry) }}
+                  {{ extraDiscoveryErrorMessage(entry) }} Fix the connection to save.
                 </p>
               }
 
-              @if (entry.hasKey || entry.keyInput.trim()) {
+              @if (entry.lastTest?.passed) {
                 <p
                   class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
-                  [attr.data-testid]="'settings-llm-extra-model-hint-' + entry.id"
+                  [attr.data-testid]="'settings-llm-extra-test-success-' + entry.id"
                 >
-                  Choose the model in the chat window; a new configuration starts with the default
-                  OpenRouter model.
+                  Key OK · new sessions start on {{ openrouterDefaultModel() }} until you pick one
+                  in chat
                 </p>
               }
             </div>
@@ -570,9 +604,6 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   customHeadersTouched = signal(false);
   hasCustomHeaders = signal(false);
 
-  /** Result of the latest discovery probe — populated for `provider==="local"`. */
-  messagesEndpointOk = signal<boolean | null>(null);
-
   /** Active project — drives the auth-status load and the OAuth terminal. */
   readonly activeProject = input<string | null>(null);
 
@@ -615,6 +646,15 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
   /** Monotonic counter bumped per discovery trigger; a response whose `id` differs from it is stale (superseded trigger) and discarded. */
   private discoveryCounter = 0;
+
+  /** Outcome of the last local connection test (button or Save-triggered), keyed by `localConnectionFingerprint`; 'null' after a base_url/key edit invalidates it (SPEED-555). */
+  private testedLocalConnection: { fp: string; passed: boolean } | null = null;
+
+  /** Local connection fingerprint as of the last persisted save (or load); an unchanged fingerprint skips a redundant Save-time probe (SPEED-555). */
+  private loadedLocalConnectionFp: string = NEVER_SAVED_LOCAL_FP;
+
+  /** SSOT OpenRouter auto-default model id (`get_openrouter_default_model`, ADR-087 section 8), shown in the connection-test success line — never hard-coded in Angular. */
+  protected openrouterDefaultModel = signal('');
 
   /** Tracks the provider value from the previous `onProviderChange` call so we can detect actual changes (ngModelChange can fire without a user edit). */
   private lastKnownProvider: FlatProviderId = 'anthropic';
@@ -667,6 +707,18 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadConfig();
     this.oauthWatcher.watchWindowFocus();
+    void this.loadOpenrouterDefaultModel();
+  }
+
+  /** Fetches the SSOT OpenRouter auto-default model id once; browser dev mode (no Tauri) leaves it blank. */
+  private async loadOpenrouterDefaultModel(): Promise<void> {
+    try {
+      const id = await this.tauri.invoke<string>('get_openrouter_default_model');
+      this.openrouterDefaultModel.set(id);
+      this.cdr.markForCheck();
+    } catch {
+      // Not in Tauri (browser dev mode) — the success line simply omits the id.
+    }
   }
 
   /** Tears down the external-login watcher (poll + focus listener). */
@@ -682,16 +734,19 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.baseUrl.set(value);
     this.discoveryState.set({ kind: 'idle' });
     this.model.set('');
-    this.messagesEndpointOk.set(null);
+    this.testedLocalConnection = null;
   }
 
   /**
-   * Touched-flag handler — see `apiKeyTouched` doc for the tri-state rationale.
+   * Touched-flag handler — see `apiKeyTouched` doc for the tri-state rationale. Also
+   * invalidates a recorded connection-test result, mirroring `onBaseUrlInput` (SPEED-555).
    * @param value - the new API key input value
    */
   protected onApiKeyInput(value: string): void {
     this.apiKey.set(value);
     this.apiKeyTouched.set(true);
+    this.discoveryState.set({ kind: 'idle' });
+    this.testedLocalConnection = null;
   }
 
   /**
@@ -769,6 +824,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (entry.kind !== 'open_router' || entry.discovering) {
       return;
     }
+    const fp = extraKeyFingerprint(entry.hasKey, entry.keyTouched, entry.keyInput);
     entry.discovering = true;
     entry.discoverError = null;
     this.extraProviders.set([...this.extraProviders()]);
@@ -780,15 +836,26 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       });
       const models = res?.models ?? [];
       const row = this.extraProviders().find((p) => p.id === entry.id);
-      if (row && models.length > 0) {
-        row.models = models;
-        row.discoverError = null;
+      if (row) {
+        if (models.length > 0) {
+          row.models = models;
+          row.discoverError = null;
+          row.lastTest = { fp, passed: true };
+        } else {
+          // Defensive: do_discover_llm_models never resolves Ok with an empty list, but a test
+          // double or a future backend change must not be silently counted as a passing test.
+          row.discoverError = { reason: 'other' };
+          row.lastTest = { fp, passed: false };
+        }
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       // Same classification contract as the local card (discovery.rs sentinels).
       const row = this.extraProviders().find((p) => p.id === entry.id);
-      if (row) row.discoverError = classifyDiscoveryFailure(msg);
+      if (row) {
+        row.discoverError = classifyDiscoveryFailure(msg);
+        row.lastTest = { fp, passed: false };
+      }
       this.log.warn(`openrouter catalog discovery failed: ${msg}`);
     } finally {
       entry.discovering = false;
@@ -818,8 +885,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   onExtraKeyInput(entry: ExtraProviderEdit, value: string): void {
     entry.keyInput = value;
     entry.keyTouched = true;
-    // A new key invalidates the previous failure (mirrors onBaseUrlInput).
+    // A new key invalidates the previous failure and any recorded connection-test result (SPEED-555).
     entry.discoverError = null;
+    entry.lastTest = null;
     this.extraProviders.set([...this.extraProviders()]);
   }
 
@@ -844,6 +912,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         return `${label} does not support model discovery. Switch to a provider with an OpenAI-compatible /v1/models endpoint.`;
       case 'other':
         return `${label} at ${url} returned no models (the server is up but no model is loaded).`;
+      case 'messages-endpoint':
+        return `${label} at ${url} returned a model list but did not respond to POST /v1/messages (Anthropic Messages API).`;
     }
   }
 
@@ -918,6 +988,12 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
 
     const id = ++this.discoveryCounter;
     this.discoveryState.set({ kind: 'in-flight', url: effectiveUrl, id });
+    const fp = localConnectionFingerprint(
+      effectiveUrl,
+      this.hasApiKey(),
+      this.apiKeyTouched(),
+      this.apiKey()
+    );
 
     try {
       // Tri-state via `LlmConfigUpdate.api_key` (see types.rs).
@@ -936,17 +1012,25 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       const result = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
         args,
       });
+      // POST /v1/messages explicitly rejected (404/405) fails the whole test, not just a warning (SPEED-555).
+      const messagesOk = result.messages_endpoint_ok ?? null;
+      const passed = messagesOk !== false;
+      this.testedLocalConnection = { fp, passed };
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
       const live = this.discoveryState();
       if (live.kind !== 'in-flight' || live.id !== id) return;
+      if (!passed) {
+        this.discoveryState.set({ kind: 'failed', url: effectiveUrl, reason: 'messages-endpoint' });
+        return;
+      }
       // Invariant: do_discover_llm_models maps empty lists to Err("empty"), so a resolved Ok always carries a non-empty array.
       this.discoveryState.set({ kind: 'ready', url: effectiveUrl, models: result.models });
-      this.messagesEndpointOk.set(result.messages_endpoint_ok ?? null);
     } catch (e: unknown) {
-      const live = this.discoveryState();
-      if (live.kind !== 'in-flight' || live.id !== id) return;
       const msg = e instanceof Error ? e.message : String(e);
       const { reason, status } = classifyDiscoveryFailure(msg);
+      this.testedLocalConnection = { fp, passed: false };
+      const live = this.discoveryState();
+      if (live.kind !== 'in-flight' || live.id !== id) return;
       this.discoveryState.set({ kind: 'failed', url: effectiveUrl, reason, status });
       // No errorOccurred.emit — discovery failure is silent degradation.
     }
@@ -1266,6 +1350,23 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Whether the connection-test gate must run a fresh probe before Save: no
+   * passing test is on record for the CURRENT fingerprint, and the fields
+   * also differ from the persisted (already-trusted) configuration (SPEED-555).
+   * @param fp - the live connection fingerprint
+   * @param savedFp - the fingerprint as of the last persisted save/load
+   * @param lastTest - the last explicit test outcome, if any
+   */
+  private needsConnectionProbe(
+    fp: string,
+    savedFp: string,
+    lastTest: { fp: string; passed: boolean } | null
+  ): boolean {
+    if (lastTest && lastTest.fp === fp) return !lastTest.passed;
+    return fp !== savedFp;
+  }
+
+  /**
    * Persists the LLM provider configuration to the backend.
    * @param forceRestart - forces a full restart even if `active` is unchanged, so a running container can't stay routed to a stale provider
    */
@@ -1292,6 +1393,42 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     }
     this.saving.set(true);
     this.saved.set(false);
+    this.cdr.markForCheck();
+
+    // Test-connection gate (ADR-087 section 8 amendment, SPEED-555): a routed active
+    // provider (local/OpenRouter) needs a passing connection test for its CURRENT
+    // field values before Save writes anything or restarts a container.
+    if (localIsActive) {
+      const fp = localConnectionFingerprint(
+        this.baseUrl() || this.defaultBaseUrl(),
+        this.hasApiKey(),
+        this.apiKeyTouched(),
+        this.apiKey()
+      );
+      if (this.needsConnectionProbe(fp, this.loadedLocalConnectionFp, this.testedLocalConnection)) {
+        await this.discoverModels(true);
+        if (this.discoveryState().kind !== 'ready') {
+          this.saving.set(false);
+          this.cdr.markForCheck();
+          return;
+        }
+      }
+    } else if (activeExtra) {
+      const fp = extraKeyFingerprint(
+        activeExtra.hasKey,
+        activeExtra.keyTouched,
+        activeExtra.keyInput
+      );
+      if (this.needsConnectionProbe(fp, activeExtra.savedFp, activeExtra.lastTest)) {
+        await this.discoverExtraModels(activeExtra);
+        if (!activeExtra.lastTest?.passed) {
+          this.saving.set(false);
+          this.cdr.markForCheck();
+          return;
+        }
+      }
+    }
+
     try {
       const active = this.buildActive();
       // Fall back to provider default if baseUrl blank; compose injects ANTHROPIC_BASE_URL.
@@ -1344,6 +1481,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         extra.hasKey = extra.keyInput.trim() !== '';
         extra.keyInput = '';
         extra.keyTouched = false;
+        extra.savedFp = extraKeyFingerprint(extra.hasKey, false, '');
       }
       this.extraProviders.set([...this.extraProviders()]);
       this.saved.set(true);
@@ -1357,6 +1495,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.hasCustomHeaders.set(!!update.custom_headers);
         this.customHeaders.set('');
         this.customHeadersTouched.set(false);
+      }
+      // Refresh the local connection baseline so an unchanged config skips a
+      // redundant probe on the next Save (component memory only, SPEED-555).
+      if (localIsActive) {
+        this.loadedLocalConnectionFp = localConnectionFingerprint(
+          this.loadedLocalEntry?.base_url ?? '',
+          !!this.loadedLocalEntry?.has_api_key,
+          false,
+          ''
+        );
       }
       // Push context tokens so the chat footer updates immediately.
       void this.chatState.refreshLlmConfigCache();
@@ -1400,6 +1548,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   }
 
   private async loadConfig(): Promise<void> {
+    // Component-memory connection-test state never survives a reload (SPEED-555).
+    this.testedLocalConnection = null;
     try {
       const config = await this.tauri.invoke<LlmConfigResponse>('get_llm_config');
       const persistedProvider = config.provider || 'anthropic';
@@ -1440,6 +1590,16 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       if (this.loadedLocalEntry?.base_url && !this.baseUrlByProvider['local']) {
         this.baseUrlByProvider['local'] = this.loadedLocalEntry.base_url;
       }
+      // Persisted local connection baseline (SPEED-555); an entry never saved before
+      // is the sentinel, so the first Save on that project always tests.
+      this.loadedLocalConnectionFp = this.loadedLocalEntry
+        ? localConnectionFingerprint(
+            this.loadedLocalEntry.base_url ?? '',
+            !!this.loadedLocalEntry.has_api_key,
+            false,
+            ''
+          )
+        : NEVER_SAVED_LOCAL_FP;
       // Anthropic model snapshot from entry/active/flat; a foreign (`/`-shaped)
       // id is dropped to account default (F1, ADR-073 provenance).
       const anthropicEntry = (config.providers ?? []).find((p) => p.id === 'anthropic');
@@ -1465,6 +1625,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
           row.model = p.model ?? '';
           row.hasKey = !!p.has_api_key;
           row.contextTokens = p.context_tokens ?? null;
+          row.savedFp = extraKeyFingerprint(row.hasKey, false, '');
+          row.lastTest = null;
         }
       }
       // Resolve the active row by id first, then by kind for legacy generated ids.

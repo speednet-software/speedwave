@@ -1046,6 +1046,13 @@ pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> 
     Ok(speedwave_runtime::compose::default_base_url(&provider))
 }
 
+/// SSOT OpenRouter auto-default model id (ADR-087 section 8), surfaced to the
+/// Settings connection-test success line — the frontend never hard-codes this string.
+#[tauri::command]
+pub fn get_openrouter_default_model() -> &'static str {
+    speedwave_runtime::consts::OPENROUTER_DEFAULT_MODEL
+}
+
 /// SSOT Anthropic model list for Settings → LLM Provider; bumping a model
 /// edits one const in `defaults.rs`. Adds the derived `has_1m` field.
 #[tauri::command]
@@ -4007,6 +4014,14 @@ mod tests {
     fn get_default_base_url_returns_none_for_unknown_provider() {
         let result = get_default_base_url("openai".to_string()).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn get_openrouter_default_model_returns_the_consts_ssot() {
+        assert_eq!(
+            get_openrouter_default_model(),
+            speedwave_runtime::consts::OPENROUTER_DEFAULT_MODEL
+        );
     }
 
     // -- project_llm_is_unconfigured_in tests --
