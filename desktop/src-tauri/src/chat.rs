@@ -5825,9 +5825,8 @@ mod tests {
         }
     }
 
-    /// SPEED-544: the `--model` spawn flag and the no-session override queue are
-    /// gone — the pre-first-turn case is covered entirely by the idle respawn
-    /// reading the settings.json pin, never by argv.
+    /// SPEED-544: no `--model` in argv ever; the pre-first-turn pick is covered by
+    /// the idle respawn reading the settings.json pin.
     #[test]
     fn prepare_args_never_appends_a_model_flag_without_a_pin_file() {
         let user_config = single_project_user_config();

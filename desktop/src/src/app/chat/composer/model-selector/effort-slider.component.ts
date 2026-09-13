@@ -17,12 +17,8 @@ export function capitalizeLevel(level: string): string {
 }
 
 /**
- * Discrete effort-level slider (Claude Desktop popover pattern): stops are
- * confined to the levels the caller passes in (already filtered to the active
- * model's `effort_levels`), `low` on the left ("Faster") to `max` on the right
- * ("Smarter"). A pick (click on a stop, drag-to-release, or Enter after an
- * arrow move) emits once via `levelSelected`; the caller owns pin persistence
- * and the wire `/effort` send.
+ * Discrete effort slider over the caller's stops (the active model's `effort_levels`, low
+ * to max); a stop click, drag release, or Enter emits `levelSelected` once. Caller persists.
  */
 @Component({
   selector: 'app-effort-slider',
@@ -85,9 +81,8 @@ export class EffortSliderComponent {
 
   /** Resets any tentative move when the slider's inputs change out from under it. */
   constructor() {
-    // An externally-driven change (a resync, or the popover reopening on a
-    // different model) discards any tentative move — it belongs to a session
-    // that no longer applies.
+    // An external change (resync, popover reopened on another model) discards a
+    // tentative arrow move that belonged to the previous state.
     effect(() => {
       this.stops();
       this.activeLevel();
