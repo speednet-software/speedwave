@@ -84,6 +84,33 @@ pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
     })
 }
 
+/// Resolves a Claude Code model-family alias (`opus`, `sonnet`, `haiku`, `fable`,
+/// each optionally suffixed `[1m]`) to its family's `latest` catalog id -- the
+/// same "family prefix + latest" lookup `anthropic_default_models_env` uses.
+/// Claude Code itself rewrites a saved full id to this alias shape in
+/// `settings.json` (`claude-fable-5[1m]` -> `fable[1m]`, model-config.md
+/// "Work with Fable"). Anything else (a full catalog id, or an unrecognized
+/// value) passes through unchanged so callers can show it verbatim; resolution
+/// never checks `has_1m()` -- `is_selectable_anthropic_model_id` is the validity SSOT.
+pub fn resolve_model_alias(value: &str) -> String {
+    let (word, suffix) = match value.strip_suffix("[1m]") {
+        Some(base) => (base, "[1m]"),
+        None => (value, ""),
+    };
+    let family_prefix = match word {
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        "fable" => "Fable",
+        _ => return value.to_string(),
+    };
+    ANTHROPIC_MODELS
+        .iter()
+        .find(|m| m.family.starts_with(family_prefix) && m.latest)
+        .map(|m| format!("{}{suffix}", m.id))
+        .unwrap_or_else(|| value.to_string())
+}
+
 // Published per-MTok rates: platform.claude.com/docs/en/about-claude/pricing.
 // Claude 4.6+ bills the full 1M window at standard rates — [1m] reuses the base const.
 const FABLE_PRICING: ModelPricing = ModelPricing {
@@ -871,5 +898,66 @@ mod tests {
                 m.id
             );
         }
+    }
+
+    #[test]
+    fn resolve_model_alias_maps_each_documented_alias_to_its_latest_entry() {
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-5");
+        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-5");
+        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_model_alias("fable"), "claude-fable-5-1");
+    }
+
+    #[test]
+    fn resolve_model_alias_preserves_the_1m_suffix() {
+        assert_eq!(resolve_model_alias("opus[1m]"), "claude-opus-5[1m]");
+        assert_eq!(resolve_model_alias("sonnet[1m]"), "claude-sonnet-5[1m]");
+        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
+        assert_eq!(resolve_model_alias("haiku[1m]"), "claude-haiku-4-5[1m]");
+    }
+
+    /// Documented rewrite (model-config.md, "Work with Fable"): Claude Code
+    /// itself changes a saved `claude-fable-5[1m]` to the `fable[1m]` alias the
+    /// first time it runs v2.1.257+ - the reader must resolve it back.
+    #[test]
+    fn resolve_model_alias_matches_the_documented_fable_rewrite_demo() {
+        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
+    }
+
+    #[test]
+    fn resolve_model_alias_passes_a_full_catalog_id_through_unchanged() {
+        assert_eq!(resolve_model_alias("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(
+            resolve_model_alias("claude-fable-5[1m]"),
+            "claude-fable-5[1m]"
+        );
+        assert_eq!(resolve_model_alias("claude-opus-4-8"), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn resolve_model_alias_passes_an_unknown_value_through_verbatim() {
+        assert_eq!(resolve_model_alias(""), "");
+        assert_eq!(resolve_model_alias("gpt-4o-mini"), "gpt-4o-mini");
+        assert_eq!(resolve_model_alias("best"), "best");
+        assert_eq!(resolve_model_alias("opusplan"), "opusplan");
+        assert_eq!(resolve_model_alias("öéü"), "öéü");
+    }
+
+    /// The resolver never consults `has_1m()`: it only maps a family word to the
+    /// family's latest id. `claude-haiku-4-5` has no priced `[1m]` variant, so the
+    /// resolved id exists but is NOT selectable - validity is a separate concern.
+    #[test]
+    fn resolve_model_alias_haiku_1m_resolves_even_though_haiku_has_no_1m_price() {
+        let resolved = resolve_model_alias("haiku[1m]");
+        assert_eq!(resolved, "claude-haiku-4-5[1m]");
+        assert!(!is_selectable_anthropic_model_id(&resolved));
+    }
+
+    /// Mirrors the `fable[1m]` demo: the latest Fable entry does carry a `[1m]`
+    /// price, so the resolved id is selectable.
+    #[test]
+    fn resolve_model_alias_fable_1m_is_selectable_because_latest_fable_has_a_1m_price() {
+        let resolved = resolve_model_alias("fable[1m]");
+        assert!(is_selectable_anthropic_model_id(&resolved));
     }
 }
