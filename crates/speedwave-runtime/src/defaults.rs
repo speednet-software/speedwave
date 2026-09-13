@@ -606,6 +606,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn fable_5_is_demoted_to_legacy() {
         // Fable 5.1 replaces Fable 5 as the Latest Fable entry; Fable 5 keeps its
         // pricing but must no longer be the alias-pin target.
