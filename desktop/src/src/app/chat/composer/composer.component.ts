@@ -221,15 +221,6 @@ const PLAN_MODE_PREFIX =
         >
           /<span class="hidden sm:inline"> skill</span>
         </button>
-        <span class="mx-1 hidden text-[var(--line-strong)] md:inline">·</span>
-        <app-model-selector
-          [projectId]="projectId()"
-          [streaming]="streaming()"
-          [modelError]="modelError()"
-          [sessionModel]="model()"
-          (modelSelected)="modelSelected.emit($event)"
-          (effortSelected)="effortSelected.emit($event)"
-        />
         @if (contextLabel()) {
           <span
             class="hidden text-[var(--ink-mute)] lg:inline"
@@ -239,7 +230,16 @@ const PLAN_MODE_PREFIX =
             >{{ contextLabel() }}</span
           >
         }
-        <div class="ml-auto flex flex-shrink-0 items-center gap-2">
+        <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+          <!-- Model + effort pills sit next to the send button, like Claude Desktop. -->
+          <app-model-selector
+            [projectId]="projectId()"
+            [streaming]="streaming()"
+            [modelError]="modelError()"
+            [sessionModel]="model()"
+            (modelSelected)="modelSelected.emit($event)"
+            (effortSelected)="effortSelected.emit($event)"
+          />
           @if (streaming()) {
             <button
               type="button"

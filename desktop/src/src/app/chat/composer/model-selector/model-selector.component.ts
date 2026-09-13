@@ -85,7 +85,7 @@ export interface ModelSelection {
           (click)="open.set(false)"
         ></button>
         <div
-          class="absolute bottom-full left-0 z-40 mb-2 w-80 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
+          class="absolute bottom-full right-0 z-40 mb-2 w-80 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
           role="dialog"
         >
           <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
@@ -160,7 +160,7 @@ export interface ModelSelection {
         ></button>
         <div
           data-testid="effort-popover"
-          class="absolute bottom-full left-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
+          class="absolute bottom-full right-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
           role="dialog"
         >
           <app-effort-slider
