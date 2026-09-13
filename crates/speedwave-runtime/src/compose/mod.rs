@@ -5912,6 +5912,35 @@ services:
     }
 
     #[test]
+    fn test_anthropic_api_key_kind_sets_no_model_env() {
+        // The AnthropicApiKey kind shares the same match arm as AnthropicOauth
+        // (compose/llm.rs) — assert the guard covers it too, not just OAuth.
+        let data_dir = tempfile::tempdir().unwrap();
+        let llm = LlmConfig {
+            schema_version: Some(crate::config::LLM_SCHEMA_VERSION),
+            providers: vec![crate::config::LlmProviderEntry {
+                id: "anthropic".to_string(),
+                kind: crate::config::LlmProviderKind::AnthropicApiKey,
+                base_url: None,
+                model: Some("claude-sonnet-5".to_string()),
+                has_api_key: true,
+                context_tokens: None,
+                has_custom_headers: false,
+            }],
+            active: Some(crate::config::LlmActive {
+                provider_id: "anthropic".to_string(),
+                model: Some("claude-sonnet-5".to_string()),
+            }),
+            ..Default::default()
+        };
+        let rendered =
+            apply_llm_config_in(data_dir.path(), COMPOSE_TEMPLATE, &llm, "test-project").unwrap();
+        let env = get_claude_env(&rendered);
+        assert_model_not_forced(&env);
+        assert_no_effort_level_forced(&env);
+    }
+
+    #[test]
     fn test_anthropic_injects_default_alias_env_vars() {
         let data_dir = tempfile::tempdir().unwrap();
         // Workaround for anthropics/claude-code#34083: inject ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
