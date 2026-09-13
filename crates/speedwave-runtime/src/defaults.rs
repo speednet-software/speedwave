@@ -68,8 +68,8 @@ pub struct AnthropicModelInfo {
     pub pricing_1m: Option<ModelPricing>,
     /// Offered by the composer selector; legacy entries stay for pricing history.
     pub selectable: bool,
-    /// Effort levels this model accepts, a subset of `EFFORT_LEVELS` in the same
-    /// `low`→`max` order; empty when the model doesn't support effort (Haiku 4.5).
+    /// Effort levels this model accepts, a subset of `EFFORT_LEVELS` in `low`→`max`
+    /// order; empty when unsupported (Haiku 4.5). Never deserialized from JSON.
     #[serde(skip_deserializing)]
     pub effort_levels: &'static [&'static str],
     /// Default effort with no pin set; `None` exactly when `effort_levels` is
