@@ -85,7 +85,7 @@ fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
         .join(".claude")
 }
 
-fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
+pub(crate) fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
     let projects_dir = claude_dot_dir_impl(data_dir, project).join("projects");
     resolve_workspace_dir(&projects_dir)
 }
@@ -758,17 +758,16 @@ pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Resul
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
 
-/// Session-START model of the newest transcript accepted by `accept`: what a NEW
-/// session will resolve. Mid-session wire `/model` switches are session-scoped.
-pub fn last_session_model(project: &str, accept: impl Fn(&str) -> bool) -> Option<String> {
-    last_session_model_impl(consts::data_dir(), project, accept)
-}
-
 /// Aborted "/" sessions leave frequent model-less transcripts, so the hint walks
 /// newest-first; the cap bounds badge-render IO on a large history dir.
 const LAST_SESSION_MODEL_SCAN_CAP: usize = 20;
 
-fn last_session_model_impl(
+/// Session-START model of the newest transcript accepted by `accept`: what a NEW
+/// session will resolve. Mid-session wire `/model` switches are session-scoped.
+/// `pub(crate)` (not a `consts::data_dir()`-hardcoded wrapper): its one caller,
+/// `pin_cmd::get_model_hint_in`, already takes `data_dir` as a parameter so its
+/// own tests can inject a tempdir.
+pub(crate) fn last_session_model_impl(
     data_dir: &Path,
     project: &str,
     accept: impl Fn(&str) -> bool,

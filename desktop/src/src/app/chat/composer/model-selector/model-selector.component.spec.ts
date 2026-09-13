@@ -736,6 +736,28 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(badgeText()).toBe('claude-fable-5[1m]');
   });
 
+  it('shows the backend-resolved alias pin verbatim (SPEED-540 demo: fable[1m] -> claude-fable-5-1[1m])', async () => {
+    // get_model_hint resolves a Claude Code alias to its catalog id server-side
+    // (defaults::resolve_model_alias); the component only ever displays what it gets back.
+    modelHint = 'claude-fable-5-1[1m]';
+    fixture.componentRef.setInput('projectId', 'proj-2');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+    expect(badgeText()).toBe('claude-fable-5-1[1m]');
+  });
+
+  it('shows an unrecognized pin value verbatim, never "default"', async () => {
+    modelHint = 'some-mystery-value';
+    fixture.componentRef.setInput('projectId', 'proj-2');
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixture.detectChanges();
+    expect(badgeText()).toBe('some-mystery-value');
+  });
+
   it('prefers the live session model over the stored config model (wire switch truth)', async () => {
     // Field repro (OpenRouter): a session-scoped wire /model diverges from the
     // config, which is only the next-session default - the badge must follow
