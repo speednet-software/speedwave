@@ -276,6 +276,45 @@ fi
 # v2: pre-v2 markers were poisoned by the empty-list bug below — ignore and remove them.
 _bundled_marker="${HOME}/.claude/.speedwave-bundled-plugins-installed.v2"
 rm -f "${HOME}/.claude/.speedwave-bundled-plugins-installed"
+
+# One-time removal of a plugin Speedwave used to bundle (ADR-087). Runs only while the marker
+# records Speedwave's own install of it, so a user's own install is never touched. Non-fatal.
+_retired="superpowers@claude-plugins-official"
+if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; then
+    if ! command -v jq &> /dev/null; then
+        echo "WARNING: jq not found — skipping removal of retired plugin ${_retired}" >&2
+        _diag WARN CONFIG "jq not found — retired plugin removal skipped"
+    else
+        # Blank or malformed list output means unknown, not absent: fall through to the uninstall.
+        _present="$(timeout 30 claude plugin list --json 2>/dev/null | jq -r \
+            --arg id "${_retired}" --arg name "${_retired%@*}" --arg mp "${_retired#*@}" \
+            'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp)) | tostring' \
+            2>/dev/null)" || _present=""
+        _gone=0
+        if [ "${_present}" = "false" ]; then
+            _gone=1
+            _diag INFO SKIP "${_retired} not installed; dropping its marker entry"
+        elif _err="$(timeout 60 claude plugin uninstall "${_retired}" 2>&1 >/dev/null)"; then
+            # CC leaves the plugin's cache tree behind; nothing loads it, but it is dead weight.
+            rm -rf "${HOME}/.claude/plugins/cache/${_retired#*@}/${_retired%@*}"
+            _gone=1
+            _diag INFO OK "uninstalled retired plugin ${_retired}"
+        elif [[ "${_err}" == *"not found in installed plugins"* ]]; then
+            _gone=1
+            _diag INFO SKIP "${_retired} already removed; dropping its marker entry"
+        else
+            echo "WARNING: failed to uninstall retired plugin ${_retired}: ${_err} (continuing)" >&2
+            _diag WARN PLUGIN "uninstall ${_retired}: ${_err}"
+        fi
+        if [ "${_gone}" -eq 1 ]; then
+            grep -vxF "${_retired}" "${_bundled_marker}" > "${_bundled_marker}.tmp" || true
+            mv "${_bundled_marker}.tmp" "${_bundled_marker}"
+        fi
+        unset _present _gone _err
+    fi
+fi
+unset _retired
+
 if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     _mp="${SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE:-claude-plugins-official}"
     if ! echo "${_mp}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then

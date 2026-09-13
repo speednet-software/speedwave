@@ -13,11 +13,11 @@ pub const BUNDLED_PLUGIN_MARKETPLACE: &str = "claude-plugins-official";
 
 /// Official Anthropic plugins installed and enabled by default at container start (entrypoint
 /// runs `claude plugin install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`.
+/// `superpowers` was retired by ADR-087; the entrypoint uninstalls it once where Speedwave installed it.
 pub const BUNDLED_PLUGINS: &[&str] = &[
     "frontend-design",
     "feature-dev",
     "claude-md-management",
-    "superpowers",
     "typescript-lsp",
 ];
 
@@ -294,6 +294,14 @@ mod tests {
         assert!(
             !BUNDLED_PLUGIN_MARKETPLACE.is_empty(),
             "marketplace must be set"
+        );
+    }
+
+    #[test]
+    fn retired_superpowers_plugin_is_not_bundled() {
+        assert!(
+            !BUNDLED_PLUGINS.contains(&"superpowers"),
+            "superpowers was retired by ADR-087 (its skills and hook compete with the vendored speedwave-* set)"
         );
     }
 

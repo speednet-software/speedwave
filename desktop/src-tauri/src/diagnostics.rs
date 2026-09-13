@@ -568,7 +568,7 @@ mod tests {
         let log = tmp.path().join(".speedwave-entrypoint.log");
         std::fs::write(
             &log,
-            "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n",
+            "2026-07-13T12:00:01+02:00 ERROR FAIL example-plugin: clone failed\n",
         )
         .unwrap();
         let out = tmp.path().join("diag.zip");
