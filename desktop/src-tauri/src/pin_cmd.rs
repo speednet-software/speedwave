@@ -85,14 +85,6 @@ pub(crate) fn set_effort_pin(project_id: String, level: String) -> Result<(), St
     set_effort_pin_in(speedwave_runtime::consts::data_dir(), &project_name, &level)
 }
 
-#[tauri::command]
-pub(crate) fn list_effort_levels() -> Result<Vec<String>, String> {
-    Ok(speedwave_runtime::defaults::EFFORT_LEVELS
-        .iter()
-        .map(|s| s.to_string())
-        .collect())
-}
-
 /// Pre-session badge hint: the settings `model` pin first (CC aliases resolved, unknown
 /// values verbatim), else the newest `claude-*` transcript model (foreign ids never leak).
 #[tauri::command]
@@ -179,12 +171,6 @@ mod tests {
     fn get_effort_pin_rejects_invalid_project() {
         let res = get_effort_pin(String::new());
         assert!(res.is_err());
-    }
-
-    #[test]
-    fn list_effort_levels_returns_all_five() {
-        let levels = list_effort_levels().unwrap();
-        assert_eq!(levels, vec!["low", "medium", "high", "xhigh", "max"]);
     }
 
     #[test]

@@ -16,6 +16,7 @@ import { LoggerService } from '../../../services/logger.service';
 import type { ActiveProviderSummary, AnthropicModel, DiscoverResult } from '../../../models/llm';
 import { isAnthropicKind } from '../../../models/llm';
 import { normalizeObserved, wireModelId } from './wire-model-id';
+import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
 /** One row in the combobox, normalized across the three provider sources. */
 interface ModelOption {
@@ -42,7 +43,7 @@ export interface ModelSelection {
  */
 @Component({
   selector: 'app-model-selector',
-  imports: [FormsModule, TooltipDirective],
+  imports: [FormsModule, TooltipDirective, EffortSliderComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
   template: `
@@ -55,8 +56,20 @@ export interface ModelSelection {
         [attr.title]="streaming() ? 'Model locked while a turn is streaming' : 'Change model'"
         (click)="openCombobox()"
       >
-        {{ displayModel() }}
+        {{ displayModelLabel() }}
       </button>
+      @if (showEffortSegment()) {
+        <button
+          type="button"
+          data-testid="effort-segment"
+          class="hidden text-[var(--ink-mute)] hover:text-[var(--ink)] hover:underline md:inline"
+          appTooltip="Reasoning effort - applies to the current session and persists for new ones"
+          placement="top"
+          (click)="toggleEffortPopover()"
+        >
+          {{ effortSegmentLabel() }}
+        </button>
+      }
       @if (modelError()) {
         <span data-testid="model-selection-error" role="alert" class="ml-2 text-red-300">{{
           modelError()
@@ -136,29 +149,26 @@ export interface ModelSelection {
           </div>
         </div>
       }
-      @if (showEffortControl()) {
-        <div data-testid="effort-control" class="hidden items-center gap-1 md:flex">
-          <span
-            class="mono text-[10px] text-[var(--ink-mute)]"
-            appTooltip="Reasoning effort - applies to the current session and persists for new ones"
-            placement="top"
-            >{{ currentEffortPin() ?? 'auto' }}</span
-          >
-          @for (level of effortLevels(); track level) {
-            <button
-              type="button"
-              [attr.data-testid]="'effort-option-' + level"
-              class="mono rounded border px-1.5 py-0.5 text-[10px]"
-              [class]="
-                currentEffortPin() === level
-                  ? 'border-[var(--teal)] text-[var(--teal)]'
-                  : 'border-[var(--line)] text-[var(--ink-mute)] hover:text-[var(--ink)]'
-              "
-              (click)="selectEffortLevel(level)"
-            >
-              {{ level }}
-            </button>
-          }
+      @if (effortOpen()) {
+        <button
+          type="button"
+          data-testid="effort-popover-backdrop"
+          aria-label="Close effort popover"
+          tabindex="-1"
+          class="fixed inset-0 z-30 cursor-default"
+          (click)="effortOpen.set(false)"
+        ></button>
+        <div
+          data-testid="effort-popover"
+          class="absolute bottom-full left-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)]"
+          role="dialog"
+        >
+          <app-effort-slider
+            [stops]="effortStops()"
+            [activeLevel]="effectiveEffortLevel() ?? ''"
+            [pinned]="currentEffortPin() !== null"
+            (levelSelected)="onEffortSliderSelect($event)"
+          />
         </div>
       }
     </div>
@@ -205,8 +215,10 @@ export class ModelSelectorComponent {
    */
   private discoverCache: { key: string; options: ModelOption[] } | null = null;
 
-  protected readonly effortLevels = signal<string[]>([]);
+  /** Full Anthropic catalog (selectable and legacy entries), the slider stops' SSOT. */
+  private readonly anthropicCatalog = signal<AnthropicModel[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
+  protected readonly effortOpen = signal(false);
 
   /** Optimistic badge value after a live anthropic pick (no config write to re-read it from). */
   private readonly lastPicked = signal('');
@@ -218,6 +230,73 @@ export class ModelSelectorComponent {
   protected readonly showEffortControl = computed(() => {
     const summary = this.summary();
     return summary !== null && isAnthropicKind(summary.kind);
+  });
+
+  /** Full catalog entry backing the displayed model id (`[1m]` suffix stripped). */
+  private readonly currentModelEntry = computed<AnthropicModel | null>(() => {
+    const bare = this.displayModel().replace(/\[1m\]$/, '');
+    return this.anthropicCatalog().find((m) => m.id === bare) ?? null;
+  });
+
+  /**
+   * Any full 5-level catalog entry — the stop-list fallback for a display state with
+   * no resolved catalog id (the pre-session "default" state, or an unrecognized pin).
+   */
+  private readonly fullLevelEntry = computed<AnthropicModel | null>(
+    () => this.anthropicCatalog().find((m) => m.effort_levels.length === 5) ?? null
+  );
+
+  /** Slider stops for the active model, `low`→`max`; empty hides the segment (Haiku 4.5). */
+  protected readonly effortStops = computed<string[]>(
+    () => this.currentModelEntry()?.effort_levels ?? this.fullLevelEntry()?.effort_levels ?? []
+  );
+
+  /** The active model's own default effort (`high`, `xhigh` on Opus 4.7), shown unpinned. */
+  private readonly catalogDefaultEffort = computed<string | null>(
+    () => this.currentModelEntry()?.default_effort ?? this.fullLevelEntry()?.default_effort ?? null
+  );
+
+  /** Canonical `low`→`max` order, read from a full 5-level entry (never a hardcoded list). */
+  private readonly canonicalOrder = computed<string[]>(
+    () => this.fullLevelEntry()?.effort_levels ?? []
+  );
+
+  /** Hidden entirely when the active model has no effort levels (Haiku 4.5) or provider is routed. */
+  protected readonly showEffortSegment = computed(
+    () => this.showEffortControl() && this.effortStops().length > 0
+  );
+
+  /**
+   * The level the handle/segment show: the pin if supported, else the highest supported
+   * level at or below it (Claude Code's own clamp); unpinned, the model's catalog default.
+   */
+  protected readonly effectiveEffortLevel = computed<string | null>(() => {
+    const stops = this.effortStops();
+    if (stops.length === 0) return null;
+    const pin = this.currentEffortPin();
+    if (!pin) return this.catalogDefaultEffort();
+    if (stops.includes(pin)) return pin;
+    const order = this.canonicalOrder();
+    const idx = order.indexOf(pin);
+    for (let i = idx - 1; i >= 0; i--) {
+      if (stops.includes(order[i])) return order[i];
+    }
+    return stops[0];
+  });
+
+  /** Pill segment text: capitalized effective level, or "Default" with no pin. */
+  protected readonly effortSegmentLabel = computed<string>(() => {
+    if (this.currentEffortPin() === null) return 'Default';
+    const level = this.effectiveEffortLevel();
+    return level ? capitalizeLevel(level) : 'Default';
+  });
+
+  /** Pill model segment: catalog family label (+ ` [1m]`) for a known id, else verbatim. */
+  protected readonly displayModelLabel = computed<string>(() => {
+    const id = this.displayModel();
+    const entry = this.currentModelEntry();
+    if (!entry) return id;
+    return id.endsWith('[1m]') ? `${entry.family} [1m]` : entry.family;
   });
 
   /** Last `sessionModel` seen by the reload effect; detects a genuine session-start transition. */
@@ -235,6 +314,10 @@ export class ModelSelectorComponent {
     effect(() => {
       const id = this.projectId();
       if (this.showEffortControl() && id) void this.loadEffortState(id);
+    });
+    effect(() => {
+      const id = this.projectId();
+      if (this.showEffortControl() && id) void this.loadAnthropicCatalog();
     });
     // A new session applies any pending effort pin; re-read it so the badge clears.
     effect(() => {
@@ -295,6 +378,7 @@ export class ModelSelectorComponent {
    */
   async openCombobox(): Promise<void> {
     if (this.streaming()) return;
+    this.effortOpen.set(false);
     this.open.set(true);
     const id = this.projectId();
     if (this.summaryProjectId !== id) await this.loadSummary(id);
@@ -306,9 +390,10 @@ export class ModelSelectorComponent {
     return this.optionsFetch;
   }
 
-  /** Escape closes the combobox, matching the app's popover conventions. */
+  /** Escape closes whichever popover (model list or effort slider) is open. */
   protected onEscape(): void {
     if (this.open()) this.open.set(false);
+    if (this.effortOpen()) this.effortOpen.set(false);
   }
 
   /**
@@ -462,18 +547,14 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Loads the persistable-level list and the current launch-effort pin for the project.
+   * Loads the current launch-effort pin for the project (or `null` when unset).
    * Drops the result if the project changed while the fetch was in flight.
    * @param projectId - Active project id to read the pin for.
    */
   private async loadEffortState(projectId: string): Promise<void> {
     try {
-      const [levels, pin] = await Promise.all([
-        this.tauri.invoke<string[]>('list_effort_levels'),
-        this.tauri.invoke<string | null>('get_effort_pin', { projectId }),
-      ]);
+      const pin = await this.tauri.invoke<string | null>('get_effort_pin', { projectId });
       if (this.projectId() !== projectId) return;
-      this.effortLevels.set(levels);
       this.currentEffortPin.set(pin);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -481,13 +562,26 @@ export class ModelSelectorComponent {
     }
   }
 
+  /** Loads the full Anthropic catalog backing the slider stops and the pill's family label. */
+  private async loadAnthropicCatalog(): Promise<void> {
+    const list = await this.anthropicModels.list();
+    this.anthropicCatalog.set(list);
+  }
+
+  /** Toggles the effort popover, closing the model combobox if it was open. */
+  protected toggleEffortPopover(): void {
+    this.open.set(false);
+    this.effortOpen.update((v) => !v);
+  }
+
   /**
-   * Optimistically shows the picked level and emits it; `ChatStateService` persists the
-   * pin then wires the session. A failed write surfaces via `modelError` and resyncs the pin.
-   * @param level - One of the model's supported effort levels, from an `effort-option-*` click.
+   * Applies a slider pick: closes the popover, updates the pin display, and emits
+   * `effortSelected` (`ChatStateService.applyEffortSelection` persists the pin then wires).
+   * @param level - The chosen stop, one of `effortStops()`.
    */
-  protected selectEffortLevel(level: string): void {
+  protected onEffortSliderSelect(level: string): void {
     this.currentEffortPin.set(level);
+    this.effortOpen.set(false);
     this.effortSelected.emit(level);
   }
 }

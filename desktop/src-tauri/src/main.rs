@@ -1310,7 +1310,6 @@ fn main() {
             containers_cmd::restart_llm_proxy,
             pin_cmd::get_effort_pin,
             pin_cmd::set_effort_pin,
-            pin_cmd::list_effort_levels,
             pin_cmd::get_model_hint,
             pin_cmd::set_model_pin,
             containers_cmd::get_telemetry_config,

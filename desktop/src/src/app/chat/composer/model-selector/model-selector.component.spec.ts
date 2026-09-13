@@ -58,7 +58,6 @@ describe('ModelSelectorComponent', () => {
       if (cmd === 'get_active_provider_summary') return summary;
       if (cmd === 'list_anthropic_models') return anthropicCatalog;
       if (cmd === 'get_effort_pin') return 'high';
-      if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
       throw new Error(`unexpected invoke: ${cmd}`);
     });
     await TestBed.configureTestingModule({
@@ -71,11 +70,12 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
   });
 
-  it('shows the normalized badge (no entry-id prefix) from the active provider summary', async () => {
+  it('shows the normalized badge as the catalog family label (no entry-id prefix)', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
-    expect(badge.nativeElement.textContent).toContain('claude-sonnet-5');
+    expect(badge.nativeElement.textContent).toContain('Sonnet 5');
+    expect(badge.nativeElement.textContent).not.toContain('claude-sonnet-5');
     expect(badge.nativeElement.textContent).not.toContain('anthropic/claude-sonnet-5');
   });
 
@@ -96,7 +96,8 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
     const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
     // Exact "openrouter/" prefix stripped; the inner "anthropic/…" first
-    // segment must survive (a naive first-`/` slice would drop it).
+    // segment must survive (a naive first-`/` slice would drop it). Not a
+    // catalog id, so the family-label mapping never applies: stays verbatim.
     expect(badge.nativeElement.textContent).toContain('anthropic/claude-sonnet-5');
     expect(badge.nativeElement.textContent).not.toContain('openrouter/');
   });
@@ -105,6 +106,7 @@ describe('ModelSelectorComponent', () => {
     let resolveList!: (v: AnthropicModel[]) => void;
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
       if (cmd === 'list_anthropic_models')
         return new Promise((r) => {
           resolveList = r;
@@ -165,6 +167,7 @@ describe('ModelSelectorComponent', () => {
     ];
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
       if (cmd === 'list_anthropic_models') return Promise.resolve(catalogWithFable);
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
@@ -186,6 +189,7 @@ describe('ModelSelectorComponent', () => {
   it('shows error+retry on a fetch failure and recovers on retry', async () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
       if (cmd === 'list_anthropic_models') return Promise.reject(new Error('boom'));
       return Promise.reject(new Error('unexpected'));
     });
@@ -197,6 +201,7 @@ describe('ModelSelectorComponent', () => {
 
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
+      if (cmd === 'get_effort_pin') return Promise.resolve('high');
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       return Promise.reject(new Error('unexpected'));
     });
@@ -397,13 +402,13 @@ describe('ModelSelectorComponent', () => {
     ]);
   });
 
-  it('renders the effort control only for anthropic provider kinds', async () => {
+  it('renders the effort segment only for anthropic provider kinds', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
-    expect(fixture.debugElement.query(By.css('[data-testid="effort-control"]'))).toBeTruthy();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeTruthy();
   });
 
-  it('hides the effort control for non-anthropic provider kinds', async () => {
+  it('hides the effort segment for non-anthropic provider kinds', async () => {
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary')
         return Promise.resolve({
@@ -419,35 +424,42 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
-    expect(fixture.debugElement.query(By.css('[data-testid="effort-control"]'))).toBeFalsy();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
   });
 
-  it('shows the current session pin read from get_effort_pin and no pending badge when unset', async () => {
+  it('shows the current pin, capitalized, on the segment', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
-    const el = fixture.nativeElement as HTMLElement;
-    expect(el.textContent).toContain('high');
-    expect(el.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+    expect(segment.nativeElement.textContent.trim()).toBe('High');
   });
 
-  it('a pick updates the highlight immediately and emits effortSelected (write-through moved to ChatStateService)', async () => {
+  it('opening the popover renders the slider with the segment pin as the active stop', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeTruthy();
+    const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
+    expect(slider.nativeElement.getAttribute('aria-valuetext')).toBe('High');
+  });
+
+  it('a stop click emits effortSelected, updates the pill, and closes the popover', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     const emitted: string[] = [];
     fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
-    const lowOption = fixture.nativeElement.querySelector(
-      '[data-testid="effort-option-low"]'
-    ) as HTMLElement;
-    lowOption.click();
+
+    fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
     fixture.detectChanges();
+    fixture.debugElement.query(By.css('[data-testid="effort-stop-low"]')).nativeElement.click();
+    fixture.detectChanges();
+
     expect(emitted).toEqual(['low']);
     expect(tauriInvoke).not.toHaveBeenCalledWith('set_effort_pin', expect.anything());
-    // Live semantics: the picked level is current at once; no pending badge exists.
-    expect(fixture.nativeElement.querySelector('[data-testid="effort-pending"]')).toBeFalsy();
-    const el = fixture.nativeElement.querySelector(
-      '[data-testid="effort-option-low"]'
-    ) as HTMLElement;
-    expect(el.className).toContain('--teal');
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeFalsy();
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+    expect(segment.nativeElement.textContent.trim()).toBe('Low');
   });
 
   it('a pick during a streaming turn still emits (the chat layer queues the wire send)', async () => {
@@ -457,25 +469,51 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
     const emitted: string[] = [];
     fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
-    const option = fixture.nativeElement.querySelector(
-      '[data-testid="effort-option-low"]'
-    ) as HTMLButtonElement;
-    expect(option.disabled).toBe(false);
-    option.click();
+
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))
+      .nativeElement as HTMLButtonElement;
+    expect(segment.disabled).toBeFalsy();
+    segment.click();
+    fixture.detectChanges();
+    fixture.debugElement.query(By.css('[data-testid="effort-stop-low"]')).nativeElement.click();
     fixture.detectChanges();
     expect(emitted).toEqual(['low']);
     expect(tauriInvoke).not.toHaveBeenCalledWith('set_effort_pin', expect.anything());
   });
 
+  it('no help icon in the popover; Faster and Smarter labels are present', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+    fixture.detectChanges();
+    const popover = fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))
+      .nativeElement as HTMLElement;
+    expect(popover.textContent).toContain('Faster');
+    expect(popover.textContent).toContain('Smarter');
+    expect(popover.querySelector('[aria-label="Help"]')).toBeFalsy();
+  });
+
+  it('Escape closes the effort popover', async () => {
+    await fixture.whenStable();
+    fixture.detectChanges();
+    fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeTruthy();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeFalsy();
+  });
+
   it('a failed write-through resyncs the pin from the backend instead of trusting the optimistic pick', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
-    const lowOption = fixture.nativeElement.querySelector(
-      '[data-testid="effort-option-low"]'
-    ) as HTMLElement;
-    lowOption.click();
+    fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
     fixture.detectChanges();
-    expect(fixture.nativeElement.textContent).toContain('low');
+    fixture.debugElement.query(By.css('[data-testid="effort-stop-low"]')).nativeElement.click();
+    fixture.detectChanges();
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.textContent
+    ).toContain('Low');
 
     tauriInvoke.mockClear();
     fixture.componentRef.setInput('modelError', 'locked config');
@@ -484,7 +522,9 @@ describe('ModelSelectorComponent', () => {
     fixture.detectChanges();
 
     expect(tauriInvoke).toHaveBeenCalledWith('get_effort_pin', { projectId: 'proj-1' });
-    expect(fixture.nativeElement.textContent).toContain('high');
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.textContent
+    ).toContain('High');
   });
 
   it('closes the combobox on a backdrop click and on Escape', async () => {
@@ -548,7 +588,7 @@ describe('ModelSelectorComponent', () => {
     let resolvePinA!: (v: string | null) => void;
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
-      if (cmd === 'list_effort_levels') return Promise.resolve(['low', 'medium', 'high', 'xhigh']);
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'get_effort_pin')
         return new Promise((r) => {
           resolvePinA = r;
@@ -563,7 +603,7 @@ describe('ModelSelectorComponent', () => {
     // Switch to project B before A resolves; B gets its own pin going forward.
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
-      if (cmd === 'list_effort_levels') return Promise.resolve(['low', 'medium', 'high', 'xhigh']);
+      if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
       if (cmd === 'get_effort_pin') return Promise.resolve('medium');
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
@@ -676,7 +716,6 @@ describe('ModelSelectorComponent', () => {
     expect(fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'))).toBeFalsy();
   });
 });
-
 describe('ModelSelectorComponent badge fallback (anthropic carries no config model)', () => {
   let fixture: ComponentFixture<ModelSelectorComponent>;
   let tauriInvoke: ReturnType<typeof vi.fn>;
@@ -713,7 +752,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
       if (cmd === 'get_model_hint') return modelHint;
-      if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
       throw new Error(`unexpected invoke: ${cmd}`);
     });
     await TestBed.configureTestingModule({
@@ -733,11 +771,11 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     ).trim();
   }
 
-  it('shows the live session model when the config carries none', async () => {
+  it('shows the live session model, as its catalog family label, when the config carries none', async () => {
     fixture.componentRef.setInput('sessionModel', 'claude-fable-5');
     await fixture.whenStable();
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-fable-5');
+    expect(badgeText()).toBe('Fable 5');
   });
 
   it('shows "default" only when neither a session, a pin, nor history knows the model', async () => {
@@ -746,7 +784,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(badgeText()).toBe('default');
   });
 
-  it('shows the CC settings-pin/last-transcript hint before any session', async () => {
+  it('shows the CC settings-pin/last-transcript hint before any session, as the family label', async () => {
     modelHint = 'claude-fable-5[1m]';
     fixture.componentRef.setInput('projectId', 'proj-2');
     fixture.detectChanges();
@@ -754,12 +792,13 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     // The hint fetch is fired from inside loadSummary; flush its microtask chain.
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-fable-5[1m]');
+    expect(badgeText()).toBe('Fable 5 [1m]');
   });
 
-  it('shows the backend-resolved alias pin verbatim (SPEED-540 demo: fable[1m] -> claude-fable-5-1[1m])', async () => {
+  it('shows an id the catalog does not know verbatim (SPEED-540 demo: fable[1m] -> claude-fable-5-1[1m])', async () => {
     // get_model_hint resolves a Claude Code alias to its catalog id server-side
-    // (defaults::resolve_model_alias); the component only ever displays what it gets back.
+    // (defaults::resolve_model_alias); this fixture's catalog only carries
+    // claude-fable-5, so claude-fable-5-1 is unknown here and stays verbatim.
     modelHint = 'claude-fable-5-1[1m]';
     fixture.componentRef.setInput('projectId', 'proj-2');
     fixture.detectChanges();
@@ -794,7 +833,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
       if (cmd === 'list_anthropic_models') return catalog;
       if (cmd === 'get_effort_pin') return null;
       if (cmd === 'get_model_hint') return modelHint;
-      if (cmd === 'list_effort_levels') return ['low', 'medium', 'high', 'xhigh'];
       throw new Error(`unexpected invoke: ${cmd}`);
     });
     fixture.componentRef.setInput('projectId', 'proj-2');
@@ -812,6 +850,7 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
+    // claude-opus-4-8 is not in this fixture's catalog: verbatim.
     expect(badgeText()).toBe('claude-opus-4-8');
   });
 
@@ -833,17 +872,18 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
       .query(By.css('[data-testid="model-selector-option-claude-fable-5"]'))
       .nativeElement.click();
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-fable-5');
+    expect(badgeText()).toBe('Fable 5');
 
     fixture.componentRef.setInput('sessionModel', '');
     fixture.detectChanges();
     await fixture.whenStable();
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
+    // claude-opus-4-8 is not in this fixture's catalog: verbatim.
     expect(badgeText()).toBe('claude-opus-4-8');
   });
 
-  it('shows the picked catalog id optimistically after a live anthropic selection', async () => {
+  it('shows the picked catalog id, as its family label, optimistically after a live anthropic selection', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
     fixture.debugElement
@@ -858,6 +898,229 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     expect(option).toBeTruthy();
     option.nativeElement.click();
     fixture.detectChanges();
-    expect(badgeText()).toBe('claude-fable-5');
+    expect(badgeText()).toBe('Fable 5');
+  });
+});
+describe('ModelSelectorComponent effort slider — per-model stop restriction', () => {
+  let fixture: ComponentFixture<ModelSelectorComponent>;
+  let tauriInvoke: ReturnType<typeof vi.fn>;
+
+  const catalog: AnthropicModel[] = [
+    {
+      id: 'claude-sonnet-5',
+      family: 'Sonnet 5',
+      context_tokens: 1_000_000,
+      latest: true,
+      premium: false,
+      selectable: true,
+      has_1m: true,
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'high',
+    } as AnthropicModel,
+    {
+      id: 'claude-sonnet-4-6',
+      family: 'Sonnet 4.6',
+      context_tokens: 1_000_000,
+      latest: false,
+      premium: false,
+      selectable: false,
+      has_1m: true,
+      effort_levels: ['low', 'medium', 'high', 'max'],
+      default_effort: 'high',
+    } as AnthropicModel,
+    {
+      id: 'claude-opus-4-7',
+      family: 'Opus 4.7',
+      context_tokens: 1_000_000,
+      latest: false,
+      premium: true,
+      selectable: false,
+      has_1m: true,
+      effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      default_effort: 'xhigh',
+    } as AnthropicModel,
+    {
+      id: 'claude-haiku-4-5',
+      family: 'Haiku 4.5',
+      context_tokens: 200_000,
+      latest: true,
+      premium: false,
+      selectable: true,
+      has_1m: false,
+      effort_levels: [],
+      default_effort: null,
+    } as AnthropicModel,
+  ];
+
+  function setSummaryAndPin(
+    fixt: ComponentFixture<ModelSelectorComponent>,
+    invoke: ReturnType<typeof vi.fn>,
+    model: string,
+    pin: string | null
+  ): void {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_active_provider_summary')
+        return Promise.resolve({
+          provider_id: 'anthropic',
+          kind: 'anthropic_oauth',
+          model,
+          base_url: null,
+        });
+      if (cmd === 'list_anthropic_models') return Promise.resolve(catalog);
+      if (cmd === 'get_effort_pin') return Promise.resolve(pin);
+      return Promise.reject(new Error(`unexpected: ${cmd}`));
+    });
+  }
+
+  /**
+   * Settles the summary→catalog-load effect cascade, which needs a macrotask turn beyond `whenStable`.
+   * @param fixt - Fixture under test.
+   */
+  async function flush(fixt: ComponentFixture<ModelSelectorComponent>): Promise<void> {
+    await fixt.whenStable();
+    fixt.detectChanges();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fixt.detectChanges();
+  }
+
+  async function openPopover(fixt: ComponentFixture<ModelSelectorComponent>): Promise<void> {
+    await flush(fixt);
+    fixt.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+    fixt.detectChanges();
+  }
+
+  beforeEach(async () => {
+    tauriInvoke = vi.fn();
+    await TestBed.configureTestingModule({
+      imports: [ModelSelectorComponent],
+      providers: [{ provide: TauriService, useValue: { invoke: tauriInvoke } }],
+    }).compileComponents();
+    fixture = TestBed.createComponent(ModelSelectorComponent);
+    fixture.componentRef.setInput('streaming', false);
+  });
+
+  it('renders only the stops the active model supports: no xhigh on Sonnet 4.6', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', 'high');
+    fixture.componentRef.setInput('projectId', 'proj-sonnet-4-6');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    for (const level of ['low', 'medium', 'high', 'max']) {
+      expect(
+        fixture.debugElement.query(By.css(`[data-testid="effort-stop-${level}"]`))
+      ).toBeTruthy();
+    }
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-stop-xhigh"]'))).toBeFalsy();
+  });
+
+  it('hides the effort segment entirely for a model without effort support (Haiku 4.5)', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-haiku-4-5', null);
+    fixture.componentRef.setInput('projectId', 'proj-haiku');
+    fixture.detectChanges();
+    await flush(fixture);
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-segment"]'))).toBeFalsy();
+  });
+
+  it('no pin: pill and popover header show Default, handle at the catalog default (xhigh on Opus 4.7), dimmed', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-opus-4-7', null);
+    fixture.componentRef.setInput('projectId', 'proj-opus-4-7');
+    await flush(fixture);
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+    expect(segment.nativeElement.textContent.trim()).toBe('Default');
+
+    await openPopover(fixture);
+    const header = fixture.debugElement.query(By.css('[data-testid="effort-popover-header"]'));
+    expect(header.nativeElement.textContent).toContain('Effort Default');
+    const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
+    expect(slider.nativeElement.getAttribute('aria-valuetext')).toBe('Xhigh');
+    expect(slider.nativeElement.className).toContain('opacity-40');
+  });
+
+  it('a pin unsupported by the active model shows the highest supported stop below it; the pin itself is left untouched', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-4-6', 'xhigh');
+    fixture.componentRef.setInput('projectId', 'proj-clamp');
+    await flush(fixture);
+    const segment = fixture.debugElement.query(By.css('[data-testid="effort-segment"]'));
+    expect(segment.nativeElement.textContent.trim()).toBe('High');
+
+    await openPopover(fixture);
+    const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
+    expect(slider.nativeElement.getAttribute('aria-valuetext')).toBe('High');
+    expect(tauriInvoke).not.toHaveBeenCalledWith('set_effort_pin', expect.anything());
+  });
+
+  it('arrow keys move the tentative stop; Enter commits it', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'medium');
+    fixture.componentRef.setInput('projectId', 'proj-arrows');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    const emitted: string[] = [];
+    fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
+    const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
+      .nativeElement as HTMLElement;
+
+    slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    fixture.detectChanges();
+    expect(slider.getAttribute('aria-valuetext')).toBe('High');
+    expect(emitted).toEqual([]);
+
+    slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    fixture.detectChanges();
+    expect(emitted).toEqual(['high']);
+  });
+
+  it('Escape closes the popover without applying a tentative arrow move', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'medium');
+    fixture.componentRef.setInput('projectId', 'proj-escape');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    const emitted: string[] = [];
+    fixture.componentInstance.effortSelected.subscribe((l: string) => emitted.push(l));
+    const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'))
+      .nativeElement as HTMLElement;
+    slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    fixture.detectChanges();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    fixture.detectChanges();
+
+    expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeFalsy();
+    expect(emitted).toEqual([]);
+    // Re-opening starts fresh from the (unchanged) pin, not the discarded tentative move.
+    fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
+    fixture.detectChanges();
+    const reopened = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
+    expect(reopened.nativeElement.getAttribute('aria-valuetext')).toBe('Medium');
+  });
+
+  it('the slider exposes role=slider with a textual value for the current model', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'high');
+    fixture.componentRef.setInput('projectId', 'proj-aria');
+    fixture.detectChanges();
+    await openPopover(fixture);
+
+    const slider = fixture.debugElement.query(
+      By.css('[data-testid="effort-slider"]')
+    ).nativeElement;
+    expect(slider.getAttribute('role')).toBe('slider');
+    expect(slider.getAttribute('aria-valuetext')).toBe('High');
+    expect(slider.getAttribute('aria-valuemin')).toBe('0');
+    expect(slider.getAttribute('aria-valuemax')).toBe('4');
+  });
+
+  it('shows the model and effort segments side by side in the pill', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'high');
+    fixture.componentRef.setInput('projectId', 'proj-pill');
+    await flush(fixture);
+
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]')).nativeElement
+        .textContent
+    ).toContain('Sonnet 5');
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.textContent
+    ).toContain('High');
   });
 });
