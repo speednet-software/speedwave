@@ -98,14 +98,8 @@ pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
     })
 }
 
-/// Resolves a Claude Code model-family alias (`opus`, `sonnet`, `haiku`, `fable`,
-/// each optionally suffixed `[1m]`) to its family's `latest` catalog id -- the
-/// same "family prefix + latest" lookup `anthropic_default_models_env` uses.
-/// Claude Code itself rewrites a saved full id to this alias shape in
-/// `settings.json` (`claude-fable-5[1m]` -> `fable[1m]`, model-config.md
-/// "Work with Fable"). Anything else (a full catalog id, or an unrecognized
-/// value) passes through unchanged so callers can show it verbatim; resolution
-/// never checks `has_1m()` -- `is_selectable_anthropic_model_id` is the validity SSOT.
+/// Maps a Claude Code family alias (`opus|sonnet|haiku|fable`, optional `[1m]`) to the
+/// family's `latest` catalog id; anything else passes through verbatim (validity is separate).
 pub fn resolve_model_alias(value: &str) -> String {
     let (word, suffix) = match value.strip_suffix("[1m]") {
         Some(base) => (base, "[1m]"),
@@ -948,9 +942,8 @@ mod tests {
         assert_eq!(resolve_model_alias("haiku[1m]"), "claude-haiku-4-5[1m]");
     }
 
-    /// Documented rewrite (model-config.md, "Work with Fable"): Claude Code
-    /// itself changes a saved `claude-fable-5[1m]` to the `fable[1m]` alias the
-    /// first time it runs v2.1.257+ - the reader must resolve it back.
+    /// model-config.md "Work with Fable": CC rewrites a saved `claude-fable-5[1m]`
+    /// to `fable[1m]` on first run of v2.1.257+; the reader must resolve it back.
     #[test]
     fn resolve_model_alias_matches_the_documented_fable_rewrite_demo() {
         assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
@@ -975,9 +968,8 @@ mod tests {
         assert_eq!(resolve_model_alias("öéü"), "öéü");
     }
 
-    /// The resolver never consults `has_1m()`: it only maps a family word to the
-    /// family's latest id. `claude-haiku-4-5` has no priced `[1m]` variant, so the
-    /// resolved id exists but is NOT selectable - validity is a separate concern.
+    /// Resolution never consults `has_1m()`: Haiku's `[1m]` resolves to an id that
+    /// `is_selectable_anthropic_model_id` then rejects (no priced 1M variant).
     #[test]
     fn resolve_model_alias_haiku_1m_resolves_even_though_haiku_has_no_1m_price() {
         let resolved = resolve_model_alias("haiku[1m]");
@@ -1021,10 +1013,8 @@ mod tests {
 
     #[test]
     fn anthropic_models_effort_table_matches_docs() {
-        // Pins the table from code.claude.com/docs/en/model-config.md#adjust-effort-level:
-        // "The available effort levels depend on the model. Models not listed here do
-        // not support effort" -- Fable 5.1/5, Opus 5/4.8/4.7, and Sonnet 5 get the full
-        // five; Opus 4.6 and Sonnet 4.6 get four (no `xhigh`); Haiku 4.5 gets none.
+        // model-config.md#adjust-effort-level: "Models not listed here do not support
+        // effort"; 4.7+/Fable get five levels, 4.6 lacks `xhigh`, Haiku 4.5 has none.
         let full_five: &[&str] = &["low", "medium", "high", "xhigh", "max"];
         let four_no_xhigh: &[&str] = &["low", "medium", "high", "max"];
         let find = |id: &str| {

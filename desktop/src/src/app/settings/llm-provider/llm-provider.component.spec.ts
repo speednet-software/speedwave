@@ -1957,8 +1957,8 @@ describe('LlmProviderComponent', () => {
   });
 
   it('save_allows_anthropic_with_empty_model', async () => {
-    // Anthropic starts on ANTHROPIC_DEFAULT_MODEL, a persisted /model pick, or
-    // Claude's plan default — no model in config is legal.
+    // Anthropic starts on a persisted /model pick or Claude's plan default (compose
+    // injects no model env, SPEED-541) — no model in config is legal.
     let invokeCalled = false;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'update_llm_config') {

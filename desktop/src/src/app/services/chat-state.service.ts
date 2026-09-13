@@ -180,11 +180,8 @@ export class ChatStateService {
   }
 
   /**
-   * Persists the effort pin (spawn's `--effort` reads it next time), then
-   * wires the CURRENT session: an idle live session gets `/effort` now, a
-   * streaming turn queues it, and no live session respawns the eager
-   * pre-first-turn process so the first reply honours the pin just written
-   * (ADR-087 amendment, SPEED-538).
+   * Persists the effort pin, then applies it: wire `/effort` on an idle live session,
+   * queued mid-turn, or a respawn of the eager idle pre-first-turn process (SPEED-538).
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {

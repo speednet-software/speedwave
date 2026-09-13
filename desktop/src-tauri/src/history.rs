@@ -762,11 +762,8 @@ pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Resul
 /// newest-first; the cap bounds badge-render IO on a large history dir.
 const LAST_SESSION_MODEL_SCAN_CAP: usize = 20;
 
-/// Session-START model of the newest transcript accepted by `accept`: what a NEW
-/// session will resolve. Mid-session wire `/model` switches are session-scoped.
-/// `pub(crate)` (not a `consts::data_dir()`-hardcoded wrapper): its one caller,
-/// `pin_cmd::get_model_hint_in`, already takes `data_dir` as a parameter so its
-/// own tests can inject a tempdir.
+/// Session-START model of the newest transcript accepted by `accept` (what a NEW session
+/// resolves); `data_dir`-parameterized so `pin_cmd::get_model_hint_in` tests inject a tempdir.
 pub(crate) fn last_session_model_impl(
     data_dir: &Path,
     project: &str,

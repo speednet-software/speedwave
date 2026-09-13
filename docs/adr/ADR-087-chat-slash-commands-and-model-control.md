@@ -280,6 +280,35 @@ rendered only for Anthropic provider kinds. Level-vs-model capability
 mismatches are Claude Code's own concern (an unsupported level is silently
 clamped per-model[^1]).
 
+**Amendment (SPEED-538, 2026-09-13: the effort carrier moves to the Speedwave
+project config; the shipped design above is superseded).** A fresh session now
+carries no `--effort` flag at all, so Claude Code applies the model's own default
+effort (`high`, `xhigh` on Opus 4.7)[^1] exactly as a bare Claude Code session
+would. A composer pick persists as `ProjectUserEntry::effort_pin` in the user
+config, one of `defaults::EFFORT_LEVELS` (`low`, `medium`, `high`, `xhigh`,
+`max`), written under the config lock by `pin_cmd::set_effort_pin`; every spawn
+of a project with a pin passes exactly one `--effort <pin>`
+(`chat.rs::launch_effort_level` returns `Option`). The carrier left Claude
+Code's `effortLevel` key for two documented reasons: that key accepts only
+`low`..`xhigh` while `--effort` also takes `max` (cli-reference: "Options:
+`low`, `medium`, `high`, `xhigh`, `max`, or `ultracode`"), and since Claude Code
+2.1.257 the launch flag releases the premium hold only for that session
+(model-config: "Leaves the hold in place for later sessions: `--effort` at
+launch"), so the flag has to travel with every spawn anyway - the
+`unpinOpus48LaunchEffort`-style persistence described in the earlier amendment
+no longer applies. A legacy `effortLevel` written by earlier builds of this
+branch is taken over once (`claude_settings::take_legacy_effort_pin` via
+`pin_cmd::ensure_effort_pin_migrated_in`, run before every spawn and by
+`get_effort_pin`) and the key is removed from the file. Ordering in
+`ChatStateService.applyEffortSelection`: pin write first, wire `/effort` second
+(queued when a turn is streaming); a failed write blocks the wire and surfaces
+in the composer; with no live session the eagerly spawned idle pre-first-turn
+process is respawned so the first reply honours the pin (the same rule as the
+persistent model pick, decision 3 amendment). Speedwave never sets
+`CLAUDE_CODE_EFFORT_LEVEL`: it outranks both `--effort` and the wire `/effort`
+(env-vars.md) and compose bakes env in at container create; the renderer guard
+`assert_no_effort_level_forced` pins that.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the

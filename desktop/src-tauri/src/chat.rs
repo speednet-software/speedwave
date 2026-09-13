@@ -1450,9 +1450,8 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Launch effort for a spawn: `Some` only when the project's config carries
-/// a persisted pin (`ProjectUserEntry::effort_pin`); `None` omits `--effort`
-/// so Claude Code applies the model's own default (SPEED-538).
+/// `Some` only when the project config carries an effort pin; `None` omits
+/// `--effort` so Claude Code applies the model's own default (SPEED-538).
 fn launch_effort_level(
     user_config: &config::SpeedwaveUserConfig,
     project_name: &str,
@@ -1615,9 +1614,8 @@ impl ChatSession {
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
         let mut flags = resolved.flags.clone();
-        // A pin releases CC's premium launch-effort hold for this session too
-        // (empirical; ADR-087 amendment); without a pin, no flag is sent and
-        // Claude Code applies the model's own default effort (SPEED-538).
+        // A pin also releases CC's premium launch-effort hold for this session;
+        // without a pin no flag is sent and the model default applies (SPEED-538).
         if let Some(level) = launch_effort_level(user_config, project_name) {
             flags.push("--effort".to_string());
             flags.push(level);

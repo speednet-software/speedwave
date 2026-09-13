@@ -20,13 +20,8 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
     value.get(key)?.as_str().map(str::to_string)
 }
 
-/// One-time migration (SPEED-538): reads and removes the legacy `effortLevel`
-/// key an earlier Speedwave version wrote into claude-home `settings.json`,
-/// preserving every other key. Returns `None` (file left untouched) when the
-/// file is missing, the key is absent, or its value is not a string.
-///
-/// Runs under the same advisory lock the historical writer used, so it still
-/// serializes against the in-container Claude Code process's own writes.
+/// One-time takeover of the legacy `effortLevel` key: reads and removes it under the
+/// settings lock, preserving other keys; `None` (file untouched) when absent/non-string.
 pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     let path = settings_path(data_dir, project);
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
@@ -51,16 +46,8 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
     .map_err(|e| e.to_string())
 }
 
-/// Writes `model` into the project's claude-home `settings.json`, preserving
-/// every other key via read-modify-write. Rejects an id that is not a
-/// composer-selectable Anthropic catalog id or its `[1m]` alias
-/// (`defaults::is_selectable_anthropic_model_id`), and a malformed/non-object
-/// `settings.json` without touching the file.
-///
-/// Shares `set_effort_pin`'s lock/atomicity contract: the in-container Claude
-/// Code process writes this same file live for its own `/model` handling, so
-/// both writers serialize under `.settings.json.lock` instead of racing a
-/// lost update.
+/// Writes the `model` key (a selectable catalog id or its priced `[1m]` alias) under the
+/// settings lock, preserving every other key; a malformed file is rejected untouched.
 pub fn set_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
     if !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
         return Err(format!("unknown Anthropic model: {model}"));
@@ -310,10 +297,8 @@ mod tests {
         );
     }
 
-    /// Two concurrent writers (simulating two Desktop pin writes racing the
-    /// in-container Claude Code process's own settings.json write) must
-    /// serialize under the shared lock: no torn/lost write, and the final
-    /// file holds exactly one of the two attempted values.
+    /// Two writers racing under the shared lock: no torn/lost write, the final file
+    /// holds exactly one of the two values.
     #[test]
     fn set_model_pin_concurrent_writers_serialize_without_lost_update() {
         let tmp = tempfile::tempdir().unwrap();

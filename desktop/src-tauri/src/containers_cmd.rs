@@ -2352,10 +2352,8 @@ mod tests {
         }
     }
 
-    /// `list_anthropic_models` must expose `has_1m` derived from
-    /// `pricing_1m.is_some()` — the composer's SSOT for the `[1m]` option.
-    /// claude-fable-5 always runs at the 1M window on the Anthropic API (ADR-087
-    /// "Anthropic model catalog facts"; code.claude.com/docs/en/model-config.md).
+    /// `has_1m` on the wire derives from `pricing_1m.is_some()`; claude-fable-5 runs at
+    /// the 1M window on the Anthropic API (ADR-087 "Anthropic model catalog facts").
     #[test]
     fn list_anthropic_models_carries_has_1m_from_pricing() {
         let models = list_anthropic_models();

@@ -692,9 +692,8 @@ pub struct ProjectUserEntry {
     /// PII policy selection for this project (`None` = compiled-in default).
     #[serde(default)]
     pub policy: Option<PiiPolicyUserConfig>,
-    /// Persistent Anthropic effort pin (one of `defaults::EFFORT_LEVELS`);
-    /// `None` = no pin, spawn omits `--effort` and Claude Code applies the
-    /// model's own default.
+    /// Persistent Anthropic effort pin, one of `defaults::EFFORT_LEVELS`;
+    /// `None` = no pin, so the spawn omits `--effort` (model default applies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_pin: Option<String>,
 }

@@ -806,10 +806,8 @@ mod tests {
 
     #[test]
     fn anthropic_model_wire_fields_match_ts_mirror() {
-        // `pricing`/`pricing_1m` are deliberately NOT in the TS `AnthropicModel`
-        // mirror (anthropic-models.service.spec.ts's PRICED_FIXTURE documents the
-        // omission); every other field must match on both sides, or a rename on
-        // either side fails here instead of drifting silently.
+        // `pricing`/`pricing_1m` are deliberately absent from the TS `AnthropicModel`
+        // mirror (see PRICED_FIXTURE in anthropic-models.service.spec.ts).
         const UNMIRRORED: &[&str] = &["pricing", "pricing_1m"];
 
         let sample = speedwave_runtime::defaults::ANTHROPIC_MODELS

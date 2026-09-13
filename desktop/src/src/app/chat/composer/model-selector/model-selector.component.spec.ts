@@ -138,7 +138,7 @@ describe('ModelSelectorComponent', () => {
     ).toBeFalsy();
   });
 
-  it('offers the [1m] alias by has_1m, not context_tokens (claude-fable-5 exception)', async () => {
+  it('offers the [1m] alias by has_1m, not context_tokens', async () => {
     const catalogWithFable: AnthropicModel[] = [
       {
         id: 'claude-fable-5',

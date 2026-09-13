@@ -482,12 +482,9 @@ export class ModelSelectorComponent {
   }
 
   /**
-   * Optimistically shows the picked level and emits it; `ChatStateService`
-   * persists the pin then wires the CURRENT session (SPEED-538). A write
-   * failure surfaces via `modelError`, which the constructor's effect uses
-   * to resync the pin from the backend instead of trusting this guess.
-   * @param level - One of the model's supported effort levels, from an
-   * `effort-option-*` click.
+   * Optimistically shows the picked level and emits it; `ChatStateService` persists the
+   * pin then wires the session. A failed write surfaces via `modelError` and resyncs the pin.
+   * @param level - One of the model's supported effort levels, from an `effort-option-*` click.
    */
   protected selectEffortLevel(level: string): void {
     this.currentEffortPin.set(level);

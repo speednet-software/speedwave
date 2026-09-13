@@ -15,10 +15,8 @@ fn resolve_project_name(project_id: &str) -> Result<String, String> {
     Ok(project.name.clone())
 }
 
-/// One-time takeover (SPEED-538): migrates a legacy `effortLevel` from
-/// claude-home `settings.json` into the project's config pin when it has
-/// none yet, removing the key from the file either way. Idempotent - a
-/// project that already has a pin never reads the legacy file.
+/// One-time takeover of a legacy `effortLevel` into the project's config pin when it has
+/// none; the key is removed from the file either way. Idempotent once a pin exists.
 pub(crate) fn ensure_effort_pin_migrated_in(
     data_dir: &std::path::Path,
     project_name: &str,
@@ -95,12 +93,8 @@ pub(crate) fn list_effort_levels() -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Anthropic-badge hint, pre-session: the settings `model` pin is the first
-/// source, with any Claude Code alias (`opus`/`sonnet`/`haiku`/`fable`, each
-/// optionally suffixed `[1m]`) resolved to its catalog id and an unrecognized
-/// pin value shown verbatim (never "default"). Only without a pin does it fall
-/// back to the newest transcript's start model, restricted to `claude-*` shapes
-/// so a foreign provider's transcript can't poison the badge.
+/// Pre-session badge hint: the settings `model` pin first (CC aliases resolved, unknown
+/// values verbatim), else the newest `claude-*` transcript model (foreign ids never leak).
 #[tauri::command]
 pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
@@ -110,9 +104,8 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
     ))
 }
 
-/// Testable core of [`get_model_hint`]: takes an explicit `data_dir` so the
-/// pin-first/transcript-fallback/none priority order can be unit-tested
-/// against a tempdir instead of the real `~/.speedwave` data dir.
+/// Testable core of [`get_model_hint`]: explicit `data_dir` so the source order can be
+/// unit-tested against a tempdir.
 fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
     if let Some(pin) = crate::claude_settings::get_model_pin(data_dir, project) {
         return Some(speedwave_runtime::defaults::resolve_model_alias(&pin));
@@ -120,9 +113,8 @@ fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
     crate::history::last_session_model_impl(data_dir, project, |m| m.starts_with("claude-"))
 }
 
-/// Persists an Anthropic model pick as the `model` key of the project's
-/// claude-home `settings.json`, so the next spawn (and Claude Code itself)
-/// starts on it; routed (local/OpenRouter) picks never call this.
+/// Persists an Anthropic model pick as the settings.json `model` key for the next spawn;
+/// routed (local/OpenRouter) picks never call this.
 #[tauri::command]
 pub(crate) fn set_model_pin(project_id: String, model: String) -> Result<(), String> {
     let project_name = resolve_project_name(&project_id)?;
@@ -142,10 +134,8 @@ pub(crate) fn set_model_pin(project_id: String, model: String) -> Result<(), Str
 mod tests {
     use super::*;
 
-    /// Writes a raw `model` pin value into the project's claude-home
-    /// `settings.json`, bypassing `claude_settings::set_model_pin` (SPEED-539's
-    /// write path) so the read side can be tested against arbitrary raw values,
-    /// including an alias Claude Code itself would write.
+    /// Writes a raw `model` value straight into settings.json (bypassing `set_model_pin`)
+    /// so the read side can be tested with aliases Claude Code itself writes.
     fn write_model_pin(data_dir: &Path, project: &str, model: &str) {
         let dir =
             speedwave_runtime::claude_home::claude_home_dir(data_dir, project).join(".claude");
@@ -263,9 +253,8 @@ mod tests {
         );
     }
 
-    /// Demo scenario from the ticket: a hand-written `fable[1m]` pin (the shape
-    /// Claude Code itself rewrites a saved `claude-fable-5[1m]` to) resolves to
-    /// the latest Fable's catalog id with the `[1m]` suffix kept.
+    /// Ticket demo: a hand-written `fable[1m]` pin resolves to the latest Fable id with
+    /// the `[1m]` suffix kept.
     #[test]
     fn get_model_hint_in_resolves_an_alias_pin_to_its_latest_catalog_id() {
         let tmp = tempfile::tempdir().unwrap();
