@@ -5,25 +5,35 @@
  * (leaves its loading state, plugin commands visible, hidden natives absent),
  * the composer model selector (mid-session switch, chip rendering, resume
  * survival), the local/OpenRouter write-through terrain (extends specs
- * 11/08), and the Anthropic-only effort control's next-session semantics.
+ * 11/08), and — for Anthropic — the SPEED-535 persistent model/effort pin
+ * story end to end: fresh-install account defaults, a composer pick surviving
+ * "+" and a real app restart, a mid-stream pick flushed at turn end, and the
+ * effort slider popover.
  *
  * Runs after spec 19 and before spec 07 (factory reset, always last).
  * All assertions use data-testid attributes, never UX-volatile text, except
  * where the underlying component exposes the value only as text content
- * (slash command names, the effort control's current-pin label) - see the
+ * (slash command names, the effort segment's current-level label) - see the
  * inline notes at each such assertion.
  */
 
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { confirmRestartAndWait } from '../helpers/shell';
 import { waitForHealthy } from '../helpers/health';
+import { restartAppAndReconnect } from '../helpers/app-restart';
+import { lastSpawnArgs, waitForFreshSpawnArgs } from '../helpers/spawn-args';
+import { clearModelPinFile, clearEffortPinFile } from '../helpers/host-files';
+import {
+  anthropicCatalog,
+  latestAnthropicModelIds,
+  catalogEntryForBadgeLabel,
+} from '../helpers/anthropic-catalog';
 import {
   openSettings,
   openChat,
   configureLocalProvider,
   configureOpenRouter,
   pickComposerModel,
-  saveProvider,
   sendMessageAndWait,
   startNewConversation,
   resumeNewestConversation,
@@ -32,10 +42,19 @@ import {
   requireLocalLlm,
   requireOpenrouterKey,
   requireOpenrouterModel,
+  queueMessageViaEnter,
+  waitForTurnStart,
+  waitForTurnComplete,
 } from '../helpers/llm';
 import { localLlmUnreachable } from '../helpers/preflight';
 
 const E2E_PROJECT_NAME = 'e2e-test';
+/** The SPEED-535 Anthropic battery runs on the OTHER fixture project: spec 18 leaves it
+ *  selected on Anthropic with no model/effort pin, and nothing after 20 but 07 touches it. */
+const ANTHROPIC_PROJECT = 'e2e-second';
+/** Canonical `low`→`max` order (`defaults::EFFORT_LEVELS`) — used only to enumerate the
+ *  levels a slider assertion must confirm ABSENT for a model missing some of them. */
+const ALL_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /** Types "/" into the composer and waits for the popover to settle past its loader. */
 async function openSlashPopover(): Promise<void> {
@@ -237,93 +256,233 @@ describe('Slash Popover + Model/Effort Selector', function () {
     expect(badgeText.trim().length).toBeGreaterThan(0);
   });
 
-  it('effort control: shows next-session semantics and the new pin applies to the next session', async function () {
-    this.timeout(240_000);
-    // Effort is Anthropic-only (4.3.3) - switch back so the control renders.
-    // An unauthenticated anthropic card cannot be saved (canSave gates on
-    // credentials) and the rigs carry no Anthropic account, so live-effort
-    // coverage is environment-gated here — like localLlmUnreachable elsewhere;
-    // unit tests + field runs own it when auth is absent.
-    await openSettings();
-    const anthropicBtn = await $('[data-testid="settings-llm-provider-anthropic"]');
-    await anthropicBtn.waitForExist({ timeout: 15_000 });
-    await anthropicBtn.click();
-    const authPill = await $('[data-testid="auth-status-value"]');
-    await authPill.waitForExist({ timeout: 15_000 });
-    if (!(await authPill.getText()).includes('connected')) {
-      await (await $('[data-testid="nav-chat"]')).click();
-      this.skip();
-      return;
-    }
-    await saveProvider();
-    await confirmRestartAndWait();
-    await openChat();
+  describe('Anthropic model + effort persistence (SPEED-535)', function () {
+    /** Set once `before` confirms a live Anthropic OAuth session — Speedwave never performs
+     *  Anthropic OAuth itself (security.md), so a human must have logged in on the rig. */
+    let anthropicAvailable = false;
 
-    await $('[data-testid="effort-control"]').waitForExist({
-      timeout: 15_000,
-      timeoutMsg: 'effort-control never rendered for the Anthropic provider',
+    before(async function () {
+      this.timeout(120_000);
+      if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
+        await switchToProject(ANTHROPIC_PROJECT);
+      }
+      await openSettings();
+      const anthropicCard = await $('[data-testid="settings-llm-provider-anthropic"]');
+      await anthropicCard.waitForExist({ timeout: 15_000 });
+      await anthropicCard.click();
+      const authPill = await $('[data-testid="auth-status-value"]');
+      await authPill.waitForExist({ timeout: 15_000 });
+      anthropicAvailable = (await authPill.getText()).includes('connected');
+      if (!anthropicAvailable) {
+        this.skip();
+      }
     });
-    // Levels are buttons named effort-option-<level> (Task 17); recover the
-    // level set from their testid suffixes rather than a data-level attribute.
-    const levelButtons = await $$('[data-testid^="effort-option-"]').getElements();
-    expect(levelButtons.length).toBeGreaterThan(1);
 
-    const currentPinText = (await (await $('[data-testid="effort-control"]')).getText()).trim();
-    let targetLevel: string | null = null;
-    for (const btn of levelButtons) {
-      const testid = await btn.getAttribute('data-testid');
-      const level = (testid ?? '').replace('effort-option-', '');
-      if (level && !currentPinText.startsWith(level)) {
-        targetLevel = level;
-        break;
+    after(function () {
+      // No product "clear pin" command exists by design (Out of Scope) — restore a
+      // clean state directly on the host files so a later run never inherits this pin.
+      clearModelPinFile(ANTHROPIC_PROJECT);
+      clearEffortPinFile(ANTHROPIC_PROJECT);
+    });
+
+    it('(a) a fresh, unpinned session spawns with no --model/--effort and reports the account default in SystemInit', async function () {
+      this.timeout(120_000);
+      // The eager pre-message spawn only fires on the app's first-ever /chat visit
+      // (long spent on e2e-test) or "+"/restart — here the first send lazily starts it.
+      const priorArgs = await lastSpawnArgs();
+      await openChat();
+      await sendMessageAndWait('Say hi in one word.');
+      const freshArgs = await waitForFreshSpawnArgs(priorArgs);
+
+      expect(freshArgs).not.toContain('--model');
+      expect(freshArgs).not.toContain('--effort');
+
+      const catalog = await anthropicCatalog();
+      const latestIds = await latestAnthropicModelIds();
+      const badgeLabel = (await (await $('[data-testid="composer-model-badge"]')).getText()).trim();
+      const entry = catalogEntryForBadgeLabel(catalog, badgeLabel);
+      if (!entry) {
+        throw new Error(`composer-model-badge showed an unrecognized label "${badgeLabel}"`);
       }
-    }
-    if (!targetLevel) throw new Error('no alternative effort level found');
-    console.log(`[20-slash-and-model-selector] switching to effort level: ${targetLevel}`);
-    // A live session must exist so the pick applies via a wire /effort.
-    await sendMessageAndWait('Say hi in one word.');
-    await (await $(`[data-testid="effort-option-${targetLevel}"]`)).click();
+      expect(latestIds).toContain(entry.id);
+    });
 
-    // Live semantics (ADR-087 amendment): the pick is current at once - the pin
-    // span reflects it immediately and no pending badge exists.
-    await browser.waitUntil(
-      async () => {
-        const text = (await (await $('[data-testid="effort-control"]')).getText()).trim();
-        return text.startsWith(targetLevel!);
-      },
-      {
-        timeout: 10_000,
-        timeoutMsg: `effort-control never showed ${targetLevel} as current after the pick`,
+    it('(b)+(c) a composer pick of a model and an effort level persists across "+" and a real app restart', async function () {
+      this.timeout(360_000);
+      const catalog = await anthropicCatalog();
+      const currentBadge = (
+        await (await $('[data-testid="composer-model-badge"]')).getText()
+      ).trim();
+      const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
+      const targetModel = catalog.find(
+        (m) => m.selectable && m.effort_levels.length > 0 && m.id !== currentEntry?.id
+      );
+      if (!targetModel) {
+        throw new Error('no alternative selectable Anthropic model with effort support found');
       }
-    );
-    expect(await $('[data-testid="effort-pending"]').isExisting()).toBe(false);
 
-    // The wire /effort renders as a control chip in the conversation.
-    await browser.waitUntil(
-      async () => {
-        const chips = await $$('[data-testid="control-chip"][data-command="effort"]').getElements();
-        for (const chip of chips) {
-          if ((await chip.getText()).includes(targetLevel!)) return true;
+      // Pick the model on the live (idle) session — wire `/model` fires at once.
+      await openModelSelector();
+      await pickModelOption(targetModel.id);
+      await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
+        timeout: 30_000,
+        timeoutMsg: `model control-chip never rendered after picking ${targetModel.id}`,
+      });
+
+      await sendMessageAndWait('Say hi in one word.');
+      await browser.waitUntil(
+        async () =>
+          (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() ===
+          targetModel.family,
+        {
+          timeout: 30_000,
+          timeoutMsg: 'composer-model-badge never settled on the picked model after the reply',
         }
-        return false;
-      },
-      {
-        timeout: 30_000,
-        timeoutMsg: `no effort control chip appeared for ${targetLevel}`,
-      }
-    );
+      );
 
-    // A NEW session starts on the persisted pin (spawn --effort <pin>).
-    await startNewConversation();
-    await browser.waitUntil(
-      async () => {
-        const text = (await (await $('[data-testid="effort-control"]')).getText()).trim();
-        return text.startsWith(targetLevel!);
-      },
-      {
+      // Effort: "max" is the least ambiguous level — never a coincidental catalog default.
+      await (await $('[data-testid="effort-segment"]')).click();
+      await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000 });
+      await (await $('[data-testid="effort-stop-max"]')).click();
+      await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000, reverse: true });
+      await $('[data-testid="control-chip"][data-command="effort"]').waitForExist({
         timeout: 30_000,
-        timeoutMsg: `new session never started on the persisted effort pin (${targetLevel})`,
+        timeoutMsg: 'effort control-chip never rendered after picking max',
+      });
+
+      // "+" is deliberate: it breaks the transcript-walkback fallback, so only a
+      // real pin (not a coincidentally-matching last transcript) can pass below.
+      await startNewConversation();
+
+      const priorArgs = await lastSpawnArgs();
+      await restartAppAndReconnect();
+
+      if ((await activeProjectSlug()) !== ANTHROPIC_PROJECT) {
+        await switchToProject(ANTHROPIC_PROJECT);
       }
-    );
+      await openChat();
+
+      // Pill truth BEFORE the first message of the new, post-restart session — the
+      // settings.json pin read via get_model_hint, not a session-live value.
+      await browser.waitUntil(
+        async () =>
+          (await (await $('[data-testid="composer-model-badge"]')).getText()).trim() ===
+          targetModel.family,
+        {
+          timeout: 30_000,
+          timeoutMsg: 'composer-model-badge never showed the pinned model before the first message',
+        }
+      );
+      expect((await (await $('[data-testid="effort-segment"]')).getText()).trim()).toBe('Max');
+
+      const freshArgs = await waitForFreshSpawnArgs(priorArgs);
+      expect(freshArgs).not.toContain('--model');
+      expect(freshArgs.filter((a) => a === '--effort').length).toBe(1);
+      expect(freshArgs[freshArgs.indexOf('--effort') + 1]).toBe('max');
+
+      await sendMessageAndWait('Say hi in one word, again.');
+      // The pin already resolved this model at spawn — a redundant wire /model
+      // right after SystemInit would be a bug (it nukes prompt cache for nothing).
+      expect(
+        (await $$('[data-testid="control-chip"][data-command="model"]').getElements()).length
+      ).toBe(0);
+    });
+
+    it('(d) a model pick made mid-stream is queued and applied only after the turn ends', async function () {
+      this.timeout(180_000);
+      const catalog = await anthropicCatalog();
+      const currentBadge = (
+        await (await $('[data-testid="composer-model-badge"]')).getText()
+      ).trim();
+      const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
+      const targetModel = catalog.find((m) => m.selectable && m.id !== currentEntry?.id);
+      if (!targetModel) throw new Error('no alternative selectable Anthropic model found');
+
+      await openModelSelector();
+      await browser.waitUntil(
+        async () => (await $$('[data-testid^="model-selector-option-"]').getElements()).length > 1,
+        { timeout: 30_000, timeoutMsg: 'model selector never listed more than one option' }
+      );
+
+      // Submit via Enter on the still-focused textarea, not a `chat-send` click — the
+      // popover floats above the composer and a coordinate click risks interception.
+      await queueMessageViaEnter('Count slowly from one to five, one number per line.');
+      await waitForTurnStart();
+
+      // The pick fires while the turn streams — applyModelSelection's mid-stream
+      // branch queues it instead of sending `/model` immediately.
+      await pickModelOption(targetModel.id);
+      expect(await $('[data-testid="model-selector-search"]').isExisting()).toBe(false);
+      expect(await $('[data-testid="control-chip"][data-command="model"]').isExisting()).toBe(
+        false
+      );
+
+      await waitForTurnComplete();
+      await $('[data-testid="control-chip"][data-command="model"]').waitForExist({
+        timeout: 30_000,
+        timeoutMsg: `queued model pick (${targetModel.id}) never flushed after the turn ended`,
+      });
+    });
+
+    it('(e) the effort slider matches the active model and hides entirely on Haiku 4.5', async function () {
+      this.timeout(120_000);
+      const catalog = await anthropicCatalog();
+      const currentBadge = (
+        await (await $('[data-testid="composer-model-badge"]')).getText()
+      ).trim();
+      const currentEntry = catalogEntryForBadgeLabel(catalog, currentBadge);
+      if (!currentEntry || currentEntry.effort_levels.length === 0) {
+        throw new Error(`active model "${currentBadge}" unexpectedly has no effort levels`);
+      }
+
+      await (await $('[data-testid="effort-segment"]')).click();
+      await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000 });
+
+      // Stops exactly match the active model's catalog effort_levels — no more, no less.
+      for (const level of currentEntry.effort_levels) {
+        expect(await $(`[data-testid="effort-stop-${level}"]`).isExisting()).toBe(true);
+      }
+      for (const level of ALL_EFFORT_LEVELS.filter(
+        (l) => !currentEntry.effort_levels.includes(l)
+      )) {
+        expect(await $(`[data-testid="effort-stop-${level}"]`).isExisting()).toBe(false);
+      }
+
+      // Claude Desktop parity: no help icon anywhere in the popover.
+      const popoverText = await (await $('[data-testid="effort-popover"]')).getText();
+      expect(popoverText).not.toMatch(/(^|\s)\?(\s|$)/);
+
+      await (await $('[data-testid="effort-stop-low"]')).click();
+      await $('[data-testid="effort-popover"]').waitForExist({ timeout: 10_000, reverse: true });
+
+      // Pill reflects the new level at once.
+      await browser.waitUntil(
+        async () => (await (await $('[data-testid="effort-segment"]')).getText()).trim() === 'Low',
+        { timeout: 10_000, timeoutMsg: 'effort-segment never showed Low after the pick' }
+      );
+      await $('[data-testid="control-chip"][data-command="effort"]').waitForExist({
+        timeout: 30_000,
+        timeoutMsg: 'effort control-chip never rendered after picking low',
+      });
+
+      // Header reflects it too — reopen to read it (it closes on every commit).
+      await (await $('[data-testid="effort-segment"]')).click();
+      await $('[data-testid="effort-popover-header"]').waitForExist({ timeout: 10_000 });
+      expect((await (await $('[data-testid="effort-popover-header"]')).getText()).trim()).toBe(
+        'Effort Low'
+      );
+      await browser.keys('Escape');
+
+      // Switching to Haiku 4.5 (no effort support at all) hides the segment
+      // entirely — the pick applies optimistically, no reply needed to observe it.
+      const haiku = catalog.find((m) => m.id === 'claude-haiku-4-5');
+      if (!haiku) throw new Error('claude-haiku-4-5 missing from the catalog');
+      await openModelSelector();
+      await pickModelOption(haiku.id);
+      await browser.waitUntil(async () => !(await $('[data-testid="effort-segment"]').isExisting()), {
+        timeout: 30_000,
+        timeoutMsg: 'effort-segment still rendered after switching to Haiku 4.5',
+      });
+    });
   });
 });

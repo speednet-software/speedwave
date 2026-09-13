@@ -1616,6 +1616,10 @@ impl ChatSession {
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 
+        // SPEED-545 e2e observation only (never a production log of the full command line).
+        #[cfg(feature = "e2e")]
+        crate::e2e_support::record_spawn_args(&args);
+
         Ok((args, container))
     }
 

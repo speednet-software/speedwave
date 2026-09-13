@@ -1442,6 +1442,12 @@ fn main() {
             mic_permission_cmd::microphone_permission_status,
             system_settings_cmd::open_microphone_pane,
             system_settings_cmd::open_audio_capture_pane,
+            // SPEED-545 e2e-only observation/action commands (never registered in a
+            // shipped build — `feature = "e2e"` is never enabled outside E2E builds).
+            #[cfg(feature = "e2e")]
+            e2e_support::e2e_last_spawn_args,
+            #[cfg(feature = "e2e")]
+            e2e_support::e2e_restart_app,
         ])
         .on_window_event(move |window, event| {
             match event {

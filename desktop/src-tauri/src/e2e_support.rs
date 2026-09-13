@@ -2,10 +2,48 @@
 //! helper stays covered on every platform.
 
 use std::net::{SocketAddr, TcpListener};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Must match tauri-plugin-webdriver's hardcoded 127.0.0.1:4445 bind.
 pub const E2E_WEBDRIVER_PORT: u16 = 4445;
+
+/// Most recent Claude Code spawn argv (SPEED-545 e2e observation only — the call site in
+/// `chat.rs` is `#[cfg(feature = "e2e")]`-gated, so this never runs in a shipped build).
+static LAST_SPAWN_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Overwrites the recorded spawn argv; the plain fn (not the Tauri command) stays under
+/// `any(test, feature = "e2e")` so its round-trip is covered by a normal `cargo test`.
+pub fn record_spawn_args(args: &[String]) {
+    if let Ok(mut guard) = LAST_SPAWN_ARGS.lock() {
+        *guard = args.to_vec();
+    }
+}
+
+/// Reads back the last-recorded spawn argv; empty when none has been recorded yet.
+pub fn last_spawn_args() -> Vec<String> {
+    LAST_SPAWN_ARGS
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+/// E2E-only Tauri command: exposes [`last_spawn_args`] to the WebDriver suite so a spec can
+/// assert the exact argv a spawn used (e.g. no `--model`/`--effort` without a pin).
+#[cfg(feature = "e2e")]
+#[tauri::command]
+pub fn e2e_last_spawn_args() -> Vec<String> {
+    last_spawn_args()
+}
+
+/// E2E-only Tauri command: restarts the app process with no data wipe (unlike
+/// `factory_reset`'s `app.restart()`, which follows a full wipe) — proves a
+/// `settings.json`/config pin survives a real relaunch, not just a new session.
+#[cfg(feature = "e2e")]
+#[tauri::command]
+pub fn e2e_restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
 
 /// A held port surfaces as `AddrInUse`; on Windows it can also surface as
 /// WSAEACCES → `PermissionDenied` (SO_EXCLUSIVEADDRUSE, port-exclusion ranges).
@@ -40,6 +78,27 @@ pub fn wait_until_port_free(
 #[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_and_read_round_trip() {
+        let args = vec!["--effort".to_string(), "max".to_string()];
+        record_spawn_args(&args);
+        assert_eq!(last_spawn_args(), args);
+    }
+
+    #[test]
+    fn record_overwrites_the_previous_value() {
+        record_spawn_args(&["first".to_string()]);
+        record_spawn_args(&["second".to_string()]);
+        assert_eq!(last_spawn_args(), vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn record_spawn_args_accepts_an_empty_slice() {
+        record_spawn_args(&["marker-nonempty".to_string()]);
+        record_spawn_args(&[]);
+        assert_eq!(last_spawn_args(), Vec::<String>::new());
+    }
 
     #[test]
     fn returns_immediately_when_port_free() {
