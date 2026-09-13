@@ -146,7 +146,7 @@ export class ChatStateService {
     return this._pendingQueue;
   }
 
-  /** Anthropic model chosen while no session was live (composer, Task 16); consumed by the next spawn's `--model`, else wired once after the next SystemInit. */
+  /** Model pick made mid-turn on a live session (SPEED-539: the pin already covers "no session"); wire `/model` flushed when the turn ends. */
   private readonly _pendingModelOverride = signal<string | null>(null);
   /** Effort picked mid-turn; wire `/effort` flushed when the turn ends. */
   private readonly _pendingEffortOverride = signal<string | null>(null);
@@ -196,39 +196,41 @@ export class ChatStateService {
   readonly modelSelectionError: Signal<string> = this._modelSelectionError.asReadonly();
 
   /**
-   * The single handler for a composer model-selector pick (Task 16): config
-   * write first for non-anthropic kinds, then live wire switch / pending override.
+   * The single handler for a composer model-selector pick (Task 16): persists
+   * the pick first (Anthropic: `settings.json` model pin; routed: config write-through), then applies it live (wire switch, queued override, or idle respawn).
    * @param sel - Selected model triad emitted by the model selector.
    */
   async applyModelSelection(sel: ModelSelectionInput): Promise<void> {
     this._modelSelectionError.set('');
     const isAnthropic = sel.kind === 'anthropic_oauth' || sel.kind === 'anthropic_api_key';
-    if (!isAnthropic) {
-      try {
+    try {
+      if (isAnthropic) {
+        await this.tauri.invoke('set_model_pin', {
+          projectId: this.projectState.activeProject() ?? '',
+          model: sel.wireId,
+        });
+      } else {
         await this.anthropicModels.setProviderModel(
           this.projectState.activeProject() ?? '',
           sel.providerId,
           sel.catalogId
         );
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.log.warn(`model selection write-through failed: ${msg}`);
-        this._modelSelectionError.set(msg);
-        return;
       }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.log.warn(`model selection persist failed: ${msg}`);
+      this._modelSelectionError.set(msg);
+      return;
     }
     if (this.hasLiveSession()) {
       // Mid-turn sendMessage silently drops on isStreaming; queue for turn end.
       if (this.isStreaming) this.setPendingModelOverride(sel.wireId);
       else await this.sendMessage(`/model ${sel.wireId}`);
-    } else if (isAnthropic) {
-      this.setPendingModelOverride(sel.wireId);
-      // Idle pre-first-turn spawn: respawn so the pick rides --model and governs
-      // the FIRST reply (a queued wire /model can only apply from the next turn).
-      if (!this.isStreaming && !this._resumeInProgress) {
-        this.resetForNewConversation();
-        await this.startChatSession();
-      }
+    } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
+      // Idle pre-first-turn spawn: the respawned process re-reads the pin
+      // from settings.json, so the first reply honors it without a queued --model.
+      this.resetForNewConversation();
+      await this.startChatSession();
     }
   }
 
@@ -503,8 +505,8 @@ export class ChatStateService {
     if (project && !this.startingSession) {
       this.startingSession = true;
       const gen = this._sessionGeneration;
-      // A pre-session pick applies at spawn (--model) so the FIRST turn honors it;
-      // consumed synchronously so the SystemInit flush cannot double-send /model.
+      // A mid-stream pick that survived resetForNewConversation rides the fresh
+      // spawn's --model; consumed synchronously so SystemInit can't double-send it.
       const modelOverride = this._pendingModelOverride();
       if (modelOverride) this._pendingModelOverride.set(null);
       this.log.debug(`[chat-state] startChatSession: project=${project}`);

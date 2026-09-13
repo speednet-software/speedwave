@@ -201,6 +201,34 @@ resume, the injected message renders as a normal chip like any other -
 the transcript cannot distinguish it from a user-typed one, so it is not
 special-cased there.
 
+**Amendment (SPEED-539: the Anthropic pick becomes persistent via
+`settings.json`, reversing "session-only" above).** Claude Code's own
+settings documentation gives the `model` key a scope of "Any file" and
+tells an external tool exactly what to do when Claude Code itself cannot
+persist a pick for it: "Set the key in the tool that generates the
+file"[^5]. The same key is read "only once, at session start" - identically
+in `-p` mode, since nothing in the non-interactive path re-reads it
+mid-session[^5][^6]. `ChatStateService.applyModelSelection` now writes the
+picked `wire_id` into the project's claude-home `settings.json` under
+`model` (`pin_cmd::set_model_pin`, delegating to the new
+`claude_settings::set_model_pin`, sharing `set_effort_pin`'s locked
+read-modify-write) before any live action, so the write's success gates the
+wire switch - a failed write surfaces in the composer and neither the wire
+nor a respawn proceeds. This supersedes the field-tested amendment above and
+the machinery it introduced: the pre-session `--model` spawn flag and the
+SystemInit-flushed queue existed only to cover the FIRST reply before a
+session existed, and a written pin now covers that identically, because the
+next spawn (interactive or `-p`) reads the file directly. Decision 3's
+mid-session mechanics (wire `/model`, control chips, soft-impose) are
+unchanged - only the no-session case changes: since Desktop already spawns
+an idle Claude process eagerly, at app init and on "+"
+(`ChatStateService.init`/`startNewConversation` call `startChatSession()`
+before any message exists), a no-session pick writes the pin and respawns
+that idle process so its first reply reads the file fresh, instead of
+carrying `--model` on the override queue. The `--model`/`model_override`
+plumbing in `chat.rs`/`chat_session_cmd.rs` stays for now (its removal is
+SPEED-544's contraction ticket) but a no-session pick no longer feeds it.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a
@@ -318,6 +346,24 @@ column[^1]. The env remains part of the _non-Anthropic_ routed-alias remap
 the already-prefixed `wire_id`, not at a bare Claude model name, so Claude
 Code's own alias resolution never has to look the real id up.
 
+**Amendment (SPEED-539: account-type default table correction).** The
+"Opus 4.8" default cited above is out of date. Claude Code's model
+configuration page states today: "Max, Team Premium, Enterprise, and
+Anthropic API: defaults to Opus 5" and "Pro and Team Standard: defaults to
+Sonnet 5", noting "Before v2.1.219, `default` resolved to Opus 4.8 on the
+Anthropic API, Max, Team Premium, and Enterprise pay-as-you-go from
+v2.1.154"[^5]. The pinned Claude Code build (`defaults.rs::CLAUDE_VERSION`)
+is well past 2.1.219, so **Opus 5**, not Opus 4.8, is the correct
+account-type default for Max/Team Premium/Enterprise/API today; Sonnet 5
+remains correct for Pro/Team Standard. This is a factual correction only -
+decision 7's own conclusion (no Anthropic model configured anywhere, so
+Claude Code resolves whichever account-type default applies) is unchanged.
+Separately, SPEED-539 gives the composer's own pick a persistent home again
+(the `settings.json` `model` key, see the amendment under decision 3 above);
+once a pin exists it outranks both the organization default and the
+account-type default at every subsequent spawn, exactly as the precedence
+order already stated in this decision predicts.
+
 ### 8. Auto-default rules for fresh non-Anthropic setups
 
 To keep the "model required for non-Anthropic providers" invariant from
@@ -389,7 +435,9 @@ value into.
   allowlist is intersected with the real init on every discovery, not
   trusted alone.
 - Settings loses its Anthropic model selector entirely; Anthropic model
-  choice lives only in the composer, for the current session.
+  choice lives only in the composer, persisted via the `settings.json`
+  `model` pin (SPEED-539 amendment) and applied to the current session over
+  the wire.
 
 [^1]: Claude Code model configuration - default model resolution and precedence order (`/model`, `--model`/`ANTHROPIC_MODEL`, settings, org default, account-type default), per-plan account defaults, the `[1m]` context-window suffix, effort-level persistence and settings-file constraints (`low`/`medium`/`high`/`xhigh` only), and Fable 5's own availability gating. https://code.claude.com/docs/en/model-config
 
@@ -398,3 +446,7 @@ value into.
 [^3]: Anthropic API model deprecations page - status table showing `claude-opus-4-6`, `claude-opus-4-7`, and `claude-sonnet-4-6` as Active with no retirement date, and `claude-opus-4-1-20250805` as Deprecated with retirement date August 5, 2026. https://platform.claude.com/docs/en/about-claude/model-deprecations
 
 [^4]: Anthropic API pricing page - Claude Sonnet 5 introductory pricing ($2/$10 per MTok through August 31, 2026) and standard pricing ($3/$15 per MTok) thereafter. https://platform.claude.com/docs/en/about-claude/pricing
+
+[^5]: Claude Code settings - the `model` key's "Any file" scope, "Set the key in the tool that generates the file" guidance for a pick that must survive when Claude Code itself cannot persist it, and the account-type default model table ("Max, Team Premium, Enterprise, and Anthropic API: defaults to Opus 5"; "Pro and Team Standard: defaults to Sonnet 5"; "Before v2.1.219, `default` resolved to Opus 4.8"). https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config
+
+[^6]: Claude Code settings - "Claude Code reads some keys only once, at session start, so an edit to one of them doesn't reach the running session," naming `model` among them; `/model` in `-p` mode "applies to the current session only and isn't saved as your default." https://code.claude.com/docs/en/settings and https://code.claude.com/docs/en/model-config

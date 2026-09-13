@@ -55,6 +55,19 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
     )
 }
 
+/// Persists an Anthropic model pick as the `model` key of the project's
+/// claude-home `settings.json`, so the next spawn (and Claude Code itself)
+/// starts on it; routed (local/OpenRouter) picks never call this.
+#[tauri::command]
+pub(crate) fn set_model_pin(project_id: String, model: String) -> Result<(), String> {
+    let project_name = resolve_project_name(&project_id)?;
+    crate::claude_settings::set_model_pin(
+        speedwave_runtime::consts::data_dir(),
+        &project_name,
+        &model,
+    )
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -113,5 +126,21 @@ mod tests {
         let set_err = set_effort_pin(String::new(), "low".to_string()).unwrap_err();
         assert_eq!(get_err, set_err);
         assert_eq!(get_err, resolve_project_name("").unwrap_err());
+    }
+
+    #[test]
+    fn set_model_pin_rejects_invalid_project() {
+        let res = set_model_pin(String::new(), "claude-sonnet-5".to_string());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn set_model_pin_shares_the_same_resolution_error_as_the_effort_commands() {
+        // set_model_pin delegates to the same resolve_project_name as the effort
+        // commands: an invalid project_id must surface the identical error class.
+        let model_err = set_model_pin(String::new(), "claude-sonnet-5".to_string()).unwrap_err();
+        let effort_err = set_effort_pin(String::new(), "low".to_string()).unwrap_err();
+        assert_eq!(model_err, effort_err);
+        assert_eq!(model_err, resolve_project_name("").unwrap_err());
     }
 }

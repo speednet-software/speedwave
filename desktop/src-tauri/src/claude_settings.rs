@@ -67,6 +67,44 @@ pub fn set_effort_pin(data_dir: &Path, project: &str, level: &str) -> Result<(),
     .map_err(|e| e.to_string())
 }
 
+/// Writes `model` into the project's claude-home `settings.json`, preserving
+/// every other key via read-modify-write. Rejects an id that is not a
+/// composer-selectable Anthropic catalog id or its `[1m]` alias
+/// (`defaults::is_selectable_anthropic_model_id`), and a malformed/non-object
+/// `settings.json` without touching the file.
+///
+/// Shares `set_effort_pin`'s lock/atomicity contract: the in-container Claude
+/// Code process writes this same file live for its own `/model` handling, so
+/// both writers serialize under `.settings.json.lock` instead of racing a
+/// lost update.
+pub fn set_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
+    if !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
+        return Err(format!("unknown Anthropic model: {model}"));
+    }
+    let path = settings_path(data_dir, project);
+    if let Some(parent) = path.parent() {
+        fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
+    }
+    fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
+        let existing = fs_perms::read_regular_file_no_follow(&path).map_err(anyhow::Error::msg)?;
+        let mut value: serde_json::Value = match existing {
+            Some(contents) => serde_json::from_str(&contents)
+                .map_err(|e| anyhow::anyhow!("malformed settings.json: {e}"))?,
+            None => serde_json::json!({}),
+        };
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("settings.json root is not an object"))?;
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+        let rendered = serde_json::to_string_pretty(&value)?;
+        fs_perms::write_shared_file_atomic(&path, &rendered)
+    })
+    .map_err(|e| e.to_string())
+}
+
 fn settings_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
     speedwave_runtime::claude_home::claude_home_dir(data_dir, project)
         .join(".claude")
@@ -277,6 +315,146 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         set_effort_pin(tmp.path(), "proj", PERSISTABLE_EFFORT_LEVELS[0]).unwrap();
+        let lock_path = settings_lock_path(tmp.path(), "proj");
+        let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn set_model_pin_writes_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj"),
+            Some("claude-sonnet-5".to_string())
+        );
+    }
+
+    #[test]
+    fn set_model_pin_accepts_the_1m_alias_when_priced() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5[1m]").unwrap();
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj"),
+            Some("claude-sonnet-5[1m]".to_string())
+        );
+    }
+
+    #[test]
+    fn set_model_pin_preserves_other_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(
+            tmp.path(),
+            "proj",
+            r#"{"effortLevel":"high","hooks":{"PreToolUse":[]}}"#,
+        );
+        set_model_pin(tmp.path(), "proj", "claude-opus-5").unwrap();
+        let path = settings_path(tmp.path(), "proj");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["effortLevel"], "high");
+        assert_eq!(value["hooks"]["PreToolUse"], serde_json::json!([]));
+        assert_eq!(value["model"], "claude-opus-5");
+    }
+
+    #[test]
+    fn set_model_pin_rejects_ids_outside_the_anthropic_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["gpt-4o", "openrouter/anthropic/claude-sonnet-5", ""] {
+            let err = set_model_pin(tmp.path(), "proj", bad).unwrap_err();
+            assert!(err.contains("unknown Anthropic model"), "id: {bad}");
+        }
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn set_model_pin_rejects_the_1m_alias_for_a_model_without_1m_pricing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // claude-haiku-4-5 is selectable but has no priced 1M variant.
+        let err = set_model_pin(tmp.path(), "proj", "claude-haiku-4-5[1m]").unwrap_err();
+        assert!(err.contains("unknown Anthropic model"));
+        assert_eq!(get_model_pin(tmp.path(), "proj"), None);
+    }
+
+    #[test]
+    fn set_model_pin_rejects_malformed_json_and_leaves_the_file_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", "not json");
+        let err = set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap_err();
+        assert!(err.contains("malformed settings.json"));
+        let path = settings_path(tmp.path(), "proj");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
+    }
+
+    #[test]
+    fn set_model_pin_rejects_non_object_root_and_leaves_the_file_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_settings(tmp.path(), "proj", "[]");
+        let err = set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap_err();
+        assert!(err.contains("not an object"));
+        let path = settings_path(tmp.path(), "proj");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+    }
+
+    #[test]
+    fn set_model_pin_overwrites_previous_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-opus-5").unwrap();
+        assert_eq!(
+            get_model_pin(tmp.path(), "proj"),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    /// Two concurrent writers (simulating two Desktop pin writes racing the
+    /// in-container Claude Code process's own settings.json write) must
+    /// serialize under the shared lock: no torn/lost write, and the final
+    /// file holds exactly one of the two attempted values.
+    #[test]
+    fn set_model_pin_concurrent_writers_serialize_without_lost_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        write_settings(&data_dir, "proj", r#"{"effortLevel":"high"}"#);
+
+        let iterations = 50;
+        let d1 = data_dir.clone();
+        let d2 = data_dir.clone();
+        let t1 = std::thread::spawn(move || {
+            for _ in 0..iterations {
+                set_model_pin(&d1, "proj", "claude-sonnet-5").unwrap();
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for _ in 0..iterations {
+                set_model_pin(&d2, "proj", "claude-opus-5").unwrap();
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let path = settings_path(&data_dir, "proj");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("final file must be valid JSON, not torn");
+        assert_eq!(value["effortLevel"], "high");
+        let model = value["model"].as_str().unwrap();
+        assert!(
+            model == "claude-sonnet-5" || model == "claude-opus-5",
+            "unexpected model: {model}"
+        );
+
+        let read_back = get_model_pin(&data_dir, "proj");
+        assert_eq!(read_back.as_deref(), Some(model));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_model_pin_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        set_model_pin(tmp.path(), "proj", "claude-sonnet-5").unwrap();
         let lock_path = settings_lock_path(tmp.path(), "proj");
         let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

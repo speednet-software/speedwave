@@ -1312,6 +1312,7 @@ fn main() {
             pin_cmd::set_effort_pin,
             pin_cmd::list_effort_levels,
             pin_cmd::get_model_hint,
+            pin_cmd::set_model_pin,
             containers_cmd::get_telemetry_config,
             containers_cmd::update_telemetry_config,
             containers_cmd::probe_otlp_endpoint,

@@ -4699,6 +4699,7 @@ describe('ChatStateService', () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       const calls: string[] = [];
       let resolveSet!: () => void;
       vi.spyOn(anthropicModels, 'setProviderModel').mockImplementation(
@@ -4730,6 +4731,8 @@ describe('ChatStateService', () => {
       resolveSet();
       await pending;
       expect(calls).toEqual(['setProviderModel-start', 'setProviderModel-resolved', 'sendMessage']);
+      // Routed picks write through to project config only, never the Anthropic model pin.
+      expect(invokeSpy).not.toHaveBeenCalledWith('set_model_pin', expect.anything());
     });
 
     it('does not send the wire command when setProviderModel rejects', async () => {
@@ -4750,30 +4753,56 @@ describe('ChatStateService', () => {
       expect(service.modelSelectionError()).toContain('locked config');
     });
 
-    it('sends the wire command directly for a live anthropic selection (no config write-through)', async () => {
+    it('persists the model pin BEFORE sending the wire command for a live anthropic selection', async () => {
       const service = TestBed.inject(ChatStateService);
       const anthropicModels = TestBed.inject(AnthropicModelsService);
       const setProviderModelSpy = vi.spyOn(anthropicModels, 'setProviderModel');
-      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      const calls: string[] = [];
+      let resolvePin!: () => void;
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'set_model_pin') {
+          return new Promise((r) => {
+            calls.push('set_model_pin-start');
+            resolvePin = () => {
+              calls.push('set_model_pin-resolved');
+              r(undefined);
+            };
+          });
+        }
+        return undefined;
+      });
+      vi.spyOn(service, 'sendMessage').mockImplementation(async () => {
+        calls.push('sendMessage');
+      });
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-sonnet-5', session_id: 'sess-2' },
       });
 
-      await service.applyModelSelection({
+      const pending = service.applyModelSelection({
         catalogId: 'claude-opus-4-8',
         wireId: 'claude-opus-4-8',
         providerId: 'anthropic',
         kind: 'anthropic_oauth',
       });
-
+      expect(calls).toEqual(['set_model_pin-start']);
+      resolvePin();
+      await pending;
+      expect(calls).toEqual(['set_model_pin-start', 'set_model_pin-resolved', 'sendMessage']);
       expect(setProviderModelSpy).not.toHaveBeenCalled();
-      expect(sendMessageSpy).toHaveBeenCalledWith('/model claude-opus-4-8');
     });
 
-    it('queues a pending anthropic override, not a wire send, when no session is live', async () => {
+    it('blocks the wire and surfaces an error when the model pin write fails on a live session', async () => {
       const service = TestBed.inject(ChatStateService);
       const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_model_pin') throw new Error('unknown Anthropic model');
+        return undefined;
+      };
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-3' },
+      });
 
       await service.applyModelSelection({
         catalogId: 'claude-opus-4-8',
@@ -4783,10 +4812,31 @@ describe('ChatStateService', () => {
       });
 
       expect(sendMessageSpy).not.toHaveBeenCalled();
-      expect(service.pendingModelOverride()).toBe('claude-opus-4-8');
+      expect(service.modelSelectionError()).toContain('unknown Anthropic model');
     });
 
-    it('an idle pre-first-turn anthropic pick respawns the session carrying the override', async () => {
+    it('persists the model pin and sends nothing further when no session or project is active', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-4-8',
+        wireId: 'claude-opus-4-8',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: '',
+        model: 'claude-opus-4-8',
+      });
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('an idle pre-first-turn anthropic pick persists the pin and respawns without a queued override', async () => {
       const service = TestBed.inject(ChatStateService);
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
@@ -4803,12 +4853,23 @@ describe('ChatStateService', () => {
       });
       await new Promise((r) => setTimeout(r, 0));
 
-      const startCalls = invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat');
-      expect(startCalls.at(-1)?.[1]).toMatchObject({ modelOverride: 'claude-sonnet-5' });
+      const pinCallIndex = invokeSpy.mock.calls.findIndex(([cmd]) => cmd === 'set_model_pin');
+      const startCalls = invokeSpy.mock.calls
+        .map((call, i) => ({ cmd: call[0], args: call[1], i }))
+        .filter(({ cmd }) => cmd === 'start_chat');
+      expect(pinCallIndex).toBeGreaterThanOrEqual(0);
+      expect(invokeSpy.mock.calls[pinCallIndex][1]).toEqual({
+        projectId: 'test',
+        model: 'claude-sonnet-5',
+      });
+      expect(startCalls.at(-1)?.i).toBeGreaterThan(pinCallIndex);
+      // The --model plumbing stays for SPEED-544 to remove, but a no-session
+      // pick no longer feeds it — the respawned process re-reads the pin file.
+      expect(startCalls.at(-1)?.args).toMatchObject({ modelOverride: null });
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    it('a pick during the still-session-less first turn queues without respawning', async () => {
+    it('a still-session-less streaming pick persists the pin without respawning or queuing', async () => {
       const service = TestBed.inject(ChatStateService);
       TestBed.inject(ProjectStateService).activeProject.set('test');
       service.isStreaming = true;
@@ -4821,8 +4882,77 @@ describe('ChatStateService', () => {
         kind: 'anthropic_oauth',
       });
 
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: 'test',
+        model: 'claude-sonnet-5',
+      });
       expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
-      expect(service.pendingModelOverride()).toBe('claude-sonnet-5');
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('blocks the respawn and surfaces an error when the model pin write fails with no live session', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_model_pin') throw new Error('locked settings.json');
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(service.modelSelectionError()).toContain('locked settings.json');
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+    });
+
+    it('a mid-stream pick on a live session persists the pin immediately and wires it after the turn ends', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: expect.any(String),
+        model: 'claude-haiku-4-5',
+      });
+      let modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeUndefined();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      await vi.waitFor(() => {
+        modelSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) =>
+            cmd === 'send_message' && JSON.stringify(args).includes('/model claude-haiku-4-5')
+        );
+        expect(modelSend).toBeDefined();
+      });
+      expect(service.pendingModelOverride()).toBeNull();
     });
 
     it('does nothing further for a no-session non-anthropic selection beyond the write-through', async () => {
