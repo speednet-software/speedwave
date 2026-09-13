@@ -88,12 +88,7 @@ impl SessionDriver for ChatSessionDriver<'_> {
             .lock()
             .map_err(|e| format!("session lock poisoned: {e}"))?;
         session
-            .start_with_retry(
-                self.app_handle.clone(),
-                Some(session_id),
-                Some(user_uuid),
-                None,
-            )
+            .start_with_retry(self.app_handle.clone(), Some(session_id), Some(user_uuid))
             .map_err(|e| e.to_string())
     }
 }

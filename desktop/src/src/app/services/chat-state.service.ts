@@ -146,25 +146,17 @@ export class ChatStateService {
     return this._pendingQueue;
   }
 
-  /** Model pick made mid-turn on a live session (SPEED-539: the pin already covers "no session"); wire `/model` flushed when the turn ends. */
+  /** Model pick queued mid-turn on a live session (SPEED-544: a no-session pick respawns instead of queuing); wire `/model` flushes when the turn ends. */
   private readonly _pendingModelOverride = signal<string | null>(null);
   /** Effort picked mid-turn; wire `/effort` flushed when the turn ends. */
   private readonly _pendingEffortOverride = signal<string | null>(null);
   /** Read-only: the composer's queued model switch, or null when none/already sent. */
   readonly pendingModelOverride: Signal<string | null> = this._pendingModelOverride.asReadonly();
 
-  /**
-   * Queues an Anthropic model switch to send once the next SystemInit arrives.
-   * @param modelId - Wire model id to switch to, or null to clear the queue.
-   */
-  setPendingModelOverride(modelId: string | null): void {
-    this._pendingModelOverride.set(modelId);
-  }
-
   /** Sends the queued override as a normal `/model` message and clears it (fires at most once per queued value). */
   private flushPendingModelOverride(): void {
     // Never consume into sendMessage's silent isStreaming drop: keep the queue
-    // and retry on the next flush point (SystemInit / turn end) instead.
+    // and retry on the next flush point (Result / turn end) instead.
     if (this.isStreaming) return;
     const model = this._pendingModelOverride();
     if (model) {
@@ -242,7 +234,7 @@ export class ChatStateService {
     }
     if (this.hasLiveSession()) {
       // Mid-turn sendMessage silently drops on isStreaming; queue for turn end.
-      if (this.isStreaming) this.setPendingModelOverride(sel.wireId);
+      if (this.isStreaming) this._pendingModelOverride.set(sel.wireId);
       else await this.sendMessage(`/model ${sel.wireId}`);
     } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
       // Idle pre-first-turn spawn: the respawned process re-reads the pin
@@ -523,13 +515,9 @@ export class ChatStateService {
     if (project && !this.startingSession) {
       this.startingSession = true;
       const gen = this._sessionGeneration;
-      // A mid-stream pick that survived resetForNewConversation rides the fresh
-      // spawn's --model; consumed synchronously so SystemInit can't double-send it.
-      const modelOverride = this._pendingModelOverride();
-      if (modelOverride) this._pendingModelOverride.set(null);
       this.log.debug(`[chat-state] startChatSession: project=${project}`);
       try {
-        await this.tauri.invoke('start_chat', { project, modelOverride });
+        await this.tauri.invoke('start_chat', { project });
         this.log.debug('[chat-state] startChatSession: success');
         // A resume that landed mid-flight owns the session now; reporting success
         // would let the caller send into a session it no longer controls.
@@ -959,7 +947,8 @@ export class ChatStateService {
           this.seedSessionId(chunk.data.session_id);
           void this.flushDeferredQueue(chunk.data.session_id);
         }
-        this.flushPendingModelOverride();
+        // SPEED-544: no wire /model here — a pre-session pick is covered by the
+        // settings.json pin + idle respawn, and re-sending it would nuke prompt cache.
         break;
 
       case 'ControlChip': {
@@ -1156,6 +1145,10 @@ export class ChatStateService {
     this.initialized = false;
     this.startingSession = false;
     this.clearSessionTracking();
+    // A mid-stream pick targeted the turn it was queued in — it must not leak
+    // into the fresh session this reset is about to start (SPEED-544).
+    this._pendingModelOverride.set(null);
+    this._pendingEffortOverride.set(null);
     this.notifyChange();
   }
 
@@ -1413,11 +1406,8 @@ export class ChatStateService {
   async resumeConversation(sessionId: string): Promise<void> {
     if (this._resumeInProgress) return;
     this._resumeInProgress = true;
-    // Resuming an existing conversation is a context change: a pick queued for the
-    // fresh session being composed must not fire into this old transcript instead.
-    this._pendingModelOverride.set(null);
-    this._pendingEffortOverride.set(null);
-
+    // resetForNewConversation clears the mid-stream override queue too — a pick
+    // queued for the fresh session being composed must not leak into this old transcript.
     this.resetForNewConversation();
     this.beginTranscriptLoad();
     // Mark start in progress so a racing send waits instead of tearing down this
