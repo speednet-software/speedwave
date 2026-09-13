@@ -1861,8 +1861,9 @@ EOF
     run cat "$TEST_HOME/uninstall.log"
     [ "${lines[0]}" = "superpowers@claude-plugins-official" ]
     [ "${#lines[@]}" -eq 1 ]
-    ! grep -qxF "superpowers@claude-plugins-official" \
+    run grep -qxF "superpowers@claude-plugins-official" \
         "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
     [ ! -e "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"INFO OK"* ]]
@@ -1917,8 +1918,9 @@ EOF
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ ! -f "$TEST_HOME/uninstall.log" ]
-    ! grep -qxF "superpowers@claude-plugins-official" \
+    run grep -qxF "superpowers@claude-plugins-official" \
         "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"INFO SKIP"* ]]
     [[ "$output" == *"superpowers@claude-plugins-official not installed"* ]]
@@ -1931,8 +1933,9 @@ EOF
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [ ! -f "$TEST_HOME/uninstall.log" ]
-    ! grep -qxF "superpowers@claude-plugins-official" \
+    run grep -qxF "superpowers@claude-plugins-official" \
         "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"INFO SKIP"* ]]
     [[ "$output" == *"superpowers@claude-plugins-official not installed"* ]]
@@ -1966,8 +1969,9 @@ EOF
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [[ "$output" != *"failed to uninstall retired plugin"* ]]
-    ! grep -qxF "superpowers@claude-plugins-official" \
+    run grep -qxF "superpowers@claude-plugins-official" \
         "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"INFO SKIP"* ]]
     [[ "$output" == *"superpowers@claude-plugins-official already removed"* ]]
