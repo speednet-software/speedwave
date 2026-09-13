@@ -17,7 +17,7 @@ Issues and specs for this repo live as GitHub issues. Every operation goes throu
 
 When set to `yes`, also list the internal author logins in this file (owners, members and collaborators): the hub reports a PR's author `login` but not its repository association, so a PR is external when its author is not on that list. PRs then run through the same labels and states as issues:
 
-- **Read a PR**: `github.getPullRequest` for body, author and branches, `github.getPrDiff` for the diff, `github.listPrComments` for the conversation.
+- **Read a PR**: `github.getPullRequest` for title, author and branches, `github.getIssue` with the PR number for the body (GitHub serves pull requests through the issues endpoint), `github.getPrDiff` for the diff, `github.listPrComments` for the conversation.
 - **List external PRs for triage**: `github.listPullRequests` with `state: "open"`, then drop PRs whose author is on the internal list.
 - **Comment / label / close**: `github.createPrComment`; `github.updateIssue` with the PR `number` for labels (a pull request is an issue to GitHub's label API); `github.updatePullRequest` with `state: "closed"`.
 
@@ -38,6 +38,6 @@ Used by `/speedwave-wayfinder`. The **map** is a single issue with **child** iss
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `github.createIssue` with `labels: ["wayfinder:map"]`.
 - **Child ticket**: `github.createIssue` with `Part of #<map>` as the first line of the body and the label `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`); add the child to a task list in the map body with `github.updateIssue`. GitHub's native sub-issues are not reachable through the hub. Once claimed, the ticket is assigned to the driving dev.
 - **Blocking**: a `Blocked by: #<n>, #<n>` line at the top of the child body. GitHub's native issue dependencies are not reachable through the hub, so this line is the canonical representation. A ticket is unblocked when every blocker is closed (`github.getIssue` on each).
-- **Frontier query**: `github.listIssues` with `state: "open"`, keep the issues whose body starts with `Part of #<map>`, drop any with an open blocker in its `Blocked by` line or with an assignee; first in map order wins.
+- **Frontier query**: `github.listIssues` with `state: "open"` and one `labels` filter per `wayfinder:<type>` label (the list carries no body), then `github.getIssue` on each candidate; keep the issues whose body starts with `Part of #<map>`, drop any with an open blocker in its `Blocked by` line or with an assignee; first in map order wins.
 - **Claim**: `github.getCurrentUser` for your `login`, then `github.updateIssue` with `assignees: [<login>]` — the session's first write.
 - **Resolve**: `github.createPrComment` with the answer, then `github.closeIssue`, then append a context pointer (gist + link) to the map's Decisions-so-far with `github.updateIssue` on the map body.

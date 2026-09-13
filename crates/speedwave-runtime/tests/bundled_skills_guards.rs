@@ -198,11 +198,8 @@ const NATIVE_CORE_SKILLS: &[&str] = &[
     "speedwave-sitemap",
 ];
 
-/// Upstream identifiers a vendored copy must not keep. `/speedwave-grilling` and
-/// `/speedwave-tdd` contain neither `/grilling` nor `/tdd`, so they never match.
+/// Upstream identifiers a vendored copy must not keep (bare slash names are checked separately).
 const UPSTREAM_LEFTOVERS: &[&str] = &[
-    "/grilling",
-    "/tdd",
     "setup-matt-pocock-skills",
     "CONTEXT.md",
     "CONTEXT-MAP.md",
@@ -212,6 +209,35 @@ const UPSTREAM_LEFTOVERS: &[&str] = &[
 
 /// Host CLIs a bundled skill must never reach for; whole-word so `github` is fine.
 const FORBIDDEN_HOST_CLIS: &[&str] = &["gh", "glab"];
+
+/// Every upstream slash name; a bare `/<name>` is a leftover (`/speedwave-<name>` never matches).
+const UPSTREAM_SLASH_NAMES: &[&str] = &[
+    "ask-matt",
+    "code-review",
+    "codebase-design",
+    "diagnosing-bugs",
+    "domain-modeling",
+    "grill-me",
+    "grill-with-docs",
+    "grilling",
+    "handoff",
+    "implement",
+    "improve-codebase-architecture",
+    "prototype",
+    "research",
+    "resolving-merge-conflicts",
+    "setup-matt-pocock-skills",
+    "tdd",
+    "teach",
+    "to-questionnaire",
+    "to-spec",
+    "to-tickets",
+    "triage",
+    "wait-what",
+    "wayfinder",
+    "wizard",
+    "writing-for-agents",
+];
 
 /// Upstream pin (ADR-087): the license note and the bundled-skills rule must agree.
 const UPSTREAM_VERSION: &str = "1.2.3";
@@ -325,6 +351,8 @@ fn every_skill_name_matches_its_directory() {
 
 #[test]
 fn bundled_skills_carry_no_upstream_leftovers() {
+    let bare_slash =
+        Regex::new(&format!(r"/(?:{})\b", UPSTREAM_SLASH_NAMES.join("|"))).expect("valid regex");
     let mut violations = Vec::new();
     for file in collect_all_files() {
         let content = read_lossy(&file);
@@ -339,6 +367,13 @@ fn bundled_skills_carry_no_upstream_leftovers() {
                 );
             for hit in hits {
                 violations.push(format!("{}:{}: {hit}", rel(&file), idx + 1));
+            }
+            for found in bare_slash.find_iter(line) {
+                // `\b` treats `-` as a boundary, so skip path-like hits such as `/triage-labels.md`.
+                if line.as_bytes().get(found.end()) == Some(&b'-') {
+                    continue;
+                }
+                violations.push(format!("{}:{}: {}", rel(&file), idx + 1, found.as_str()));
             }
         }
     }
@@ -393,6 +428,10 @@ fn vendored_skill_visibility_matches_adr_table() {
     for (name, user_invoked) in VENDORED_SKILLS {
         let file = skills_root().join(name).join("SKILL.md");
         if !file.exists() {
+            violations.push(format!(
+                "{}: missing, ADR-087 lists this vendored skill",
+                rel(&file)
+            ));
             continue;
         }
         let content = fs::read_to_string(&file).expect("read SKILL.md");

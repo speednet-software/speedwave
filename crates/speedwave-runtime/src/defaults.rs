@@ -11,9 +11,8 @@ pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 /// Official Anthropic marketplace the bundled plugins install from.
 pub const BUNDLED_PLUGIN_MARKETPLACE: &str = "claude-plugins-official";
 
-/// Official Anthropic plugins installed and enabled by default at container start (entrypoint
-/// runs `claude plugin install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`.
-/// `superpowers` was retired by ADR-087; the entrypoint uninstalls it once where Speedwave installed it.
+/// Official Anthropic plugins installed and enabled by default at container start (`claude plugin
+/// install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`. ADR-087 retired `superpowers`.
 pub const BUNDLED_PLUGINS: &[&str] = &[
     "frontend-design",
     "feature-dev",

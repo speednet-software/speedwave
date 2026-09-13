@@ -19,7 +19,7 @@ Issues and specs for this repo live as GitLab issues. Every operation goes throu
 When set to `yes`, also list the internal author usernames in this file (project members and owners): the hub reports an MR's author but not its membership, so an MR is external when its author is not on that list. MRs then run through the same labels and states as issues:
 
 - **Read an MR**: `gitlab.getMrFull` for the description, author and labels, `gitlab.getMrChanges` for the diff, `gitlab.listMrNotes` for the discussion.
-- **List external MRs for triage**: `gitlab.listMrIds` with `state: "opened"`, then drop MRs whose author is on the internal list.
+- **List external MRs for triage**: `gitlab.listMrIds` with `state: "opened"` (iids and titles only), then `gitlab.getMrFull` on each to read the author and drop MRs whose author is on the internal list.
 - **Comment / label / close**: `gitlab.createMrNote`; `gitlab.updateMergeRequest` with comma-separated `labels` (replaces the set); `gitlab.updateMergeRequest` with `state_event: "close"`.
 
 Unlike GitHub, GitLab numbers issues and MRs separately, so `#42` is unambiguous once you know which surface the maintainer means.
