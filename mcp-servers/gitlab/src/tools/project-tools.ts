@@ -48,13 +48,14 @@ const listProjectIdsTool: Tool = {
           type: 'object',
           properties: {
             id: { type: 'number' },
-            name: { type: 'string' },
-            path_with_namespace: { type: 'string' },
-            web_url: { type: 'string' },
-            default_branch: { type: 'string' },
+            path: {
+              type: 'string',
+              description: 'path_with_namespace; pass it (or id) as project_id to getProjectFull',
+            },
           },
         },
       },
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],

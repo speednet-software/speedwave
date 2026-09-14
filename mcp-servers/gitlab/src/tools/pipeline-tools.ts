@@ -59,18 +59,16 @@ const listPipelineIdsTool: Tool = {
         items: {
           type: 'object',
           properties: {
-            id: { type: 'number' },
-            status: {
-              type: 'string',
-              enum: [...PIPELINE_STATUSES],
+            id: {
+              type: 'number',
+              description: 'Pipeline ID; pass as pipeline_id to getPipelineFull',
             },
             ref: { type: 'string', description: 'Branch or tag name' },
-            sha: { type: 'string', description: 'Commit SHA' },
-            web_url: { type: 'string' },
-            created_at: { type: 'string' },
+            status: { type: 'string', enum: [...PIPELINE_STATUSES] },
           },
         },
       },
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],

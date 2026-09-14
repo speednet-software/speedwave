@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createPipelineTools } from './pipeline-tools.js';
-import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
+import {
+  expectEmittedKeysDeclared,
+  expectNotFoundTeachingError,
+  expectPermissionTeachingError,
+  type SchemaNode,
+} from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -184,6 +189,33 @@ describe('pipeline-tools', () => {
       ).items.properties;
       const outputStatus = pipelinesItemProps.status as { enum?: string[] };
       expect(outputStatus.enum).toContain('skipped');
+    });
+
+    it('declares the { pipelines: [{ id, ref, status }], count } shape the handler emits', async () => {
+      mockClient.listPipelines.mockResolvedValue([
+        {
+          id: 42,
+          ref: 'main',
+          status: 'failed',
+          sha: 'a1b2c3d4',
+          web_url: 'https://gitlab.example.com/test/project/-/pipelines/42',
+          created_at: '2026-09-14T00:00:00Z',
+        },
+      ]);
+
+      const tools = createPipelineTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listPipelineIds')!;
+      const props = listTool.tool.outputSchema!.properties as Record<string, SchemaNode>;
+
+      expect(Object.keys(props.pipelines.items!.properties!)).toEqual(['id', 'ref', 'status']);
+      expect(props.count).toEqual({ type: 'number' });
+      expect(listTool.tool.example).toContain('{ pipelines, count }');
+
+      const emitted = expectEmittedKeysDeclared(
+        listTool.tool,
+        await listTool.handler({ project_id: 'test/project' })
+      );
+      expect(emitted).toEqual({ pipelines: [{ id: 42, ref: 'main', status: 'failed' }], count: 1 });
     });
   });
 
