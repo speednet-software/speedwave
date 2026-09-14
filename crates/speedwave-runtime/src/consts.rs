@@ -2506,9 +2506,14 @@ mod tests {
     fn data_dir_from_prefers_env_then_exe_then_production() {
         let home = std::path::Path::new("/Users/alice");
         let dev_cli = unix_cli("/Users/alice", "speedwave-dev");
+        // is_absolute() is host-shaped, so the pinned value has to be too.
+        #[cfg(windows)]
+        let pinned = r"C:\pinned";
+        #[cfg(not(windows))]
+        let pinned = "/opt/pinned";
         assert_eq!(
-            data_dir_from(Some("/opt/pinned"), Some(&dev_cli), false, home),
-            std::path::PathBuf::from("/opt/pinned"),
+            data_dir_from(Some(pinned), Some(&dev_cli), false, home),
+            std::path::PathBuf::from(pinned),
             "SPEEDWAVE_DATA_DIR still wins over the installed name"
         );
         assert_eq!(

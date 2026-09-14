@@ -121,9 +121,11 @@ guard-not-prod-data-dir:
 # same rule as consts::derive_instance_name_from (^[a-z][a-z0-9-]{0,63}$ once the
 # leading dot is stripped) or the app panics at startup instead of reporting a
 # typo. DEV_PORT is checked here too: the derived value is always a number, but an
-# explicitly passed one is whatever the caller typed.
+# explicitly passed one is whatever the caller typed. The rule is ASCII, while glob
+# ranges collate per locale, so the name check runs under LC_ALL=C.
 guard-dev-instance:
-	@name='$(DEV_INSTANCE)'; \
+	@export LC_ALL=C; \
+	name='$(DEV_INSTANCE)'; \
 	case "$$name" in \
 	  ''|*[!a-z0-9-]*|[!a-z]*) \
 	    echo "❌ Refusing: DEV_INSTANCE='$$name' must match ^[a-z][a-z0-9-]*$$ (it becomes the Lima VM name via the data-dir basename)." >&2; \
@@ -550,7 +552,7 @@ DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-bu
 
 test-desktop-build-run:
 	@$(REQUIRE_BATS)
-	bats $(DESKTOP_BUILD_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
 test-desktop-run: guard-not-prod-data-dir
