@@ -187,7 +187,7 @@ pub fn compile_policy_v3(json: &str) -> Result<CompiledPolicy, PolicyError> {
 fn compile_rules(rules: Vec<RuleV3>) -> Result<Vec<CompiledRule>, PolicyError> {
     let mut compiled = Vec::with_capacity(rules.len());
     for rule in rules {
-        if !rule_id_format_valid(&rule.id) {
+        if !is_valid_rule_id(&rule.id) {
             return Err(PolicyError::Semantic(format!(
                 "invalid rule id format '{}'",
                 rule.id
@@ -277,7 +277,8 @@ fn compile_keywords(keywords: Vec<KeywordV3>) -> Result<Vec<CompiledKeyword>, Po
     Ok(compiled)
 }
 
-fn rule_id_format_valid(id: &str) -> bool {
+/// Whether `id` has the shape of a policy rule id (and so of a token category).
+pub fn is_valid_rule_id(id: &str) -> bool {
     RULE_ID_RE.as_ref().is_ok_and(|re| re.is_match(id))
 }
 
