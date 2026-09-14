@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createMrTools } from './mr-tools.js';
 import { GitLabClient } from '../client.js';
+import { expectEmittedKeysDeclared, type SchemaNode } from './test-helpers.js';
 
 type MockClient = {
   listMergeRequests: Mock;
@@ -206,6 +207,27 @@ describe('MR Tools', () => {
         content: [{ type: 'text', text: 'Error: Formatted error message' }],
         isError: true,
       });
+    });
+
+    it('declares the { mrs: [{ iid, title }], count } shape the handler emits', async () => {
+      mockClient.listMergeRequests.mockResolvedValue([
+        { iid: 7, title: 'Only MR', state: 'opened', author: { username: 'dev' } },
+      ]);
+
+      const tools = createMrTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listMrIds')!;
+      const props = listTool.tool.outputSchema!.properties as Record<string, SchemaNode>;
+
+      expect(props.merge_requests).toBeUndefined();
+      expect(Object.keys(props.mrs.items!.properties!)).toEqual(['iid', 'title']);
+      expect(props.count).toEqual({ type: 'number' });
+      expect(listTool.tool.example).toContain('{ mrs, count }');
+
+      const emitted = expectEmittedKeysDeclared(
+        listTool.tool,
+        await listTool.handler({ project_id: 123 })
+      );
+      expect(emitted).toEqual({ mrs: [{ iid: 7, title: 'Only MR' }], count: 1 });
     });
   });
 

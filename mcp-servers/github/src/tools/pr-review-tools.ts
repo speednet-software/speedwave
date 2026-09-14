@@ -205,10 +205,11 @@ const createPrReviewTool: Tool = {
 
 const listPrCommentsTool: Tool = {
   name: 'listPrComments',
-  description: 'General (non-review) comments on a pull request.',
+  description:
+    'General (non-review) comments on a pull request or an issue (shared GitHub comments endpoint, so `number` may be an issue number).',
   annotations: READ_ONLY_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['github', 'pr', 'pull', 'request', 'comments', 'discussion'],
+  keywords: ['github', 'pr', 'pull', 'request', 'issue', 'comments', 'discussion'],
   example:
     'const { comments, count } = await github.listPrComments({ owner: "octocat", repo: "hello", number: 42 })',
   inputSchema: {
@@ -258,10 +259,11 @@ const listPrCommentsTool: Tool = {
 
 const createPrCommentTool: Tool = {
   name: 'createPrComment',
-  description: 'Add a general (non-review) comment to a pull request.',
+  description:
+    'Add a general (non-review) comment to a pull request or an issue. GitHub serves both from one comments endpoint, so `number` may be an issue number.',
   annotations: WRITE_ANNOTATIONS,
   _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['github', 'pr', 'pull', 'request', 'comment', 'create', 'add'],
+  keywords: ['github', 'pr', 'pull', 'request', 'issue', 'comment', 'create', 'add'],
   example:
     'await github.createPrComment({ owner: "octocat", repo: "hello", number: 42, body: "Thanks!" })',
   inputSchema: {
@@ -289,6 +291,10 @@ const createPrCommentTool: Tool = {
     {
       description: 'Add a comment to a pull request',
       input: { owner: 'octocat', repo: 'hello-world', number: 1, body: 'Looks good' },
+    },
+    {
+      description: 'Add a comment to an issue',
+      input: { owner: 'octocat', repo: 'hello-world', number: 7, body: 'Reproduced on main' },
     },
   ],
 };

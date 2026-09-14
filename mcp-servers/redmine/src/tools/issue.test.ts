@@ -1,7 +1,24 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
-import { notConfiguredMessage } from '@speedwave/mcp-shared';
+import { notConfiguredMessage, type Tool, type ToolsCallResult } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
 import { RedmineClient, ProjectScopeError } from '../client.js';
+
+type SchemaNode = { type: string; items?: SchemaNode; properties?: Record<string, SchemaNode> };
+
+/**
+ * Parses a JSON tool result and asserts every emitted top-level key is declared in `tool.outputSchema`.
+ * @param tool - Tool whose outputSchema is the result contract.
+ * @param result - Successful tool call result carrying a JSON text payload.
+ * @returns The parsed payload for further assertions.
+ */
+function expectEmittedKeysDeclared(tool: Tool, result: ToolsCallResult): Record<string, unknown> {
+  expect(result.isError).toBeUndefined();
+  const text = (result.content[0] as { text: string }).text;
+  const emitted = JSON.parse(text) as Record<string, unknown>;
+  const declared = Object.keys(tool.outputSchema!.properties as Record<string, unknown>);
+  expect(declared).toEqual(expect.arrayContaining(Object.keys(emitted)));
+  return emitted;
+}
 
 type MockClient = {
   listIssues: Mock;
@@ -329,6 +346,25 @@ describe('issue-tools', () => {
         isError: true,
       });
     });
+
+    it('declares the ids-only shape the handler emits in outputSchema', async () => {
+      mockClient.listIssues.mockResolvedValue({
+        issues: [{ id: 7, subject: 'Only issue', status: { id: 1, name: 'New' } }],
+        total_count: 1,
+      });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const def = tools.find((t) => t.tool.name === 'listIssueIds')!;
+      const props = def.tool.outputSchema!.properties as Record<string, SchemaNode>;
+
+      expect(props.issues).toBeUndefined();
+      expect(props.ids.items).toEqual({ type: 'number' });
+      expect(props.total_count).toEqual({ type: 'number' });
+      expect(def.tool.outputSchema!.required).toEqual(['success']);
+
+      const emitted = expectEmittedKeysDeclared(def.tool, await def.handler({}));
+      expect(emitted).toEqual({ ids: [7], total_count: 1 });
+    });
   });
 
   describe('getIssueFull', () => {
@@ -489,6 +525,24 @@ describe('issue-tools', () => {
           },
         ],
       });
+    });
+
+    it('declares the ids-only shape the handler emits in outputSchema', async () => {
+      mockClient.searchIssues.mockResolvedValue({
+        results: [{ id: 9, type: 'issue', title: 'Hit' }],
+        total_count: 1,
+      });
+
+      const tools = createIssueTools(mockClient as unknown as RedmineClient);
+      const def = tools.find((t) => t.tool.name === 'searchIssueIds')!;
+      const props = def.tool.outputSchema!.properties as Record<string, SchemaNode>;
+
+      expect(props.results).toBeUndefined();
+      expect(props.ids.items).toEqual({ type: 'number' });
+      expect(props.total_count).toEqual({ type: 'number' });
+
+      const emitted = expectEmittedKeysDeclared(def.tool, await def.handler({ query: 'hit' }));
+      expect(emitted).toEqual({ ids: [9], total_count: 1 });
     });
   });
 
