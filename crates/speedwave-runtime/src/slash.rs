@@ -18,6 +18,10 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
+/// Staleness for a fallback result. Short, because the usual cause is a
+/// container that is still starting and recovers within seconds.
+const FALLBACK_CACHE_STALENESS: Duration = Duration::from_secs(15);
+
 /// Polling interval while waiting for the init line.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -96,7 +100,7 @@ impl ProjectHandle {
 // Public API
 
 /// Discovers slash commands for `project`'s active Claude session. Returns a
-/// cached result younger than [`CACHE_STALENESS`], else runs+caches discovery.
+/// cached result younger than its staleness budget, else runs+caches discovery.
 pub fn discover_slash_commands(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -175,11 +179,20 @@ fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
         }
     };
     let entry = map.get(project_name)?;
-    if entry.stored_at.elapsed() < CACHE_STALENESS {
+    if entry.stored_at.elapsed() < staleness_for(entry.discovery.source) {
         Some(entry.discovery.clone())
     } else {
         map.remove(project_name);
         None
+    }
+}
+
+/// Staleness budget for a cached entry: a fallback expires quickly so a
+/// container that finished starting is picked up without an explicit refresh.
+fn staleness_for(source: DiscoverySource) -> Duration {
+    match source {
+        DiscoverySource::Init => CACHE_STALENESS,
+        DiscoverySource::Fallback => FALLBACK_CACHE_STALENESS,
     }
 }
 
@@ -195,6 +208,20 @@ fn cache_put(project_name: &str, discovery: SlashDiscovery) {
             );
         }
         Err(e) => log_cache_poisoned("cache_put", &e),
+    }
+}
+
+/// Ages a cached entry by `by` so staleness can be exercised without sleeping.
+#[cfg(test)]
+fn backdate_cache_entry(project_name: &str, by: Duration) {
+    let mut map = match cache().lock() {
+        Ok(map) => map,
+        Err(_) => return,
+    };
+    if let Some(entry) = map.get_mut(project_name) {
+        if let Some(aged) = entry.stored_at.checked_sub(by) {
+            entry.stored_at = aged;
+        }
     }
 }
 
@@ -985,6 +1012,65 @@ mod tests {
         // After invalidation, the failing runtime must produce Fallback.
         let third = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(third.source, DiscoverySource::Fallback);
+    }
+
+    #[test]
+    fn a_fallback_gets_a_shorter_staleness_budget_than_a_real_discovery() {
+        assert_eq!(staleness_for(DiscoverySource::Init), CACHE_STALENESS);
+        assert_eq!(
+            staleness_for(DiscoverySource::Fallback),
+            FALLBACK_CACHE_STALENESS
+        );
+        assert!(FALLBACK_CACHE_STALENESS < CACHE_STALENESS);
+    }
+
+    #[test]
+    fn a_cached_fallback_expires_and_a_recovered_container_wins() {
+        invalidate_all_caches();
+        let project = ProjectHandle::new(unique_project_name("fb-expiry"), std::env::temp_dir());
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        let first = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(first.source, DiscoverySource::Fallback);
+
+        backdate_cache_entry(
+            &project.name,
+            FALLBACK_CACHE_STALENESS + Duration::from_secs(1),
+        );
+
+        let script = format!("{}\n", sample_init_json());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        let second = discover_slash_commands(&working, &project).unwrap();
+        assert_eq!(second.source, DiscoverySource::Init);
+        assert!(second.commands.iter().any(|c| c.name == "my-skill"));
+    }
+
+    #[test]
+    fn a_cached_discovery_outlives_the_fallback_budget() {
+        invalidate_all_caches();
+        let script = format!("{}\n", sample_init_json());
+        let project = ProjectHandle::new(unique_project_name("init-ttl"), std::env::temp_dir());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        assert_eq!(
+            discover_slash_commands(&working, &project).unwrap().source,
+            DiscoverySource::Init
+        );
+
+        backdate_cache_entry(
+            &project.name,
+            FALLBACK_CACHE_STALENESS + Duration::from_secs(1),
+        );
+
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        let still_cached = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(still_cached.source, DiscoverySource::Init);
     }
 
     #[test]
