@@ -137,10 +137,35 @@ class HelperTest(unittest.TestCase):
         beta = f32_const(model, "beta", (8,), 3.0)
         shifted = model.tensor("shifted", (1, 4, 8))
         model.op(tr.OP_ADD, [scaled, beta], [shifted])
+        w = int8_weight(model, "BertLayer_0/Linear_query;", 8, 8)
+        bias = f32_const(model, "BertLayer_0/Linear_query;", (8,))
+        q = model.tensor("q", (1, 4, 8))
+        model.op(tr.OP_FULLY_CONNECTED, [normalized, w, bias], [q])
         graph = gm.Graph(model)
         found_gamma, found_beta = gm.layer_norm_affine(graph, rsqrt, 8)
         self.assertEqual(found_gamma, model.tensor_bytes(gamma))
         self.assertEqual(found_beta, model.tensor_bytes(beta))
+
+        misplaced = model.tensor("q2", (1, 4, 8))
+        model.op(tr.OP_FULLY_CONNECTED, [shifted, w, bias], [misplaced])
+        with self.assertRaises(gm.GraphMapError):
+            gm.layer_norm_affine(gm.Graph(model), rsqrt, 8)
+
+        unread = FakeModel()
+        variance = unread.tensor("var", (4,))
+        rsqrt_out = unread.tensor("rsqrt", (4,))
+        rsqrt_u = unread.op(tr.OP_RSQRT, [variance], [rsqrt_out])
+        x = unread.tensor("x", (1, 4, 8))
+        normalized = unread.tensor("n", (1, 4, 8))
+        unread.op(tr.OP_MUL, [x, rsqrt_out], [normalized])
+        gamma = f32_const(unread, "gamma", (8,), 2.0)
+        scaled = unread.tensor("scaled", (1, 4, 8))
+        unread.op(tr.OP_MUL, [normalized, gamma], [scaled])
+        beta = f32_const(unread, "beta", (8,), 3.0)
+        shifted = unread.tensor("shifted", (1, 4, 8))
+        unread.op(tr.OP_ADD, [scaled, beta], [shifted])
+        with self.assertRaises(gm.GraphMapError):
+            gm.layer_norm_affine(gm.Graph(unread), rsqrt_u, 8)
 
         folded = FakeModel()
         variance = folded.tensor("var", (4,))
@@ -194,7 +219,10 @@ class RealModelTest(unittest.TestCase):
         self.assertFalse(cfg["gelu_approximate"])
         self.assertEqual(mapped.param_count, 22866905)
         self.assertEqual(len(mapped.tensors), 141)
-        self.assertEqual(mapped.notes, ["layer 5 output LayerNorm affine folded into the classifier; emitting identity"])
+        self.assertEqual(mapped.notes, [
+            gm.AFFINE_SPLIT_NOTE,
+            "layer 5 output LayerNorm affine folded into the classifier; emitting identity",
+        ])
 
 
 if __name__ == "__main__":

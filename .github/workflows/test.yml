@@ -160,6 +160,12 @@ jobs:
       - name: Proxy tests
         run: make test-proxy
 
+      - name: pii-ner converter tests
+        run: make test-pii-ner-tools
+
+      - name: pii-ner model e2e (CPU)
+        run: make test-pii-ner-model
+
       - name: MCP tests + coverage
         run: make coverage-mcp
 
@@ -362,7 +368,13 @@ jobs:
       # Mirrors `make test-rust`'s cargo line (guard: _tests/ci/rust-coverage-gates.bats);
       # audio-transcription (whisper.cpp) runs in the macOS `test` job instead.
       - name: cargo test (full suite incl. test-support)
-        run: cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support
+        run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --features speedwave-runtime/test-support
+
+      - name: pii-ner converter tests
+        run: make test-pii-ner-tools
+
+      - name: pii-ner model e2e (CPU)
+        run: make test-pii-ner-model
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash

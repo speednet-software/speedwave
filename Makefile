@@ -442,7 +442,7 @@ endif
 
 # Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
 test-rust-run: guard-not-prod-data-dir
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
@@ -494,7 +494,7 @@ test-proxy: guard-not-prod-data-dir
 test-rust: guard-not-prod-data-dir
 	@# `test-support` is required, not cosmetic: the `required-features = ["test-support"]`
 	@# integration suites (apply_transaction_behaviour, lock suites) are silently skipped without it.
-	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
+	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --features speedwave-runtime/test-support)
 	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
 	@# is off by default — the CLI never enables it — so the default run above
 	@# doesn't compile the `transcription` module. Test it explicitly here.
@@ -603,6 +603,16 @@ test-pii-ner-tools:
 clean-pii-ner-model:
 	rm -rf $(PII_NER_ARTIFACT_DIR)
 
+# End-to-end check of the burn port against reference tflite outputs (tests/fixtures, CPU backend).
+test-pii-ner-model: guard-not-prod-data-dir prepare-pii-ner-model
+	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR) --verify
+	$(call RUN_CARGO_ISOLATED,env SPEEDWAVE_PII_NER_ARTIFACT="$(CURDIR)/$(PII_NER_ARTIFACT_DIR)" cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e)
+	@echo "✅ pii-ner model e2e passed"
+
+# Timing and sample detections; ARGS passes through, e.g. ARGS="--device cpu --iterations 50".
+bench-pii-ner: prepare-pii-ner-model
+	cargo run -p speedwave-pii-ner --release --features bench --bin pii-ner-bench -- --artifact $(PII_NER_ARTIFACT_DIR) $(ARGS)
+
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 coverage: coverage-rust coverage-mcp coverage-angular
@@ -610,7 +620,7 @@ coverage: coverage-rust coverage-mcp coverage-angular
 
 coverage-rust:
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --fail-under-lines 70
+	cargo llvm-cov -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --fail-under-lines 70
 	@echo "✅ Rust coverage passed (≥70% lines)"
 
 coverage-mcp: build-mcp
@@ -807,10 +817,11 @@ setup-e2e-vms:
 # ── Linting ──────────────────────────────────────────────────────────────────
 
 check-clippy:
-	cargo clippy -p speedwave-runtime -p speedwave-cli --all-targets -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --all-targets -- -D warnings
 	@# `--all-targets` lints test code too. `test-support` + `audio-transcription`
 	@# are off by default, so lint those modules/feature-gated tests explicitly.
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
+	cargo clippy -p speedwave-pii-ner --all-targets --features bench,model-e2e -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
 check-desktop-clippy: build-angular build-mcp
@@ -906,7 +917,7 @@ fmt:
 	@echo "✅ Formatted"
 
 lint:
-	cargo clippy -p speedwave-runtime -p speedwave-cli -- -D warnings
+	cargo clippy -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner -- -D warnings
 	cd desktop/src-tauri && cargo clippy -- -D warnings
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'

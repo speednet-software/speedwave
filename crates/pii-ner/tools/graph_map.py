@@ -326,6 +326,7 @@ def layer_norm_affine(graph: Graph, rsqrt: tr.Operator, hidden: int) -> tuple[Op
                     if len(beta_ops) != 1:
                         raise GraphMapError(f"gamma MUL {op.index} is not followed by a beta ADD")
                     beta_index = graph.const_with_shape(beta_ops[0], (hidden,))
+                    check_affine_split(graph, op, beta_ops[0])
                     return graph.model.tensor_bytes(gamma_index), graph.model.tensor_bytes(beta_index)
             if op.opcode == tr.OP_FULLY_CONNECTED:
                 return None, None
@@ -333,6 +334,26 @@ def layer_norm_affine(graph: Graph, rsqrt: tr.Operator, hidden: int) -> tuple[Op
                 for out in op.outputs:
                     frontier.append((out, depth + 1))
     raise GraphMapError(f"no affine or consumer found after RSQRT {rsqrt.index}")
+
+
+def check_affine_split(graph: Graph, gamma_mul: tr.Operator, beta_add: tr.Operator) -> None:
+    """The exporter folds gamma/beta into the following linear layers: those must read the
+    normalization before the affine step, and nothing linear may read the affine output."""
+    normalized = graph.dynamic_inputs(gamma_mul)[0]
+    reads_plain = any(c.opcode == tr.OP_FULLY_CONNECTED for c in graph.consumers.get(normalized, []))
+    reads_affine = any(
+        c.opcode == tr.OP_FULLY_CONNECTED for c in graph.consumers.get(beta_add.outputs[0], [])
+    )
+    if not reads_plain or reads_affine:
+        raise GraphMapError(
+            f"LayerNorm at MUL {gamma_mul.index}: linear layers must read the pre-affine normalization"
+        )
+
+
+AFFINE_SPLIT_NOTE = (
+    "linear layers read each LayerNorm before gamma/beta (folded into their weights); "
+    "the residual stream carries the affine output"
+)
 
 
 def map_layer_norms(graph: Graph, hidden: int, seq_len: int, layers: dict[int, LayerParams]) -> LayerNormParams:
@@ -527,7 +548,7 @@ def map_graph(model: tr.TfliteModel) -> MappedModel:
         raise GraphMapError(f"layer indices are not contiguous: {layer_indices}")
     eps_values = {embeddings_norm.eps}
     scales = set()
-    notes: list[str] = []
+    notes: list[str] = [AFFINE_SPLIT_NOTE]
     if embeddings_norm.folded:
         raise GraphMapError("embedding LayerNorm has no affine parameters")
     tensors.update(layer_norm_tensors("bert.embeddings.LayerNorm", embeddings_norm, hidden))
