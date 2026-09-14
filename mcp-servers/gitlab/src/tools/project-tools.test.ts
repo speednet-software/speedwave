@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage } from '@speedwave/mcp-shared';
 import { createProjectTools } from './project-tools.js';
 import { GitLabClient } from '../client.js';
+import { expectEmittedKeysDeclared, type SchemaNode } from './test-helpers.js';
 
 // Mock client type with all required methods
 type MockClient = {
@@ -200,6 +201,29 @@ describe('createProjectTools', () => {
 
       expect(listProjectIdsTool?.tool.inputSchema.properties).toHaveProperty('owned');
       expect(listProjectIdsTool?.tool.description).toContain('owned: true');
+    });
+
+    it('declares the { projects: [{ id, path }], count } shape the handler emits', async () => {
+      mockClient.listProjects.mockResolvedValue([
+        {
+          id: 7,
+          name: 'core',
+          path_with_namespace: 'speedwave/core',
+          web_url: 'https://gitlab.example.com/speedwave/core',
+          default_branch: 'main',
+        },
+      ]);
+
+      const tools = createProjectTools(mockClient as unknown as GitLabClient);
+      const listTool = tools.find((t) => t.tool.name === 'listProjectIds')!;
+      const props = listTool.tool.outputSchema!.properties as Record<string, SchemaNode>;
+
+      expect(Object.keys(props.projects.items!.properties!)).toEqual(['id', 'path']);
+      expect(props.count).toEqual({ type: 'number' });
+      expect(listTool.tool.example).toContain('{ projects, count }');
+
+      const emitted = expectEmittedKeysDeclared(listTool.tool, await listTool.handler({}));
+      expect(emitted).toEqual({ projects: [{ id: 7, path: 'speedwave/core' }], count: 1 });
     });
   });
 
