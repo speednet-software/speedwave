@@ -3416,6 +3416,95 @@ describe('LlmProviderComponent', () => {
       expect(text).not.toContain('anthropic/claude-sonnet-5');
     });
 
+    it('save clicked during a running OpenRouter test joins that test and saves once it passes', async () => {
+      let resolveDiscover = null as ((value: unknown) => void) | null;
+      let discoverCalls = 0;
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          return new Promise((resolve) => (resolveDiscover = resolve));
+        }
+        if (cmd === 'update_llm_config') saveInvoked = true;
+        return undefined;
+      };
+      const row = component.extraProviders()[0];
+      component.toggleExtraExpanded(row);
+      component.selectExtraProvider(row);
+      component.onExtraKeyInput(row, 'sk-or-x');
+
+      const test = component.discoverExtraModels(row);
+      const save = component.saveConfig();
+      await flushMicrotasks();
+      expect(saveInvoked).toBe(false);
+      expect(resolveDiscover).not.toBeNull();
+
+      if (!resolveDiscover) throw new Error('discover never started');
+      resolveDiscover({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
+      await Promise.all([test, save]);
+
+      expect(discoverCalls).toBe(1);
+      expect(saveInvoked).toBe(true);
+    });
+
+    it('save clicked during a running OpenRouter test blocks when that test fails', async () => {
+      let rejectDiscover = null as ((reason: unknown) => void) | null;
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          return new Promise((_resolve, reject) => (rejectDiscover = reject));
+        }
+        if (cmd === 'update_llm_config') saveInvoked = true;
+        return undefined;
+      };
+      const row = component.extraProviders()[0];
+      component.toggleExtraExpanded(row);
+      component.selectExtraProvider(row);
+      component.onExtraKeyInput(row, 'sk-or-x');
+
+      const test = component.discoverExtraModels(row);
+      const save = component.saveConfig();
+      await flushMicrotasks();
+      if (!rejectDiscover) throw new Error('discover never started');
+      rejectDiscover(new Error('auth'));
+      await Promise.all([test, save]);
+      fixture.detectChanges();
+
+      expect(saveInvoked).toBe(false);
+      expect(component.saving()).toBe(false);
+      expect(
+        fixture.nativeElement.querySelector(
+          "[data-testid='settings-llm-extra-discovery-error-openrouter']"
+        )
+      ).not.toBeNull();
+    });
+
+    it('a second test-connection click during a running test starts no second probe', async () => {
+      let resolveDiscover = null as ((value: unknown) => void) | null;
+      let discoverCalls = 0;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          discoverCalls++;
+          return new Promise((resolve) => (resolveDiscover = resolve));
+        }
+        return undefined;
+      };
+      const row = component.extraProviders()[0];
+      component.toggleExtraExpanded(row);
+      component.onExtraKeyInput(row, 'sk-or-x');
+
+      const first = component.discoverExtraModels(row);
+      const second = component.discoverExtraModels(row);
+      await flushMicrotasks();
+      if (!resolveDiscover) throw new Error('discover never started');
+      resolveDiscover({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
+      await Promise.all([first, second]);
+
+      expect(discoverCalls).toBe(1);
+      expect(row.lastTest?.passed).toBe(true);
+      expect(row.inFlight).toBeNull();
+    });
+
     it('the anthropic card saves without a connection probe; badges are unchanged', async () => {
       let discoverCalls = 0;
       let saveInvoked = false;

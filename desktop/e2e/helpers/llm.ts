@@ -54,17 +54,18 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   }
   await keyInput.setValue(apiKey);
 
-  // Discovery is a live key check: a bad OPENROUTER_API_KEY fails HERE with a
-  // clear reason instead of somewhere downstream in a chat spec.
-  const refresh = await $('[data-testid="settings-llm-extra-refresh-openrouter"]');
-  await refresh.click();
-  await browser.waitUntil(async () => !(await refresh.getText()).includes('discovering'), {
-    timeout: 60_000,
-    timeoutMsg: 'OpenRouter catalog discovery never settled',
-  });
+  // The connection test is a live key check: a bad OPENROUTER_API_KEY fails HERE with a
+  // clear reason instead of somewhere downstream in a chat spec. Its outcome is the only
+  // settle signal (SPEED-555): a success line or an inline error, never the button label.
+  await (await $('[data-testid="settings-llm-extra-refresh-openrouter"]')).click();
+  const success = await $('[data-testid="settings-llm-extra-test-success-openrouter"]');
   const orError = await $('[data-testid="settings-llm-extra-discovery-error-openrouter"]');
+  await browser.waitUntil(
+    async () => (await success.isExisting()) || (await orError.isExisting()),
+    { timeout: 60_000, timeoutMsg: 'OpenRouter connection test never settled' }
+  );
   if (await orError.isExisting()) {
-    throw new Error(`OpenRouter discovery failed: ${await orError.getText()}`);
+    throw new Error(`OpenRouter connection test failed: ${await orError.getText()}`);
   }
 
   await saveProvider();

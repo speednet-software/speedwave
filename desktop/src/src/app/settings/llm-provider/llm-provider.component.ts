@@ -55,6 +55,8 @@ interface ExtraProviderEdit {
   savedFp: string;
   /** Outcome of the last explicit connection test for this row, keyed by the fingerprint it ran against; `null` after an edit invalidates it (SPEED-555). */
   lastTest: { fp: string; passed: boolean } | null;
+  /** The running connection test, so a Save (or second click) during it joins that test instead of skipping the gate. */
+  inFlight: Promise<void> | null;
 }
 
 /** The permanent remote row (`openrouter`) — rendered like the anthropic/local cards; an unconfigured row is simply not persisted. */
@@ -73,6 +75,7 @@ function fixedExtraRows(): ExtraProviderEdit[] {
     contextTokens: null,
     savedFp: extraKeyFingerprint(false, false, ''),
     lastTest: null,
+    inFlight: null,
   });
   return [empty('openrouter', 'open_router')];
 }
@@ -834,9 +837,23 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
    * @param entry - the remote provider row to discover models for
    */
   async discoverExtraModels(entry: ExtraProviderEdit): Promise<void> {
-    if (entry.kind !== 'open_router' || entry.discovering) {
+    if (entry.kind !== 'open_router') {
       return;
     }
+    if (entry.inFlight) {
+      return entry.inFlight;
+    }
+    entry.inFlight = this.runExtraConnectionTest(entry).finally(() => {
+      entry.inFlight = null;
+    });
+    return entry.inFlight;
+  }
+
+  /**
+   * The single connection test run for a remote row; `discoverExtraModels` dedupes concurrent callers onto it.
+   * @param entry - the remote provider row under test
+   */
+  private async runExtraConnectionTest(entry: ExtraProviderEdit): Promise<void> {
     const fp = extraKeyFingerprint(entry.hasKey, entry.keyTouched, entry.keyInput);
     entry.discovering = true;
     entry.discoverError = null;

@@ -483,6 +483,9 @@ value `ModelAutoDefaultProbe::first_local_model` (same file) picks; for
 OpenRouter the `OPENROUTER_DEFAULT_MODEL` constant
 (`crates/speedwave-runtime/src/consts.rs`), read through the
 `get_openrouter_default_model` Tauri command, never a literal in Angular.
+A Save issued while a button-triggered test is still running joins that
+test (`discoverExtraModels` hands back the in-flight promise) and gates on
+its outcome; it never skips the gate or silently does nothing.
 
 ## Anthropic model catalog facts backing this ADR
 
