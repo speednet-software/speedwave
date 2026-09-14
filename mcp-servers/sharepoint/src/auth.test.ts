@@ -32,6 +32,7 @@ describe('sharepoint auth enforcement', () => {
   describe('middleware wiring', () => {
     let httpServer: http.Server | undefined;
     let port: number;
+    const LOOPBACK = '127.0.0.1';
 
     function request(options: {
       path: string;
@@ -40,14 +41,19 @@ describe('sharepoint auth enforcement', () => {
       body?: string;
     }): Promise<{ status: number; body: string }> {
       return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Request timeout')), 5000);
+        const timeout = setTimeout(() => {
+          reject(new Error('Request timeout'));
+          req.destroy();
+        }, 5000);
         const req = http.request(
           {
-            hostname: '127.0.0.1',
+            hostname: LOOPBACK,
             port,
             path: options.path,
             method: options.method || 'GET',
             headers: options.headers || {},
+            // Fresh connection per request: no keep-alive socket outlives its test's server.
+            agent: false,
           },
           (res) => {
             let data = '';
@@ -74,6 +80,23 @@ describe('sharepoint auth enforcement', () => {
       }
     });
 
+    async function listen(server: ReturnType<typeof createMCPServer>): Promise<void> {
+      await new Promise<void>((resolve, reject) => {
+        // Bind the address the client dials: host-less listen(0) is dual-stack [::], and macOS may
+        // hand it a port a foreign IPv4 127.0.0.1 listener holds, which then gets the connection.
+        httpServer = server.app.listen(0, LOOPBACK, () => {
+          const addr = httpServer!.address();
+          if (!addr || typeof addr !== 'object' || addr.address !== LOOPBACK) {
+            reject(new Error(`test server bound to ${JSON.stringify(addr)}, not ${LOOPBACK}`));
+            return;
+          }
+          port = addr.port;
+          resolve();
+        });
+        httpServer.on('error', reject);
+      });
+    }
+
     it('returns 401 for requests without Bearer token', async () => {
       const server = createMCPServer({
         name: 'mcp-sharepoint-test',
@@ -82,15 +105,7 @@ describe('sharepoint auth enforcement', () => {
         auth: { token: 'test-sharepoint-token' },
       });
 
-      await new Promise<void>((resolve) => {
-        httpServer = server.app.listen(0, () => {
-          const addr = httpServer!.address();
-          if (addr && typeof addr === 'object') {
-            port = addr.port;
-          }
-          resolve();
-        });
-      });
+      await listen(server);
 
       const res = await request({
         path: '/',
@@ -113,15 +128,7 @@ describe('sharepoint auth enforcement', () => {
         },
       });
 
-      await new Promise<void>((resolve) => {
-        httpServer = server.app.listen(0, () => {
-          const addr = httpServer!.address();
-          if (addr && typeof addr === 'object') {
-            port = addr.port;
-          }
-          resolve();
-        });
-      });
+      await listen(server);
 
       const res = await request({ path: '/health' });
       expect(res.status).toBe(500);
