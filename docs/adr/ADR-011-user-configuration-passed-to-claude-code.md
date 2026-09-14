@@ -5,7 +5,7 @@
 
 > **Amendment (2026-09-02):** The env key carrying `claude.llm.model` on the Anthropic path changed from `ANTHROPIC_MODEL` to `ANTHROPIC_DEFAULT_MODEL`; the field descriptions below are corrected in place. Rationale and the binary verification behind it: ADR-073, amendment of the same date.
 
-> **Amendment (2026-09-13):** On the Anthropic path `claude.llm.model` is no longer injected at all (SPEED-541; ADR-073 amendment of the same date): the config self-heal clears the field for Anthropic entries (ADR-087 decision 7), and the persistent model pick is the container `settings.json` `model` key (ADR-087 decision 3 amendment). The `ANTHROPIC_DEFAULT_MODEL` sentences below describe the routed-provider alias remap and history only.
+> **Amendment (2026-09-13):** On the Anthropic path `claude.llm.model` is no longer injected at all (SPEED-541; ADR-073 amendment of the same date): the config self-heal clears the field for Anthropic entries (ADR-088 decision 7), and the persistent model pick is the container `settings.json` `model` key (ADR-088 decision 3 amendment). The `ANTHROPIC_DEFAULT_MODEL` sentences below describe the routed-provider alias remap and history only.
 
 ## Decision
 

@@ -11,13 +11,12 @@ pub const MCP_CONFIG_PATH: &str = "/home/speedwave/.claude/mcp-config.json";
 /// Official Anthropic marketplace the bundled plugins install from.
 pub const BUNDLED_PLUGIN_MARKETPLACE: &str = "claude-plugins-official";
 
-/// Official Anthropic plugins installed and enabled by default at container start (entrypoint
-/// runs `claude plugin install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`.
+/// Official Anthropic plugins installed and enabled by default at container start (`claude plugin
+/// install <name>@<marketplace>`, idempotent, unpinned); disable via `/plugin`. ADR-087 retired `superpowers`.
 pub const BUNDLED_PLUGINS: &[&str] = &[
     "frontend-design",
     "feature-dev",
     "claude-md-management",
-    "superpowers",
     "typescript-lsp",
 ];
 
@@ -51,7 +50,7 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
     /// Stable API alias (no snapshot date). Never compose-injected for Anthropic (SPEED-541);
-    /// the pin persists via the in-container `settings.json` `model` key (SPEED-539/ADR-087).
+    /// the pin persists via the in-container `settings.json` `model` key (SPEED-539/ADR-088).
     pub id: &'static str,
     /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,
@@ -383,6 +382,14 @@ mod tests {
         assert!(
             !BUNDLED_PLUGIN_MARKETPLACE.is_empty(),
             "marketplace must be set"
+        );
+    }
+
+    #[test]
+    fn retired_superpowers_plugin_is_not_bundled() {
+        assert!(
+            !BUNDLED_PLUGINS.contains(&"superpowers"),
+            "superpowers was retired by ADR-087 (its skills and hook compete with the vendored speedwave-* set)"
         );
     }
 

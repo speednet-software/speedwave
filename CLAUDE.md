@@ -26,6 +26,7 @@ Every change must work on **both macOS and Windows**.
 - `alignments.md` — every paired-source alignment, split into test-guarded (a failing test names the fix) and manual (update both sides yourself).
 - `cross-platform.md` — the macOS/Windows pitfall list (paths, networking, filesystem, processes, BOM/CRLF, TZ, CRT).
 - `plugins.md` — the full plugin contract (sibling repo `speedwave-plugins`).
+- `bundled-skills.md` — core/integration/vendored skill vocabulary, the fidelity classes a vendored copy may differ in, the re-sync procedure, retired bundled plugins.
 - `local-llm.md` — LLM provider/proxy invariants and usage/cost SSOT.
 - `mcp-servers.md` — worker policy + the new-worker checklist.
 - `native-macos.md` — native Swift OS integrations (Mail/Calendar/Reminders/Notes via AppleEvents), TCC permission gates, host-side Whisper transcription (macOS-only invariants).

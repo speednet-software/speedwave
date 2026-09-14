@@ -1046,7 +1046,7 @@ pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> 
     Ok(speedwave_runtime::compose::default_base_url(&provider))
 }
 
-/// SSOT OpenRouter auto-default model id (ADR-087 section 8), surfaced to the
+/// SSOT OpenRouter auto-default model id (ADR-088 section 8), surfaced to the
 /// Settings connection-test success line — the frontend never hard-codes this string.
 #[tauri::command]
 pub fn get_openrouter_default_model() -> &'static str {
@@ -2360,7 +2360,7 @@ mod tests {
     }
 
     /// `has_1m` on the wire derives from `pricing_1m.is_some()`; claude-fable-5 runs at
-    /// the 1M window on the Anthropic API (ADR-087 "Anthropic model catalog facts").
+    /// the 1M window on the Anthropic API (ADR-088 "Anthropic model catalog facts").
     #[test]
     fn list_anthropic_models_carries_has_1m_from_pricing() {
         let models = list_anthropic_models();

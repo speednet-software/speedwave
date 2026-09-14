@@ -74,6 +74,7 @@ interface MockGitlabEndpoints {
   Repositories: { compare: Mock; allRepositoryTrees: Mock };
   RepositoryFiles: { show: Mock; allFileBlames: Mock };
   Issues: { all: Mock; create: Mock; edit: Mock };
+  IssueNotes: { all: Mock; create: Mock };
   ProjectLabels: { all: Mock; create: Mock };
 }
 
@@ -161,6 +162,10 @@ describe('GitLabClient', () => {
         all: vi.fn(),
         create: vi.fn(),
         edit: vi.fn(),
+      },
+      IssueNotes: {
+        all: vi.fn(),
+        create: vi.fn(),
       },
       ProjectLabels: {
         all: vi.fn(),
@@ -2779,6 +2784,7 @@ describe('GitLabClient', () => {
         description: undefined,
         labels: undefined,
         stateEvent: undefined,
+        assigneeIds: undefined,
       });
       expect(result).toEqual(mockIssue);
     });
@@ -2800,7 +2806,26 @@ describe('GitLabClient', () => {
         description: 'New description',
         labels: 'bug',
         stateEvent: 'close',
+        assigneeIds: undefined,
       });
+    });
+
+    it('should replace assignees, an empty array unassigning', async () => {
+      mockGitlabInstance.Issues.edit.mockResolvedValue({ id: 1, iid: 10 });
+
+      await client.updateIssue(1, 10, { assignee_ids: [7, 9] });
+      expect(mockGitlabInstance.Issues.edit).toHaveBeenLastCalledWith(
+        1,
+        10,
+        expect.objectContaining({ assigneeIds: [7, 9] })
+      );
+
+      await client.updateIssue(1, 10, { assignee_ids: [] });
+      expect(mockGitlabInstance.Issues.edit).toHaveBeenLastCalledWith(
+        1,
+        10,
+        expect.objectContaining({ assigneeIds: [] })
+      );
     });
   });
 
@@ -2816,6 +2841,101 @@ describe('GitLabClient', () => {
         stateEvent: 'close',
       });
       expect(result).toEqual(mockIssue);
+    });
+  });
+
+  describe('listIssueNotes', () => {
+    it('should list issue notes with the default page size', async () => {
+      const mockNotes = [
+        { id: 1, body: 'Comment 1', author: { username: 'user1' } },
+        { id: 2, body: 'Comment 2', author: { username: 'user2' } },
+      ];
+
+      mockGitlabInstance.IssueNotes.all.mockResolvedValue(mockNotes);
+
+      const result = await client.listIssueNotes(1, 10);
+
+      expect(mockGitlabInstance.IssueNotes.all).toHaveBeenCalledWith(1, 10, {
+        perPage: 20,
+        maxPages: 1,
+      });
+      expect(result).toEqual(mockNotes);
+    });
+
+    it('should limit notes to the requested page size', async () => {
+      const mockNotes = Array.from({ length: 30 }, (_, i) => ({
+        id: i + 1,
+        body: `Note ${i}`,
+      }));
+
+      mockGitlabInstance.IssueNotes.all.mockResolvedValue(mockNotes);
+
+      const result = await client.listIssueNotes(1, 10, 10);
+
+      expect(mockGitlabInstance.IssueNotes.all).toHaveBeenCalledWith(1, 10, {
+        perPage: 10,
+        maxPages: 1,
+      });
+      expect(result).toHaveLength(10);
+    });
+
+    it('should clamp a limit above the maximum page size', async () => {
+      mockGitlabInstance.IssueNotes.all.mockResolvedValue([]);
+
+      await client.listIssueNotes('group/project', 10, 500);
+
+      expect(mockGitlabInstance.IssueNotes.all).toHaveBeenCalledWith('group/project', 10, {
+        perPage: 100,
+        maxPages: 1,
+      });
+    });
+
+    it.each([0, -5, Number.NaN])(
+      'should fall back to the default page size for limit %p',
+      async (limit) => {
+        mockGitlabInstance.IssueNotes.all.mockResolvedValue([]);
+
+        await client.listIssueNotes(1, 10, limit as number);
+
+        expect(mockGitlabInstance.IssueNotes.all).toHaveBeenCalledWith(1, 10, {
+          perPage: 20,
+          maxPages: 1,
+        });
+      }
+    );
+
+    it('should propagate API errors', async () => {
+      mockGitlabInstance.IssueNotes.all.mockRejectedValue(new Error('404 Not Found'));
+
+      await expect(client.listIssueNotes(1, 10)).rejects.toThrow('404 Not Found');
+    });
+  });
+
+  describe('createIssueNote', () => {
+    it('should create an issue note', async () => {
+      const mockNote = { id: 1, body: 'New comment' };
+
+      mockGitlabInstance.IssueNotes.create.mockResolvedValue(mockNote);
+
+      const result = await client.createIssueNote(1, 10, 'New comment');
+
+      expect(mockGitlabInstance.IssueNotes.create).toHaveBeenCalledWith(1, 10, 'New comment');
+      expect(result).toEqual(mockNote);
+    });
+
+    it('should pass a multiline Unicode body through unchanged', async () => {
+      const body = 'Zażółć gęślą jaźń 🚀\nSecond line';
+      mockGitlabInstance.IssueNotes.create.mockResolvedValue({ id: 2, body });
+
+      await client.createIssueNote('group/project', 7, body);
+
+      expect(mockGitlabInstance.IssueNotes.create).toHaveBeenCalledWith('group/project', 7, body);
+    });
+
+    it('should propagate API errors', async () => {
+      mockGitlabInstance.IssueNotes.create.mockRejectedValue(new Error('403 Forbidden'));
+
+      await expect(client.createIssueNote(1, 10, 'x')).rejects.toThrow('403 Forbidden');
     });
   });
 
@@ -3176,6 +3296,7 @@ describe('Response Mappers', () => {
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
       RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
       Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      IssueNotes: { all: vi.fn(), create: vi.fn() },
       ProjectLabels: { all: vi.fn(), create: vi.fn() },
     };
 
@@ -3403,6 +3524,7 @@ describe('validateRequired — error paths', () => {
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
       RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
       Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      IssueNotes: { all: vi.fn(), create: vi.fn() },
       ProjectLabels: { all: vi.fn(), create: vi.fn() },
     };
     mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
@@ -3705,6 +3827,7 @@ describe('getTag and deleteTag', () => {
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
       RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
       Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      IssueNotes: { all: vi.fn(), create: vi.fn() },
       ProjectLabels: { all: vi.fn(), create: vi.fn() },
     };
     mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
@@ -3863,6 +3986,7 @@ describe('Response mappers — defensive fallbacks (sparse API responses)', () =
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
       RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
       Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      IssueNotes: { all: vi.fn(), create: vi.fn() },
       ProjectLabels: { all: vi.fn(), create: vi.fn() },
     };
     mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);
@@ -4346,6 +4470,7 @@ describe('Remaining branch coverage — inline mapper fallbacks and edge cases',
       Repositories: { compare: vi.fn(), allRepositoryTrees: vi.fn() },
       RepositoryFiles: { show: vi.fn(), allFileBlames: vi.fn() },
       Issues: { all: vi.fn(), create: vi.fn(), edit: vi.fn() },
+      IssueNotes: { all: vi.fn(), create: vi.fn() },
       ProjectLabels: { all: vi.fn(), create: vi.fn() },
     };
     mockGitlabConstructor.mockImplementation(() => mockGitlabInstance);

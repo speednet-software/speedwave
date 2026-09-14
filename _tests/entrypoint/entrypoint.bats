@@ -239,7 +239,7 @@ EOF
     [ -z "$(ls -A "$HOME/.claude/skills")" ]
 }
 
-@test "links the bundled core web-authoring skills from the real resources tree" {
+@test "links the bundled core skills from the real resources tree" {
     # Point at the real claude-resources tree; top-level core skills are
     # unconditionally linked (no integration gating, no ENABLED_SERVICES).
     real_resources="$BATS_TEST_DIRNAME/../../containers/claude-resources"
@@ -250,7 +250,7 @@ EOF
     [ -d "$HOME/.claude/skills" ]
     [ ! -L "$HOME/.claude/skills" ]
 
-    for skill in speedwave-sitemap speedwave-site-audit speedwave-product-showcase; do
+    for skill in speedwave-sitemap speedwave-site-audit speedwave-product-showcase speedwave-wait-what; do
         [ -L "$HOME/.claude/skills/$skill" ]
         [ "$(readlink "$HOME/.claude/skills/$skill")" = "$real_resources/skills/$skill" ]
         [ -f "$HOME/.claude/skills/$skill/SKILL.md" ]
@@ -1452,14 +1452,14 @@ EOF
 
 @test "installs each bundled plugin at start with the marketplace suffix" {
     _stub_claude_recording_plugin_installs
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/installed-plugins.log"
     [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
     [[ "$output" == *"feature-dev@claude-plugins-official"* ]]
-    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"example-plugin@claude-plugins-official"* ]]
 }
 
 @test "does not install any plugin when the bundled-plugins env is unset" {
@@ -1487,13 +1487,13 @@ EOF
 
 @test "an empty plugin list output means nothing installed, never everything" {
     _stub_claude_empty_plugin_list
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/installed-plugins.log"
     [[ "$output" == *"frontend-design@claude-plugins-official"* ]]
-    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"example-plugin@claude-plugins-official"* ]]
 }
 
 @test "a whitespace-only plugin list output means nothing installed" {
@@ -1553,12 +1553,12 @@ EOF
 
 @test "skips an invalid bundled-plugin name and continues with the rest" {
     _stub_claude_recording_plugin_installs
-    export SPEEDWAVE_BUNDLED_PLUGINS="Bad_Name,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="Bad_Name,example-plugin"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"invalid bundled-plugin name: Bad_Name"* ]]
     run cat "$TEST_HOME/installed-plugins.log"
-    [[ "$output" == *"superpowers@"* ]]
+    [[ "$output" == *"example-plugin@"* ]]
     [[ "$output" != *"Bad_Name"* ]]
 }
 
@@ -1722,25 +1722,25 @@ EOF
 
 @test "bootstraps the official marketplace once, before the first bundled-plugin install" {
     _stub_claude_recording_all_plugin_calls
-    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
     [ "${lines[1]}" = "install frontend-design@claude-plugins-official" ]
-    [ "${lines[2]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[2]}" = "install example-plugin@claude-plugins-official" ]
     [ "${#lines[@]}" -eq 3 ]
 }
 
 @test "does not bootstrap a custom bundled-plugin marketplace" {
     _stub_claude_recording_all_plugin_calls
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="custom-mp"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install superpowers@custom-mp" ]
+    [ "${lines[0]}" = "install example-plugin@custom-mp" ]
     [ "${#lines[@]}" -eq 1 ]
 }
 
@@ -1750,12 +1750,12 @@ EOF
     mkdir -p "$TEST_HOME/.claude/plugins"
     echo '{"claude-plugins-official":{"source":{"source":"github"}}}' \
         > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[0]}" = "install example-plugin@claude-plugins-official" ]
     [ "${#lines[@]}" -eq 1 ]
 }
 
@@ -1764,13 +1764,13 @@ EOF
     _stub_claude_recording_all_plugin_calls
     mkdir -p "$TEST_HOME/.claude/plugins"
     echo '{"claude-plugins-official":null}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[1]}" = "install example-plugin@claude-plugins-official" ]
 }
 
 @test "bundled-plugin install carries at least a 120s timeout budget" {
@@ -1783,20 +1783,20 @@ EOF
     _stub_claude_recording_all_plugin_calls
     mkdir -p "$TEST_HOME/.claude/plugins"
     echo '{"some-other-mp":{}}' > "$TEST_HOME/.claude/plugins/known_marketplaces.json"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     run cat "$TEST_HOME/plugin-calls.log"
     [ "${lines[0]}" = "marketplace-add anthropics/claude-plugins-official" ]
-    [ "${lines[1]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[1]}" = "install example-plugin@claude-plugins-official" ]
 }
 
 @test "skips marketplace bootstrap when every bundled plugin is already installed" {
     [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
     _stub_claude_recording_all_plugin_calls
-    sed -i.bak 's|\[\]|[{"id":"superpowers@claude-plugins-official","enabled":true}]|' "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    sed -i.bak 's|\[\]|[{"id":"example-plugin@claude-plugins-official","enabled":true}]|' "$STUBS_DIR/claude"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -1806,17 +1806,332 @@ EOF
 @test "a failed marketplace bootstrap is non-fatal, logged, and installs still run" {
     _stub_claude_recording_all_plugin_calls
     sed -i.bak 's|echo "marketplace-add .*|echo "network unreachable" >\&2; exit 1|' "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
     [[ "$output" == *"failed to add plugin marketplace"* ]]
     [[ "$output" == *"network unreachable"* ]]
     run cat "$TEST_HOME/plugin-calls.log"
-    [ "${lines[0]}" = "install superpowers@claude-plugins-official" ]
+    [ "${lines[0]}" = "install example-plugin@claude-plugins-official" ]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"WARN CONFIG"* ]]
     [[ "$output" == *"marketplace add claude-plugins-official: network unreachable"* ]]
+}
+
+# ── Retired bundled plugin: one-time uninstall driven by the v2 marker (ADR-087) ─────────────────────
+
+# Stub: `plugin list --json` replays $TEST_HOME/plugin-list.json (or reports nothing
+# installed); uninstall/install/marketplace-add each record their target.
+_stub_claude_retired_plugin() {
+    cat > "$STUBS_DIR/claude" << EOF
+#!/bin/bash
+if [ "\$1" = "plugin" ] && [ "\$2" = "list" ]; then
+    echo "list" >> "$TEST_HOME/plugin-list.log"
+    if [ -f "$TEST_HOME/plugin-list.json" ]; then cat "$TEST_HOME/plugin-list.json"; else echo '[]'; fi
+    exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "uninstall" ]; then
+    echo "\$3" >> "$TEST_HOME/uninstall.log"
+    if [ -f "$TEST_HOME/uninstall-fail" ]; then cat "$TEST_HOME/uninstall-fail" >&2; exit 1; fi
+    exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "marketplace" ] && [ "\$3" = "add" ]; then
+    echo "marketplace-add \$4" >> "$TEST_HOME/plugin-calls.log"; exit 0
+fi
+if [ "\$1" = "plugin" ] && [ "\$2" = "install" ]; then
+    echo "\$3" >> "$TEST_HOME/installed-plugins.log"; exit 0
+fi
+echo "${PINNED_VERSION} (Claude Code)"
+EOF
+    chmod +x "$STUBS_DIR/claude"
+}
+
+@test "a marker-recorded retired plugin is uninstalled once and its cache tree removed" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    mkdir -p "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0"
+    echo "# skill" > "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/SKILL.md"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/uninstall.log"
+    [ "${lines[0]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    [ ! -e "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO OK"* ]]
+    [[ "$output" == *"uninstalled retired plugin superpowers@claude-plugins-official"* ]]
+}
+
+@test "a plugin Speedwave never recorded installing is left alone" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+
+    # Marker records another plugin only: the user's own install is not Speedwave's.
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+
+    rm -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+}
+
+@test "a failing retired-plugin uninstall is non-fatal and keeps the marker entry for a retry" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    printf '%s\n' "boom" > "$TEST_HOME/uninstall-fail"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"failed to uninstall retired plugin superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"boom"* ]]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"WARN PLUGIN"* ]]
+    [[ "$output" == *"uninstall superpowers@claude-plugins-official: boom"* ]]
+    grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+}
+
+@test "a plugin list without the retired plugin drops the marker entry without calling uninstall" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    mkdir -p "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    # Absent at every scope, so the dead cache tree goes too.
+    [ ! -e "$TEST_HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO SKIP"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official not installed"* ]]
+
+    # Same verdict when the list carries other plugins but not the retired one.
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"frontend-design@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO SKIP"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official not installed"* ]]
+}
+
+@test "a second start after a successful removal does not call uninstall again" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$TEST_HOME/uninstall.log")" -eq 1 ]
+}
+
+@test "an uninstall rejected as not installed is treated as already removed" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    printf '%s\n' 'Plugin "superpowers@claude-plugins-official" not found in installed plugins' \
+        > "$TEST_HOME/uninstall-fail"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"failed to uninstall retired plugin"* ]]
+    [ -f "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2" ]
+    run grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "$status" -ne 0 ]
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"INFO SKIP"* ]]
+    [[ "$output" == *"superpowers@claude-plugins-official already removed"* ]]
+}
+
+@test "a blank plugin list output means unknown, so the retired uninstall still runs" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    : > "$TEST_HOME/plugin-list.json"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/uninstall.log"
+    [ "${lines[0]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+}
+
+@test "removing the retired marker entry leaves the other bundled-plugin entries intact" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+    [ "$(wc -l < "$TEST_HOME/uninstall.log")" -eq 1 ]
+}
+
+@test "missing jq warns and skips the retired-plugin removal, keeping the marker entry" {
+    rm -f "$STUBS_DIR/jq"
+    # With the stub gone, jq only resolves if the bare test host ships one outside
+    # the stripped locations; skip rather than assert on host-dependent behavior.
+    command -v jq &> /dev/null && skip "a non-stub jq is reachable on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING: jq not found"* ]]
+    [[ "$output" == *"skipping removal of retired plugin superpowers@claude-plugins-official"* ]]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+}
+
+@test "the retired-plugin uninstall carries a timeout budget" {
+    grep -qE 'timeout ([6-9][0-9]|[1-9][0-9]{2,}) claude plugin uninstall' "$ENTRYPOINT"
+}
+
+@test "a failing retired-plugin uninstall keeps its marker line through a bundled-install rebuild" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    printf '%s\n' "boom" > "$TEST_HOME/uninstall-fail"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/installed-plugins.log"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official" ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official" ]
+    [ "${lines[1]}" = "superpowers@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "a marker rewrite that cannot write its temp file warns and keeps the entry" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    # A directory squatting on the temp path makes the redirect fail like a full or read-only home.
+    mkdir -p "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2.tmp"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not rewrite the bundled-plugins marker"* ]]
+    grep -qxF "superpowers@claude-plugins-official" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    run cat "$TEST_HOME/.speedwave-entrypoint.log"
+    [[ "$output" == *"WARN PLUGIN"* ]]
+    [[ "$output" == *"marker rewrite failed"* ]]
+}
+
+@test "a bundled plugin found installed without a Speedwave record is marked found and counts as recorded" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    echo '[{"id":"frontend-design@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/installed-plugins.log" ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "frontend-design@claude-plugins-official#found" ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    # The found line counts as recorded: the second start skips the plugin list subprocess.
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$TEST_HOME/plugin-list.log")" -eq 1 ]
+}
+
+@test "a retired plugin recorded as found is the user's install and is never uninstalled" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "superpowers@claude-plugins-official#found" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"superpowers@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    [ ! -f "$TEST_HOME/uninstall.log" ]
+    grep -qxF "superpowers@claude-plugins-official#found" \
+        "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+}
+
+@test "a marker rebuild carries over Speedwave's own install records unchanged" {
+    [ -x "$STUBS_DIR/jq" ] || skip "jq not available on this test host"
+    _stub_claude_retired_plugin
+    printf '%s\n' "frontend-design@claude-plugins-official" \
+        > "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    echo '[{"id":"frontend-design@claude-plugins-official","enabled":true}]' \
+        > "$TEST_HOME/plugin-list.json"
+    export SPEEDWAVE_BUNDLED_PLUGINS="frontend-design,feature-dev"
+    export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
+
+    run bash "$ENTRYPOINT" true
+    [ "$status" -eq 0 ]
+    run cat "$TEST_HOME/.claude/.speedwave-bundled-plugins-installed.v2"
+    [ "${lines[0]}" = "feature-dev@claude-plugins-official" ]
+    [ "${lines[1]}" = "frontend-design@claude-plugins-official" ]
+    [ "${#lines[@]}" -eq 2 ]
 }
 
 # ── Hook registration (ADR-078): hooks.json merged into settings "hooks" key — symlinks under ~/.claude/hooks/ alone never execute ─
@@ -2242,7 +2557,7 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -2250,7 +2565,7 @@ EOF
     [[ "$output" == *"failed to install bundled plugin"* ]]
     run cat "$TEST_HOME/.speedwave-entrypoint.log"
     [[ "$output" == *"ERROR FAIL"* ]]
-    [[ "$output" == *"superpowers@claude-plugins-official"* ]]
+    [[ "$output" == *"example-plugin@claude-plugins-official"* ]]
     [[ "$output" == *"Failed to clone repository"* ]]
     [[ "$output" == *"entrypoint done (1 failure"* ]]
 }
@@ -2318,7 +2633,7 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]
@@ -2342,7 +2657,7 @@ fi
 echo "${PINNED_VERSION} (Claude Code)"
 EOF
     chmod +x "$STUBS_DIR/claude"
-    export SPEEDWAVE_BUNDLED_PLUGINS="superpowers"
+    export SPEEDWAVE_BUNDLED_PLUGINS="example-plugin"
     export SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE="claude-plugins-official"
     run bash "$ENTRYPOINT" true
     [ "$status" -eq 0 ]

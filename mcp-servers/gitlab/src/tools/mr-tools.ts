@@ -60,22 +60,20 @@ const listMrIdsTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      merge_requests: {
+      mrs: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            id: { type: 'number' },
-            iid: { type: 'number', description: 'Internal ID within project' },
+            iid: {
+              type: 'number',
+              description: 'Internal ID within project; pass as mr_iid to getMrFull',
+            },
             title: { type: 'string' },
-            state: { type: 'string', enum: ['opened', 'closed', 'merged'] },
-            source_branch: { type: 'string' },
-            target_branch: { type: 'string' },
-            author: { type: 'object', properties: { username: { type: 'string' } } },
-            web_url: { type: 'string' },
           },
         },
       },
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],

@@ -16,6 +16,17 @@ import {
 import { RedmineClient } from '../client.js';
 import { resolveParams } from './helpers.js';
 import { withRedmineErrors } from './error-handling.js';
+import { successResultSchema } from './schema-helpers.js';
+
+/** Result shape of every ids-only issue lookup; getIssueFull takes an id from `ids`. */
+const ISSUE_IDS_OUTPUT_SCHEMA = successResultSchema({
+  ids: {
+    type: 'array',
+    items: { type: 'number' },
+    description: 'Issue IDs; fetch details with getIssueFull',
+  },
+  total_count: { type: 'number' },
+});
 
 /**
  * Resolve `assigned_to` to `assigned_to_id` in place; returns a teaching error result when the
@@ -68,45 +79,7 @@ const listIssueIdsTool: Tool = {
       offset: { type: 'number', description: 'Pagination offset' },
     },
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      issues: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'number' },
-            subject: { type: 'string' },
-            status: {
-              type: 'object',
-              properties: { id: { type: 'number' }, name: { type: 'string' } },
-            },
-            priority: {
-              type: 'object',
-              properties: { id: { type: 'number' }, name: { type: 'string' } },
-            },
-            tracker: {
-              type: 'object',
-              properties: { id: { type: 'number' }, name: { type: 'string' } },
-            },
-            assigned_to: {
-              type: 'object',
-              properties: { id: { type: 'number' }, name: { type: 'string' } },
-            },
-            project: {
-              type: 'object',
-              properties: { id: { type: 'number' }, name: { type: 'string' } },
-            },
-          },
-        },
-      },
-      total_count: { type: 'number' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: ISSUE_IDS_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: list all issues (with defaults)',
@@ -237,27 +210,7 @@ const searchIssueIdsTool: Tool = {
     },
     required: ['query'],
   },
-  outputSchema: {
-    type: 'object',
-    properties: {
-      success: { type: 'boolean' },
-      results: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'number' },
-            subject: { type: 'string' },
-            status: { type: 'object', properties: { name: { type: 'string' } } },
-            project: { type: 'object', properties: { name: { type: 'string' } } },
-          },
-        },
-      },
-      total_count: { type: 'number' },
-      error: { type: 'string' },
-    },
-    required: ['success'],
-  },
+  outputSchema: ISSUE_IDS_OUTPUT_SCHEMA,
   inputExamples: [
     {
       description: 'Minimal: search all projects',

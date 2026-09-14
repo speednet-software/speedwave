@@ -613,6 +613,8 @@ struct SlashFrontmatter {
 /// Turns raw discovery into a filtered, enriched, sorted `SlashDiscovery`.
 /// Default-deny: a name with no provenance anywhere (plugin/agent/native/on-disk) is dropped.
 fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> SlashDiscovery {
+    // Core skills are copied to <data_dir>/claude-resources, the tree the container links from.
+    let bundled_dir = data_dir.join("claude-resources");
     let personal_dir = personal_claude_dir();
     let mut commands: Vec<SlashCommand> = Vec::new();
 
@@ -634,6 +636,7 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
                 clean_name,
                 None,
                 project_dir,
+                None,
                 personal_dir.as_deref(),
                 &raw.plugins,
             );
@@ -661,6 +664,7 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
             clean_name,
             plugin.as_deref(),
             project_dir,
+            Some(&bundled_dir),
             personal_dir.as_deref(),
             &raw.plugins,
         );
@@ -752,11 +756,12 @@ fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKi
 }
 
 /// Returns the first on-disk frontmatter hit and its origin (`None` when no
-/// file matched). Priority: project skills/commands → personal → plugin paths.
+/// file matched). Priority: project → bundled Speedwave resources → personal → plugin paths.
 fn lookup_frontmatter(
     name: &str,
     plugin: Option<&str>,
     project_dir: &Path,
+    bundled_dir: Option<&Path>,
     personal_dir: Option<&Path>,
     plugins: &[PluginEntry],
 ) -> (SlashFrontmatter, Option<FrontmatterOrigin>) {
@@ -767,6 +772,9 @@ fn lookup_frontmatter(
         project_dir.join("claude-resources"),
     ] {
         push_skill_candidates(&base, name, &mut candidates);
+    }
+    if let Some(bundled) = bundled_dir {
+        push_skill_candidates(bundled, name, &mut candidates);
     }
     if let Some(personal) = personal_dir {
         push_skill_candidates(personal, name, &mut candidates);
@@ -1717,7 +1725,7 @@ mod tests {
         }];
 
         let (fm, origin) =
-            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, &plugins);
+            lookup_frontmatter("tool", Some("plugin-x"), &project_dir, None, None, &plugins);
         assert_eq!(fm.description.as_deref(), Some("from plugin"));
         assert_eq!(origin, Some(FrontmatterOrigin::Skill));
     }
@@ -1790,6 +1798,66 @@ mod tests {
         assert!(leader.join().is_err(), "leader must have panicked");
         let res = follower.join().unwrap();
         assert_eq!(res.unwrap_err(), "discovery leader failed");
+    }
+
+    #[test]
+    fn lookup_frontmatter_reads_bundled_core_skills_from_the_resources_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundled = tmp.path().join("claude-resources");
+        let skill_dir = bundled.join("skills").join("speedwave-grill-me");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: from bundle\n---\n",
+        )
+        .unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let (fm, origin) = lookup_frontmatter(
+            "speedwave-grill-me",
+            None,
+            &project_dir,
+            Some(&bundled),
+            None,
+            &[],
+        );
+        assert_eq!(fm.description.as_deref(), Some("from bundle"));
+        assert_eq!(origin, Some(FrontmatterOrigin::Skill));
+    }
+
+    #[test]
+    fn lookup_frontmatter_prefers_the_project_over_bundled_resources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundled = tmp.path().join("claude-resources");
+        let bundled_skill = bundled.join("skills").join("speedwave-grill-me");
+        std::fs::create_dir_all(&bundled_skill).unwrap();
+        std::fs::write(
+            bundled_skill.join("SKILL.md"),
+            "---\ndescription: from bundle\n---\n",
+        )
+        .unwrap();
+        let project_dir = tmp.path().join("project");
+        let project_skill = project_dir
+            .join(".claude")
+            .join("skills")
+            .join("speedwave-grill-me");
+        std::fs::create_dir_all(&project_skill).unwrap();
+        std::fs::write(
+            project_skill.join("SKILL.md"),
+            "---\ndescription: from project\n---\n",
+        )
+        .unwrap();
+
+        let (fm, _) = lookup_frontmatter(
+            "speedwave-grill-me",
+            None,
+            &project_dir,
+            Some(&bundled),
+            None,
+            &[],
+        );
+        assert_eq!(fm.description.as_deref(), Some("from project"));
     }
 
     #[test]

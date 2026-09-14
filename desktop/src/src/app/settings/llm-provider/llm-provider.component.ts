@@ -653,7 +653,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Local connection fingerprint as of the last persisted save (or load); an unchanged fingerprint skips a redundant Save-time probe (SPEED-555). */
   private loadedLocalConnectionFp: string = NEVER_SAVED_LOCAL_FP;
 
-  /** SSOT OpenRouter auto-default model id (`get_openrouter_default_model`, ADR-087 section 8): the success-line fallback for a row without a stored model; never hard-coded in Angular. */
+  /** SSOT OpenRouter auto-default model id (`get_openrouter_default_model`, ADR-088 section 8): the success-line fallback for a row without a stored model; never hard-coded in Angular. */
   protected openrouterDefaultModel = signal('');
 
   /** Tracks the provider value from the previous `onProviderChange` call so we can detect actual changes (ngModelChange can fire without a user edit). */
@@ -1285,7 +1285,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     if (target === 'anthropic') return this.oauthAuthenticated() || this.apiKeyConfigured();
     const extra = this.extraProviders().find((p) => p.id === target);
     // A keyed remote row saves without a model — the backend auto-defaults it
-    // at save time (ADR-087 §8), so the key is the real requirement.
+    // at save time (ADR-088 §8), so the key is the real requirement.
     if (extra) return !!extra.model.trim() || extra.hasKey || !!extra.keyInput.trim();
     return this.localModelSatisfied();
   });
@@ -1409,7 +1409,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       return;
     }
     const activeExtra = this.extraProviders().find((p) => p.id === this.effectiveTarget());
-    // A model-less remote row is fine (backend auto-defaults, ADR-087 §8) but a
+    // A model-less remote row is fine (backend auto-defaults, ADR-088 §8) but a
     // keyless one can never route — reject with the actionable requirement.
     if (
       activeExtra &&
@@ -1424,7 +1424,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.saved.set(false);
     this.cdr.markForCheck();
 
-    // Test-connection gate (ADR-087 §8 amendment, SPEED-555): a routed provider needs a
+    // Test-connection gate (ADR-088 §8 amendment, SPEED-555): a routed provider needs a
     // passing test for its CURRENT field values before Save writes or restarts anything.
     if (localIsActive) {
       const fp = localConnectionFingerprint(

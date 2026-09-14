@@ -48,7 +48,7 @@ fn every_catalog_entry_is_priced() {
 #[test]
 fn million_context_entries_have_a_priced_1m_variant() {
     // Require `pricing_1m` exactly when 1M-context (every catalog entry is,
-    // including claude-fable-5 -- see ADR-087 "Anthropic model catalog facts").
+    // including claude-fable-5 -- see ADR-088 "Anthropic model catalog facts").
     for m in ANTHROPIC_MODELS {
         let is_million = m.context_tokens >= 1_000_000;
         match (&m.pricing_1m, is_million) {

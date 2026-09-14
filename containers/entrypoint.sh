@@ -276,6 +276,58 @@ fi
 # v2: pre-v2 markers were poisoned by the empty-list bug below — ignore and remove them.
 _bundled_marker="${HOME}/.claude/.speedwave-bundled-plugins-installed.v2"
 rm -f "${HOME}/.claude/.speedwave-bundled-plugins-installed"
+
+# One-time removal of a plugin Speedwave used to bundle (ADR-087). Runs only while the marker
+# records the plugin as installed by Speedwave (a `#found` line is the user's own). Non-fatal.
+_retired="superpowers@claude-plugins-official"
+_retired_keep=""
+if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; then
+    if ! command -v jq &> /dev/null; then
+        echo "WARNING: jq not found — skipping removal of retired plugin ${_retired}" >&2
+        _diag WARN CONFIG "jq not found — retired plugin removal skipped"
+        _retired_keep="${_retired}"
+    else
+        # Blank or malformed list output means unknown, not absent: fall through to the uninstall.
+        _present="$(timeout 30 claude plugin list --json 2>/dev/null | jq -r \
+            --arg id "${_retired}" --arg name "${_retired%@*}" --arg mp "${_retired#*@}" \
+            'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp)) | tostring' \
+            2>/dev/null)" || _present=""
+        _gone=0
+        if [ "${_present}" = "false" ]; then
+            # Absent at every scope, so the leftover cache tree is dead weight too.
+            rm -rf "${HOME}/.claude/plugins/cache/${_retired#*@}/${_retired%@*}"
+            _gone=1
+            _diag INFO SKIP "${_retired} not installed; dropping its marker entry"
+        elif _err="$(timeout 60 claude plugin uninstall "${_retired}" 2>&1 >/dev/null)"; then
+            # CC leaves the plugin's cache tree behind; nothing loads it, but it is dead weight.
+            rm -rf "${HOME}/.claude/plugins/cache/${_retired#*@}/${_retired%@*}"
+            _gone=1
+            _diag INFO OK "uninstalled retired plugin ${_retired}"
+        elif [[ "${_err}" == *"not found in installed plugins"* ]]; then
+            # Gone at user scope only; a project-scope install may still use the cache, so keep it.
+            _gone=1
+            _diag INFO SKIP "${_retired} already removed; dropping its marker entry"
+        else
+            echo "WARNING: failed to uninstall retired plugin ${_retired}: ${_err} (continuing)" >&2
+            _diag WARN PLUGIN "uninstall ${_retired}: ${_err}"
+            _retired_keep="${_retired}"
+        fi
+        if [ "${_gone}" -eq 1 ]; then
+            # grep -v exits 1 when it drops the last line; exit >1 or a missing .tmp means the write failed.
+            _rc=0
+            grep -vxF "${_retired}" "${_bundled_marker}" > "${_bundled_marker}.tmp" || _rc=$?
+            if [ "${_rc}" -gt 1 ] || [ ! -f "${_bundled_marker}.tmp" ] || ! mv "${_bundled_marker}.tmp" "${_bundled_marker}"; then
+                rm -f "${_bundled_marker}.tmp" 2>/dev/null || true
+                echo "WARNING: could not rewrite the bundled-plugins marker for ${_retired} (continuing)" >&2
+                _diag WARN PLUGIN "marker rewrite failed for ${_retired}"
+                _retired_keep="${_retired}"
+            fi
+        fi
+        unset _present _gone _err _rc
+    fi
+fi
+unset _retired
+
 if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     _mp="${SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE:-claude-plugins-official}"
     if ! echo "${_mp}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
@@ -290,7 +342,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ -f "${_bundled_marker}" ]; then
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
             echo "${_plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$' || continue
-            grep -qxF "${_plugin}@${_mp}" "${_bundled_marker}" || { _all_recorded=0; break; }
+            grep -qxE "^${_plugin}@${_mp}(#found)?$" "${_bundled_marker}" || { _all_recorded=0; break; }
         done
     else
         _all_recorded=0
@@ -305,6 +357,10 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
+        # A retired plugin whose removal did not complete keeps its line so the next start retries.
+        if [ -n "${_retired_keep}" ]; then
+            echo "${_retired_keep}" >> "${_new_marker}"
+        fi
         _mp_add_attempted=""
         # The CLI can print NOTHING with exit 0 on a cold start; blank means unknown,
         # never "everything installed" (jq 1.6's -e exits 0 on empty input).
@@ -323,7 +379,12 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                 'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp))' \
                 2>/dev/null)" || _match=""
             if [ "${_match}" = "true" ]; then
-                echo "${_plugin}@${_mp}" >> "${_new_marker}"
+                # Carry over Speedwave's own install record; a first sighting is the user's (#found).
+                if grep -qxF "${_plugin}@${_mp}" "${_bundled_marker}" 2>/dev/null; then
+                    echo "${_plugin}@${_mp}" >> "${_new_marker}"
+                else
+                    echo "${_plugin}@${_mp}#found" >> "${_new_marker}"
+                fi
                 _diag INFO SKIP "${_plugin}@${_mp} (already installed)"
                 continue
             fi
@@ -356,7 +417,7 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     unset _mp _plugin _installed _err _all_recorded _new_marker _match _mp_add_attempted
 fi
-unset _bundled_marker
+unset _bundled_marker _retired_keep
 
 # Symlink plugin resources — same managed-link tracking as core/integration entries
 # so toggling a plugin off cleans up its links on the next restart.

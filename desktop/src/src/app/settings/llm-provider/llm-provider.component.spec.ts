@@ -2413,7 +2413,7 @@ describe('LlmProviderComponent', () => {
     expect(emitted).toContain('requires an API key');
   });
 
-  it('save accepts a keyed remote provider without a model (backend auto-defaults, ADR-087 §8)', async () => {
+  it('save accepts a keyed remote provider without a model (backend auto-defaults, ADR-088 §8)', async () => {
     let captured: Record<string, unknown> | null = null;
     mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'update_llm_config') captured = args?.['update'] as Record<string, unknown>;
