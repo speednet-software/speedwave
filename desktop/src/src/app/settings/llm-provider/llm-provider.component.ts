@@ -443,7 +443,7 @@ function classifyDiscoveryFailure(msg: string): {
                 data-testid="settings-llm-test-success"
               >
                 Server OK · {{ discovery.models.length }} models · Messages API OK · new sessions
-                start on {{ discovery.models[0].id }} until you pick one in chat
+                start on {{ localStartModel(discovery.models) }} until you pick one in chat
               </p>
             }
 
@@ -555,8 +555,8 @@ function classifyDiscoveryFailure(msg: string): {
                   class="mono mt-3 text-[11px] text-[var(--ink-mute)]"
                   [attr.data-testid]="'settings-llm-extra-test-success-' + entry.id"
                 >
-                  Key OK · new sessions start on {{ openrouterDefaultModel() }} until you pick one
-                  in chat
+                  Key OK · new sessions start on {{ extraStartModel(entry) }} until you pick one in
+                  chat
                 </p>
               }
             </div>
@@ -650,7 +650,7 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Local connection fingerprint as of the last persisted save (or load); an unchanged fingerprint skips a redundant Save-time probe (SPEED-555). */
   private loadedLocalConnectionFp: string = NEVER_SAVED_LOCAL_FP;
 
-  /** SSOT OpenRouter auto-default model id (`get_openrouter_default_model`, ADR-087 section 8), shown in the connection-test success line — never hard-coded in Angular. */
+  /** SSOT OpenRouter auto-default model id (`get_openrouter_default_model`, ADR-087 section 8): the success-line fallback for a row without a stored model; never hard-coded in Angular. */
   protected openrouterDefaultModel = signal('');
 
   /** Tracks the provider value from the previous `onProviderChange` call so we can detect actual changes (ngModelChange can fire without a user edit). */
@@ -705,6 +705,22 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     this.loadConfig();
     this.oauthWatcher.watchWindowFocus();
     void this.loadOpenrouterDefaultModel();
+  }
+
+  /**
+   * Model new sessions start on after Save: the stored local entry model (Save passes it through) wins; only an entry without one gets the first probed model, the Rust auto-default.
+   * @param models - the models the connection test returned (non-empty in the ready state)
+   */
+  protected localStartModel(models: DiscoveredModel[]): string {
+    return this.loadedLocalEntry?.model?.trim() || models[0].id;
+  }
+
+  /**
+   * Model new sessions start on after Save for a remote row: the stored entry model (a composer pick persists there) wins over the SSOT auto-default.
+   * @param entry - the remote provider row
+   */
+  protected extraStartModel(entry: ExtraProviderEdit): string {
+    return entry.model.trim() || this.openrouterDefaultModel();
   }
 
   /** Fetches the SSOT OpenRouter auto-default model id once; browser dev mode (no Tauri) leaves it blank. */

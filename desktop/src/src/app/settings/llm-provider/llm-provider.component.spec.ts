@@ -3289,7 +3289,7 @@ describe('LlmProviderComponent', () => {
       expect(discoverCalls).toBe(2);
     });
 
-    it('local success line names the model count, Messages API status and the first probed model (models[0], same order the Rust auto-default picks)', async () => {
+    it('local success line names the model count, Messages API status and, for an entry without a stored model, the first probed model (models[0], the Rust auto-default order)', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'discover_llm_models') {
           return {
@@ -3321,6 +3321,36 @@ describe('LlmProviderComponent', () => {
       ).toBeNull();
     });
 
+    it('local success line names the stored entry model over the first probed model (Save passes the entry model through)', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          return {
+            models: [{ id: 'llama3.3' }, { id: 'qwen2.5' }],
+            messages_endpoint_ok: true,
+          };
+        }
+        return undefined;
+      };
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component['loadedLocalEntry'] = {
+        id: 'local',
+        kind: 'local',
+        base_url: 'http://host.docker.internal:11434',
+        model: 'qwen3-coder-30b',
+      };
+
+      await component.discoverModels(true);
+      fixture.detectChanges();
+
+      const text = fixture.nativeElement.querySelector("[data-testid='settings-llm-test-success']")
+        .textContent as string;
+      expect(text).toContain('2 models');
+      expect(text).toContain('new sessions start on qwen3-coder-30b');
+      expect(text).not.toContain('start on llama3.3');
+    });
+
     it('no hint sentence renders under the local fields before a test', () => {
       component.provider.set('local');
       component.selectedTarget.set('local');
@@ -3334,7 +3364,7 @@ describe('LlmProviderComponent', () => {
       ).toBeNull();
     });
 
-    it('openrouter success line names the key status and the SSOT auto-default model id, never a literal', async () => {
+    it('openrouter success line falls back to the SSOT auto-default model id for a row without a stored model, never a literal', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'discover_llm_models') {
           return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
@@ -3358,6 +3388,32 @@ describe('LlmProviderComponent', () => {
       const text = success.textContent as string;
       expect(text).toContain('Key OK');
       expect(text).toContain('anthropic/claude-sonnet-5');
+    });
+
+    it('openrouter success line names the stored row model over the SSOT auto-default (a composer pick persists into the entry)', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          return { models: [{ id: 'anthropic/claude-sonnet-5' }] };
+        }
+        if (cmd === 'get_openrouter_default_model') {
+          return 'anthropic/claude-sonnet-5';
+        }
+        return undefined;
+      };
+      await component['loadOpenrouterDefaultModel']();
+      const row = component.extraProviders()[0];
+      component.toggleExtraExpanded(row);
+      component.onExtraKeyInput(row, 'sk-or-x');
+      row.model = 'openai/gpt-4o-mini';
+      await component.discoverExtraModels(row);
+      fixture.detectChanges();
+
+      const text = fixture.nativeElement.querySelector(
+        "[data-testid='settings-llm-extra-test-success-openrouter']"
+      ).textContent as string;
+      expect(text).toContain('Key OK');
+      expect(text).toContain('new sessions start on openai/gpt-4o-mini');
+      expect(text).not.toContain('anthropic/claude-sonnet-5');
     });
 
     it('the anthropic card saves without a connection probe; badges are unchanged', async () => {

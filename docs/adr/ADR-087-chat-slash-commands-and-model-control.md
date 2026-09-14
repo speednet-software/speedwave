@@ -453,15 +453,19 @@ rejected key. OpenRouter's success criterion stays narrower than the local
 card's: the catalog endpoint accepting the key is sufficient, and the
 presence of the auto-default model (`anthropic/claude-sonnet-5`) in that
 catalog response is never checked. The connection-test state (does a
-passing result exist for the current fingerprint) is component memory only
-
-- it is not persisted, and a provider switch, project switch, or reload
-  clears it. The success line for local names the first probed model, which
-  is the same value `ModelAutoDefaultProbe::first_local_model`
-  (`desktop/src-tauri/src/containers_cmd.rs`) would pick if this save omits a
-  model; OpenRouter's line names the `OPENROUTER_DEFAULT_MODEL` constant
-  (`crates/speedwave-runtime/src/consts.rs`) via the new
-  `get_openrouter_default_model` Tauri command, never a literal in Angular.
+passing result exist for the current fingerprint) is component memory only:
+it is not persisted, and a provider switch, project switch, or reload
+clears it. The success line names the model new sessions will actually
+start on after this Save. When the provider entry already carries a model,
+that model is named: a composer pick persists into the entry through
+`set_provider_model` (`desktop/src-tauri/src/containers_cmd.rs`), and Save
+passes the entry model through untouched, so the auto-default of this
+section never applies to it. Only an entry without a model gets the
+auto-default named instead: for local the first probed model, the same
+value `ModelAutoDefaultProbe::first_local_model` (same file) picks; for
+OpenRouter the `OPENROUTER_DEFAULT_MODEL` constant
+(`crates/speedwave-runtime/src/consts.rs`), read through the
+`get_openrouter_default_model` Tauri command, never a literal in Angular.
 
 ## Anthropic model catalog facts backing this ADR
 
