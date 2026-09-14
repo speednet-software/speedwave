@@ -6,8 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** Resolves SPEEDWAVE_DATA_DIR the way the runtime does, default `~/.speedwave`
- *  (mirrors `engine.ts`'s private `dataDir()` — kept separate since both are
- *  thin one-liners and neither module imports from the other). */
+ *  (same one-liner as `engine.ts`'s private `dataDir()`; neither module imports the other). */
 function dataDir(): string {
   return process.env.SPEEDWAVE_DATA_DIR || path.join(os.homedir(), '.speedwave');
 }

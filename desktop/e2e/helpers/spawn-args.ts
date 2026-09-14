@@ -14,9 +14,8 @@ export async function lastSpawnArgs(): Promise<string[]> {
   });
 }
 
-/** Polls until `lastSpawnArgs()` differs from `priorArgs`, proving a NEW spawn happened
- *  (the recorder is a single process-global slot, so a stale value from an earlier
- *  project/spec would otherwise pass a bare non-empty check). */
+/** Polls until `lastSpawnArgs()` differs from `priorArgs`, proving a NEW spawn happened; the
+ *  recorder is one process-global slot, so a stale earlier value would pass a non-empty check. */
 export async function waitForFreshSpawnArgs(
   priorArgs: string[],
   timeoutMs = 30_000

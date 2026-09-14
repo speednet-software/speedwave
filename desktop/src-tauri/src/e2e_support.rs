@@ -2,7 +2,6 @@
 //! helper stays covered on every platform.
 
 use std::net::{SocketAddr, TcpListener};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Must match tauri-plugin-webdriver's hardcoded 127.0.0.1:4445 bind.
@@ -10,10 +9,12 @@ pub const E2E_WEBDRIVER_PORT: u16 = 4445;
 
 /// Most recent Claude Code spawn argv (SPEED-545 e2e observation only — the call site in
 /// `chat.rs` is `#[cfg(feature = "e2e")]`-gated, so this never runs in a shipped build).
-static LAST_SPAWN_ARGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(any(test, feature = "e2e"))]
+static LAST_SPAWN_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Overwrites the recorded spawn argv; the plain fn (not the Tauri command) stays under
 /// `any(test, feature = "e2e")` so its round-trip is covered by a normal `cargo test`.
+#[cfg(any(test, feature = "e2e"))]
 pub fn record_spawn_args(args: &[String]) {
     if let Ok(mut guard) = LAST_SPAWN_ARGS.lock() {
         *guard = args.to_vec();
@@ -21,6 +22,7 @@ pub fn record_spawn_args(args: &[String]) {
 }
 
 /// Reads back the last-recorded spawn argv; empty when none has been recorded yet.
+#[cfg(any(test, feature = "e2e"))]
 pub fn last_spawn_args() -> Vec<String> {
     LAST_SPAWN_ARGS
         .lock()
@@ -36,9 +38,8 @@ pub fn e2e_last_spawn_args() -> Vec<String> {
     last_spawn_args()
 }
 
-/// E2E-only Tauri command: restarts the app process with no data wipe (unlike
-/// `factory_reset`'s `app.restart()`, which follows a full wipe) — proves a
-/// `settings.json`/config pin survives a real relaunch, not just a new session.
+/// E2E-only Tauri command: restarts the app with no data wipe (unlike `factory_reset`'s
+/// post-wipe `app.restart()`), proving a pin survives a real relaunch, not just a new session.
 #[cfg(feature = "e2e")]
 #[tauri::command]
 pub fn e2e_restart_app(app: tauri::AppHandle) {
