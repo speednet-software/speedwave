@@ -3017,16 +3017,12 @@ mod tests {
         let target_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&target_dir).expect("create target dir");
 
-        #[cfg(target_os = "windows")]
-        let binary_name = "speedwave.exe";
-        #[cfg(not(target_os = "windows"))]
-        let binary_name = consts::CLI_BINARY;
+        let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
+        std::fs::write(&dest, b"old-version").expect("write old binary");
 
-        std::fs::write(target_dir.join(binary_name), b"old-version").expect("write old binary");
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
-
-        let content = std::fs::read_to_string(target_dir.join(binary_name)).expect("read");
+        let content = std::fs::read_to_string(&dest).expect("read");
         assert_eq!(content, "new-version", "should overwrite existing binary");
     }
 

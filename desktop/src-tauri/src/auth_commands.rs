@@ -1004,7 +1004,7 @@ mod tests {
             format!(
                 "$env:{} = 'C:\\Users\\test\\.speedwave-dev'; \
                  Set-Location 'C:\\Users\\test\\Projects'; \
-                 & 'C:\\Users\\test\\.speedwave-dev\\bin\\speedwave.exe' \
+                 & 'C:\\Users\\test\\.speedwave-dev\\bin\\speedwave-dev.exe' \
                  login --project 'myproj'",
                 speedwave_runtime::consts::DATA_DIR_ENV,
             )
@@ -1024,8 +1024,8 @@ mod tests {
             true,
         );
         assert!(
-            cmd.contains(r"& 'C:\Users\test\.speedwave-dev\bin\speedwave.exe'"),
-            "env-pinned PS command must invoke CLI via absolute data_dir path, got: {cmd}"
+            cmd.contains(r"& 'C:\Users\test\.speedwave-dev\bin\speedwave-dev.exe'"),
+            "env-pinned PS command must invoke this instance's CLI by absolute path, got: {cmd}"
         );
         assert!(
             !cmd.contains("; speedwave login"),

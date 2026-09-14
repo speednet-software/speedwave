@@ -1288,6 +1288,9 @@ pub fn data_dir_from_cli_exe(
         return Some(home.join(DATA_DIR));
     }
     let suffix = file_name.strip_prefix(CLI_BINARY)?.strip_prefix('-')?;
+    if suffix.is_empty() {
+        return None;
+    }
     let instance = format!("{CLI_BINARY}-{suffix}");
     is_valid_instance_name(&instance).then(|| home.join(format!(".{instance}")))
 }
@@ -2497,25 +2500,6 @@ mod tests {
         assert_eq!(installed_cli_filename(true, prod), "speedwave.exe");
         assert_eq!(installed_cli_filename(false, dev), "speedwave-dev");
         assert_eq!(installed_cli_filename(true, dev), "speedwave-dev.exe");
-    }
-
-    #[test]
-    fn data_dir_from_cli_exe_windows_uses_the_exe_location() {
-        let home = std::path::Path::new("/Users/alice");
-        let data_dir = std::path::Path::new("/Users/alice/.speedwave-dev");
-        assert_eq!(
-            data_dir_from_cli_exe(
-                true,
-                &data_dir.join(CLI_BIN_SUBDIR).join("speedwave.exe"),
-                home
-            ),
-            Some(data_dir.to_path_buf()),
-            "windows carries the instance in the path, not the filename"
-        );
-        assert_eq!(
-            data_dir_from_cli_exe(true, std::path::Path::new("/tmp/speedwave.exe"), home),
-            None
-        );
     }
 
     #[test]
