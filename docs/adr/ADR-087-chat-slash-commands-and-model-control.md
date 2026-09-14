@@ -249,6 +249,23 @@ own explicit clear (redundant now, since it already calls
 still-streaming turn cannot leak into whatever session starts next. `setPendingModelOverride` had no callers outside the service and its
 own spec by this point, so it was inlined rather than kept as a shim.
 
+**Amendment (SPEED-545 rig finding, 2026-09-14: history rebuilds the chip
+from Claude Code's synthetic command entry).** The transcript never holds the
+typed `/model x` line the history rule above matched on: Claude Code records
+an executed control command as a synthetic user entry
+(`<command-name>/model</command-name>`, `<command-message>`,
+`<command-args>x</command-args>`), followed by a `system` entry rather than a
+`<synthetic>` assistant turn, and `history.rs` dropped that entry as
+synthetic noise together with `/clear` and the local-command markers. A
+resumed conversation therefore lost every `/model` and `/effort` chip, which
+spec 20's resume-survival assertion caught on the Windows rig.
+`parse_jsonl_message` now rebuilds the typed line from the `<command-name>`
+and `<command-args>` bodies (`control_command_from_synthetic_entry`) before
+the synthetic skip, and only when `parse_control_command` accepts the result,
+so the shape rule stays the single SSOT: `/clear`, an argument-less `/model`
+(the picker) and multi-word arguments remain dropped, previews and unread
+counts still exclude the rebuilt line, and the live path is untouched.
+
 ### 5. Effort control: the launch hold, and its release for live wire control
 
 Empirically, sending `/effort <level>` over the wire is refused whenever a

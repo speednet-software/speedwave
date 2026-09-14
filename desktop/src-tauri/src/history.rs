@@ -176,6 +176,11 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 
     // Skip synthetic `type:"user"` meta-entries via `isMeta` (top-level or nested) or content sniffing.
     if msg_type == "user" {
+        // Claude Code records an executed `/model x` / `/effort y` only as a synthetic
+        // <command-name>/<command-args> entry; rebuild the typed line so the chip survives resume.
+        if let Some(line) = control_command_from_synthetic_entry(&parsed) {
+            return Some(control_line_message(&parsed, line));
+        }
         let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
         } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
@@ -260,6 +265,49 @@ fn text_is_synthetic(s: &str) -> bool {
         || trimmed.starts_with("<local-command-stdout>")
         || trimmed.starts_with("<local-command-stderr>")
         || trimmed.starts_with("Commands are in the form `/command [args]`")
+}
+
+/// Rebuilds the typed control line (`/model x`, `/effort y`) from Claude Code's synthetic
+/// `<command-name>`/`<command-args>` user entry; `None` for every other entry.
+fn control_command_from_synthetic_entry(parsed: &serde_json::Value) -> Option<String> {
+    let content = &parsed["message"]["content"];
+    let text = match content.as_str() {
+        Some(s) => s.to_string(),
+        None => content
+            .as_array()?
+            .iter()
+            .filter(|b| b["type"].as_str() == Some("text"))
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let name = tag_body(&text, "command-name")?.trim();
+    let args = tag_body(&text, "command-args").unwrap_or("").trim();
+    let line = format!("{name} {args}");
+    speedwave_runtime::slash::parse_control_command(&line)
+        .is_some()
+        .then_some(line)
+}
+
+/// Text between `<tag>` and `</tag>`, or `None` when either tag is missing.
+fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&format!("</{tag}>"))? + start;
+    Some(&text[start..end])
+}
+
+/// User message carrying only the rebuilt control line; `fold_history_control_chips` makes it the chip.
+fn control_line_message(parsed: &serde_json::Value, line: String) -> ConversationMessage {
+    ConversationMessage {
+        role: "user".to_string(),
+        content: line.clone(),
+        blocks: Some(vec![MessageBlock::Text { content: line }]),
+        timestamp: parsed["timestamp"].as_str().map(String::from),
+        uuid: parsed["uuid"].as_str().map(String::from),
+        model: None,
+        usage: None,
+    }
 }
 
 fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
@@ -1924,6 +1972,129 @@ mod tests {
                 std::mem::discriminant(other)
             ),
         }
+    }
+
+    #[test]
+    fn get_conversation_rebuilds_the_chip_from_claude_codes_synthetic_command_entry() {
+        // Claude Code records an executed control command only in this shape: no plain
+        // `/model x` user line, and a `system` entry follows instead of a synthetic reply.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>openai/gpt-4o-mini</command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"system","uuid":"s1","subtype":"local_command","content":"Set model to openai/gpt-4o-mini","timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"what is 2+2?"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"4"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 3);
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "openai/gpt-4o-mini");
+            }
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+        assert_eq!(transcript.messages[1].content, "what is 2+2?");
+        assert_eq!(transcript.messages[2].content, "4");
+    }
+
+    #[test]
+    fn get_conversation_rebuilds_an_effort_chip_from_a_text_block_array_entry_marked_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args>high</command-args>"}]},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "effort");
+                assert_eq!(argument, "high");
+            }
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn get_conversation_drops_synthetic_command_entries_that_are_not_control_commands() {
+        // `/clear`, a bare `/model` (picker, no argument) and a multi-word argument are
+        // not control chips: they stay synthetic and vanish from the transcript.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-sonnet-5 extra</command-args>"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].content, "real question");
+    }
+
+    #[test]
+    fn list_conversations_preview_skips_a_synthetic_control_command_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-sonnet-5</command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"system","uuid":"s1","subtype":"local_command","content":"Set model to claude-sonnet-5","timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real answer"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "real question");
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn tag_body_requires_both_tags() {
+        assert_eq!(tag_body("<a>x</a>", "a"), Some("x"));
+        assert_eq!(tag_body("<a>x", "a"), None);
+        assert_eq!(tag_body("x</a>", "a"), None);
+        assert_eq!(
+            tag_body("<command-args></command-args>", "command-args"),
+            Some("")
+        );
     }
 
     #[test]
