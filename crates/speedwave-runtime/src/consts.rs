@@ -10,6 +10,10 @@ pub const PII_MAX_PATTERNS: usize = 1024;
 pub const PII_MAX_KEYWORDS: usize = 256;
 /// Maximum byte length of a single PII rule pattern accepted at load.
 pub const PII_MAX_PATTERN_LENGTH: usize = 512;
+/// Minimum length, in characters, of a keyword substitution's `match` and `alias`.
+pub const PII_KEYWORD_MIN_CHARS: usize = 3;
+/// Maximum length, in characters, of a keyword substitution's `match` and `alias`.
+pub const PII_KEYWORD_MAX_CHARS: usize = 128;
 
 /// Env var overriding the data-dir location.
 pub const DATA_DIR_ENV: &str = "SPEEDWAVE_DATA_DIR";
@@ -2672,6 +2676,43 @@ mod tests {
     // proxy image's isolated build context (cannot inherit root `[workspace.lints]` in any of
     // the three cases); their `[lints]` tables must stay byte-equal (mod. whitespace) or one
     // binary runs weaker lints.
+    #[test]
+    fn pii_limits_match_policy_engine() {
+        fn engine_const(src: &str, name: &str) -> usize {
+            let needle = format!("const {name}: usize = ");
+            let rest = src
+                .split(&needle)
+                .nth(1)
+                .unwrap_or_else(|| panic!("`{name}` not found in pii-engine policy.rs"));
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits
+                .parse()
+                .unwrap_or_else(|_| panic!("`{name}` is not a plain integer literal"))
+        }
+
+        let engine = include_str!("../../pii-engine/src/policy.rs");
+        for (name, ours) in [
+            ("MAX_RULES", PII_MAX_RULES),
+            ("MAX_PATTERNS", PII_MAX_PATTERNS),
+            ("MAX_KEYWORDS", PII_MAX_KEYWORDS),
+            ("MAX_PATTERN_LEN", PII_MAX_PATTERN_LENGTH),
+            ("KEYWORD_MIN_CHARS", PII_KEYWORD_MIN_CHARS),
+            ("KEYWORD_MAX_CHARS", PII_KEYWORD_MAX_CHARS),
+        ] {
+            assert_eq!(
+                engine_const(engine, name),
+                ours,
+                "pii-engine `{name}` and this crate's mirror disagree; update both"
+            );
+        }
+
+        assert!(
+            engine.contains("kw.r#match.chars().count()")
+                && engine.contains("kw.alias.chars().count()"),
+            "pii-engine must count keyword length in characters, not bytes"
+        );
+    }
+
     #[test]
     fn lint_tables_are_aligned() {
         fn lint_table(src: &str, header: &str) -> Vec<String> {

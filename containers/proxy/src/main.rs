@@ -1,5 +1,5 @@
-//! Per-project LLM forwarder: relays native Anthropic `/v1/messages` verbatim,
-//! routes provider-prefixed models, and is the sole appender of the usage JSONL.
+//! Per-project LLM forwarder: routes provider-prefixed models, tokenizes and
+//! detokenizes `/v1/messages` both ways, and is the sole appender of the usage JSONL.
 
 use std::sync::Arc;
 

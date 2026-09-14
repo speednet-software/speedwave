@@ -1459,12 +1459,34 @@ fn build_pii_policy_user_config(
     Ok(cfg)
 }
 
+fn rejected_forced_policies(
+    submitted: &[String],
+    managed: Option<&config::ManagedPiiPolicyConfig>,
+) -> Vec<String> {
+    managed
+        .map(|m| m.forced_policies.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .filter(|forced| !submitted.iter().any(|s| s == *forced))
+        .cloned()
+        .collect()
+}
+
 /// Persists the active project's PII policy selection; runs inside the config
 /// lock so a concurrent write cannot interleave.
 #[tauri::command]
 pub fn update_security_policy(update: SecurityPolicyUpdate) -> Result<(), String> {
     config::with_config_lock(|| {
         let policy = build_pii_policy_user_config(&update)?;
+        let managed =
+            speedwave_runtime::managed_config::load_managed_config()?.and_then(|m| m.pii_policy);
+        let rejected = rejected_forced_policies(&policy.policies, managed.as_ref());
+        if !rejected.is_empty() {
+            anyhow::bail!(
+                "cannot disable organization-managed security policy: {}",
+                rejected.join(", ")
+            );
+        }
         let mut user_config = config::load_user_config()?;
         let active = user_config
             .active_project
@@ -4037,6 +4059,40 @@ mod tests {
             policies: policies.into_iter().map(String::from).collect(),
             custom_policies,
         }
+    }
+
+    fn managed_pii(forced: Vec<&str>) -> config::ManagedPiiPolicyConfig {
+        config::ManagedPiiPolicyConfig {
+            forced_policies: forced.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn forced_policy_resent_as_enabled_is_not_rejected() {
+        let submitted = vec!["gdpr-art32".to_string(), "my-own".to_string()];
+        assert!(
+            rejected_forced_policies(&submitted, Some(&managed_pii(vec!["gdpr-art32"]))).is_empty(),
+            "a forced id the user kept enabled must save, not error"
+        );
+    }
+
+    #[test]
+    fn dropping_a_forced_policy_is_rejected_by_name() {
+        let submitted = vec!["my-own".to_string()];
+        assert_eq!(
+            rejected_forced_policies(
+                &submitted,
+                Some(&managed_pii(vec!["gdpr-art32", "eu-ai-act-art5"]))
+            ),
+            vec!["gdpr-art32".to_string(), "eu-ai-act-art5".to_string()],
+            "every dropped forced id must be named in the rejection"
+        );
+    }
+
+    #[test]
+    fn no_managed_config_forces_nothing() {
+        assert!(rejected_forced_policies(&[], None).is_empty());
+        assert!(rejected_forced_policies(&[], Some(&managed_pii(vec![]))).is_empty());
     }
 
     fn custom_policy_input(

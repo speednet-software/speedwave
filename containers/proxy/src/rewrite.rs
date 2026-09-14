@@ -85,6 +85,34 @@ impl DeltaKind {
 struct BlockBuffer {
     kind: DeltaKind,
     pending: String,
+    extras: FrameExtras,
+}
+
+#[derive(Default, Clone)]
+struct FrameExtras {
+    top: serde_json::Map<String, serde_json::Value>,
+    delta: serde_json::Map<String, serde_json::Value>,
+}
+
+impl FrameExtras {
+    fn capture(frame: &serde_json::Value, payload_key: &str) -> Self {
+        let mut extras = Self::default();
+        if let Some(map) = frame.as_object() {
+            for (k, v) in map {
+                if k != "type" && k != "index" && k != "delta" {
+                    extras.top.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        if let Some(map) = frame.get("delta").and_then(|d| d.as_object()) {
+            for (k, v) in map {
+                if k != "type" && k != payload_key {
+                    extras.delta.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        extras
+    }
 }
 
 /// Applies the inbound transform appropriate for the delta kind: `partial_json` content is
@@ -332,7 +360,9 @@ impl SseRewriter {
         let block = self.blocks.entry(index).or_insert_with(|| BlockBuffer {
             kind,
             pending: String::new(),
+            extras: FrameExtras::default(),
         });
+        block.extras = FrameExtras::capture(frame, kind.payload_key());
         block.pending.push_str(payload);
         let safe = safe_prefix_len(&block.pending, keywords);
         if safe == 0 {
@@ -340,9 +370,10 @@ impl SseRewriter {
         }
         let tail = block.pending.split_off(safe);
         let prefix = std::mem::replace(&mut block.pending, tail);
+        let extras = block.extras.clone();
         let transformed = transform(kind, &prefix, keywords, key)?;
         if !transformed.is_empty() {
-            self.emit_delta(index, kind, &transformed, out);
+            self.emit_delta(index, kind, &transformed, &extras, out);
         }
         Ok(())
     }
@@ -355,22 +386,31 @@ impl SseRewriter {
         keywords: &[CompiledKeyword],
         key: &EngineKey,
     ) -> Result<(), RewriteError> {
-        let (kind, pending) = match self.blocks.get_mut(&index) {
-            Some(block) if !block.pending.is_empty() => {
-                (block.kind, std::mem::take(&mut block.pending))
-            }
+        let (kind, pending, extras) = match self.blocks.get_mut(&index) {
+            Some(block) if !block.pending.is_empty() => (
+                block.kind,
+                std::mem::take(&mut block.pending),
+                block.extras.clone(),
+            ),
             _ => return Ok(()),
         };
         let transformed = transform(kind, &pending, keywords, key)?;
         if !transformed.is_empty() {
-            self.emit_delta(index, kind, &transformed, out);
+            self.emit_delta(index, kind, &transformed, &extras, out);
         }
         Ok(())
     }
 
     /// Serializes one synthesized delta event, mirroring the upstream `event:`-line style.
-    fn emit_delta(&self, index: u64, kind: DeltaKind, text: &str, out: &mut Vec<u8>) {
-        let mut delta = serde_json::Map::new();
+    fn emit_delta(
+        &self,
+        index: u64,
+        kind: DeltaKind,
+        text: &str,
+        extras: &FrameExtras,
+        out: &mut Vec<u8>,
+    ) {
+        let mut delta = extras.delta.clone();
         delta.insert(
             "type".to_string(),
             serde_json::Value::String(kind.wire().to_string()),
@@ -379,11 +419,14 @@ impl SseRewriter {
             kind.payload_key().to_string(),
             serde_json::Value::String(text.to_string()),
         );
-        let frame = serde_json::json!({
-            "type": "content_block_delta",
-            "index": index,
-            "delta": serde_json::Value::Object(delta),
-        });
+        let mut top = extras.top.clone();
+        top.insert(
+            "type".to_string(),
+            serde_json::Value::String("content_block_delta".to_string()),
+        );
+        top.insert("index".to_string(), serde_json::Value::from(index));
+        top.insert("delta".to_string(), serde_json::Value::Object(delta));
+        let frame = serde_json::Value::Object(top);
         if self.use_event_names {
             out.extend_from_slice(b"event: content_block_delta\n");
         }
@@ -870,5 +913,34 @@ mod tests {
         let out = run(&stream, 64 * 1024, &[], &key).unwrap();
         assert_eq!(delta_text(&out, 0), "");
         assert!(out.contains("content_block_stop"));
+    }
+
+    #[test]
+    fn sse_unknown_frame_fields_survive_reassembly() {
+        let (policy, key) = default_policy_and_key();
+        let token = token_for(&policy, &key, "fixture@example.invalid");
+        let payload = serde_json::to_string(&format!("write to {token}")).unwrap();
+        let stream = format!(
+            "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"future_top\":\"keep-me\",\"delta\":{{\"type\":\"text_delta\",\"text\":{payload},\"future_delta\":42}}}}\n\n"
+        );
+        let out = run(&stream, 4096, policy.keywords(), &key).unwrap();
+
+        let frames: Vec<serde_json::Value> = out
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+            .filter(|f| f["type"] == "content_block_delta")
+            .collect();
+        assert!(
+            !frames.is_empty(),
+            "expected at least one synthesized delta"
+        );
+        for frame in &frames {
+            assert_eq!(frame["future_top"], serde_json::json!("keep-me"));
+            assert_eq!(frame["delta"]["future_delta"], serde_json::json!(42));
+            assert_eq!(frame["delta"]["type"], serde_json::json!("text_delta"));
+            assert_eq!(frame["index"], serde_json::json!(0));
+        }
+        assert_eq!(delta_text(&out, 0), "write to fixture@example.invalid");
     }
 }
