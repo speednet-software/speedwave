@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { notConfiguredMessage, withSetupGuidance } from '@speedwave/mcp-shared';
 import { createIssueTools } from './issue-tools.js';
-import { expectNotFoundTeachingError, expectPermissionTeachingError } from './test-helpers.js';
+import {
+  expectEmittedKeysDeclared,
+  expectNotFoundTeachingError,
+  expectPermissionTeachingError,
+  type SchemaNode,
+} from './test-helpers.js';
 import type { GitLabClient } from '../client.js';
 
 type MockClient = {
@@ -57,7 +62,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(mockIssues, null, 2),
+            text: JSON.stringify({ issues: mockIssues, count: 2 }, null, 2),
           },
         ],
       });
@@ -183,7 +188,7 @@ describe('issue-tools', () => {
         content: [
           {
             type: 'text',
-            text: JSON.stringify([], null, 2),
+            text: JSON.stringify({ issues: [], count: 0 }, null, 2),
           },
         ],
       });
@@ -217,6 +222,39 @@ describe('issue-tools', () => {
       const result = await handler!({ project_id: 'nonexistent/project' });
 
       expectNotFoundTeachingError(result);
+    });
+
+    it('declares the pass-through issue fields, including description, shared with getIssue', async () => {
+      const issue = {
+        id: 1,
+        iid: 1,
+        title: 'First Issue',
+        description: 'Steps to reproduce',
+        state: 'opened',
+        labels: ['bug'],
+        assignees: [{ username: 'dev' }],
+        web_url: 'https://gitlab.example.com/test/project/-/issues/1',
+      };
+      mockClient.listIssues.mockResolvedValue([issue]);
+
+      const tools = createIssueTools(mockClient as unknown as GitLabClient);
+      const list = tools.find((t) => t.tool.name === 'listIssues')!;
+      const get = tools.find((t) => t.tool.name === 'getIssue')!;
+      const listProps = list.tool.outputSchema!.properties as Record<string, SchemaNode>;
+      const getProps = get.tool.outputSchema!.properties as Record<string, SchemaNode>;
+      const itemProps = listProps.issues.items!.properties!;
+
+      expect(itemProps.description).toEqual({ type: 'string' });
+      expect(Object.keys(itemProps)).toEqual(expect.arrayContaining(Object.keys(issue)));
+      expect(itemProps).toEqual(getProps.issue.properties);
+      expect(listProps.count).toEqual({ type: 'number' });
+      expect(list.tool.example).toContain('{ issues, count }');
+
+      const emitted = expectEmittedKeysDeclared(
+        list.tool,
+        await list.handler({ project_id: 'test/project' })
+      );
+      expect(emitted).toEqual({ issues: [issue], count: 1 });
     });
   });
 

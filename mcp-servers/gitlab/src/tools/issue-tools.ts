@@ -15,6 +15,18 @@ import { withValidation } from './validation.js';
 import { TOOL_NAMES } from '../tool-names.js';
 import { IDENTITY_SCOPES } from '../identity-scopes.js';
 
+/** Documented fields of the raw GitLab issue object that listIssues and getIssue pass through. */
+const ISSUE_PROPERTIES = {
+  id: { type: 'number' },
+  iid: { type: 'number' },
+  title: { type: 'string' },
+  description: { type: 'string' },
+  state: { type: 'string' },
+  labels: { type: 'array' },
+  assignees: { type: 'array' },
+  web_url: { type: 'string' },
+};
+
 const listIssuesTool: Tool = {
   name: 'listIssues',
   description:
@@ -28,7 +40,7 @@ const listIssuesTool: Tool = {
   },
   keywords: ['gitlab', 'issues', 'list', 'bugs', 'tasks'],
   example:
-    'const issues = await gitlab.listIssues({ project_id: "speedwave/core", state: "opened" })',
+    'const { issues, count } = await gitlab.listIssues({ project_id: "speedwave/core", state: "opened" })',
   inputSchema: {
     type: 'object',
     properties: {
@@ -52,18 +64,9 @@ const listIssuesTool: Tool = {
       success: { type: 'boolean' },
       issues: {
         type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'number' },
-            iid: { type: 'number' },
-            title: { type: 'string' },
-            state: { type: 'string' },
-            labels: { type: 'array' },
-            web_url: { type: 'string' },
-          },
-        },
+        items: { type: 'object', properties: ISSUE_PROPERTIES },
       },
+      count: { type: 'number' },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -102,19 +105,7 @@ const getIssueTool: Tool = {
     type: 'object',
     properties: {
       success: { type: 'boolean' },
-      issue: {
-        type: 'object',
-        properties: {
-          id: { type: 'number' },
-          iid: { type: 'number' },
-          title: { type: 'string' },
-          description: { type: 'string' },
-          state: { type: 'string' },
-          labels: { type: 'array' },
-          assignees: { type: 'array' },
-          web_url: { type: 'string' },
-        },
-      },
+      issue: { type: 'object', properties: ISSUE_PROPERTIES },
       error: { type: 'string' },
     },
     required: ['success'],
@@ -304,7 +295,7 @@ export function createIssueTools(client: GitLabClient | null): ToolDefinition[] 
           limit?: number;
         };
         const result = await c.listIssues(project_id, options);
-        return jsonResult(result);
+        return jsonResult({ issues: result, count: result.length });
       }),
     },
     {
