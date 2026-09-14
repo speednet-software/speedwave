@@ -1219,6 +1219,7 @@ export class GitLabClient {
    * @param options.description - New issue description in markdown.
    * @param options.labels - Comma-separated label names to apply (replaces existing).
    * @param options.state_event - State transition: "close" or "reopen".
+   * @param options.assignee_ids - Replacement assignee user IDs; an empty array unassigns.
    */
   async updateIssue(
     projectId: string | number,
@@ -1228,6 +1229,7 @@ export class GitLabClient {
       description?: string;
       labels?: string;
       state_event?: string;
+      assignee_ids?: number[];
     }
   ): Promise<unknown> {
     return await this.gitlab.Issues.edit(projectId, issueIid, {
@@ -1235,6 +1237,7 @@ export class GitLabClient {
       description: options.description,
       labels: options.labels,
       stateEvent: options.state_event as 'close' | 'reopen' | undefined,
+      assigneeIds: options.assignee_ids,
     });
   }
 
@@ -1247,6 +1250,39 @@ export class GitLabClient {
     return await this.gitlab.Issues.edit(projectId, issueIid, {
       stateEvent: 'close',
     });
+  }
+
+  /**
+   * Lists comments/notes on an issue (default limit 20).
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param issueIid - Issue IID (internal ID within the project).
+   * @param limit - Maximum number of notes to return.
+   */
+  async listIssueNotes(
+    projectId: string | number,
+    issueIid: number,
+    limit: number = 20
+  ): Promise<unknown[]> {
+    const clamped = clampPageSize(limit, 20, 100);
+    const notes = await this.gitlab.IssueNotes.all(projectId, issueIid, {
+      perPage: clamped,
+      maxPages: 1,
+    });
+    return notes.slice(0, clamped);
+  }
+
+  /**
+   * Adds a comment/note (Markdown supported) to an issue.
+   * @param projectId - Project ID or path (e.g. "my-group/my-project" or 123).
+   * @param issueIid - Issue IID (internal ID within the project).
+   * @param body - Comment text (supports Markdown).
+   */
+  async createIssueNote(
+    projectId: string | number,
+    issueIid: number,
+    body: string
+  ): Promise<unknown> {
+    return await this.gitlab.IssueNotes.create(projectId, issueIid, body);
   }
 
   // ── Labels ────────────────────────────────────────────────────────────────────────────────────

@@ -619,14 +619,14 @@ mod tests {
                 mcp_os: String::new(),
                 claude: String::new(),
                 lima: String::new(),
-                entrypoint: "2026-07-13T12:00:01+02:00 ERROR FAIL superpowers: clone failed\n"
+                entrypoint: "2026-07-13T12:00:01+02:00 ERROR FAIL example-plugin: clone failed\n"
                     .to_string(),
                 audit_proxy: String::new(),
                 audit_hub: String::new(),
             },
             "proj",
         );
-        assert!(merged.contains("entrypoint | 2026-07-13T12:00:01+02:00 ERROR FAIL superpowers"));
+        assert!(merged.contains("entrypoint | 2026-07-13T12:00:01+02:00 ERROR FAIL example-plugin"));
     }
 
     #[test]

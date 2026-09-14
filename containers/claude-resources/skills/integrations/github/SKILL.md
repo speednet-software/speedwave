@@ -7,7 +7,7 @@ allowed-tools: mcp__speedwave-hub__search_tools mcp__speedwave-hub__execute_code
 
 # GitHub
 
-GitHub access goes through MCP Hub. You do not see `github__*` tools directly: they are discovered at call time via `search_tools` and invoked through `execute_code` using the injected `github` global. The token is normally obtained via GitHub OAuth App device flow (or a manually-provided fine-grained PAT as an advanced fallback); it is pre-configured at the worker and mounted read-only: never pass it, ask the user for it, or shell out to `gh` or the raw REST API.
+GitHub access goes through MCP Hub. You do not see `github__*` tools directly: they are discovered at call time via `search_tools` and invoked through `execute_code` using the injected `github` global. The token is normally obtained via GitHub OAuth App device flow (or a manually-provided fine-grained PAT as an advanced fallback); it is pre-configured at the worker and mounted read-only: never pass it, ask the user for it, or shell out to a host CLI or the raw REST API.
 
 ## Workflow
 

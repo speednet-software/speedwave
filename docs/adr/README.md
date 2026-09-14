@@ -83,7 +83,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-074](ADR-074-cli-host-bridge-reconstruction.md)                   | Reconstruct host-bridge env from disk for off-Desktop compose renders                                                       | Accepted                                                |
 | [ADR-075](ADR-075-remove-speaker-diarization.md)                       | Remove speaker diarization — clean timestamped transcript, full sherpa-onnx removal                                         | Accepted                                                |
 | [ADR-076](ADR-076-mdm-enforceable-otlp-telemetry.md)                   | MDM-enforceable OTLP telemetry — user self-service + org policy via a system managed-config file                            | Accepted                                                |
-| [ADR-077](ADR-077-bundled-official-anthropic-plugins.md)               | Bundle official Anthropic Claude Code plugins (runtime install at start + pre-baked TS server)                              | Accepted                                                |
+| [ADR-077](ADR-077-bundled-official-anthropic-plugins.md)               | Bundle official Anthropic Claude Code plugins (runtime install at start + pre-baked TS server)                              | Accepted (bundled set revised by ADR-087)               |
 | [ADR-078](ADR-078-claude-hook-registration.md)                         | Claude Code hook registration — hooks.json declarations merged into settings.json at container start                        | Accepted                                                |
 | [ADR-079](ADR-079-identity-metadata-and-teaching-errors.md)            | Identity metadata trio and the teaching-error contract: `_meta` identity companions + structured validation errors          | Accepted                                                |
 | [ADR-080](ADR-080-wsl2-mirrored-container-host-relay.md)               | Container↔host relay for WSL2 mirrored networking — loopback bind + guest-side socat relay so containers reach host bridges | Accepted                                                |
@@ -93,6 +93,7 @@ This directory contains all Architecture Decision Records (ADRs) for Speedwave. 
 | [ADR-084](ADR-084-policy-v3-open-rule-id-set.md)                       | Policy.json v3 — open rule-ID set replacing the fixed category enum, amending ADR-083                                       | Accepted                                                |
 | [ADR-085](ADR-085-windows-vulkan-transcription.md)                     | Windows Vulkan backend for whisper transcription: runtime GPU-class probe, bundled loader, pinned SDK                       | Accepted                                                |
 | [ADR-086](ADR-086-windows-code-signing-azure-artifact-signing.md)      | Windows code signing via Azure Artifact Signing: OIDC login, in-build `signCommand`, bundled-resource pass                  | Accepted                                                |
+| [ADR-087](ADR-087-vendored-pocock-skills.md)                           | Vendored Matt Pocock skills as `speedwave-*` core skills; `superpowers` retired from the bundled plugin set                 | Accepted                                                |
 
 ## Creating a New ADR
 

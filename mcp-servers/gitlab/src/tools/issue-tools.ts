@@ -1,5 +1,5 @@
 /**
- * Issue Tools - 5 tools for GitLab issue operations
+ * Issue Tools - 7 tools for GitLab issue operations
  */
 
 import {
@@ -177,10 +177,15 @@ const createIssueTool: Tool = {
 
 const updateIssueTool: Tool = {
   name: 'updateIssue',
-  description: 'Update an issue',
+  description:
+    'Update an issue: title, description, labels (replaces the set), state, or assignees (replaces the set).',
   annotations: WRITE_ANNOTATIONS,
-  _meta: { [META_KEYS.DEFER_LOADING]: true },
-  keywords: ['gitlab', 'issue', 'update', 'edit', 'modify'],
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
+  keywords: ['gitlab', 'issue', 'update', 'edit', 'modify', 'assign', 'assignee'],
   example:
     'await gitlab.updateIssue({ project_id: "speedwave/core", issue_iid: 42, title: "Updated title", state_event: "close" })',
   inputSchema: {
@@ -195,6 +200,11 @@ const updateIssueTool: Tool = {
       description: { type: 'string', description: 'New description' },
       labels: { type: 'string', description: 'Comma-separated labels' },
       state_event: { type: 'string', enum: ['close', 'reopen'], description: 'State event' },
+      assignee_ids: {
+        type: 'array',
+        items: { type: 'number' },
+        description: `Replacement assignee user IDs (an empty array unassigns). Does NOT accept 'me': resolve your own id via ${TOOL_NAMES.GET_CURRENT_USER} first.`,
+      },
     },
     required: ['project_id', 'issue_iid'],
   },
@@ -230,6 +240,14 @@ const updateIssueTool: Tool = {
         project_id: 'my-group/my-project',
         issue_iid: 123,
         state_event: 'close',
+      },
+    },
+    {
+      description: 'Assign issue to a user by id',
+      input: {
+        project_id: 'my-group/my-project',
+        issue_iid: 123,
+        assignee_ids: [7],
       },
     },
   ],
@@ -273,6 +291,107 @@ const closeIssueTool: Tool = {
     {
       description: 'Close issue',
       input: { project_id: 'my-group/my-project', issue_iid: 123 },
+    },
+  ],
+};
+
+const listIssueNotesTool: Tool = {
+  name: 'listIssueNotes',
+  description: 'List notes/comments on an issue',
+  annotations: READ_ONLY_ANNOTATIONS,
+  _meta: { [META_KEYS.DEFER_LOADING]: true },
+  keywords: ['gitlab', 'issue', 'notes', 'comments'],
+  example:
+    'const notes = await gitlab.listIssueNotes({ project_id: "speedwave/core", issue_iid: 42 })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project_id: { type: ['string', 'number'], description: 'Project ID or path' },
+      issue_iid: {
+        type: ['number', 'string'],
+        description: 'Issue IID as a number or string, e.g. 42 or "#42"',
+      },
+      limit: { type: 'number', description: 'Max results (default 20)' },
+    },
+    required: ['project_id', 'issue_iid'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      notes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'number' },
+            body: { type: 'string' },
+            author: { type: 'object' },
+            created_at: { type: 'string' },
+          },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'List issue notes',
+      input: { project_id: 'my-group/my-project', issue_iid: 123 },
+    },
+  ],
+};
+
+const createIssueNoteTool: Tool = {
+  name: 'createIssueNote',
+  description:
+    'Add a comment/note to an issue. Posted as the currently authenticated GitLab user (the configured token owner).',
+  annotations: WRITE_ANNOTATIONS,
+  _meta: {
+    [META_KEYS.DEFER_LOADING]: true,
+    [META_KEYS.USER_SCOPED]: true,
+    [META_KEYS.CURRENT_USER_TOOL]: TOOL_NAMES.GET_CURRENT_USER,
+  },
+  keywords: ['gitlab', 'issue', 'comment', 'note'],
+  example:
+    'await gitlab.createIssueNote({ project_id: "speedwave/core", issue_iid: 42, body: "On it!" })',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project_id: { type: ['string', 'number'], description: 'Project ID or path' },
+      issue_iid: {
+        type: ['number', 'string'],
+        description: 'Issue IID as a number or string, e.g. 42 or "#42"',
+      },
+      body: { type: 'string', description: 'Comment body' },
+    },
+    required: ['project_id', 'issue_iid', 'body'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      success: { type: 'boolean' },
+      note: {
+        type: 'object',
+        properties: {
+          id: { type: 'number' },
+          body: { type: 'string' },
+          author: { type: 'object' },
+        },
+      },
+      error: { type: 'string' },
+    },
+    required: ['success'],
+  },
+  inputExamples: [
+    {
+      description: 'Add comment to issue',
+      input: {
+        project_id: 'my-group/my-project',
+        issue_iid: 123,
+        body: 'Looks good!',
+      },
     },
   ],
 };
@@ -334,6 +453,7 @@ export function createIssueTools(client: GitLabClient | null): ToolDefinition[] 
           description?: string;
           labels?: string;
           state_event?: string;
+          assignee_ids?: number[];
         };
         const result = await c.updateIssue(project_id, issue_iid, options);
         return jsonResult(result);
@@ -347,6 +467,30 @@ export function createIssueTools(client: GitLabClient | null): ToolDefinition[] 
           issue_iid: number;
         };
         const result = await c.closeIssue(project_id, issue_iid);
+        return jsonResult(result);
+      }),
+    },
+    {
+      tool: listIssueNotesTool,
+      handler: withValidation(client, async (c, params) => {
+        const { project_id, issue_iid, limit } = params as {
+          project_id: string | number;
+          issue_iid: number;
+          limit?: number;
+        };
+        const result = await c.listIssueNotes(project_id, issue_iid, limit);
+        return jsonResult(result);
+      }),
+    },
+    {
+      tool: createIssueNoteTool,
+      handler: withValidation(client, async (c, params) => {
+        const { project_id, issue_iid, body } = params as {
+          project_id: string | number;
+          issue_iid: number;
+          body: string;
+        };
+        const result = await c.createIssueNote(project_id, issue_iid, body);
         return jsonResult(result);
       }),
     },

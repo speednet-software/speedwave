@@ -9,7 +9,7 @@ import { createToolDefinitions } from './index.js';
 
 const ALL_TOOLS = createToolDefinitions(null).map((td) => td.tool);
 
-const EXPECTED_TOOL_COUNT = 48;
+const EXPECTED_TOOL_COUNT = 50;
 
 describe('GitLab tool metadata', () => {
   it(`should expose exactly ${EXPECTED_TOOL_COUNT} tools`, () => {

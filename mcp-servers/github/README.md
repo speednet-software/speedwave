@@ -46,6 +46,8 @@ Isolated GitHub MCP server with per-service token isolation for Speedwave.
 
 Workflow-run logs and artifacts are returned as short-lived download URLs (GitHub serves them as ZIP archives) — the worker does not download or unpack them.
 
+`listPrComments` and `createPrComment` sit on GitHub's shared issue-comments endpoint, so their `number` may be an issue number as well as a pull request number.
+
 ## File Structure
 
 ```
