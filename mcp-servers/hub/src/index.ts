@@ -141,7 +141,10 @@ Available globals:
   ⚠️ Returns { results: T[], errors: [{index, error}] } - ALWAYS destructure!
   ✅ const { results } = await batch([...])
   ❌ const data = await batch([...]); data.map(...) // WRONG: data is not array!
-- paginate(): Async generator for large datasets
+- paginate(fetcher, config): Async generator for large datasets
+  fetcher(offset, limit) returns one page: { ids, total_count }, { issues, total_count }, ... or a bare array (arrays under other keys throw)
+  config: { limit, offset, maxItems, maxPages, stopWhen }; consume with collectPages/findInPages/countInPages/filterPages/mapPages/takeFromPages
+  const allIds = await collectPages(paginate((offset, limit) => redmine.listIssueIds({ status: "open", offset, limit }), { maxItems: 500 }));
 
 Plugin services use the same dot syntax. A dashed plugin slug is camelCased into its global (e.g. \`my-plugin\` → \`myPlugin.someTool()\`); search_tools returns this as the \`sandboxGlobal\` field whenever it differs from the service name.
 
