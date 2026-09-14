@@ -1,0 +1,20 @@
+{
+  "repo": "desert-ant-labs/redact",
+  "revision": "v0.4.0",
+  "model_version": "0.4.0",
+  "files": {
+    "redact.tflite": {
+      "sha256": "ee36727f07e3237569e71427bfe661463a82e526f7e97e92b0fa583cad16ed27",
+      "size": 24529472
+    },
+    "tokenizer.json": {
+      "sha256": "f2c1a2749a3ec41e56d9b65221918391f62d339869f8ac937fc3c581d99c74ec"
+    },
+    "labels.json": {
+      "sha256": "228835734235f85ec4bf31391a296aa6e8a36684e1171e841ac94f7b3f9b430a"
+    },
+    "redact_meta.json": {
+      "sha256": "9aba44b6d583f85322e8ebad22c8ff140003c1b462993b17c0fe4da9c8ca71e4"
+    }
+  }
+}

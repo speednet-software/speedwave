@@ -33,6 +33,9 @@ NPM := npm
 NPX := npx
 endif
 
+# Stdlib-only Python for the pii-ner model converter (no venv, no pip).
+PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+
 # Isolate dev builds from production (~/.speedwave/).
 # Unit tests use fake_home/tmpdir — they ignore this variable.
 # E2E tests backup/restore this directory (not production ~/.speedwave/).
@@ -306,7 +309,7 @@ build-desktop: generate-installer-nsh
 	@if [ "$(OS)" = "Windows_NT" ]; then bash scripts/check-vulkan-path-budget.sh; fi
 	cd desktop/src-tauri && cargo build
 
-build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh
+build-tauri: build-cli-release build-angular build-mcp build-os-cli download-nodejs generate-installer-nsh prepare-pii-ner-model
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ]; then "$(MAKE)" download-wsl-resources; fi
 	@bash scripts/bundle-build-context.sh
@@ -482,7 +485,7 @@ test-desktop-group-run:
 # shared-path-safe after test-build-phase; the one lane that touches real repo
 # paths is the serial test-desktop-group-run.
 test-run-lanes: test-rust-run test-angular-run test-entrypoint \
-                test-desktop-config test-ci test-desktop-group-run test-proxy
+                test-desktop-config test-ci test-desktop-group-run test-proxy test-pii-ner-tools
 
 test-proxy: guard-not-prod-data-dir
 	cd containers/proxy && cargo test --locked
@@ -583,6 +586,22 @@ test-mcp-office-py:
 	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
 	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
+
+# ── PII NER model (crates/pii-ner) ───────────────────────────────────────────
+# Stdlib-only Python: downloads the pinned Redact release from Hugging Face (sha256-verified)
+# and converts redact.tflite into the bundled artifact; idempotent when the artifact is current.
+PII_NER_ARTIFACT_DIR := desktop/src-tauri/pii-ner
+PII_NER_TOOLS := crates/pii-ner/tools
+
+prepare-pii-ner-model:
+	@$(PYTHON) $(PII_NER_TOOLS)/fetch_and_convert.py --out $(PII_NER_ARTIFACT_DIR)
+
+test-pii-ner-tools:
+	@$(PYTHON) -m unittest discover -s $(PII_NER_TOOLS) -p 'test_*.py'
+	@echo "✅ pii-ner converter tests passed"
+
+clean-pii-ner-model:
+	rm -rf $(PII_NER_ARTIFACT_DIR)
 
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
@@ -1022,7 +1041,7 @@ clean-wsl-resources:
 # ── Development ──────────────────────────────────────────────────────────────
 
 ifeq ($(OS),Windows_NT)
-dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-installer-nsh
+dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-installer-nsh prepare-pii-ner-model
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@"$(MAKE)" build-cli && "$(MAKE)" build-os-cli && "$(MAKE)" build-mcp
 	@echo "Preparing build context..."
@@ -1034,7 +1053,7 @@ dev: guard-not-prod-data-dir download-nodejs download-wsl-resources generate-ins
 	@"$(MAKE)" verify-bundled-assets
 	@bash scripts/dev-tauri-windows.sh
 else
-dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh
+dev: guard-not-prod-data-dir build-cli build-os-cli build-mcp download-nodejs generate-installer-nsh prepare-pii-ner-model
 	@command -v cargo-tauri >/dev/null 2>&1 || { echo "❌ cargo-tauri not found. Install: cargo install tauri-cli"; exit 1; }
 	@if [ "$$(uname)" = "Darwin" ]; then "$(MAKE)" download-lima; fi
 	@echo "Preparing build context..."
