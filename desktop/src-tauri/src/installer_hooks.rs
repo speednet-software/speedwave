@@ -163,14 +163,28 @@ mod tests {
             SWEEP_PS1.contains(r"\nodejs\"),
             "sweep.ps1 must target $instDir\\nodejs\\ workers"
         );
-        let cli_target = format!(
-            r"\{}\{}",
-            speedwave_runtime::consts::CLI_BIN_SUBDIR,
-            speedwave_runtime::consts::cli_binary_filename(true)
+        let cli_dir = format!(r"'\{}\'", speedwave_runtime::consts::CLI_BIN_SUBDIR);
+        assert!(
+            SWEEP_PS1.contains(&cli_dir),
+            "sweep.ps1 must target $dataDir{cli_dir} (CLI)"
+        );
+        // The filename is per-instance, so the script mirrors installed_cli_filename
+        // instead of carrying a literal. Rename the rule there and here together.
+        let prod = speedwave_runtime::consts::installed_cli_filename(
+            true,
+            std::path::Path::new("/home/u/.speedwave"),
         );
         assert!(
-            SWEEP_PS1.contains(&cli_target),
-            "sweep.ps1 must target $dataDir{cli_target} (CLI)"
+            SWEEP_PS1.contains(&format!("'{prod}'")),
+            "sweep.ps1 must fall back to '{prod}' for the production data dir"
+        );
+        assert!(
+            SWEEP_PS1.contains(r"-replace '^speedwave-', ''"),
+            "sweep.ps1 must strip the 'speedwave-' prefix like derive_cli_binary_name_from"
+        );
+        assert!(
+            SWEEP_PS1.contains("Split-Path $dataDir -Leaf"),
+            "sweep.ps1 must take the instance from the data-dir basename"
         );
     }
 
