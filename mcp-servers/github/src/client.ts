@@ -1013,10 +1013,11 @@ export class GitHubClient {
   }
 
   /**
-   * Lists general (issue-style) comments on a pull request.
+   * Lists general (non-review) comments on a pull request or an issue, from GitHub's shared
+   * comments endpoint.
    * @param owner - Repository owner login
    * @param repo - Repository name
-   * @param number - Pull request number
+   * @param number - Pull request or issue number
    * @param options - Pagination options
    * @param options.limit - Maximum number of comments to return (default 100 when omitted; any positive value honored)
    */
@@ -1036,10 +1037,11 @@ export class GitHubClient {
   }
 
   /**
-   * Adds a general (issue-style) comment to a pull request.
+   * Adds a general (non-review) comment to a pull request or an issue, via GitHub's shared
+   * comments endpoint.
    * @param owner - Repository owner login
    * @param repo - Repository name
-   * @param number - Pull request number
+   * @param number - Pull request or issue number
    * @param body - Comment text (Markdown)
    */
   async createPrComment(

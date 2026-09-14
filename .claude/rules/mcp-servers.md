@@ -24,6 +24,8 @@ New tool validation errors (missing/invalid params, not-found lookups, teaching 
 
 **No silent partial effect:** a tool call that partially succeeds (e.g. some items of a batch updated, some rejected) must say so in its result, never return a bare success for a partial outcome. Silent partial success is indistinguishable from full success to the calling model and to the user.
 
+**`outputSchema` is the result contract, not decoration.** Agents read it through `search_tools full_schema` and write sandbox code against it, so apart from the `success`/`error` wrapper every tool declares (Redmine: `successResultSchema`) it names exactly the keys the handler emits: list tools `{ <items key>: [...], count }`, Redmine ids-only tools `{ ids, total_count }`, pass-through results the raw fields a caller plans on (e.g. `description`). The tool's vitest file pins that alignment by parsing the emitted JSON and asserting its keys are declared (`expectEmittedKeysDeclared` in `gitlab/src/tools/test-helpers.ts`).
+
 ## Adding a built-in worker touches many places (checklist)
 
 `consts.rs` service descriptor (`TOGGLEABLE_MCP_SERVICES`, resources on the descriptor) + `BUILT_IN_SERVICE_IDS` · `build.rs::IMAGES` entry with `hash_inputs` + `${IMAGE_*}` placeholder + resource placeholders in `compose.template.yml` + bundle-script list (all test-guarded) · `tzdata` in the image (MANUAL, nothing catches a miss) · hub env `WORKER_<SVC>_URL` wiring · optional `containers/claude-resources/*/integrations/<config_key>/` resources (+ BATS on/off test in `_tests/entrypoint/entrypoint.bats`). Grep an existing worker (e.g. `redmine`) end-to-end rather than trusting this list to be exhaustive.

@@ -27,7 +27,7 @@ Desktop.ini
 .claude/*.lock
 .claude/worktrees/
 
-# Superpowers skills (local tooling, not part of the project)
+# Host-side Claude Code plugins (superpowers) write local planning docs here.
 docs/superpowers/
 
 # Environment / secrets
