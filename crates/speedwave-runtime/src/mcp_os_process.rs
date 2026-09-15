@@ -234,6 +234,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_mcp_os_alive_in_true_when_pid_alive_and_port_listens() {
         use std::net::TcpListener;
         let tmp = tempfile::tempdir().unwrap();
@@ -255,6 +256,7 @@ mod tests {
     /// the replacement's freshly-written token mount.
     #[cfg(unix)]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     #[serial(env)]
     fn respawn_does_not_delete_new_token_mount() {
         let tmp = tempfile::tempdir().unwrap();
@@ -292,6 +294,7 @@ mod tests {
     /// when the singleton spawns.
     #[cfg(unix)]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     #[serial(env)]
     fn spawn_migrates_legacy_three_file_layout() {
         let tmp = tempfile::tempdir().unwrap();
@@ -347,6 +350,7 @@ mod tests {
     /// Gated behind `mcp-os-bundle-e2e` (run via `make test-mcp-os-bundle`).
     #[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]
     #[test]
+    #[serial_test::parallel(host_addressing)]
     #[serial(env)]
     fn upgrade_path_with_real_bundled_mcp_os() {
         let script = "../../desktop/src-tauri/mcp-os/os/dist/index.js";
