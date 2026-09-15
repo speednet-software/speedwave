@@ -393,7 +393,7 @@ fn resolve_pii_ner_artifact_dir_inner(
         home,
         dev_dir.map(|d| d.join(crate::bundle::PII_NER_MANIFEST)),
     )?;
-    manifest.parent().map(Path::to_path_buf)
+    manifest.parent().map(std::path::Path::to_path_buf)
 }
 
 /// Build a `<repo-root>/<rel>` path for the dev-tree fallback. `None` when out of tree.
