@@ -27,6 +27,8 @@ $lockDir = "$dest\.bundle.lock"
 # beside it serializes its writers.
 $wasmPkgDir = if ($env:BUNDLE_WASM_PKG_DIR) { $env:BUNDLE_WASM_PKG_DIR } else { 'mcp-servers/policies/wasm-pkg' }
 $wasmParentDir = Split-Path -Parent $wasmPkgDir
+# A bare out dir name has no parent part: use the current dir, like the .sh `dirname`.
+if (-not $wasmParentDir) { $wasmParentDir = '.' }
 $wasmLockDir = Join-Path $wasmParentDir '.wasm-build.lock'
 New-Item -ItemType Directory -Path $wasmParentDir -Force | Out-Null
 
@@ -46,8 +48,11 @@ function Test-LockHolderDead {
     }
 }
 
-# Acquire-Lock <dir>: mkdir-based mutex (mirrors the .sh acquire_lock); reclaims a lock whose
-# holder PID is dead. Returns $true when acquired (caller arranges finally release).
+# Locks this run owns; the finally below releases only these (mirrors the .sh cleanup stack).
+$heldLocks = [System.Collections.Generic.List[string]]::new()
+
+# Acquire-Lock <dir>: mkdir-based mutex (mirrors the .sh acquire_lock); reclaims a lock whose holder
+# PID is dead. Registers the lock before the PID write, so a failed write still releases it.
 function Acquire-Lock {
     param([string]$dir)
     while ($true) {
@@ -62,16 +67,15 @@ function Acquire-Lock {
             Start-Sleep -Milliseconds 300
         }
     }
+    $heldLocks.Add($dir)
     "$PID" | Out-File -FilePath "$dir\pid" -Encoding ascii
     return $true
 }
 
-# Acquire both locks, then wrap main script in try/finally to release them both.
+# The acquisitions sit inside the try, so the finally also covers a failure while taking a lock.
+try {
 Acquire-Lock $lockDir | Out-Null
 Acquire-Lock $wasmLockDir | Out-Null
-
-# From here both locks are held; the finally releases them on any exit.
-try {
 
 # Clean destination
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
@@ -211,6 +215,6 @@ Stage-Host-Worker -worker oauth -bundle oauth
 Write-Host "Build context bundled into $dest"
 
 } finally {
-    # Release both mutexes on any exit (mirrors the .sh trap).
-    Remove-Item -Recurse -Force $lockDir,$wasmLockDir -ErrorAction SilentlyContinue
+    # Release only the mutexes this run took, on any exit (mirrors the .sh trap).
+    if ($heldLocks.Count -gt 0) { Remove-Item -Recurse -Force $heldLocks -ErrorAction SilentlyContinue }
 }
