@@ -678,16 +678,17 @@ describe('http-bridge', () => {
   });
 
   describe('createOsBridge', () => {
-    it('should define all 25 OS methods', () => {
+    it('should define all 26 OS methods', () => {
       const bridge = createOsBridge();
 
-      expect(Object.keys(bridge).length).toBe(25);
+      expect(Object.keys(bridge).length).toBe(26);
 
       // Reminders
       expect(bridge).toHaveProperty('listReminderLists');
       expect(bridge).toHaveProperty('listReminders');
       expect(bridge).toHaveProperty('getReminder');
       expect(bridge).toHaveProperty('createReminder');
+      expect(bridge).toHaveProperty('updateReminder');
       expect(bridge).toHaveProperty('completeReminder');
 
       // Calendar

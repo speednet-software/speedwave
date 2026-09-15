@@ -124,7 +124,7 @@ fn apply_llm_config_proxy(
                     format!("Served via Speedwave LLM proxy ({})", entry.id),
                 ),
                 (
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                    consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV.to_string(),
                     "1".to_string(),
                 ),
             ]);
@@ -216,7 +216,7 @@ fn apply_llm_config_legacy_in(
                     custom_model_description(provider),
                 ),
                 (
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                    consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV.to_string(),
                     "1".to_string(),
                 ),
                 (
@@ -342,7 +342,7 @@ pub fn anthropic_login_unset_keys() -> &'static [&'static str] {
         "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
         "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
         "ANTHROPIC_CUSTOM_HEADERS",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV,
         // A local model's window must never cap or un-enforce catalog models.
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
         "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",

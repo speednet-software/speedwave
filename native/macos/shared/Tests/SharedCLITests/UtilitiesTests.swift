@@ -36,6 +36,13 @@ final class SharedCLITests: XCTestCase {
         XCTAssertEqual(result, original)
     }
 
+    func testISO8601StringWithZoneNeverCollapsesZeroOffsetToZ() throws {
+        let date = try XCTUnwrap(parseISO8601("2025-06-15T14:30:00Z"))
+        XCTAssertEqual(iso8601String(from: date, timeZone: TimeZone(identifier: "UTC")!), "2025-06-15T14:30:00+00:00")
+        XCTAssertEqual(iso8601String(from: date, timeZone: TimeZone(identifier: "Europe/Warsaw")!), "2025-06-15T16:30:00+02:00")
+        XCTAssertEqual(iso8601String(from: date, timeZone: TimeZone(identifier: "Asia/Kolkata")!), "2025-06-15T20:00:00+05:30")
+    }
+
     func testParseISO8601InvalidFormat() {
         let badDate = "March 1st, 2025"
         XCTAssertNil(parseISO8601(badDate))

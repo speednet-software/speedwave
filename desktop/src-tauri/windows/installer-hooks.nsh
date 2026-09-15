@@ -39,8 +39,8 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `# Consumed by: NSIS PREINSTALL hook, WiX CustomAction, setup_wizard::link_cli.$\r$\n`
   FileWrite $0 `# Env: SPW_INSTDIR (Tauri app dir) + SPW_DATA_DIR (speedwave data dir).$\r$\n`
   FileWrite $0 `# Args: -Mode full|runtime$\r$\n`
-  FileWrite $0 `#   full    (default; install-time): kill Speedwave.exe + nodejs\*.exe + bin\speedwave.exe.$\r$\n`
-  FileWrite $0 `#   runtime (Tauri Desktop pre-link): kill only bin\speedwave.exe — Tauri must NOT$\r$\n`
+  FileWrite $0 `#   full    (default; install-time): kill Speedwave.exe + nodejs\*.exe + the instance CLI.$\r$\n`
+  FileWrite $0 `#   runtime (Tauri Desktop pre-link): kill only bin\<instance>.exe — Tauri must NOT$\r$\n`
   FileWrite $0 `#           target its own workers or itself or the sweep deadlocks on its own locks.$\r$\n`
   FileWrite $0 `# Exits: 0 ok, 2 missing env, 3 enum failed, 4 lock timeout.$\r$\n`
   FileWrite $0 `# See ADR-048 for design constraints (string concat, OrdinalIgnoreCase, CIM).$\r$\n`
@@ -67,7 +67,15 @@ Var SpeedwaveDataDirOverride
   FileWrite $0 `# String concat per ADR-048.$\r$\n`
   FileWrite $0 `$$nodePrefix = $$instDir + '\nodejs\'$\r$\n`
   FileWrite $0 `$$desktopExe = $$instDir + '\Speedwave.exe'$\r$\n`
-  FileWrite $0 `$$cliExe = $$dataDir + '\bin\speedwave.exe'$\r$\n`
+  FileWrite $0 `$\r$\n`
+  FileWrite $0 `# Installed CLI filename carries the instance; mirrors consts::installed_cli_filename.$\r$\n`
+  FileWrite $0 `$$instance = (Split-Path $$dataDir -Leaf) -replace '^\.+', ''$\r$\n`
+  FileWrite $0 `if ($$instance -eq 'speedwave') {$\r$\n`
+  FileWrite $0 `  $$cliName = 'speedwave.exe'$\r$\n`
+  FileWrite $0 `} else {$\r$\n`
+  FileWrite $0 `  $$cliName = 'speedwave-' + ($$instance -replace '^speedwave-', '') + '.exe'$\r$\n`
+  FileWrite $0 `}$\r$\n`
+  FileWrite $0 `$$cliExe = $$dataDir + '\bin\' + $$cliName$\r$\n`
   FileWrite $0 `$\r$\n`
   FileWrite $0 `# Runtime mode: scope to the CLI binary only (Tauri Desktop is itself running$\r$\n`
   FileWrite $0 `# the sweep — killing its own workers / self deadlocks the lock-poll).$\r$\n`

@@ -284,6 +284,27 @@ describe('SessionStatsComponent', () => {
     });
   });
 
+  describe('context window sized by the conversation model', () => {
+    it('a 1M-window conversation model reports 65%, not a 200k subagent window clamped to 100%', () => {
+      fixture.componentRef.setInput('stats', {
+        session_id: 'abc',
+        total_cost: 0.5,
+        context_usage: {
+          input_tokens: 100_000,
+          output_tokens: 1_000,
+          cache_read_tokens: 550_000,
+          cache_write_tokens: 0,
+        },
+        context_window_size: 1_000_000,
+        total_output_tokens: 1_000,
+      });
+      fixture.detectChanges();
+      expect(component.ctxTotal()).toBe(650_000);
+      expect(component.ctxUsedMax()).toBe('650k/1M');
+      expect(component.ctxPct()).toBe(65);
+    });
+  });
+
   // ── edge cases ─────────────────────────────────────────────────────────
   describe('edge cases', () => {
     // The strip is one fixed shape: every segment shows zeros until live data

@@ -518,7 +518,7 @@ pub async fn add_project(
     ide_bridge: tauri::State<'_, SharedIdeBridge>,
 ) -> Result<(), String> {
     let Ok(_transition_guard) = crate::project_cmd::PROJECT_TRANSITION_LOCK.try_lock() else {
-        return Err("A project switch is already in progress".to_string());
+        return Err(crate::project_cmd::PROJECT_TRANSITION_BUSY_ERR.to_string());
     };
     // Start subsystems on-demand (e.g. after factory reset / fresh install)
     crate::ensure_mcp_os_running(&mcp_os, &app);
@@ -635,35 +635,57 @@ pub async fn add_project(
     Ok(())
 }
 
-/// Core: compose_down → runtime::remove_project. Extracted for tests; on compose_down
-/// failure the config wipe is skipped so the user can retry.
+/// Core: check_fn → ensure_ready → compose_down → remove_fn. Extracted for tests; every
+/// failure before the wipe leaves the project registered so the user can retry.
 pub(crate) fn remove_project_core(
     name: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
+    check_fn: &dyn Fn(&str) -> Result<(), String>,
     remove_fn: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), String> {
-    if rt.is_available() {
-        rt.compose_down(name).map_err(|e| {
-            log::error!("compose_down('{name}') failed: {e}");
-            format!("Failed to stop containers for '{name}': {e}")
-        })?;
-    }
+    // Reject the active or unknown project before paying for a VM boot and a teardown;
+    // `remove_fn` re-checks under the config lock right before the wipe.
+    check_fn(name)?;
+    // Unregistering deletes the rendered compose.yml, after which nothing can reap the
+    // containers: a stopped engine (Lima VM after app exit) is started, never skipped.
+    rt.ensure_ready().map_err(|e| {
+        log::error!("ensure_ready before removing '{name}' failed: {e:#}");
+        format!(
+            "Failed to start the container engine to clean up '{name}': {}",
+            speedwave_runtime::build::user_facing_engine_error(&e)
+        )
+    })?;
+    rt.compose_down(name).map_err(|e| {
+        log::error!("compose_down('{name}') failed: {e:#}");
+        format!(
+            "Failed to stop containers for '{name}': {}",
+            speedwave_runtime::build::user_facing_engine_error(&e)
+        )
+    })?;
     log::info!("removing project name={name}");
     remove_fn(name)
 }
 
-/// Tears down a project's containers and unregisters it.
-/// Runtime layer rejects the active project (sentinel-prefixed error for the UI).
+/// Tears down a project's containers and unregisters it. Holds the transition lock
+/// like `switch_project`, so a concurrent switch cannot restart what this stops.
 #[tauri::command]
 pub async fn remove_project(name: String) -> Result<(), String> {
+    let Ok(_transition_guard) = crate::project_cmd::PROJECT_TRANSITION_LOCK.try_lock() else {
+        return Err(crate::project_cmd::PROJECT_TRANSITION_BUSY_ERR.to_string());
+    };
     tokio::task::spawn_blocking(move || {
         let rt = speedwave_runtime::runtime::detect_runtime();
-        remove_project_core(&name, &rt, &|n| {
-            speedwave_runtime::project::remove_project(n).map_err(|e| {
-                log::error!("failed to remove project: {e}");
-                e.to_string()
-            })
-        })
+        remove_project_core(
+            &name,
+            &rt,
+            &|n| speedwave_runtime::project::check_removable(n).map_err(|e| e.to_string()),
+            &|n| {
+                speedwave_runtime::project::remove_project(n).map_err(|e| {
+                    log::error!("failed to remove project: {e}");
+                    e.to_string()
+                })
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4868,17 +4890,94 @@ mod tests {
 
     use std::cell::RefCell;
 
+    fn ok_check(_: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     #[test]
     fn remove_project_core_happy_path() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let removed = RefCell::new(Vec::<String>::new());
-        let result = remove_project_core("alpha", &rt, &|n| {
+        let result = remove_project_core("alpha", &rt, &ok_check, &|n| {
             removed.borrow_mut().push(n.to_string());
             Ok(())
         });
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(handles.ensure_ready_count(), 1);
         assert_eq!(handles.down_projects(), vec!["alpha"]);
         assert_eq!(*removed.borrow(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn remove_project_core_starts_a_stopped_engine_before_teardown() {
+        // The mock reports the VM as unavailable (stopped): the teardown still runs,
+        // through a boot, and only then is the project unregistered.
+        let (rt, handles) = MockRuntimeBuilder::new().with_is_available(false).build();
+        let removed = RefCell::new(Vec::<String>::new());
+        let result = remove_project_core("alpha", &rt, &ok_check, &|n| {
+            removed.borrow_mut().push(n.to_string());
+            Ok(())
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(handles.ensure_ready_count(), 1);
+        assert_eq!(handles.down_projects(), vec!["alpha"]);
+        assert_eq!(*removed.borrow(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn remove_project_core_unready_engine_keeps_the_project() {
+        // A missing or wedged VM is a failed boot, never a silent skip: a probe failure
+        // must not read as "nothing to reap" and wipe the config.
+        let (rt, handles) = MockRuntimeBuilder::new()
+            .with_ensure_ready_error(
+                "Lima VM 'speedwave' not found. Run Speedwave.app setup wizard to create it.",
+            )
+            .build();
+        let remove_calls = RefCell::new(0u32);
+        let result = remove_project_core("alpha", &rt, &ok_check, &|_| {
+            *remove_calls.borrow_mut() += 1;
+            Ok(())
+        });
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to start the container engine to clean up 'alpha'")
+                && err.contains("not found"),
+            "expected user-facing engine-start error, got: {err}"
+        );
+        assert!(handles.down_projects().is_empty());
+        assert_eq!(
+            *remove_calls.borrow(),
+            0,
+            "config wipe must not run when the teardown is impossible"
+        );
+    }
+
+    #[test]
+    fn remove_project_core_rejects_before_touching_the_engine() {
+        let (rt, handles) = MockRuntimeBuilder::new().build();
+        let remove_calls = RefCell::new(0u32);
+        let result = remove_project_core(
+            "alpha",
+            &rt,
+            &|n| {
+                Err(format!(
+                    "{}Cannot remove the active project '{n}'.",
+                    speedwave_runtime::project::REMOVE_ACTIVE_PROJECT_ERR_PREFIX
+                ))
+            },
+            &|_| {
+                *remove_calls.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with(speedwave_runtime::project::REMOVE_ACTIVE_PROJECT_ERR_PREFIX),
+            "{err}"
+        );
+        assert_eq!(handles.ensure_ready_count(), 0);
+        assert!(handles.down_projects().is_empty());
+        assert_eq!(*remove_calls.borrow(), 0);
     }
 
     #[test]
@@ -4887,7 +4986,7 @@ mod tests {
             .with_fail_on_down(&["alpha"])
             .build();
         let remove_calls = RefCell::new(0u32);
-        let result = remove_project_core("alpha", &rt, &|_| {
+        let result = remove_project_core("alpha", &rt, &ok_check, &|_| {
             *remove_calls.borrow_mut() += 1;
             Ok(())
         });

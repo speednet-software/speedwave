@@ -331,6 +331,87 @@ describe('ProjectSwitcherComponent', () => {
       expect(component.pendingDeleteName()).toBeNull();
     });
 
+    it('confirmRemove() marks the row as removing and blocks a second removal until it settles', async () => {
+      // The backend may first boot a stopped engine, so the wait can be long.
+      let finishRemove: () => void = () => undefined;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'remove_project')
+          return new Promise<void>((resolve) => {
+            finishRemove = resolve;
+          });
+        if (cmd === 'list_projects')
+          return {
+            projects: [
+              { name: 'alpha', dir: '/tmp/alpha' },
+              { name: 'beta', dir: '/tmp/beta' },
+              { name: 'gamma', dir: '/tmp/gamma' },
+            ],
+            active_project: 'alpha',
+          };
+        return undefined;
+      };
+      mockTauri.dispatchEvent('project_switch_succeeded', { project: 'alpha' });
+      await fixture.whenStable();
+      component.requestRemove('beta');
+      const inFlight = component.confirmRemove('beta');
+      fixture.detectChanges();
+      expect(component.removingName()).toBe('beta');
+      expect(component.pendingDeleteName()).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-removing-beta"]')
+      ).not.toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-beta"]')
+      ).toBeNull();
+      const itemButton = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-beta"]'
+      ) as HTMLButtonElement | null;
+      expect(itemButton?.disabled).toBe(true);
+
+      // Other rows lose their remove and switch affordances and ignore removal requests
+      // meanwhile: the backend holds the project transition lock for the whole removal.
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-gamma"]')
+      ).toBeNull();
+      const gammaButton = fixture.nativeElement.querySelector(
+        '[data-testid="project-switcher-item-gamma"]'
+      ) as HTMLButtonElement | null;
+      expect(gammaButton?.disabled).toBe(true);
+      component.requestRemove('gamma');
+      expect(component.pendingDeleteName()).toBeNull();
+      await component.confirmRemove('gamma');
+      expect(invokeSpy).not.toHaveBeenCalledWith('remove_project', { name: 'gamma' });
+      expect(component.removingName()).toBe('beta');
+
+      finishRemove();
+      await inFlight;
+      fixture.detectChanges();
+      expect(component.removingName()).toBeNull();
+      expect(gammaButton?.disabled).toBe(false);
+    });
+
+    it('confirmRemove() restores the row and surfaces the error when the backend fails', async () => {
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'remove_project')
+          throw new Error("Failed to start the container engine to clean up 'beta': boot failed");
+        return undefined;
+      };
+      await component.confirmRemove('beta');
+      fixture.detectChanges();
+      expect(component.removingName()).toBeNull();
+      expect(component.removeError()).toEqual({
+        msg: "Failed to start the container engine to clean up 'beta': boot failed",
+        project: 'beta',
+      });
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-removing-beta"]')
+      ).toBeNull();
+      expect(
+        fixture.nativeElement.querySelector('[data-testid="project-switcher-remove-beta"]')
+      ).not.toBeNull();
+    });
+
     it('surfaces backend error inline and strips the runtime sentinel prefix', async () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'remove_project')

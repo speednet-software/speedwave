@@ -402,6 +402,18 @@ pub(crate) fn project_needs_anthropic_auth(
     }
 }
 
+/// `claude auth status` with nonessential traffic off: its background OAuth refresh dies
+/// with the command's exit and strands `.oauth_refresh.lock`, failing the next chat for 60 s.
+fn auth_status_exec_argv() -> Vec<String> {
+    vec![
+        "env".to_string(),
+        format!("{}=1", consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV),
+        consts::CLAUDE_BINARY.to_string(),
+        "auth".to_string(),
+        "status".to_string(),
+    ]
+}
+
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
         log::warn!("failed to load user config, defaulting to anthropic path: {e}");
@@ -416,8 +428,9 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     log::info!("checking Claude auth in container {container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
     log::info!("container {container_name} healthy, checking auth");
-    let mut cmd =
-        rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
+    let argv = auth_status_exec_argv();
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut cmd = rt.container_exec_piped(&container_name, &argv_refs)?;
     let output = cmd.output()?;
     log::info!(
         "auth status check for {container_name} exited with {}",
@@ -494,7 +507,7 @@ pub fn factory_reset() -> anyhow::Result<()> {
         }
     }
 
-    // 3. Remove CLI binary (Unix: ~/.local/bin/speedwave — outside data dir)
+    // 3. Remove this instance's CLI binary (Unix: ~/.local/bin/<name> — outside data dir)
     #[cfg(unix)]
     {
         let home =
@@ -783,35 +796,33 @@ pub(crate) fn files_identical(a: &std::path::Path, b: &std::path::Path) -> bool 
     }
 }
 
-/// Copies the CLI binary from `source` into `target_dir` and sets executable permissions on Unix.
-pub fn copy_cli_binary(
-    source: &std::path::Path,
-    target_dir: &std::path::Path,
-) -> anyhow::Result<()> {
+/// Copies the CLI binary from `source` to `dest` and sets executable permissions on Unix.
+/// `dest` is the full path, not a directory: the filename is the caller's (`cli_install_path_for`).
+pub fn copy_cli_binary(source: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
     if !source.exists() {
         anyhow::bail!("CLI source binary not found at {}", source.display());
     }
 
-    std::fs::create_dir_all(target_dir)?;
-
-    let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     // On Windows, the target may be locked by a running CLI process.
     // Treat as non-fatal: keep the old binary until the user closes the CLI.
     #[cfg(target_os = "windows")]
-    if let Err(e) = std::fs::copy(source, &dest) {
+    if let Err(e) = std::fs::copy(source, dest) {
         log::warn!("could not update CLI binary (file in use?): {e}");
         return Ok(());
     }
     #[cfg(not(target_os = "windows"))]
-    std::fs::copy(source, &dest)?;
+    std::fs::copy(source, dest)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dest)?.permissions();
+        let mut perms = std::fs::metadata(dest)?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&dest, perms)?;
+        std::fs::set_permissions(dest, perms)?;
     }
 
     Ok(())
@@ -935,7 +946,7 @@ pub fn link_cli() -> anyhow::Result<()> {
         )
     })?;
 
-    link_cli_from(&cli_source, &home)?;
+    link_cli_from(&cli_source, &home, consts::data_dir())?;
 
     // Write resources-dir marker so the external CLI can find build context.
     if let Ok(res) = std::env::var(consts::BUNDLE_RESOURCES_ENV) {
@@ -994,7 +1005,7 @@ pub(crate) use speedwave_runtime::binary::system_powershell_path;
 /// Kills stale Speedwave/Node/CLI processes holding binaries about to be overwritten.
 /// Runs at every Desktop startup, fails open. Kill predicate SSOT: `windows/sweep.ps1`.
 #[cfg(target_os = "windows")]
-fn run_pre_link_sweep() {
+fn run_pre_link_sweep(data_dir: &std::path::Path) {
     let Some(sweep) = resolve_sweep_script() else {
         log::warn!("pre-link sweep skipped: sweep.ps1 not found in bundle");
         return;
@@ -1003,10 +1014,10 @@ fn run_pre_link_sweep() {
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
-    let data_dir = consts::data_dir();
     let powershell = system_powershell_path();
 
-    // Runtime mode: kill only ~/.speedwave/bin/speedwave.exe (full mode is install-time only).
+    // Runtime mode: kill only this instance's <data_dir>/bin/speedwave.exe
+    // (full mode is install-time only).
     let result = speedwave_runtime::binary::system_command(&powershell.to_string_lossy())
         .args([
             "-NoProfile",
@@ -1018,7 +1029,7 @@ fn run_pre_link_sweep() {
         .arg(&sweep)
         .args(["-Mode", "runtime"])
         .env("SPW_INSTDIR", &inst_dir)
-        .env("SPW_DATA_DIR", &data_dir)
+        .env("SPW_DATA_DIR", data_dir)
         .output();
     match result {
         Ok(out) if out.status.success() => {
@@ -1037,19 +1048,24 @@ fn run_pre_link_sweep() {
     }
 }
 
-/// Copies the CLI binary and configures PATH using explicit paths.
-fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow::Result<()> {
+/// Copies the CLI binary and configures PATH using explicit paths. `data_dir` selects the
+/// instance: the filename on Unix, the directory on Windows, so builds never collide (ADR-016).
+fn link_cli_from(
+    cli_source: &std::path::Path,
+    home: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        let local_bin = home.join(".local").join("bin");
-        copy_cli_binary(cli_source, &local_bin)?;
+        let dest = consts::cli_install_path_for(false, home, data_dir);
+        copy_cli_binary(cli_source, std::path::Path::new(&dest))?;
         ensure_local_bin_on_path(home)?;
     }
 
     #[cfg(target_os = "windows")]
     {
         let _ = home;
-        let cli_dir = consts::data_dir().join(consts::CLI_BIN_SUBDIR);
+        let cli_dir = data_dir.join(consts::CLI_BIN_SUBDIR);
 
         let cli_dir_str = cli_dir.to_string_lossy().to_string();
 
@@ -1068,13 +1084,26 @@ fn link_cli_from(cli_source: &std::path::Path, home: &std::path::Path) -> anyhow
 
         // Already-current CLI: skip the sweep AND the copy — the runtime sweep
         // would kill a user's live `speedwave` session for nothing (ADR-048).
-        let target = cli_dir.join(consts::cli_binary_filename(true));
+        let installed_name = consts::installed_cli_filename(true, data_dir);
+        let target = cli_dir.join(&installed_name);
         if files_identical(cli_source, &target) {
             log::info!("installed CLI already current — sweep/copy skipped");
         } else {
             // Kill any stale process holding the exe before overwrite (ADR-048).
-            run_pre_link_sweep();
-            copy_cli_binary(cli_source, &cli_dir)?;
+            run_pre_link_sweep(data_dir);
+            copy_cli_binary(cli_source, &target)?;
+        }
+
+        // Pre-SPEED-533 installs of this instance left a speedwave.exe in the same
+        // directory, which is on PATH and shadows another instance's command.
+        let legacy = cli_dir.join(consts::cli_binary_filename(true));
+        if legacy != target && legacy.exists() {
+            if let Err(e) = std::fs::remove_file(&legacy) {
+                log::warn!(
+                    "could not remove the pre-rename CLI at {}: {e}",
+                    legacy.display()
+                );
+            }
         }
 
         let script = format!(
@@ -1121,6 +1150,20 @@ mod tests {
         ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn auth_status_argv_turns_off_nonessential_traffic_for_the_claude_binary() {
+        assert_eq!(
+            auth_status_exec_argv(),
+            vec![
+                "env",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+                "/usr/local/bin/claude",
+                "auth",
+                "status",
+            ]
+        );
+    }
 
     fn project_with_provider(name: &str, provider: Option<&str>) -> ProjectUserEntry {
         ProjectUserEntry {
@@ -2472,13 +2515,14 @@ mod tests {
         std::fs::write(&source, b"#!/bin/sh\necho hello").expect("write source");
 
         let target_dir = tmp.path().join("target");
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
+        let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        #[cfg(target_os = "windows")]
-        let dest = target_dir.join("speedwave.exe");
-        #[cfg(not(target_os = "windows"))]
-        let dest = target_dir.join(consts::CLI_BINARY);
         assert!(dest.exists(), "copied binary should exist");
+        assert!(
+            target_dir.is_dir(),
+            "copy must create the parent directory of dest"
+        );
         assert_eq!(
             std::fs::read_to_string(&dest).expect("read"),
             "#!/bin/sh\necho hello"
@@ -2494,10 +2538,9 @@ mod tests {
         let source = tmp.path().join("speedwave");
         std::fs::write(&source, b"#!/bin/sh\necho hello").expect("write source");
 
-        let target_dir = tmp.path().join("bin");
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
+        let dest = tmp.path().join("bin").join(consts::CLI_BINARY);
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        let dest = target_dir.join(consts::CLI_BINARY);
         let mode = std::fs::metadata(&dest)
             .expect("metadata")
             .permissions()
@@ -2513,9 +2556,9 @@ mod tests {
     fn copy_cli_binary_returns_error_when_source_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let source = tmp.path().join("nonexistent");
-        let target_dir = tmp.path().join("bin");
+        let dest = tmp.path().join("bin").join(consts::CLI_BINARY);
 
-        let err = copy_cli_binary(&source, &target_dir).unwrap_err();
+        let err = copy_cli_binary(&source, &dest).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
             "error should mention source not found: {}",
@@ -3006,16 +3049,12 @@ mod tests {
         let target_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&target_dir).expect("create target dir");
 
-        #[cfg(target_os = "windows")]
-        let binary_name = "speedwave.exe";
-        #[cfg(not(target_os = "windows"))]
-        let binary_name = consts::CLI_BINARY;
+        let dest = target_dir.join(consts::cli_binary_filename(cfg!(target_os = "windows")));
+        std::fs::write(&dest, b"old-version").expect("write old binary");
 
-        std::fs::write(target_dir.join(binary_name), b"old-version").expect("write old binary");
+        copy_cli_binary(&source, &dest).expect("copy should succeed");
 
-        copy_cli_binary(&source, &target_dir).expect("copy should succeed");
-
-        let content = std::fs::read_to_string(target_dir.join(binary_name)).expect("read");
+        let content = std::fs::read_to_string(&dest).expect("read");
         assert_eq!(content, "new-version", "should overwrite existing binary");
     }
 
@@ -3082,7 +3121,8 @@ mod tests {
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).expect("create home");
 
-        let err = link_cli_from(&source, &home).unwrap_err();
+        let data_dir = home.join(".speedwave");
+        let err = link_cli_from(&source, &home, &data_dir).unwrap_err();
         assert!(
             err.to_string().contains("not found"),
             "error should mention source not found: {}",
@@ -3114,10 +3154,14 @@ mod tests {
         std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
         std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
-        link_cli_from(&source, &home).expect("link_cli_from should succeed");
+        let data_dir = home.join(".speedwave-test");
+        link_cli_from(&source, &home, &data_dir).expect("link_cli_from should succeed");
 
         // Verify binary copied
-        let dest = home.join(".local").join("bin").join(consts::CLI_BINARY);
+        let dest = home
+            .join(".local")
+            .join("bin")
+            .join(consts::derive_cli_binary_name_from(&data_dir));
         assert!(dest.exists(), "CLI binary should exist at destination");
         let content = std::fs::read_to_string(&dest).expect("read dest");
         assert_eq!(content, "cli-binary-content");
@@ -3131,14 +3175,10 @@ mod tests {
         assert!(mode & 0o111 != 0, "binary should be executable");
 
         // Producer↔SSOT guard (unix): installed path must equal the login SSOT.
-        // Unix SSOT ignores data_dir; a literal avoids the data_dir()-in-tests drift ban.
+        // Both sides take the same data_dir; a tempdir avoids the data_dir()-in-tests drift ban.
         #[cfg(unix)]
         {
-            let expected = speedwave_runtime::consts::cli_install_path_for(
-                false,
-                &home,
-                &home.join(".speedwave-test"),
-            );
+            let expected = speedwave_runtime::consts::cli_install_path_for(false, &home, &data_dir);
             assert_eq!(
                 dest.to_string_lossy(),
                 expected,
@@ -3164,16 +3204,51 @@ mod tests {
         std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
 
         // Call twice
-        link_cli_from(&source, &home).expect("first call");
+        let data_dir = home.join(".speedwave");
+        link_cli_from(&source, &home, &data_dir).expect("first call");
 
         // Update source to simulate app update
         std::fs::write(&source, b"v3-binary").expect("update source");
-        link_cli_from(&source, &home).expect("second call");
+        link_cli_from(&source, &home, &data_dir).expect("second call");
 
         // Binary should be the latest version
         let dest = home.join(".local").join("bin").join(consts::CLI_BINARY);
         let content = std::fs::read_to_string(&dest).expect("read dest");
         assert_eq!(content, "v3-binary", "should have latest binary content");
+    }
+
+    /// The bug this guards: every app start re-links the CLI, and a dev instance
+    /// used to copy its debug build over the production `~/.local/bin/speedwave`.
+    #[cfg(unix)]
+    #[test]
+    fn link_cli_from_dev_instance_leaves_production_binary_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::write(home.join(".zshrc"), "# zshrc\n").expect("write zshrc");
+        std::fs::write(home.join(".bash_profile"), "# bash_profile\n").expect("write bash_profile");
+        std::fs::write(home.join(".profile"), "# profile\n").expect("write profile");
+
+        let local_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&local_bin).expect("create local bin");
+        let production = local_bin.join(consts::CLI_BINARY);
+        std::fs::write(&production, b"production-binary").expect("write production binary");
+
+        let source = tmp.path().join("speedwave");
+        std::fs::write(&source, b"debug-binary").expect("write source");
+        link_cli_from(&source, &home, &home.join(".speedwave-dev")).expect("link dev instance");
+
+        assert_eq!(
+            std::fs::read_to_string(&production).expect("read production"),
+            "production-binary",
+            "a dev instance must not overwrite the production CLI"
+        );
+        let dev = local_bin.join("speedwave-dev");
+        assert_eq!(
+            std::fs::read_to_string(&dev).expect("read dev"),
+            "debug-binary",
+            "the dev instance installs under its own name"
+        );
     }
 
     #[test]

@@ -76,7 +76,7 @@ describe('searchTools', () => {
         detailLevel: 'names_only',
       });
 
-      // Should return all tools from all services (including os with 25 tools)
+      // Should return all tools from all services (including os with 26 tools)
       expect(result.matches.length).toBeGreaterThan(75);
       expect(result.total).toBe(result.matches.length);
     });
@@ -485,7 +485,7 @@ describe('getServiceTools', () => {
     const tools = getServiceTools('os');
 
     expect(Array.isArray(tools)).toBe(true);
-    expect(tools.length).toBe(25);
+    expect(tools.length).toBe(26);
     expect(tools.every((t) => t.service === 'os')).toBe(true);
   });
 
@@ -568,7 +568,7 @@ describe('tool counts per service (regression)', () => {
 
   it('os has expected number of tools', () => {
     const tools = getServiceTools('os');
-    expect(tools.length).toBe(25); // 5 reminders + 6 calendar + 7 mail + 7 notes
+    expect(tools.length).toBe(26); // 6 reminders + 6 calendar + 7 mail + 7 notes
   });
 
   // Note: gitlab and redmine counts may vary - these tests verify minimum counts

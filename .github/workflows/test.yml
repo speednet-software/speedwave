@@ -322,7 +322,6 @@ jobs:
         run: make audit-rust
 
   swift:
-    if: github.event_name == 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -494,3 +493,18 @@ jobs:
 
       # installer_hooks tests run on macOS; cargo check above already validates
       # the Windows compile of every target.
+
+  # The single required status check: fails unless every job above succeeded, so a new job is
+  # gated by adding it to `needs`, never by editing the ruleset (guard: _tests/ci/ci-gate.bats).
+  ci-gate:
+    if: always()
+    needs: [lint, test, desktop, audit, swift, runtime-windows, desktop-windows-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Every job succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: scripts/ci-gate.sh

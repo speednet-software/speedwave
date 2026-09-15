@@ -39,6 +39,7 @@ export const ALLOWED_COMMANDS: Record<OsDomain, ReadonlySet<string>> = {
     'list_reminders',
     'get_reminder',
     'create_reminder',
+    'update_reminder',
     'complete_reminder',
   ]),
   calendar: new Set([

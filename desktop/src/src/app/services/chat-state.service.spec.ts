@@ -2511,6 +2511,36 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('stateBlocksToMessageBlocks error kind (Claude Code watchdog interruptions)', () => {
+    it('tags a watchdog error entry with its ErrorBlockKind', () => {
+      const errorState = {
+        kind: 'error',
+        content: 'API Error: Connection lost mid-response. The response above may be incomplete.',
+      } as Parameters<typeof stateBlocksToMessageBlocks>[0][number];
+
+      const out = stateBlocksToMessageBlocks([errorState]);
+
+      expect(out).toStrictEqual([
+        {
+          type: 'error',
+          content: 'API Error: Connection lost mid-response. The response above may be incomplete.',
+          kind: 'connection_interrupted',
+        },
+      ]);
+    });
+
+    it('leaves an unrelated error entry with no kind property at all', () => {
+      const errorState = {
+        kind: 'error',
+        content: 'Something went wrong',
+      } as Parameters<typeof stateBlocksToMessageBlocks>[0][number];
+
+      const out = stateBlocksToMessageBlocks([errorState]);
+
+      expect(out).toStrictEqual([{ type: 'error', content: 'Something went wrong' }]);
+    });
+  });
+
   describe('auth error routing', () => {
     it('surfaces auth error as auth_required status', async () => {
       const projectState = TestBed.inject(ProjectStateService);
@@ -4028,6 +4058,72 @@ describe('ChatStateService', () => {
     });
   });
 
+  // ── context meter sizes by the conversation model, not a subagent ──
+
+  describe('context meter uses the conversation model, not a subagent model', () => {
+    it('reports the conversation model and its window despite a subagent-heavy usage', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.5,
+          model: 'claude-fable-5',
+          context_window_size: 1_000_000,
+          // Turn-sum usage inflated by subagent output — must not move ctx or model.
+          usage: { input_tokens: 4_000, output_tokens: 300_000 },
+          context_usage: {
+            input_tokens: 100_000,
+            output_tokens: 1_000,
+            cache_read_tokens: 550_000,
+            cache_write_tokens: 0,
+          },
+        },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+      expect(service.sessionStats?.model).toBe('claude-fable-5');
+    });
+
+    it('falls back to the Anthropic SSOT window when context_window_size is absent', async () => {
+      // Regression fixture: the conversation model had no modelUsage entry
+      // this turn (Rust sends None), so the frontend resolves the SSOT window.
+      const anthropic = TestBed.inject(AnthropicModelsService);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_anthropic_models') {
+          return [
+            {
+              id: 'claude-fable-5',
+              family: 'Fable 5',
+              context_tokens: 1_000_000,
+              latest: false,
+              premium: true,
+            },
+          ];
+        }
+        return undefined;
+      };
+      await anthropic.list();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.5, model: 'claude-fable-5' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+      expect(service.sessionStats?.context_window_size).not.toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+  });
+
   // ── mapContextOverflowError ────────────────────────────────────────────────
 
   describe('mapContextOverflowError', () => {
@@ -4152,6 +4248,71 @@ describe('ChatStateService', () => {
       if (errBlock?.type === 'error') {
         expect(errBlock.content).toContain('Settings');
       }
+    });
+  });
+
+  describe('handleStreamChunk Error — Claude Code watchdog interruption kind', () => {
+    it('tags a known watchdog text with its ErrorBlockKind', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: {
+          content: 'API Error: Server error mid-response. The response above may be incomplete.',
+        },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toStrictEqual({
+        type: 'error',
+        content: 'API Error: Server error mid-response. The response above may be incomplete.',
+        kind: 'api_server_interrupted',
+      });
+    });
+
+    it('tags each remaining known watchdog text with the right kind', () => {
+      const cases: Array<[string, string]> = [
+        [
+          'API Error: Connection closed mid-response. The response above may be incomplete.',
+          'connection_interrupted',
+        ],
+        [
+          'API Error: Connection lost mid-response. The response above may be incomplete.',
+          'connection_interrupted',
+        ],
+        [
+          'API Error: The response stopped arriving. The response above may be incomplete.',
+          'response_stalled',
+        ],
+        [
+          'API Error: Your computer went to sleep mid-response. The response above may be incomplete.',
+          'host_slept',
+        ],
+      ];
+
+      for (const [content, kind] of cases) {
+        service.handleStreamChunk({ chunk_type: 'Error', data: { content } });
+        const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+          (b) => b.type === 'error'
+        );
+        expect(errBlock).toStrictEqual({ type: 'error', content, kind });
+      }
+    });
+
+    it('an unrelated error text produces a block with no kind property at all', () => {
+      service.isStreaming = true;
+
+      service.handleStreamChunk({
+        chunk_type: 'Error',
+        data: { content: 'some unrelated error' },
+      });
+
+      const errBlock = service.messages[service.messages.length - 1]?.blocks.find(
+        (b) => b.type === 'error'
+      );
+      expect(errBlock).toStrictEqual({ type: 'error', content: 'some unrelated error' });
     });
   });
 
