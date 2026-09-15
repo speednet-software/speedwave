@@ -6,6 +6,7 @@ import { PluginsComponent } from './plugins.component';
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 import { open } from '@tauri-apps/plugin-dialog';
@@ -456,7 +457,7 @@ describe('PluginsComponent', () => {
     it('maps phase events to step status transitions', async () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/example-plugin.zip');
-      let resolveFn!: (value: string) => void;
+      const pendingInstall = createDeferred<string>();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
           return Promise.resolve({
@@ -464,10 +465,7 @@ describe('PluginsComponent', () => {
             name: 'example-plugin',
             has_service_id: true,
           });
-        if (cmd === 'install_plugin')
-          return new Promise<string>((r) => {
-            resolveFn = r;
-          });
+        if (cmd === 'install_plugin') return pendingInstall.promise;
         if (cmd === 'get_plugins') return Promise.resolve(cloneMockPlugins());
         return Promise.resolve(undefined);
       };
@@ -489,7 +487,7 @@ describe('PluginsComponent', () => {
       expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe('done');
       expect(component.installSteps().find((s) => s.id === 'extracting')?.status).toBe('active');
 
-      resolveFn('Plugin installed');
+      pendingInstall.resolve('Plugin installed');
       await promise;
     });
 
@@ -497,7 +495,7 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/bad.zip');
       // Hold install_plugin pending so phase events arrive while the listener is registered.
-      let rejectFn!: (e: Error) => void;
+      const pendingInstall = createDeferred<string>();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest')
           return Promise.resolve({
@@ -505,10 +503,7 @@ describe('PluginsComponent', () => {
             name: 'bad',
             has_service_id: true,
           });
-        if (cmd === 'install_plugin')
-          return new Promise<string>((_, reject) => {
-            rejectFn = reject;
-          });
+        if (cmd === 'install_plugin') return pendingInstall.promise;
         return Promise.resolve(undefined);
       };
 
@@ -529,7 +524,7 @@ describe('PluginsComponent', () => {
       expect(component.installSteps().find((s) => s.id === 'verifying')?.status).toBe('error');
       expect(component.installError()).toBe('bad signature: invalid format');
 
-      rejectFn(new Error('signature invalid'));
+      pendingInstall.reject(new Error('signature invalid'));
       await promise;
     });
   });
@@ -539,7 +534,7 @@ describe('PluginsComponent', () => {
       await component.ngOnInit();
       openMock.mockResolvedValue('/tmp/plugin.zip');
 
-      let resolveFn!: (value: string) => void;
+      const pendingInstall = createDeferred<string>();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'peek_plugin_manifest') {
           return Promise.resolve({
@@ -548,11 +543,7 @@ describe('PluginsComponent', () => {
             has_service_id: true,
           });
         }
-        if (cmd === 'install_plugin') {
-          return new Promise<string>((resolve) => {
-            resolveFn = resolve;
-          });
-        }
+        if (cmd === 'install_plugin') return pendingInstall.promise;
         if (cmd === 'get_plugins') return Promise.resolve(cloneMockPlugins());
         if (cmd === 'list_projects')
           return Promise.resolve({
@@ -574,7 +565,7 @@ describe('PluginsComponent', () => {
       expect(overlay).not.toBeNull();
       expect(overlay.textContent).toContain('Installing plugin');
 
-      resolveFn('Plugin installed');
+      pendingInstall.resolve('Plugin installed');
       await promise;
       fixture.detectChanges();
 

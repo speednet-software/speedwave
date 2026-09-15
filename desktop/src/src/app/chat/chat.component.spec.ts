@@ -10,6 +10,7 @@ import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 function makeMockLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
@@ -78,12 +79,10 @@ describe('ChatComponent', () => {
     it('sets loadingTranscript true during fetch and false after it resolves', async () => {
       projectState.activeProject.set('test');
 
-      let releaseGetConversation: (() => void) | null = null;
+      const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseGetConversation = resolve;
-          });
+          await pendingGetConversation.promise;
           return { session_id: 's1', messages: [] };
         }
         return undefined;
@@ -94,7 +93,7 @@ describe('ChatComponent', () => {
       // Mid-flight: loader is showing.
       expect(chatState.loadingTranscriptFromState()).toBe(true);
 
-      releaseGetConversation!();
+      pendingGetConversation.resolve();
       await resumePromise;
       // Settled: loader is hidden.
       expect(chatState.loadingTranscriptFromState()).toBe(false);
@@ -119,12 +118,10 @@ describe('ChatComponent', () => {
       const dispose = vi.fn();
       const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
 
-      let releaseGetConversation: (() => void) | null = null;
+      const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseGetConversation = resolve;
-          });
+          await pendingGetConversation.promise;
           return { session_id: 's1', messages: [] };
         }
         return undefined;
@@ -136,7 +133,7 @@ describe('ChatComponent', () => {
       expect(begin).toHaveBeenCalledTimes(1);
       expect(dispose).not.toHaveBeenCalled();
 
-      releaseGetConversation!();
+      pendingGetConversation.resolve();
       await resumePromise;
       // Settled: disposer released so later sends can start a session normally.
       expect(dispose).toHaveBeenCalledTimes(1);

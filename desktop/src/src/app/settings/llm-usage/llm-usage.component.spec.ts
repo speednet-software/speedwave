@@ -12,6 +12,7 @@ import {
 } from './llm-usage.component';
 import { TauriService } from '../../services/tauri.service';
 import type { UsageBucket, UsageSummary } from '../../models/llm';
+import { createDeferred } from '../../testing/deferred';
 
 function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
   return {
@@ -584,15 +585,12 @@ describe('LlmUsageComponent deferred re-poll', () => {
   });
 
   it('drops a stale re-poll response after the project changed mid-flight', async () => {
-    let resolveStale: (s: UsageSummary) => void = () => undefined;
-    const stale = new Promise<UsageSummary>((resolve) => {
-      resolveStale = resolve;
-    });
+    const stale = createDeferred<UsageSummary>();
     let projCalls = 0;
     const invoke = vi.fn((_cmd: string, args: { project: string }): Promise<UsageSummary> => {
       if (args.project === 'other') return Promise.resolve(pricedSummary(0.42));
       projCalls++;
-      return projCalls === 1 ? Promise.resolve(deferredSummary()) : stale;
+      return projCalls === 1 ? Promise.resolve(deferredSummary()) : stale.promise;
     });
     const fixture = await mount(invoke);
 
@@ -604,7 +602,7 @@ describe('LlmUsageComponent deferred re-poll', () => {
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.42);
 
     // The stale 'proj' response must neither apply nor re-schedule.
-    resolveStale(pricedSummary(0.99));
+    stale.resolve(pricedSummary(0.99));
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.componentInstance.summary()?.totals.cost_usd).toBe(0.42);
     const projCallsAfterStale = projCalls;

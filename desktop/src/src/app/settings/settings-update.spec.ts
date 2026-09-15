@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { UpdateSectionComponent } from './update-section/update-section.component';
 import { TauriService } from '../services/tauri.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 describe('UpdateSectionComponent — update settings (compat)', () => {
   let component: UpdateSectionComponent;
@@ -50,16 +51,13 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
     });
 
     it('sets updateInstalling to true during install', async () => {
-      let resolveFn!: () => void;
+      const pendingInstall = createDeferred();
       mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<void>((resolve) => {
-          if (cmd === 'install_update_and_reconcile') resolveFn = resolve;
-          else resolve();
-        });
+        cmd === 'install_update_and_reconcile' ? pendingInstall.promise : Promise.resolve();
       component.updateAvailableVersion = '2.0.0';
       const promise = component.installUpdate();
       expect(component.updateInstalling).toBe(true);
-      resolveFn();
+      pendingInstall.resolve();
       await promise;
       expect(component.updateInstalling).toBe(false);
     });
@@ -139,15 +137,12 @@ describe('UpdateSectionComponent — update settings (compat)', () => {
     });
 
     it('sets updateChecking during check', async () => {
-      let resolveFn!: () => void;
+      const pendingCheck = createDeferred();
       mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<void>((resolve) => {
-          if (cmd === 'check_for_update') resolveFn = resolve;
-          else resolve();
-        });
+        cmd === 'check_for_update' ? pendingCheck.promise : Promise.resolve();
       const promise = component.checkForUpdate();
       expect(component.updateChecking).toBe(true);
-      resolveFn();
+      pendingCheck.resolve();
       await promise;
       expect(component.updateChecking).toBe(false);
     });

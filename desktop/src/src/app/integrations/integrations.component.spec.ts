@@ -7,6 +7,7 @@ import { ProjectStateService } from '../services/project-state.service';
 import { LoggerService } from '../services/logger.service';
 import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 import type { IntegrationStatusEntry } from '../models/integration';
 
 /** Mock LoggerService for unit tests (no Tauri context). */
@@ -1656,12 +1657,9 @@ describe('IntegrationsComponent', () => {
       const sharepointSvc = component.services.find((s) => s.service === 'sharepoint')!;
 
       // Start first flow — make it hang so status stays 'starting'
-      let resolveFirst: (v: unknown) => void;
-      const firstPromise = new Promise((r) => (resolveFirst = r));
+      const pendingFirstFlow = createDeferred<unknown>();
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'start_sharepoint_oauth') {
-          return firstPromise;
-        }
+        if (cmd === 'start_sharepoint_oauth') return pendingFirstFlow.promise;
         return undefined;
       };
 
@@ -1683,7 +1681,7 @@ describe('IntegrationsComponent', () => {
       expect(invokeSpy).not.toHaveBeenCalledWith('start_sharepoint_oauth', expect.anything());
 
       // Clean up first call
-      resolveFirst!({
+      pendingFirstFlow.resolve({
         user_code: 'CODE',
         verification_uri: 'https://example.com',
         expires_in: 900,

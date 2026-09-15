@@ -20,6 +20,7 @@ import { TauriService } from './tauri.service';
 import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 import type { ConversationTranscript, StreamChunk } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
 
@@ -122,13 +123,9 @@ describe('ChatStateService', () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
 
-      let failStartChat: (() => void) | null = null;
+      const pendingStart = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'start_chat') {
-          await new Promise<void>((_resolve, reject) => {
-            failStartChat = () => reject(new Error('chat backend crashed'));
-          });
-        }
+        if (cmd === 'start_chat') await pendingStart.promise;
         if (cmd === 'list_projects')
           return { projects: [{ name: 'test', dir: '/tmp/test' }], active_project: 'test' };
         if (cmd === 'get_bundle_reconcile_state') return MOCK_BUNDLE_RECONCILE_DONE;
@@ -140,7 +137,7 @@ describe('ChatStateService', () => {
       await new Promise((r) => setTimeout(r, 0));
       // A resume supersedes the in-flight start, then the stale start_chat fails.
       service.beginStartingSession();
-      failStartChat!();
+      pendingStart.reject(new Error('chat backend crashed'));
       await new Promise((r) => setTimeout(r, 0));
 
       // The superseded failure must NOT clobber the resumed session's state.
@@ -321,15 +318,17 @@ describe('ChatStateService', () => {
     it('leaves a resume that superseded it owning the session id', async () => {
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
-      let releaseStart: (() => void) | null = null;
-      let releaseResume: (() => void) | null = null;
+      const pendingStart = createDeferred();
+      const pendingResume = createDeferred();
+      const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
+        calls.push(cmd);
         switch (cmd) {
           case 'start_chat':
-            await new Promise<void>((r) => (releaseStart = r));
+            await pendingStart.promise;
             return undefined;
           case 'resume_conversation':
-            await new Promise<void>((r) => (releaseResume = r));
+            await pendingResume.promise;
             return undefined;
           case 'get_conversation':
             return { session_id: 'sess-resumed', messages: [] };
@@ -347,11 +346,11 @@ describe('ChatStateService', () => {
 
       const starting = service.startNewConversation();
       await vi.waitFor(() => {
-        expect(releaseStart).not.toBeNull();
+        expect(calls).toContain('start_chat');
       });
       // Supersede the in-flight start, then let it finish and unwind.
       const resuming = service.resumeConversation('sess-resumed');
-      releaseStart!();
+      pendingStart.resolve();
 
       await expect(starting).rejects.toThrow(NEW_CONVERSATION_BUSY);
       // Asserted before the resume settles: its own seed would mask a clobber here.
@@ -359,7 +358,7 @@ describe('ChatStateService', () => {
       // The resume still owns the busy flag the superseded start shares.
       expect(service.newConversationBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
 
-      releaseResume!();
+      pendingResume.resolve();
       await resuming;
       expect(service.lastKnownSessionId).toBe('sess-resumed');
     });
@@ -2334,18 +2333,14 @@ describe('ChatStateService', () => {
           },
         ],
       });
-      let rejectAnswer: (err: Error) => void = () => {};
+      const pendingAnswer = createDeferred<undefined>();
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'submit_question_answer') {
-          return new Promise<undefined>((_, rej) => {
-            rejectAnswer = rej;
-          });
-        }
+        if (cmd === 'submit_question_answer') return pendingAnswer.promise;
         return undefined;
       };
       const answerPromise = service.submitAnswer('t1', 0, 'A');
       await service.stopConversation();
-      rejectAnswer(new Error('Broken pipe'));
+      pendingAnswer.reject(new Error('Broken pipe'));
       await answerPromise;
       expect(service.messages.every((m) => m.blocks.every((b) => b.type !== 'error'))).toBe(true);
       expect(service.currentBlocks).toEqual([]);
@@ -3874,7 +3869,7 @@ describe('ChatStateService', () => {
       // init() started a fresh start_chat that clobbered the in-flight resume.
       projectState.status.set('ready');
       service.seedSessionId('sess-mid');
-      let releaseResume: (() => void) | null = null;
+      const pendingResume = createDeferred();
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
@@ -3884,22 +3879,18 @@ describe('ChatStateService', () => {
             messages: [{ role: 'user', blocks: [{ type: 'text', content: 'restored' }] }],
           };
         }
-        if (cmd === 'resume_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseResume = resolve;
-          });
-        }
+        if (cmd === 'resume_conversation') await pendingResume.promise;
         return undefined;
       };
 
       const restartDone = fireRestart(projectState);
       // The llm-config re-read precedes the resume RPC; wait until it's in flight.
       await vi.waitFor(() => {
-        expect(releaseResume).not.toBeNull();
+        expect(calls).toContain('resume_conversation');
       });
       // Remount while resume is still in flight.
       await service.init();
-      releaseResume!();
+      pendingResume.resolve();
       await restartDone;
 
       // The released resume pipeline settles asynchronously; wait for its load.

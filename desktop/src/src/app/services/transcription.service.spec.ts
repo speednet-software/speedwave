@@ -5,6 +5,7 @@ import { LIVE_TRANSCRIPT_STORAGE_KEY, TranscriptionService } from './transcripti
 import { TauriService } from './tauri.service';
 import { ChatStateService } from './chat-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 import type { CaptureWarning, Segment, TranscriptSession } from '../models/transcript';
 
 /** Minimal ChatStateService stand-in — only the send path is exercised here. */
@@ -797,11 +798,9 @@ describe('TranscriptionService', () => {
 
   describe('model download tracking', () => {
     it('downloadModel tracks the key + progress, then clears on completion', async () => {
-      let finish!: () => void;
+      const pendingDownload = createDeferred();
       mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'download_transcription_model') {
-          return new Promise<void>((resolve) => (finish = resolve));
-        }
+        if (cmd === 'download_transcription_model') return pendingDownload.promise;
         return undefined;
       };
       const done = svc.downloadModel('large-v3');
@@ -814,7 +813,7 @@ describe('TranscriptionService', () => {
         total_bytes: 100,
       });
       expect(svc.downloadProgress()?.downloaded_bytes).toBe(42);
-      finish();
+      pendingDownload.resolve();
       await done;
       expect(svc.downloadingModelKey()).toBeNull();
       expect(svc.downloadProgress()).toBeNull();
@@ -838,17 +837,15 @@ describe('TranscriptionService', () => {
     });
 
     it('rejects a second downloadModel while one is in flight', async () => {
-      let finish!: () => void;
+      const pendingDownload = createDeferred();
       mockTauri.invokeHandler = async (cmd) => {
-        if (cmd === 'download_transcription_model') {
-          return new Promise<void>((resolve) => (finish = resolve));
-        }
+        if (cmd === 'download_transcription_model') return pendingDownload.promise;
         return undefined;
       };
       const first = svc.downloadModel('large-v3');
       await new Promise((r) => setTimeout(r, 0));
       await expect(svc.downloadModel('large-v3')).rejects.toThrow('already in progress');
-      finish();
+      pendingDownload.resolve();
       await first;
     });
 

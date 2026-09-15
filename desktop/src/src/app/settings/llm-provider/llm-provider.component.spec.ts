@@ -9,6 +9,7 @@ import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { type AnthropicModel } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { createDeferred } from '../../testing/deferred';
 
 function makeMockLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
@@ -819,10 +820,7 @@ describe('LlmProviderComponent', () => {
   it('no_op_load_keeps_save_disabled_when_auth_status_resolves_after_config_with_active_project', async () => {
     // Real-world race: the constructor effect's loadAuthStatus() runs concurrently with
     // ngOnInit's loadConfig(); get_auth_status resolving after get_llm_config must not make isDirty() true with zero user edits.
-    let resolveAuthStatus: ((value: AuthStatusResponse) => void) | undefined;
-    const authStatusPromise = new Promise<AuthStatusResponse>((resolve) => {
-      resolveAuthStatus = resolve;
-    });
+    const pendingAuthStatus = createDeferred<AuthStatusResponse>();
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -835,7 +833,7 @@ describe('LlmProviderComponent', () => {
             active: { provider_id: 'anthropic', model: 'claude-sonnet-4-6' },
           };
         case 'get_auth_status':
-          return authStatusPromise;
+          return pendingAuthStatus.promise;
         case 'list_anthropic_models':
           return TEST_ANTHROPIC_MODELS;
         default:
@@ -851,7 +849,7 @@ describe('LlmProviderComponent', () => {
     await flushMicrotasks();
 
     // Now the in-flight auth probe resolves with the real, already-connected state.
-    resolveAuthStatus?.({
+    pendingAuthStatus.resolve({
       api_key_configured: false,
       oauth_authenticated: true,
       needs_anthropic_auth: false,
@@ -1567,13 +1565,10 @@ describe('LlmProviderComponent', () => {
 
   it('dedupes_provider_change_and_blur_on_same_url', async () => {
     // While a probe is in-flight against URL X, a second same-URL trigger is deduped.
-    let resolveFirst: (v: string[]) => void = () => {};
-    const hanging = new Promise<string[]>((resolve) => {
-      resolveFirst = resolve;
-    });
+    const hanging = createDeferred<string[]>();
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
-      discover: async () => await hanging,
+      discover: async () => await hanging.promise,
     });
     // Bypass ngOnInit — set state directly so we can control timing.
     component.provider.set('ollama');
@@ -1582,21 +1577,18 @@ describe('LlmProviderComponent', () => {
     // Same URL, while first is pending → must dedupe.
     await component.discoverModels(false);
     expect(discoverCalls.length).toBe(1);
-    resolveFirst(['m']);
+    hanging.resolve(['m']);
     await firstCall;
   });
 
   it('discards_stale_response_on_rapid_blur', async () => {
     // On rapid URL change, final state reflects the latest URL, not the stale slow response.
-    let resolveFirst: (v: string[]) => void = () => {};
-    const slow = new Promise<string[]>((r) => {
-      resolveFirst = r;
-    });
+    const slow = createDeferred<string[]>();
     let callIdx = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'discover_llm_models') {
         callIdx += 1;
-        if (callIdx === 1) return await slow;
+        if (callIdx === 1) return await slow.promise;
         return { models: [{ id: 'model-from-second' }] };
       }
       return undefined;
@@ -1610,7 +1602,7 @@ describe('LlmProviderComponent', () => {
     component.baseUrl.set('http://b.invalid');
     await component.discoverModels(false);
     // Now let the first probe finish with a stale result.
-    resolveFirst(['model-from-first']);
+    slow.resolve(['model-from-first']);
     await firstCall;
     await fixture.whenStable();
     const st = component.discoveryState();
