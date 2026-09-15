@@ -10,7 +10,7 @@ final class RemindersTests: XCTestCase {
     func testCommandListAdvertisesAllCommands() {
         // commandList drives both the usage and unknown-command messages in runCLI.
         for cmd in ["check_permission", "list_lists", "list_reminders",
-                    "get_reminder", "create_reminder", "complete_reminder"] {
+                    "get_reminder", "create_reminder", "update_reminder", "complete_reminder"] {
             XCTAssertTrue(RemindersCLI.commandList.contains(cmd),
                           "commandList must advertise '\(cmd)'")
         }
@@ -47,6 +47,152 @@ final class RemindersTests: XCTestCase {
         // Default limit should be used when not specified
         let limit = parsed?["limit"] as? Int ?? 20
         XCTAssertEqual(limit, 20)
+    }
+
+    // MARK: - update_reminder Argument Shape
+
+    func testUpdateReminderRequiresId() {
+        let params: [String: Any] = [:]
+        XCTAssertNil(params["id"])
+    }
+
+    func testUpdateReminderPartialParams() {
+        let params: [String: Any] = [
+            "id": "reminder-123",
+            "name": "Corrected title",
+        ]
+        XCTAssertNotNil(params["id"])
+        XCTAssertNotNil(params["name"])
+        XCTAssertNil(params["due_date"])  // Unspecified fields must stay untouched by updateReminder
+        XCTAssertNil(params["tags"])
+    }
+
+    func testUpdateReminderAllFields() {
+        let params: [String: Any] = [
+            "id": "reminder-123",
+            "name": "Review PR #42",
+            "list_id": "Work",
+            "due_date": "2026-03-01T09:00:00Z",
+            "priority": 5,
+            "notes": "Rescheduled",
+            "tags": ["work"],
+            "completed": false,
+        ]
+        XCTAssertEqual(params["name"] as? String, "Review PR #42")
+        XCTAssertEqual(params["list_id"] as? String, "Work")
+        XCTAssertNotNil(dueDateComponents(from: params["due_date"] as! String))
+        XCTAssertEqual(params["priority"] as? Int, 5)
+        XCTAssertEqual(params["notes"] as? String, "Rescheduled")
+        XCTAssertEqual(params["tags"] as? [String], ["work"])
+        XCTAssertEqual(params["completed"] as? Bool, false)
+    }
+
+    func testUpdateReminderJSONNullArrivesAsNSNull() throws {
+        // updateReminder distinguishes "clear the due date" (JSON null) from "leave it" (key absent).
+        let data = "{\"id\": \"r-1\", \"due_date\": null}".data(using: .utf8)!
+        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertTrue(params["due_date"] is NSNull)
+        XCTAssertNil(params["due_date"] as? String)
+        XCTAssertNil(params["name"])
+    }
+
+    // MARK: - Due Date Parsing
+
+    func testDueDateDateOnlyIsAllDayFloatingGregorian() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15"))
+        XCTAssertEqual(c.year, 2026)
+        XCTAssertEqual(c.month, 6)
+        XCTAssertEqual(c.day, 15)
+        XCTAssertNil(c.hour, "all-day reminders carry no time fields")
+        XCTAssertNil(c.minute)
+        XCTAssertNil(c.timeZone, "due dates are floating")
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testDueDateWithOffsetBecomesHostWallClock() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T07:00:00Z"))
+        let expected = Calendar(identifier: .gregorian).dateComponents(
+            [.year, .month, .day, .hour, .minute, .second],
+            from: parseISO8601("2026-06-15T07:00:00Z")!
+        )
+        XCTAssertEqual(c.hour, expected.hour)
+        XCTAssertEqual(c.day, expected.day)
+        XCTAssertEqual(c.second, 0)
+        XCTAssertNil(c.timeZone)
+        XCTAssertEqual(c.calendar?.identifier, .gregorian)
+    }
+
+    func testDueDateWithoutOffsetIsTakenAsWallClock() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:00"))
+        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 6, 15, 9, 30, 0])
+        XCTAssertNil(c.timeZone)
+    }
+
+    func testDueDateWithoutOffsetIgnoresFractionalSeconds() throws {
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-06-15T09:30:15.250"))
+        XCTAssertEqual([c.hour, c.minute, c.second], [9, 30, 15])
+    }
+
+    func testDueDateRejectsGarbageAndImpossibleDates() {
+        XCTAssertNil(dueDateComponents(from: "tomorrow"))
+        XCTAssertNil(dueDateComponents(from: "2026-02-30"))
+        XCTAssertNil(dueDateComponents(from: "2026-6-1"))
+        XCTAssertNil(dueDateComponents(from: ""))
+    }
+
+    // MARK: - Due Date Formatting
+
+    func testDueDateStringAllDayIsDateOnly() {
+        let c = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 6, day: 5)
+        XCTAssertEqual(dueDateString(from: c), "2026-06-05")
+    }
+
+    func testDueDateStringTimedUsesLocalOffsetAndRoundTrips() throws {
+        let input = "2026-06-15T09:30:00"
+        let c = try XCTUnwrap(dueDateComponents(from: input))
+        let formatted = try XCTUnwrap(dueDateString(from: c))
+        XCTAssertTrue(formatted.hasPrefix("2026-06-15T09:30:00"), formatted)
+        XCTAssertFalse(formatted.hasSuffix("Z"), "timed due dates are reported in local time with an offset")
+        XCTAssertEqual(dueDateComponents(from: formatted), c, "formatting then parsing must be lossless")
+    }
+
+    func testDueDateStringHonoursExplicitTimeZone() throws {
+        var c = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 1, day: 10, hour: 8)
+        c.timeZone = TimeZone(identifier: "America/New_York")
+        XCTAssertEqual(dueDateString(from: c), "2026-01-10T08:00:00-05:00")
+    }
+
+    func testDueDateStringWithoutDateIsNil() {
+        XCTAssertNil(dueDateString(from: DateComponents(hour: 9)))
+    }
+
+    func testReminderToDictEmitsAllDayFlagAndDateOnlyDueDate() throws {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Pay rent"
+        reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01"))
+        let dict = reminderToDict(reminder)
+        XCTAssertEqual(dict["due_date"] as? String, "2026-07-01")
+        XCTAssertEqual(dict["all_day"] as? Bool, true)
+    }
+
+    func testReminderToDictTimedDueDateIsNotAllDay() throws {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Standup"
+        reminder.dueDateComponents = try XCTUnwrap(dueDateComponents(from: "2026-07-01T10:00:00"))
+        let dict = reminderToDict(reminder)
+        XCTAssertEqual(dict["all_day"] as? Bool, false)
+        XCTAssertTrue((dict["due_date"] as? String ?? "").hasPrefix("2026-07-01T10:00:00"))
+    }
+
+    func testReminderToDictWithoutDueDateOmitsAllDay() {
+        let store = EKEventStore()
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = "Someday"
+        let dict = reminderToDict(reminder)
+        XCTAssertNil(dict["due_date"])
+        XCTAssertNil(dict["all_day"])
     }
 
     // MARK: - Tag Extraction from Notes

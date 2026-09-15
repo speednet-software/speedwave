@@ -20,11 +20,11 @@ struct EventStoreGate: PermissionGate {
 // MARK: - CLI Entry Point
 
 /// reminders-cli <command> [json-args]
-/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder
+/// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder
 @main
 struct RemindersCLI {
     static let commandList =
-        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, complete_reminder"
+        "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder"
 
     static func main() {
         // Shared store; check_permission uses its own gate.
@@ -47,6 +47,7 @@ struct RemindersCLI {
                 "list_reminders": { try listReminders(store: store, params: $0) },
                 "get_reminder": { try getReminder(store: store, params: $0) },
                 "create_reminder": { try createReminder(store: store, params: $0) },
+                "update_reminder": { try updateReminder(store: store, params: $0) },
                 "complete_reminder": { try completeReminder(store: store, params: $0) },
             ]
         )
@@ -194,13 +195,10 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     }
 
     if let dueDateStr = params["due_date"] as? String {
-        guard let date = parseISO8601(dueDateStr) else {
+        guard let components = dueDateComponents(from: dueDateStr) else {
             throw CLIError.invalidDate(dueDateStr)
         }
-        reminder.dueDateComponents = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second],
-            from: date
-        )
+        reminder.dueDateComponents = components
     }
 
     if let priority = params["priority"] as? Int {
@@ -217,6 +215,57 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         "id": reminder.calendarItemIdentifier,
         "status": "created",
     ]
+}
+
+func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
+    guard let id = params["id"] as? String else {
+        throw CLIError.missingField("id")
+    }
+
+    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else {
+        throw CLIError.notFound("Reminder with id '\(id)' not found")
+    }
+
+    if let name = params["name"] as? String {
+        reminder.title = name
+    }
+
+    if let filter = params["list_id"] as? String {
+        let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
+        reminder.calendar = matches[0]
+    }
+
+    if params["due_date"] is NSNull {
+        // EventKit refuses a recurring reminder without a due date, so the rules go with it.
+        reminder.dueDateComponents = nil
+        reminder.recurrenceRules = nil
+    } else if let dueDateStr = params["due_date"] as? String {
+        guard let components = dueDateComponents(from: dueDateStr) else {
+            throw CLIError.invalidDate(dueDateStr)
+        }
+        reminder.dueDateComponents = components
+    }
+
+    if let priority = params["priority"] as? Int {
+        reminder.priority = priority
+    }
+
+    if let completed = params["completed"] as? Bool {
+        reminder.isCompleted = completed
+        reminder.completionDate = completed ? Date() : nil
+    }
+
+    // Notes and tags share one EventKit field: only recombine when the caller touches either.
+    if params["notes"] != nil || params["tags"] != nil {
+        let rawNotes = reminder.notes ?? ""
+        let newNotes = params["notes"] as? String ?? stripTags(from: rawNotes)
+        let newTags = params["tags"] as? [String] ?? extractTags(from: rawNotes)
+        reminder.notes = combineTags(newTags, with: newNotes)
+    }
+
+    try store.save(reminder, commit: true)
+
+    return ["status": "updated"]
 }
 
 func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [String: Any] {
@@ -256,12 +305,13 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
         dict["tags"] = tags
     }
 
-    if let dueDate = r.dueDateComponents?.date {
-        dict["due_date"] = iso8601String(from: dueDate)
+    if let due = r.dueDateComponents, let dueDate = dueDateString(from: due) {
+        dict["due_date"] = dueDate
+        dict["all_day"] = due.hour == nil
     }
 
     if let completionDate = r.completionDate {
-        dict["completed_date"] = iso8601String(from: completionDate)
+        dict["completed_date"] = localISO8601String(from: completionDate, timeZone: .current)
     }
 
     if !cleanNotes.isEmpty {
@@ -269,6 +319,73 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
     }
 
     return dict
+}
+
+// MARK: - Due Date Helpers
+
+private let gregorian = Calendar(identifier: .gregorian)
+
+private let dateOnlyPattern = #"^\d{4}-\d{2}-\d{2}$"#
+private let wallClockPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$"#
+private let offsetPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"#
+
+/// Floating Gregorian components (EventKit requires that calendar): a bare date is all-day,
+/// a time with offset/`Z` becomes the host's wall clock, a time without offset is wall clock as given.
+func dueDateComponents(from string: String) -> DateComponents? {
+    if string.range(of: dateOnlyPattern, options: .regularExpression) != nil {
+        let parts = string.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        let components = DateComponents(calendar: gregorian, year: parts[0], month: parts[1], day: parts[2])
+        return components.isValidDate ? components : nil
+    }
+
+    let date: Date?
+    if string.range(of: wallClockPattern, options: .regularExpression) != nil {
+        let formatter = DateFormatter()
+        formatter.calendar = gregorian
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        date = formatter.date(from: string.replacingOccurrences(of: #"\.\d+$"#, with: "", options: .regularExpression))
+    } else if string.range(of: offsetPattern, options: .regularExpression) != nil {
+        date = parseISO8601(string)
+    } else {
+        // Foundation's date-only fallback accepts unpadded "2026-6-1" as a timed UTC midnight; refuse it.
+        return nil
+    }
+    guard let date else { return nil }
+
+    var local = gregorian
+    local.timeZone = .current
+    var components = local.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+    components.calendar = gregorian
+    components.timeZone = nil
+    return components
+}
+
+/// Formats due date components: all-day as `yyyy-MM-dd`, timed as local time with UTC offset.
+func dueDateString(from components: DateComponents) -> String? {
+    guard let year = components.year, let month = components.month, let day = components.day else {
+        return nil
+    }
+    if components.hour == nil {
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+    var resolved = components
+    if resolved.calendar == nil {
+        resolved.calendar = gregorian
+    }
+    let timeZone = components.timeZone ?? .current
+    resolved.timeZone = timeZone
+    guard let date = resolved.date else { return nil }
+    return localISO8601String(from: date, timeZone: timeZone)
+}
+
+func localISO8601String(from date: Date, timeZone: TimeZone) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    formatter.timeZone = timeZone
+    return formatter.string(from: date)
 }
 
 // MARK: - Tag Helpers

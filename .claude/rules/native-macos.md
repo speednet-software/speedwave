@@ -6,6 +6,7 @@ paths:
   - 'desktop/src-tauri/entitlements/**'
   - 'desktop/src-tauri/src/mic_permission_cmd.rs'
   - 'desktop/src-tauri/Info.plist'
+  - 'mcp-servers/os/src/tools/reminder-tools.ts'
 ---
 
 # Native macOS Rules (Swift OS integrations, TCC, transcription)
@@ -27,6 +28,13 @@ Extending a Mail/Notes gate or adding a new native automation gate must keep thi
 - macOS entitlements plists live in `desktop/src-tauri/entitlements/` (one per restricted API: apple-events, audio-capture, calendars, node, reminders, virtualization). Add a new plist for a new restricted API — never relax an existing one. Coverage is test-guarded (`_tests/desktop/entitlements-*.bats`, `info-plist.bats`).
 - Native CLI Info.plists must embed the tauri.conf.json version, correct sub-identifier, and TCC UsageDescription keys — test-guarded (`native-cli-info-plist.bats`); see alignments rules.
 - **Microphone consent is requested in-process by the main Tauri app** (`mic_permission_cmd.rs`, before any capture spawn), never left to a spawned CLI: `AVCaptureDevice.requestAccess` shows no prompt from a headless helper — it silently denies, with no TCC entry to re-enable. The grant lands under `pl.speedwave.desktop` and child CLIs inherit it. The main app is therefore signed with `bundle.macOS.entitlements` (`audio-capture.plist`, guarded by `main-app-entitlements.bats`) and carries `NSMicrophoneUsageDescription` in its Info.plist.
+
+## Reminders (EventKit)
+
+- **Public EventKit only.** `reminders-cli` talks to `EKEventStore` and nothing else: no AppleScript, no reading the Reminders SQLite store (needs Full Disk Access), no private ReminderKit. Consequence: flags, native tags, subtasks, sections, images and smart lists are out of reach; "tags" are `[#tag]` markers inside the notes field (`combineTags`/`extractTags`/`stripTags`), parsed back into a separate `tags` array.
+- **Glossary** (tool params, schemas and docs use these words): _list_ = an `EKCalendar` that holds reminders (never "calendar"); _reminder_; _tag_ = a `[#tag]` marker; _due date_ is _all-day_ (`YYYY-MM-DD`, components without time fields) or _timed_, and always _floating_ (`timeZone == nil`: 9:00 stays 9:00 in every zone); _alarm_ (not alert/notification); _recurrence_ (not repeat); _completed_.
+- **Due dates go through `dueDateComponents(from:)`/`dueDateString(from:)`** in `RemindersCLI.swift`. Input: `YYYY-MM-DD` (all-day), `YYYY-MM-DDTHH:MM:SS` (host wall clock) or the same with an offset/`Z` (converted to host wall clock); anything else, including unpadded dates, is rejected. The components always carry the Gregorian calendar (EventKit raises otherwise, and `Calendar.current` need not be Gregorian) and no time zone. Output: `YYYY-MM-DD` or local time with UTC offset, plus `all_day`; `completed_date` is local time with offset. `calendar-cli` keeps its own `Date`-based model.
+- **`update_reminder` is a PATCH:** an omitted field keeps its value; JSON `null` on `due_date` clears the due date and drops the recurrence rules with it (EventKit refuses a recurring reminder without a due date). `notes` and `tags` share one EventKit field, so updating one re-derives the other from the stored value; `tags: []` clears tags, `completed: false` reopens.
 
 ## Transcription
 
