@@ -402,6 +402,18 @@ pub(crate) fn project_needs_anthropic_auth(
     }
 }
 
+/// `claude auth status` with nonessential traffic off: its background OAuth refresh dies
+/// with the command's exit and strands `.oauth_refresh.lock`, failing the next chat for 60 s.
+fn auth_status_exec_argv() -> Vec<String> {
+    vec![
+        "env".to_string(),
+        format!("{}=1", consts::CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV),
+        consts::CLAUDE_BINARY.to_string(),
+        "auth".to_string(),
+        "status".to_string(),
+    ]
+}
+
 pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     let user_config = speedwave_runtime::config::load_user_config().unwrap_or_else(|e| {
         log::warn!("failed to load user config, defaulting to anthropic path: {e}");
@@ -416,8 +428,9 @@ pub fn check_claude_auth(project: &str) -> anyhow::Result<bool> {
     log::info!("checking Claude auth in container {container_name}");
     ensure_exec_healthy(&rt, project, &container_name)?;
     log::info!("container {container_name} healthy, checking auth");
-    let mut cmd =
-        rt.container_exec_piped(&container_name, &[consts::CLAUDE_BINARY, "auth", "status"])?;
+    let argv = auth_status_exec_argv();
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut cmd = rt.container_exec_piped(&container_name, &argv_refs)?;
     let output = cmd.output()?;
     log::info!(
         "auth status check for {container_name} exited with {}",
@@ -1137,6 +1150,20 @@ mod tests {
         ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn auth_status_argv_turns_off_nonessential_traffic_for_the_claude_binary() {
+        assert_eq!(
+            auth_status_exec_argv(),
+            vec![
+                "env",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+                "/usr/local/bin/claude",
+                "auth",
+                "status",
+            ]
+        );
+    }
 
     fn project_with_provider(name: &str, provider: Option<&str>) -> ProjectUserEntry {
         ProjectUserEntry {
