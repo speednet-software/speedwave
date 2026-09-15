@@ -91,7 +91,30 @@ export type ErrorBlockKind =
   | 'session_starting'
   | 'auth_required'
   | 'stopped_by_user'
+  | 'api_server_interrupted'
+  | 'connection_interrupted'
+  | 'response_stalled'
+  | 'host_slept'
   | 'generic';
+
+/** Case-insensitive substrings of known Claude Code watchdog interruption texts. */
+const WATCHDOG_ERROR_NEEDLES: ReadonlyArray<{ needle: string; kind: ErrorBlockKind }> = [
+  { needle: 'server error mid-response', kind: 'api_server_interrupted' },
+  { needle: 'connection closed mid-response', kind: 'connection_interrupted' },
+  { needle: 'connection lost mid-response', kind: 'connection_interrupted' },
+  { needle: 'the response stopped arriving', kind: 'response_stalled' },
+  { needle: 'your computer went to sleep mid-response', kind: 'host_slept' },
+];
+
+/**
+ * Classifies a raw error string as a known Claude Code watchdog interruption, by
+ * case-insensitive substring. Returns `undefined` for anything else.
+ * @param content - Raw error text from the backend.
+ */
+export function watchdogErrorKind(content: string): ErrorBlockKind | undefined {
+  const lower = content.toLowerCase();
+  return WATCHDOG_ERROR_NEEDLES.find((entry) => lower.includes(entry.needle))?.kind;
+}
 
 /**
  * Per-turn token usage. Unlike `UsageInfo`, all cache fields are required
