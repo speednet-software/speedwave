@@ -30,7 +30,7 @@ SCRIPT="$BATS_TEST_DIRNAME/../../scripts/e2e-vm.sh"
 @test "shared excludes contain desktop/src-tauri bundled asset dirs" {
     local excludes
     excludes="$(sed -n '/^E2E_RSYNC_EXCLUDES=(/,/)/p' "$SCRIPT")"
-    for asset in lima nodejs wsl cli mcp-os THIRD-PARTY-LICENSES; do
+    for asset in lima nodejs wsl cli mcp-os pii-ner THIRD-PARTY-LICENSES; do
         echo "$excludes" | grep -q "desktop/src-tauri/${asset}" || {
             echo "missing desktop/src-tauri/${asset}"; return 1
         }

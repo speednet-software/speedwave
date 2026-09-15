@@ -370,11 +370,13 @@ jobs:
       - name: cargo test (full suite incl. test-support)
         run: cargo test -p speedwave-runtime -p speedwave-cli -p speedwave-pii-engine -p speedwave-pii-ner --features speedwave-runtime/test-support
 
-      - name: pii-ner converter tests
-        run: make test-pii-ner-tools
-
-      - name: pii-ner model e2e (CPU)
-        run: make test-pii-ner-model
+      # Same steps as `make test-pii-ner-tools` / `make test-pii-ner-model` without make.
+      - name: pii-ner converter tests and model e2e (CPU)
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" -m unittest discover -s crates/pii-ner/tools -p 'test_*.py'
+          "$PY" crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner --verify
+          SPEEDWAVE_PII_NER_ARTIFACT="$GITHUB_WORKSPACE/desktop/src-tauri/pii-ner" cargo test -p speedwave-pii-ner --features model-e2e --test model_e2e
 
       - name: Verify .gitattributes survives core.autocrlf=true checkout
         shell: bash

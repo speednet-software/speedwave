@@ -83,6 +83,10 @@ require_file "$root/mcp-os/shared/package-lock.json"
 require_non_empty_dir "$root/mcp-os/shared/node_modules"
 [[ -d "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "Missing mcp-shared dir: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
 [[ ! -L "$root/mcp-os/os/node_modules/@speedwave/mcp-shared" ]] || fail "mcp-shared must be a real directory, not a symlink: $root/mcp-os/os/node_modules/@speedwave/mcp-shared"
+# PII NER model artifact (ADR-088): output of `make prepare-pii-ner-model`.
+require_file "$root/pii-ner/manifest.json"
+require_file "$root/pii-ner/redact-bert.safetensors"
+require_file "$root/pii-ner/tokenizer.json"
 # Third-party notices ship in every bundle (make bundle-static-licenses / the CI copy step).
 require_non_empty_dir "$root/THIRD-PARTY-LICENSES"
 

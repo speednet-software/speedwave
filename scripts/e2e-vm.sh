@@ -29,6 +29,7 @@ E2E_RSYNC_EXCLUDES=(
     'desktop/src-tauri/wsl'
     'desktop/src-tauri/cli'
     'desktop/src-tauri/mcp-os'
+    'desktop/src-tauri/pii-ner'
     'desktop/src-tauri/THIRD-PARTY-LICENSES'
     'desktop/src-tauri/calendar-cli'
     'desktop/src-tauri/mail-cli'

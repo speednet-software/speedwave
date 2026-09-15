@@ -60,6 +60,14 @@ runs:
       shell: bash
       run: scripts/bundle-build-context.sh --ci
 
+    # PII NER model artifact (ADR-088): the pinned redact.tflite is downloaded, verified by
+    # sha256 and converted with the stdlib-only tool into desktop/src-tauri/pii-ner/.
+    - name: Convert the PII NER model for bundling
+      shell: bash
+      run: |
+        PY=$(command -v python3 || command -v python)
+        "$PY" crates/pii-ner/tools/fetch_and_convert.py --out desktop/src-tauri/pii-ner --verify
+
     - name: Build macOS native CLI binaries
       if: contains(inputs.platform, 'macos')
       shell: bash
