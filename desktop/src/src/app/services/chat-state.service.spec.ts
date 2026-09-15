@@ -3247,6 +3247,72 @@ describe('ChatStateService', () => {
     });
   });
 
+  // ── context meter sizes by the conversation model, not a subagent ──
+
+  describe('context meter uses the conversation model, not a subagent model', () => {
+    it('reports the conversation model and its window despite a subagent-heavy usage', () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: {
+          session_id: 'abc',
+          total_cost: 0.5,
+          model: 'claude-fable-5',
+          context_window_size: 1_000_000,
+          // Turn-sum usage inflated by subagent output — must not move ctx or model.
+          usage: { input_tokens: 4_000, output_tokens: 300_000 },
+          context_usage: {
+            input_tokens: 100_000,
+            output_tokens: 1_000,
+            cache_read_tokens: 550_000,
+            cache_write_tokens: 0,
+          },
+        },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+      expect(service.sessionStats?.model).toBe('claude-fable-5');
+    });
+
+    it('falls back to the Anthropic SSOT window when context_window_size is absent', async () => {
+      // Regression fixture: the conversation model had no modelUsage entry
+      // this turn (Rust sends None), so the frontend resolves the SSOT window.
+      const anthropic = TestBed.inject(AnthropicModelsService);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'list_anthropic_models') {
+          return [
+            {
+              id: 'claude-fable-5',
+              family: 'Fable 5',
+              context_tokens: 1_000_000,
+              latest: false,
+              premium: true,
+            },
+          ];
+        }
+        return undefined;
+      };
+      await anthropic.list();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'abc', total_cost: 0.5, model: 'claude-fable-5' },
+      });
+
+      expect(service.sessionStats?.context_window_size).toBe(1_000_000);
+      expect(service.sessionStats?.context_window_size).not.toBe(DEFAULT_CONTEXT_TOKENS);
+    });
+  });
+
   // ── mapContextOverflowError ────────────────────────────────────────────────
 
   describe('mapContextOverflowError', () => {

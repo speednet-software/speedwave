@@ -58,8 +58,8 @@ pub enum StreamChunk {
         /// hides the segment until `reconcileFooterCost` fills it from the proxy SSOT.
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_cost: Option<f64>,
-        /// Model name for the turn when known. Populated from `modelUsage`
-        /// in the `result` message or from the most recent `SystemInit`.
+        /// The conversation model — from `SystemInit`/the latest main-chain
+        /// `message.model`, never a subagent model from `modelUsage`.
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// Usage of the most recent main-chain API call — the only valid
@@ -456,7 +456,8 @@ pub struct StreamParser {
     /// Cumulative session cost in USD from the previous `Result`. Per-turn
     /// cost = current total - previous total, when both are authoritative.
     previous_session_cost: Option<f64>,
-    /// Last model seen (from `SystemInit` or `modelUsage` in a result).
+    /// The conversation model: the `SystemInit` model, superseded by the
+    /// latest main-chain assistant `message.model`; never a sidechain model.
     last_model: Option<String>,
     /// Unhandled top-level stream-json `type` values, each logged once per
     /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
@@ -519,6 +520,7 @@ impl StreamParser {
             "assistant" => {
                 self.capture_assistant_uuid(parsed);
                 self.capture_context_usage(parsed);
+                self.capture_conversation_model(parsed);
                 (Vec::new(), None)
             }
             "system" => option_to_vec(self.parse_system_message(parsed)),
@@ -564,6 +566,19 @@ impl StreamParser {
         if let Some(u) = turn_usage_from_jsonl(&parsed["message"]["usage"]) {
             if u != TurnUsage::default() {
                 self.last_context_usage = Some(u);
+            }
+        }
+    }
+
+    /// Track the conversation model from main-chain assistant events (last one
+    /// wins); sidechain (subagent) calls and missing/empty models are ignored.
+    fn capture_conversation_model(&mut self, parsed: &serde_json::Value) {
+        if is_sidechain_event(parsed) {
+            return;
+        }
+        if let Some(m) = parsed["message"]["model"].as_str() {
+            if !m.is_empty() {
+                self.last_model = Some(m.to_string());
             }
         }
     }
@@ -973,28 +988,27 @@ impl StreamParser {
             .as_f64()
             .or_else(|| parsed["total_cost"].as_f64());
 
-        // modelUsage: cumulative per-model stats; used for contextWindow + model id.
+        // modelUsage: cumulative per-model stats (includes subagent models).
         let model_usage = parsed["modelUsage"].as_object();
-        // contextWindow from the dominant model (highest outputTokens).
-        let context_window_size = model_usage
-            .and_then(|mu| {
-                mu.values()
-                    .max_by_key(|stats| stats["outputTokens"].as_u64().unwrap_or(0))
-            })
-            .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Model with the most output tokens; falls back to last SystemInit model.
-        let model = model_usage
-            .and_then(|mu| {
-                mu.iter()
-                    .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
-                    .map(|(k, _)| k.clone())
-            })
-            .or_else(|| self.last_model.clone());
-        // Keep `last_model` in sync for turns without modelUsage.
-        if let Some(m) = model.as_deref() {
-            self.last_model = Some(m.to_string());
+        // The conversation model always wins; the dominant-outputTokens key is
+        // only a fallback for when no conversation model is known yet.
+        let model = self
+            .last_model
+            .clone()
+            .or_else(|| dominant_model_by_output_tokens(model_usage));
+        // Sync `last_model` only when the fallback above picked it — the
+        // conversation model must never be overwritten by a subagent's entry.
+        if self.last_model.is_none() {
+            self.last_model = model.clone();
         }
+
+        // contextWindow of the conversation model; `None` when that model has
+        // no modelUsage entry (e.g. only subagents on other models ran).
+        let context_window_size = model
+            .as_deref()
+            .and_then(|m| model_usage.and_then(|mu| mu.get(m)))
+            .and_then(|stats| stats["contextWindow"].as_u64());
 
         // Option-preserving reader (absent cache fields stay `None` for the UI);
         // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
@@ -1234,6 +1248,18 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     } else {
         None
     }
+}
+
+/// Fallback model pick used only when no conversation model is known yet:
+/// the `modelUsage` entry with the most `outputTokens`.
+fn dominant_model_by_output_tokens(
+    model_usage: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    model_usage.and_then(|mu| {
+        mu.iter()
+            .max_by_key(|(_, stats)| stats["outputTokens"].as_u64().unwrap_or(0))
+            .map(|(k, _)| k.clone())
+    })
 }
 
 /// 1 MiB cap on serialized user-message JSON — wire is text-only after
@@ -3405,9 +3431,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_result_picks_dominant_model_when_modelusage_has_multiple_keys() {
-        // Regression: a turn mixing a main model with background Haiku calls
-        // must report the model with the highest outputTokens.
+    fn parse_result_falls_back_to_dominant_model_when_no_conversation_model_known() {
+        // Fallback path only: no SystemInit/assistant model captured yet (e.g.
+        // a local-LLM turn) — pick the modelUsage entry with the most outputTokens.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50,"contextWindow":200000},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500,"contextWindow":1000000}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -3420,13 +3446,188 @@ mod tests {
                 assert_eq!(
                     model.as_deref(),
                     Some("claude-opus-4-7"),
-                    "must pick the model with the highest outputTokens, not the alphabetically first key"
+                    "with no conversation model known, must fall back to the highest-outputTokens key"
                 );
                 assert_eq!(
                     context_window_size,
                     Some(1_000_000),
-                    "context_window_size must come from the same dominant model — picking Haiku's 200k here would misreport the cap for 1M sessions"
+                    "context_window_size must come from the same fallback model"
                 );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_uses_conversation_model_window_not_the_dominant_subagent_model() {
+        // Regression: a Haiku subagent produced far more output than the
+        // conversation model, but the window must still be the latter's.
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000},"claude-fable-5":{"inputTokens":100,"outputTokens":100,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-fable-5"),
+                    "the conversation model must win even though the Haiku subagent produced more output"
+                );
+                assert_eq!(
+                    context_window_size,
+                    Some(1_000_000),
+                    "context_window_size must be the conversation model's window, not the dominant subagent's 200k"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_main_chain_assistant_model_supersedes_systeminit() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+        );
+        // Main-chain assistant event (parent_tool_use_id: null) — supersedes init.
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_1","model":"claude-sonnet-4-6","role":"assistant"}}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-opus-4-7":{"inputTokens":10,"outputTokens":5000,"contextWindow":500000},"claude-sonnet-4-6":{"inputTokens":100,"outputTokens":100,"contextWindow":750000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+                assert_eq!(
+                    context_window_size,
+                    Some(750_000),
+                    "must use sonnet's window, not opus's higher-outputTokens entry"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_ignores_sidechain_assistant_model() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+        // Sidechain via parent_tool_use_id.
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"msg_1","model":"claude-haiku-4-5","role":"assistant"}}"#,
+        );
+        // Sidechain via the on-disk isSidechain marker (no parent_tool_use_id).
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_2","model":"claude-haiku-4-5","role":"assistant"}}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000},"claude-fable-5":{"inputTokens":100,"outputTokens":100,"contextWindow":1000000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(
+                    model.as_deref(),
+                    Some("claude-fable-5"),
+                    "a sidechain assistant event must never move the conversation model"
+                );
+                assert_eq!(context_window_size, Some(1_000_000));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_context_window_none_when_conversation_model_absent_from_modelusage() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+
+        // modelUsage carries only a subagent's model this turn.
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000}}}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result {
+                model,
+                context_window_size,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("claude-fable-5"));
+                assert!(
+                    context_window_size.is_none(),
+                    "must be None so the frontend falls back to the Anthropic SSOT instead of a subagent's window"
+                );
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_result_conversation_model_persists_across_turns_without_modelusage() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+        let first = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000},"claude-fable-5":{"inputTokens":100,"outputTokens":100,"contextWindow":1000000}}}"#;
+        parse_line_str(&mut parser, first);
+
+        let second = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.11,"result":""}"#;
+        let chunk = parse_line_str(&mut parser, second).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-fable-5"));
+            }
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_conversation_model_ignores_empty_or_missing_model() {
+        let mut parser = StreamParser::new();
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_1","model":"","role":"assistant"}}"#,
+        );
+        parse_line_str(
+            &mut parser,
+            r#"{"type":"assistant","message":{"id":"msg_2","role":"assistant"}}"#,
+        );
+
+        let line = r#"{"type":"result","session_id":"abc","is_error":false,"result":"","total_cost_usd":0.01}"#;
+        let chunk = parse_line_str(&mut parser, line).unwrap();
+        match chunk {
+            StreamChunk::Result { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-fable-5"));
             }
             other => panic!("expected Result, got {other:?}"),
         }
