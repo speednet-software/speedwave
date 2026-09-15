@@ -38,6 +38,7 @@ mod oauth_loopback;
 mod oauth_providers;
 mod paste_cmd;
 mod pii_display;
+mod pii_ner_service;
 mod plugin_oauth_cmd;
 mod slack_oauth_cmd;
 // `path_util` is consumed only by the Windows-only `oauth_login_cmd::open_terminal_with_command`.
@@ -805,6 +806,7 @@ fn main() {
     let plugin_bridges: SharedPluginBridges =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let mcp_os: SharedMcpOs = Arc::new(Mutex::new(None));
+    let pii_ner: pii_ner_service::SharedPiiNer = Arc::new(Mutex::new(None));
     let oauth: SharedOauth = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let auto_check_handle: SharedAutoCheckHandle = Arc::new(Mutex::new(None));
 
@@ -820,6 +822,7 @@ fn main() {
         ide_bridge: ide_bridge.clone(),
         plugin_bridges: plugin_bridges.clone(),
         mcp_os: mcp_os.clone(),
+        pii_ner: pii_ner.clone(),
         oauth: oauth.clone(),
         auto_check_handle: auto_check_handle.clone(),
     };
@@ -940,6 +943,7 @@ fn main() {
         .manage(clipboard_bridge_slot.clone())
         .manage(plugin_bridges.clone())
         .manage(mcp_os.clone())
+        .manage(pii_ner.clone())
         .manage(oauth.clone())
         .manage(queue_service.clone())
         .manage(transcript_store.clone())
@@ -1022,6 +1026,21 @@ fn main() {
                     app.handle(),
                 );
 
+                // Start the host PII NER detector before mcp-os: one compose reconcile below
+                // picks up both ports (ADR-089).
+                match pii_ner_service::PiiNerService::start(
+                    speedwave_runtime::consts::data_dir(),
+                    pii_ner_service::production_loader(),
+                ) {
+                    Ok(service) => {
+                        log::info!("PII NER detector service listening on port {}", service.port());
+                        if let Ok(mut guard) = pii_ner.lock() {
+                            *guard = Some(service);
+                        }
+                    }
+                    Err(e) => log::error!("PII NER detector service failed to start: {e}"),
+                }
+
                 // Start mcp-os process
                 let script = speedwave_runtime::build::resolve_mcp_os_script();
                 if let Some(script_path) = script {
@@ -1035,15 +1054,15 @@ fn main() {
                             if let Ok(mut guard) = mcp_os.lock() {
                                 *guard = Some(worker);
                             }
-
-                            // Compose regen + recreate so hub picks up new mcp-os port.
-                            reconcile::reconcile_compose_port(app.handle());
                         }
                         Err(e) => log::error!("mcp-os spawn error: {e}"),
                     }
                 } else {
                     log::warn!("mcp-os script not found — OS integrations will be unavailable");
                 }
+
+                // Compose regen + recreate so hub and proxy pick up the new host ports.
+                reconcile::reconcile_compose_port(app.handle());
 
                 start_mcp_os_watchdog(mcp_os.clone(), app.handle().clone());
 
