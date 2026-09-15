@@ -380,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn liveness_probe_custom_delegates_to_fn() {
         fn always_true(_: &Path) -> bool {
             true

@@ -1656,6 +1656,7 @@ mod tests {
     // --- HostBridge::new ---
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_assigns_port_and_token() {
         let cfg = endpoint_config("ide");
         let bridge = HostBridge::new(cfg).unwrap();
@@ -1665,6 +1666,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_holds_listener_until_start() {
         let cfg = endpoint_config("ide");
         let bridge = HostBridge::new(cfg).unwrap();
@@ -1676,6 +1678,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn host_bridge_debug_redacts_auth_token() {
         let cfg = endpoint_config("ide");
         let bridge = HostBridge::new(cfg).unwrap();
@@ -1699,6 +1702,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_with_preferred_port_uses_it_when_free() {
         let (guard, port) = reserve_free_port();
         drop(guard);
@@ -1711,6 +1715,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_with_preferred_port_fails_when_busy() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1728,6 +1733,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_with_persistent_token_creates_file_first_run() {
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp
@@ -1752,6 +1758,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_with_persistent_token_reuses_existing() {
         let tmp = tempfile::tempdir().unwrap();
         let token_path = tmp
@@ -1775,6 +1782,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_with_persistent_token_regenerates_on_malformed() {
         let tmp = tempfile::tempdir().unwrap();
         let token_dir = tmp.path().join("plugin-state").join("xyz");
@@ -1792,6 +1800,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn new_without_opts_regenerates_token_per_call() {
         let a = HostBridge::new(endpoint_config("ide")).unwrap();
         let b = HostBridge::new(endpoint_config("ide")).unwrap();
@@ -1872,6 +1881,7 @@ mod tests {
     // --- stale lock cleanup ---
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn stale_lock_cleanup_removes_files_for_dead_ports() {
         let dir = tempfile::tempdir().unwrap();
         let dead = dir.path().join("65535.lock");
@@ -1881,6 +1891,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn stale_lock_cleanup_removes_unparseable_names() {
         let dir = tempfile::tempdir().unwrap();
         let junk = dir.path().join("not-a-port.lock");
@@ -1890,6 +1901,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn stale_lock_cleanup_preserves_live_ports() {
         let dir = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1972,6 +1984,7 @@ mod tests {
     // --- start / stop lifecycle ---
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn start_endpoint_in_pairing_config_bails() {
         let cfg = pairing_config("example-plugin");
         let mut bridge = HostBridge::new(cfg).unwrap();
@@ -1981,6 +1994,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn start_pairing_in_endpoint_config_bails() {
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
@@ -1989,6 +2003,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn stop_is_idempotent_when_files_missing() {
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
@@ -2057,6 +2072,7 @@ mod tests {
     // -------- Endpoint integration tests --------
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_header_auth_valid_token_accepted() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|mut ws, _ctx| {
@@ -2083,6 +2099,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_header_auth_invalid_token_rejected() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
@@ -2098,6 +2115,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_origin_rejected_when_policy_is_reject_if_present() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
@@ -2119,6 +2137,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_context_exposes_path_query_matched_auth() {
         let cfg = endpoint_config("ide");
         type Snapshot = (
@@ -2175,6 +2194,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_subprotocol_echoed_when_advertised() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let cfg = HostBridgeConfig::builder("ide")
@@ -2215,6 +2235,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_active_connection_closes_on_bridge_stop() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|mut ws, mut ctx| {
@@ -2250,6 +2271,7 @@ mod tests {
     // -------- Pairing integration tests --------
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_two_different_roles_get_paired_and_relay() {
         let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2314,6 +2336,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_relay_forwards_binary_frames() {
         let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
@@ -2347,6 +2370,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_pair_busy_returns_http_409() {
         let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2404,6 +2428,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_disconnect_one_side_closes_other() {
         let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
@@ -2439,6 +2464,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn lock_body_builder_called_with_correct_context() {
         // Use a builder that captures the args via shared state.
         let captured: Arc<Mutex<Option<(u16, String)>>> = Arc::new(Mutex::new(None));
@@ -2466,6 +2492,7 @@ mod tests {
     // ─── Plan-required tests: lifecycle + state ───────────────────────────────
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn start_twice_returns_error() {
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
@@ -2480,6 +2507,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn drop_calls_stop() {
         let cfg = endpoint_config("ide");
         let bridge = HostBridge::new(cfg).unwrap();
@@ -2490,6 +2518,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn stop_removes_lock_file_and_joins_threads() {
         let cfg = endpoint_config("ide");
         let mut bridge = HostBridge::new(cfg).unwrap();
@@ -2520,6 +2549,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn start_writes_lock_file_atomic_via_named_temp_file() {
         // Asserts the lock file appears; content + mode are checked in dedicated tests.
         let cfg = endpoint_config("ide");
@@ -2539,6 +2569,7 @@ mod tests {
     // ─── Plan-required tests: endpoint mode ──────────────────────────────────
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_two_clients_concurrent() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|mut ws, _| {
@@ -2575,6 +2606,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_max_frame_close_1009() {
         // 1 KiB cap forces an oversize close on a 2 KiB message.
         let cfg = HostBridgeConfig::builder("ide")
@@ -2619,6 +2651,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn endpoint_accept_breaks_on_shutdown() {
         let cfg = endpoint_config("ide");
         let handler: ConnectionHandler = Arc::new(|_, _| Box::pin(async {}));
@@ -2635,6 +2668,7 @@ mod tests {
     // ─── Plan-required tests: pairing role matching ──────────────────────────
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_role_match_header_worker() {
         let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2670,6 +2704,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_role_match_query_plugin() {
         let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2703,6 +2738,7 @@ mod tests {
     // ─── Plan-required tests: pairing relay correctness ──────────────────────
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_relay_text_frames() {
         let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
@@ -2737,6 +2773,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_relay_close_frames() {
         let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
@@ -2777,6 +2814,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_event_callback_order_slot_slot_paired_closed() {
         let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2832,6 +2870,7 @@ mod tests {
     // ─── Plan-required tests: collision policies + race fix ──────────────────
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_rejects_same_role_with_409() {
         // Use Reject policy for this test.
         let roles = HashMap::from([
@@ -2906,6 +2945,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_evict_older_replaces_pending() {
         let cfg = pairing_config("example-plugin");
         let events: Arc<Mutex<Vec<PairingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2956,6 +2996,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_third_connection_returns_http_409_not_close_1008() {
         let cfg = pairing_config("example-plugin");
         let (bridge, _tmp) = start_pairing_for_test(cfg, None);
@@ -2999,6 +3040,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_pair_id_generation_prevents_stale_active_clear() {
         // A relay task that finishes after a *new* pair was activated must
         // NOT clear `active`. We exercise this by walking the state manually.
@@ -3071,6 +3113,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pairing_max_frame_violation_closes_pair_1009() {
         // 256 B frame cap; sending 1 KiB tears down the pair.
         let roles = HashMap::from([
@@ -3132,6 +3175,7 @@ mod tests {
     // ─── Plan-required tests: pending slot timeout + watchdog ───────────────
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn pending_slot_timeout_clears_slot() {
         // 1s timeout + 250ms check interval (timeout/4).
         let roles = HashMap::from([
@@ -3183,6 +3227,7 @@ mod tests {
     /// The relay lifecycle must ride the bridge lifecycle: ensure at start, periodic
     /// watchdog re-ensure (a WSL distro restart wipes the relay), remove at stop (ADR-080).
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn relay_lifecycle_rides_bridge_start_watchdog_and_stop() {
         use crate::mirror_relay::recorder::{calls_for_port, RelayOp};
 
@@ -3334,9 +3379,7 @@ mod tests {
                 Err(anyhow::anyhow!("wsl probe failed"))
             }
         }
-        speedwave_runtime::compose::set_host_addressing_computer_for_test(Arc::new(
-            FailingComputer,
-        ));
+        let _failing = speedwave_runtime::compose::pin_addressing_computer(FailingComputer);
 
         let dir = tempfile::tempdir().unwrap();
         let current = dir.path().join("60123.lock");
@@ -3352,7 +3395,6 @@ mod tests {
             "tracked path must be untouched while addressing is unresolvable"
         );
         assert!(current.exists(), "original lock must not be moved");
-        speedwave_runtime::compose::reset_host_addressing_computer_for_test();
     }
 
     #[test]

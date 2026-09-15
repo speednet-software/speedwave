@@ -33,8 +33,7 @@ pub use addressing::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use addressing::{
-    pin_direct_addressing, pin_mirrored_addressing, reset_host_addressing_computer_for_test,
-    set_host_addressing_computer_for_test, AddressingGuard,
+    pin_addressing_computer, pin_direct_addressing, pin_mirrored_addressing, AddressingGuard,
 };
 
 #[cfg(test)]
@@ -3090,6 +3089,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_claude_depends_on_proxy() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
@@ -3580,6 +3580,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_rendered_compose_contains_policy_mount_and_envs() {
         let data_dir = tempfile::tempdir().unwrap();
         let config = ResolvedClaudeConfig {
@@ -5924,6 +5925,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_mcp_os_config_injects_worker_url_into_hub() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
         let url = mcp_os_gateway_url(4007);
@@ -5986,6 +5988,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_mcp_os_config_not_in_claude_env() {
         let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(VALID_COMPOSE).unwrap();
         let url = mcp_os_gateway_url(4007);
@@ -6181,6 +6184,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_oauth_config_injects_into_plugin_consumer() {
         let compose = r#"
 services:
@@ -6325,6 +6329,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_oauth_config_writes_per_service_bearer_file() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
@@ -6415,6 +6420,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_oauth_config_does_not_inject_into_unprovisioned_services() {
         let tmp = tempfile::tempdir().unwrap();
         let lock_path = tmp.path().join(consts::PER_PROJECT_LOCK_FILE);
@@ -12492,6 +12498,7 @@ services:
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_render_compose_host_bridge_adds_extra_hosts_for_plugin_service() {
         let bridges = super::HostBridgesInfo {
             bridges: vec![super::HostBridgeRegistration {
