@@ -401,15 +401,8 @@ export class ComposerComponent implements AfterViewInit {
 
   private slashSuppressedByUser = false;
 
-  /**
-   * Wires the slash service to the active project and syncs the textarea
-   * disabled state with the `disabled` input.
-   */
+  /** Syncs the field with the `disabled` and `draftText` inputs and revokes removed attachment previews. */
   constructor() {
-    this.projectState.onProjectReady(() => {
-      const id = this.projectState.activeProject();
-      if (id) void this.slashService.refresh(id);
-    });
     effect(() => {
       const value = this.disabled();
       if (value) this.text.disable({ emitEvent: false });
