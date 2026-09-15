@@ -188,8 +188,7 @@ func createReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     reminder.title = name
 
     if let filter = params["list_id"] as? String {
-        let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
-        reminder.calendar = matches[0]
+        reminder.calendar = try resolveReminderList(filter, store: store)
     } else {
         reminder.calendar = store.defaultCalendarForNewReminders()
     }
@@ -231,8 +230,7 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     }
 
     if let filter = params["list_id"] as? String {
-        let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
-        reminder.calendar = matches[0]
+        reminder.calendar = try resolveReminderList(filter, store: store)
     }
 
     if params["due_date"] is NSNull {
@@ -255,12 +253,13 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         reminder.completionDate = completed ? Date() : nil
     }
 
-    // Notes and tags share one EventKit field: only recombine when the caller touches either.
+    // Notes and tags share one EventKit field: only touch it when the caller sends either.
     if params["notes"] != nil || params["tags"] != nil {
-        let rawNotes = reminder.notes ?? ""
-        let newNotes = params["notes"] as? String ?? stripTags(from: rawNotes)
-        let newTags = params["tags"] as? [String] ?? extractTags(from: rawNotes)
-        reminder.notes = combineTags(newTags, with: newNotes)
+        reminder.notes = mergeNotes(
+            existing: reminder.notes,
+            notes: params["notes"] as? String,
+            tags: params["tags"] as? [String]
+        )
     }
 
     try store.save(reminder, commit: true)
@@ -287,6 +286,15 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
 
 // MARK: - Helpers
 
+/// One list by id or exact name; several lists sharing a name are refused rather than picked blindly.
+func resolveReminderList(_ filter: String, store: EKEventStore) throws -> EKCalendar {
+    let matches = try resolveCalendars(for: .reminder, filter: filter, store: store)
+    guard matches.count == 1 else {
+        throw CLIError.ambiguous("Reminder list '\(filter)' matches \(matches.count) lists; pass the list id instead")
+    }
+    return matches[0]
+}
+
 func reminderToDict(_ r: EKReminder) -> [String: Any] {
     let rawNotes = r.notes ?? ""
     let tags = extractTags(from: rawNotes)
@@ -307,11 +315,11 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
 
     if let due = r.dueDateComponents, let dueDate = dueDateString(from: due) {
         dict["due_date"] = dueDate
-        dict["all_day"] = due.hour == nil
+        dict["all_day"] = isAllDay(due)
     }
 
     if let completionDate = r.completionDate {
-        dict["completed_date"] = localISO8601String(from: completionDate, timeZone: .current)
+        dict["completed_date"] = iso8601String(from: completionDate, timeZone: .current)
     }
 
     if !cleanNotes.isEmpty {
@@ -325,41 +333,50 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
 
 private let gregorian = Calendar(identifier: .gregorian)
 
+// Validates wall-clock fields without a zone, so a floating time inside a DST gap is not refused.
+private let zonelessGregorian: Calendar = {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    return calendar
+}()
+
 private let dateOnlyPattern = #"^\d{4}-\d{2}-\d{2}$"#
 private let wallClockPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$"#
 private let offsetPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"#
 
-/// Floating Gregorian components (EventKit requires that calendar): a bare date is all-day,
-/// a time with offset/`Z` becomes the host's wall clock, a time without offset is wall clock as given.
+func isAllDay(_ components: DateComponents) -> Bool {
+    components.hour == nil
+}
+
+/// Floating Gregorian components (EventKit requires that calendar): a bare date is all-day, a time
+/// without offset is kept as typed (never DST-adjusted), a time with offset/`Z` becomes the host's wall clock.
 func dueDateComponents(from string: String) -> DateComponents? {
-    if string.range(of: dateOnlyPattern, options: .regularExpression) != nil {
-        let parts = string.split(separator: "-").compactMap { Int($0) }
-        guard parts.count == 3 else { return nil }
-        let components = DateComponents(calendar: gregorian, year: parts[0], month: parts[1], day: parts[2])
-        return components.isValidDate ? components : nil
+    func matches(_ pattern: String) -> Bool {
+        string.range(of: pattern, options: .regularExpression) != nil
+    }
+    let dateOnly = matches(dateOnlyPattern)
+    let wallClock = matches(wallClockPattern)
+    guard dateOnly || wallClock || matches(offsetPattern) else { return nil }
+
+    // ICU `\d` also matches non-ASCII digits, which Int() refuses; impossible dates are refused too.
+    let ymd = string.prefix(10).split(separator: "-").compactMap { Int($0) }
+    guard ymd.count == 3 else { return nil }
+    var components = DateComponents(calendar: gregorian, year: ymd[0], month: ymd[1], day: ymd[2])
+    guard components.isValidDate(in: zonelessGregorian) else { return nil }
+    if dateOnly { return components }
+
+    if wallClock {
+        let hms = string.dropFirst(11).prefix(8).split(separator: ":").compactMap { Int($0) }
+        guard hms.count == 3 else { return nil }
+        components.hour = hms[0]
+        components.minute = hms[1]
+        components.second = hms[2]
+        return components.isValidDate(in: zonelessGregorian) ? components : nil
     }
 
-    let date: Date?
-    if string.range(of: wallClockPattern, options: .regularExpression) != nil {
-        let formatter = DateFormatter()
-        formatter.calendar = gregorian
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        date = formatter.date(from: string.replacingOccurrences(of: #"\.\d+$"#, with: "", options: .regularExpression))
-    } else if string.range(of: offsetPattern, options: .regularExpression) != nil {
-        date = parseISO8601(string)
-    } else {
-        // Foundation's date-only fallback accepts unpadded "2026-6-1" as a timed UTC midnight; refuse it.
-        return nil
-    }
-    guard let date else { return nil }
-
-    var local = gregorian
-    local.timeZone = .current
-    var components = local.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+    guard let date = parseISO8601(string) else { return nil }
+    components = gregorian.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
     components.calendar = gregorian
-    components.timeZone = nil
     return components
 }
 
@@ -368,24 +385,15 @@ func dueDateString(from components: DateComponents) -> String? {
     guard let year = components.year, let month = components.month, let day = components.day else {
         return nil
     }
-    if components.hour == nil {
+    if isAllDay(components) {
         return String(format: "%04d-%02d-%02d", year, month, day)
     }
     var resolved = components
-    if resolved.calendar == nil {
-        resolved.calendar = gregorian
-    }
+    resolved.calendar = resolved.calendar ?? gregorian
     let timeZone = components.timeZone ?? .current
     resolved.timeZone = timeZone
     guard let date = resolved.date else { return nil }
-    return localISO8601String(from: date, timeZone: timeZone)
-}
-
-func localISO8601String(from date: Date, timeZone: TimeZone) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime]
-    formatter.timeZone = timeZone
-    return formatter.string(from: date)
+    return iso8601String(from: date, timeZone: timeZone)
 }
 
 // MARK: - Tag Helpers
@@ -424,20 +432,43 @@ func stripTags(from notes: String) -> String {
         .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
 }
 
-/// Format tags as `[#tag]` markers and combine with notes.
-func combineTags(_ tags: [String], with notes: String?) -> String? {
+/// Format tags as `[#tag]` markers: trimmed, lowercased, deduplicated, space-separated.
+func formatTags(_ tags: [String]) -> String {
     var seen = Set<String>()
-    let normalized = tags
+    return tags
         .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
         .filter { !$0.isEmpty && seen.insert($0).inserted }
-    let formatted = normalized
         .map { "[#\($0)]" }
         .joined(separator: " ")
-    let clean = notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+}
 
-    if formatted.isEmpty && clean.isEmpty { return nil }
-    if formatted.isEmpty { return clean }
-    if clean.isEmpty { return formatted }
-    return "\(formatted)\n\(clean)"
+/// Format tags as `[#tag]` markers and combine with notes.
+func combineTags(_ tags: [String], with notes: String?) -> String? {
+    joinTags(formatTags(tags), with: notes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+}
+
+private func joinTags(_ markers: String, with body: String) -> String? {
+    if markers.isEmpty && body.isEmpty { return nil }
+    if markers.isEmpty { return body }
+    if body.isEmpty { return markers }
+    return "\(markers)\n\(body)"
+}
+
+/// Splits the marker run `combineTags` writes at the start of the notes from the text after it.
+func splitLeadingTags(_ notes: String) -> (markers: String, body: String) {
+    let pattern = #"^(?:\[#[^\]]+\][ \t]*)+\n?"#
+    guard let range = notes.range(of: pattern, options: .regularExpression) else {
+        return ("", notes)
+    }
+    let markers = notes[range].trimmingCharacters(in: .whitespacesAndNewlines)
+    return (markers, String(notes[range.upperBound...]))
+}
+
+/// PATCH merge for the shared notes field: a side the caller omits is kept byte-for-byte.
+func mergeNotes(existing: String?, notes: String?, tags: [String]?) -> String? {
+    let current = splitLeadingTags(existing ?? "")
+    let markers = tags.map(formatTags) ?? current.markers
+    let body = notes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? current.body
+    return joinTags(markers, with: body)
 }
 

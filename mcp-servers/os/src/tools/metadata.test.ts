@@ -85,6 +85,7 @@ describe('OS tool metadata', () => {
   it('write/delete tools have appropriate categories', () => {
     const writeTools = [
       'createReminder',
+      'updateReminder',
       'completeReminder',
       'createEvent',
       'updateEvent',

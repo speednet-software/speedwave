@@ -19,6 +19,9 @@ import {
 } from './validation.js';
 import { runCommand } from '../platform-runner.js';
 
+/** Tags become `[#tag]` markers inside the notes field, so these characters would forge markers. */
+const TAG_MARKER_CHARS = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 /** Input parameters for the listReminderLists tool (no params required). */
@@ -286,7 +289,7 @@ const createReminderTool: Tool = {
           'YYYY-MM-DD for an all-day reminder, or YYYY-MM-DDTHH:MM:SS for a timed one (local time; a UTC offset or Z is converted to local time)',
       },
       priority: {
-        type: 'number',
+        type: 'integer',
         description:
           'Priority, 0-9 (0=none, 1-4=high, 5=medium, 6-9=low; EventKit treats 1-9 as a gradient)',
       },
@@ -367,10 +370,10 @@ const updateReminderTool: Tool = {
       due_date: {
         type: ['string', 'null'],
         description:
-          'New due date: YYYY-MM-DD for all-day, or YYYY-MM-DDTHH:MM:SS for a timed reminder (local time; an offset or Z is converted). Pass null to remove the due date (this also stops any repetition)',
+          'New due date: YYYY-MM-DD for all-day, or YYYY-MM-DDTHH:MM:SS for a timed reminder (local time; an offset or Z is converted). Pass null to remove the due date (this also removes any recurrence)',
       },
       priority: {
-        type: 'number',
+        type: 'integer',
         description:
           'New priority, 0-9 (0=none, 1-4=high, 5=medium, 6-9=low; EventKit treats 1-9 as a gradient)',
       },
@@ -519,24 +522,11 @@ export async function handleCreateReminder(params: CreateReminderParams): Promis
       ['list_id', MAX_LENGTHS.id, false],
       ['notes', MAX_LENGTHS.body, true],
     ],
-    numbers: [['priority', 0, 9]],
+    integers: [['priority', 0, 9]],
     dates: ['due_date'],
-    stringArrays: [['tags', 50, MAX_LENGTHS.short]],
+    stringArrays: [['tags', 50, MAX_LENGTHS.short, TAG_MARKER_CHARS]],
   });
   if (!v.valid) return v.error;
-  const tags = p.tags as string[] | undefined;
-  if (tags) {
-    const badIdx = tags.findIndex((t) => /[[\]#]/.test(t));
-    if (badIdx !== -1) {
-      return {
-        success: false,
-        error: {
-          code: 'INVALID_CHARACTERS',
-          message: `tags[${badIdx}] must not contain [, ], or # characters`,
-        },
-      };
-    }
-  }
   const result = await runCommand('reminders', 'create_reminder', p);
   return { success: true, data: result.parsed };
 }
@@ -556,27 +546,15 @@ export async function handleUpdateReminder(params: UpdateReminderParams): Promis
       ['list_id', MAX_LENGTHS.id, false],
       ['notes', MAX_LENGTHS.body, true],
     ],
-    numbers: [['priority', 0, 9]],
+    integers: [['priority', 0, 9]],
     dates: ['due_date'],
-    stringArrays: [['tags', 50, MAX_LENGTHS.short]],
+    nullable: ['due_date'],
+    stringArrays: [['tags', 50, MAX_LENGTHS.short, TAG_MARKER_CHARS]],
   });
   if (!v.valid) return v.error;
   if (p.name !== undefined) {
     const nonEmpty = requireFields(p, ['name']);
     if (!nonEmpty.valid) return nonEmpty.error;
-  }
-  const tags = p.tags as string[] | undefined;
-  if (tags) {
-    const badIdx = tags.findIndex((t) => /[[\]#]/.test(t));
-    if (badIdx !== -1) {
-      return {
-        success: false,
-        error: {
-          code: 'INVALID_CHARACTERS',
-          message: `tags[${badIdx}] must not contain [, ], or # characters`,
-        },
-      };
-    }
   }
   const result = await runCommand('reminders', 'update_reminder', p);
   return { success: true, data: result.parsed };

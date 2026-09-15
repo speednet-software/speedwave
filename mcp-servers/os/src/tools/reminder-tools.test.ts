@@ -386,6 +386,14 @@ describe('reminder-tools', () => {
       expect(result.error?.code).toBe('OUT_OF_RANGE');
     });
 
+    it('rejects a fractional priority instead of silently ignoring it', async () => {
+      const result = await handleUpdateReminder({ id: 'r-1', priority: 5.5 });
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe('INVALID_TYPE');
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it('rejects a tag containing marker characters', async () => {
       const result = await handleUpdateReminder({ id: 'r-1', tags: ['ok', 'bad]#'] });
 
@@ -557,6 +565,20 @@ describe('reminder-tools', () => {
         const result = await handleCreateReminder({ name: 'Test', priority: '1' as any });
         expect(result.success).toBe(false);
         expect(result.error?.code).toBe('INVALID_TYPE');
+      });
+
+      it('rejects a fractional priority (the CLI cannot apply it)', async () => {
+        const result = await handleCreateReminder({ name: 'Test', priority: 5.5 });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+        expect(runCommand).not.toHaveBeenCalled();
+      });
+
+      it('rejects due_date null (only updateReminder can clear a due date)', async () => {
+        const result = await handleCreateReminder({ name: 'Test', due_date: null as any });
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe('INVALID_TYPE');
+        expect(runCommand).not.toHaveBeenCalled();
       });
 
       it('rejects invalid due_date', async () => {

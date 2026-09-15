@@ -137,7 +137,22 @@ final class RemindersTests: XCTestCase {
         XCTAssertNil(dueDateComponents(from: "tomorrow"))
         XCTAssertNil(dueDateComponents(from: "2026-02-30"))
         XCTAssertNil(dueDateComponents(from: "2026-6-1"))
+        XCTAssertNil(dueDateComponents(from: "٢٠٢٦-٠١-٠١"), "ICU \\d matches non-ASCII digits; refuse them")
         XCTAssertNil(dueDateComponents(from: ""))
+    }
+
+    func testDueDateRejectsImpossibleTimedDatesInEveryShape() {
+        XCTAssertNil(dueDateComponents(from: "2026-02-30T09:30:00"))
+        XCTAssertNil(dueDateComponents(from: "2026-02-30T09:30:00Z"))
+        XCTAssertNil(dueDateComponents(from: "2026-06-15T25:00:00"))
+        XCTAssertNil(dueDateComponents(from: "2026-06-15T23:60:00"))
+    }
+
+    func testDueDateWallClockKeepsDstGapTimeAsTyped() throws {
+        // 02:30 does not exist on 2026-03-29 in Europe/Warsaw; a floating time must still be stored as typed.
+        let c = try XCTUnwrap(dueDateComponents(from: "2026-03-29T02:30:00"))
+        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute, c.second], [2026, 3, 29, 2, 30, 0])
+        XCTAssertNil(c.timeZone)
     }
 
     // MARK: - Due Date Formatting
@@ -284,6 +299,46 @@ final class RemindersTests: XCTestCase {
     func testCombineTagsDeduplicates() {
         let result = combineTags(["Work", "work", "WORK"], with: nil)
         XCTAssertEqual(result, "[#work]")
+    }
+
+    // MARK: - Partial Notes/Tags Merge (update_reminder)
+
+    func testMergeNotesTagsOnlyKeepsBodyByteForByte() {
+        let existing = "[#Work] hello\n\n\n\nworld  \n"
+        XCTAssertEqual(mergeNotes(existing: existing, notes: nil, tags: ["x"]), "[#x]\nhello\n\n\n\nworld  \n")
+    }
+
+    func testMergeNotesNotesOnlyKeepsMarkersAsStored() {
+        let existing = "[#Work] [#urgent]\nold text"
+        XCTAssertEqual(mergeNotes(existing: existing, notes: "new text", tags: nil), "[#Work] [#urgent]\nnew text")
+    }
+
+    func testMergeNotesLeavesLiteralMarkerTextInBodyAlone() {
+        let existing = "See ticket [#123] for details"
+        XCTAssertEqual(mergeNotes(existing: existing, notes: nil, tags: ["work"]), "[#work]\nSee ticket [#123] for details")
+    }
+
+    func testMergeNotesBothGivenBehavesLikeCreate() {
+        XCTAssertEqual(mergeNotes(existing: "[#old]\nx", notes: "  fresh  ", tags: ["A", "a"]), "[#a]\nfresh")
+    }
+
+    func testMergeNotesClearingBothYieldsNil() {
+        XCTAssertNil(mergeNotes(existing: "[#old]\ntext", notes: "", tags: []))
+        XCTAssertNil(mergeNotes(existing: nil, notes: nil, tags: []))
+    }
+
+    func testMergeNotesWithoutStoredMarkersDoesNotInventAny() {
+        XCTAssertEqual(mergeNotes(existing: "plain", notes: "changed", tags: nil), "changed")
+        XCTAssertEqual(mergeNotes(existing: "plain", notes: nil, tags: ["t"]), "[#t]\nplain")
+    }
+
+    func testSplitLeadingTagsSeparatesMarkerRunFromBody() {
+        let split = splitLeadingTags("[#a] [#b]\nbody\nmore")
+        XCTAssertEqual(split.markers, "[#a] [#b]")
+        XCTAssertEqual(split.body, "body\nmore")
+        let none = splitLeadingTags("body [#inline]")
+        XCTAssertEqual(none.markers, "")
+        XCTAssertEqual(none.body, "body [#inline]")
     }
 
     // MARK: - Permission Access
