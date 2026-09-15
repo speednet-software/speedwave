@@ -4,7 +4,7 @@ import { SecuritySectionComponent } from './security-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { createDeferred } from '../../testing/deferred';
+import { createDeferred, type Deferred } from '../../testing/deferred';
 import type {
   PiiRuleInfo,
   RuleCategories,
@@ -365,12 +365,15 @@ describe('SecuritySectionComponent', () => {
 
   describe('dirty gating of Save', () => {
     it('the form and Save button are absent until get_security_policy resolves', async () => {
-      const pendingPolicy = createDeferred<SecurityPolicyResponse>();
+      let pendingPolicy!: Deferred<SecurityPolicyResponse>;
       mockTauri = new MockTauriService();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_pii_rules') return categoryList();
         if (cmd === 'list_security_policy_templates') return baseTemplates();
-        if (cmd === 'get_security_policy') return pendingPolicy.promise;
+        if (cmd === 'get_security_policy') {
+          pendingPolicy = createDeferred<SecurityPolicyResponse>();
+          return pendingPolicy.promise;
+        }
         return undefined;
       };
       await create();

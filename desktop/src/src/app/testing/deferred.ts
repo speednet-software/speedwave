@@ -1,5 +1,5 @@
 /** Externally settled promise: holds a mocked invoke open until the test releases it. */
-export interface Deferred<T> {
+export interface Deferred<T = void> {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;

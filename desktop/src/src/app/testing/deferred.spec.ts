@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createDeferred } from './deferred';
+import { createDeferred, type Deferred } from './deferred';
 
 describe('createDeferred', () => {
   it('stays pending until resolve is called, then settles with the value', async () => {
@@ -16,7 +16,7 @@ describe('createDeferred', () => {
   });
 
   it('defaults T to void so a bare resolve() releases the gate', async () => {
-    const gate = createDeferred();
+    const gate: Deferred = createDeferred();
     gate.resolve();
     await expect(gate.promise).resolves.toBeUndefined();
   });

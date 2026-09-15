@@ -3,7 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { CreateProjectModalComponent } from './create-project-modal.component';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-import { createDeferred } from '../../testing/deferred';
+import { createDeferred, type Deferred } from '../../testing/deferred';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 import { open } from '@tauri-apps/plugin-dialog';
@@ -301,8 +301,11 @@ describe('CreateProjectModalComponent', () => {
 
     it('does not emit `closed` while a submit is in flight', async () => {
       // Stub invoke to never resolve so `busy` stays true while we test cancel.
-      const pendingSubmit = createDeferred();
-      vi.spyOn(mockTauri, 'invoke').mockImplementation(() => pendingSubmit.promise);
+      let pendingInvoke!: Deferred;
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(() => {
+        pendingInvoke = createDeferred();
+        return pendingInvoke.promise;
+      });
       const closed = vi.fn();
       component.closed.subscribe(closed);
 
@@ -314,7 +317,7 @@ describe('CreateProjectModalComponent', () => {
 
       expect(closed).not.toHaveBeenCalled();
       // Clean up: let submit finish so the test does not leak a pending promise.
-      pendingSubmit.resolve();
+      pendingInvoke.resolve();
       await Promise.resolve();
     });
   });
