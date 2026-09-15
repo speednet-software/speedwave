@@ -6,10 +6,7 @@ import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { HealthReport } from '../models/health';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 function makeReport(overallHealthy = true): HealthReport {
   return {

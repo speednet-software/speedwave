@@ -10,10 +10,7 @@ import { LoggerService } from '../../services/logger.service';
 import { type AnthropicModel } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
 import { createDeferred } from '../../testing/deferred';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../../testing/mock-logger';
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   ollama: 'http://host.docker.internal:11434',

@@ -11,10 +11,7 @@ import { LoggerService } from '../services/logger.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('ChatComponent', () => {
   let component: ChatComponent;

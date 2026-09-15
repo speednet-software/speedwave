@@ -1,16 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { PluginBridgeService } from './plugin-bridge.service';
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import type { PluginBridgeStatus } from '../models/plugin';
+import { makeMockLogger } from '../testing/mock-logger';
 
 const SLUG = 'example-plugin';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
 
 type RunningSnapshot = Extract<PluginBridgeStatus, { running: true }>;
 

@@ -12,10 +12,7 @@ import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-ta
 import { createDeferred } from '../testing/deferred';
 import { HealthStoreService } from './health-store.service';
 import type { HealthReport } from '../models/health';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 function makeHealth(overrides: Partial<HealthReport>): HealthReport {
   return {
