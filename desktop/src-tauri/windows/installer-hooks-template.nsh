@@ -1,53 +1,19 @@
-; Uninstaller cleanup for Speedwave (issue #613).
-;
-; The literal "Speedwave" distro name below mirrors
-; crates/speedwave-runtime/src/consts.rs::WSL_DISTRO_NAME.
-; See the "WSL distro name" SSOT-alignment row in CLAUDE.md
-; for the full list of files to update if it changes.
-;
-; $SpeedwaveCleanData and $SpeedwaveDataDirOverride are top-level Vars so
-; they persist between PRE/POST uninstall macros -- Tauri's NSIS template
-; expands both into the same uninstaller .nsi, so ordinary global-variable
-; scoping applies.
-;
-; Silent-install contract: `/SD IDNO` makes silent uninstalls
-; (`uninstall.exe /S`) default to "preserve data".
-;
-; Bundled-payload cleanup ($LOCALAPPDATA\Speedwave\nodejs) runs
-; unconditionally — it is app code, not user data, so the prompt
-; below does not gate it.
-
 Var SpeedwaveCleanData
 Var SpeedwaveDataDirOverride
 
 ; @@SPEEDWAVE_EMBEDDED_MACROS@@
-; Generator replaces the marker above with materialize macros derived from
-; windows/sweep.ps1 + firewall.ps1. See scripts/generate-installer-nsh.sh.
 
-; PRE-INSTALL: release $INSTDIR\Speedwave.exe, $INSTDIR\nodejs\*, and
-; $dataDir\bin\speedwave.exe before the installer overwrites them.
-; Without this, upgrades fail with "Error opening file for writing" on
-; stale workers, or link_cli silently keeps a stale CLI on next launch.
-; See ADR-048 §"PRE-INSTALL orphan worker sweep".
 !macro NSIS_HOOK_PREINSTALL
-  ; Materialize sweep.ps1 into $PLUGINSDIR (auto-cleaned by NSIS).
   !insertmacro SPEEDWAVE_MATERIALIZE_SWEEP
 
-  ; $INSTDIR via env var (process-scoped) — see ADR-048.
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", t "$INSTDIR")i'
 
-  ; $dataDir for CLI sweep: honour SPEEDWAVE_DATA_DIR, else $PROFILE\.speedwave
-  ; (DATA_DIR const in consts.rs).
   ReadEnvStr $1 "SPEEDWAVE_DATA_DIR"
   StrCmp $1 "" 0 sw_data_dir_ok
     StrCpy $1 "$PROFILE\.speedwave"
   sw_data_dir_ok:
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", t "$1")i'
 
-  ; Run via the wscript hidden-window shim so PowerShell does not flash a black
-  ; console during install (nsExec hides via SW_HIDE only, which conhost paints
-  ; before honoring — see windows/run-hidden.vbs). The shim returns the child
-  ; exit code, so Pop $0 is unchanged.
   !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
   nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\sweep.ps1$\""`
   Pop $0
@@ -56,19 +22,13 @@ Var SpeedwaveDataDirOverride
     DetailPrint "Common causes: PowerShell missing, AppLocker / WDAC blocking script execution, ExecutionPolicy enforced by GPO, or a worker process the sweep could not kill."
   ${EndIf}
 
-  ; Clear env vars so they do not leak into other installer phases.
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_INSTDIR", i 0)i'
   System::Call 'kernel32::SetEnvironmentVariable(t "SPW_DATA_DIR", i 0)i'
 !macroend
 
-; POST-INSTALL: create Hyper-V firewall rule for the WSL VM so the host
-; bridge (bound on the WSL adapter IP, not 127.0.0.1) is reachable from
-; containers without surfacing a per-binary WDF prompt to the user.
-; See CLAUDE.md SSOT row for windows/firewall.ps1.
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
   !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
-  ; Hidden-window shim (see PRE-INSTALL): no console flash, exit code preserved.
   nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode install"`
   Pop $0
   ${If} $0 != 0
@@ -77,9 +37,6 @@ Var SpeedwaveDataDirOverride
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; ADR-031: SPEEDWAVE_DATA_DIR redirects ~/.speedwave to a custom path.
-  ; If set, we display a different prompt that names the env var explicitly
-  ; and warns the user we cannot resolve the path from the uninstaller.
   ReadEnvStr $SpeedwaveDataDirOverride "SPEEDWAVE_DATA_DIR"
   StrCmp $SpeedwaveDataDirOverride "" sw_default_prompt sw_override_prompt
 
@@ -104,17 +61,11 @@ Var SpeedwaveDataDirOverride
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  ; Always remove bundled binaries left in $LOCALAPPDATA\Speedwave by Tauri's
-  ; resource extractor (issue #613 follow-up). These are not user data — they
-  ; are app payload (Node.js, helper executables) that the uninstaller would
-  ; otherwise orphan. Run unconditionally, before the user-data branch.
   RMDir /r "$LOCALAPPDATA\Speedwave\nodejs"
   RMDir "$LOCALAPPDATA\Speedwave"
 
-  ; Always remove the firewall rules — they are app config, not user data.
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
   !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN
-  ; Hidden-window shim (see PRE-INSTALL): no console flash, exit code preserved.
   nsExec::ExecToLog `"$SYSDIR\wscript.exe" "$PLUGINSDIR\run-hidden.vbs" "$\"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$PLUGINSDIR\firewall.ps1$\" -Mode uninstall"`
   Pop $0
   ${If} $0 != 0
@@ -123,12 +74,6 @@ Var SpeedwaveDataDirOverride
 
   StrCmp $SpeedwaveCleanData "1" 0 sw_skip_cleanup
 
-    ; Probe whether the Speedwave distro is registered. `wsl -d <name> -- true`
-    ; returns 0 only if the distro exists and can be entered. If it does not
-    ; exist (user installed but never completed setup), skip the terminate +
-    ; unregister to avoid a misleading "WARNING: returned 1" in the install log.
-    ; Use $SYSDIR (System32) to prevent PATH-based binary substitution,
-    ; matching the absolute-path hardening in WslRuntime::reset_vm().
     nsExec::Exec '"$SYSDIR\wsl.exe" -d Speedwave -- true'
     Pop $0
     ${If} $0 != 0
@@ -136,12 +81,9 @@ Var SpeedwaveDataDirOverride
       Goto sw_after_wsl_unregister
     ${EndIf}
 
-    ; Best-effort terminate; ignore exit code.
     nsExec::ExecToLog '"$SYSDIR\wsl.exe" --terminate Speedwave'
     Pop $0
 
-    ; Unregister the WSL distro. Any non-zero exit code at this point is
-    ; unexpected (we just confirmed the distro exists), so warn the user.
     nsExec::ExecToLog '"$SYSDIR\wsl.exe" --unregister Speedwave'
     Pop $0
     ${If} $0 != 0
@@ -152,9 +94,6 @@ Var SpeedwaveDataDirOverride
 
     sw_after_wsl_unregister:
 
-    ; Only delete the default data dir; leave SPEEDWAVE_DATA_DIR alone
-    ; (we cannot validate or sandbox the path safely from the uninstaller).
-    ; ".speedwave" must match consts::DATA_DIR — see SSOT alignment in CLAUDE.md.
     StrCmp $SpeedwaveDataDirOverride "" 0 sw_skip_data_dir
       RMDir /r "$PROFILE\.speedwave"
       DetailPrint "Speedwave: removed user data and WSL distribution"

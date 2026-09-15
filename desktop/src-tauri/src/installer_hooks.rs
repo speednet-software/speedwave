@@ -1,6 +1,3 @@
-//! Regression tests for `windows/installer-hooks.nsh` and its inputs
-//! (`installer-hooks-template.nsh`, `sweep.ps1`, `firewall.ps1`). See ADR-048.
-
 #[cfg(test)]
 mod tests {
     const HOOKS: &str = include_str!("../windows/installer-hooks.nsh");
@@ -10,8 +7,8 @@ mod tests {
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
     const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
-
-    // ── Hook shape ──────────────────────────────────────────────────────
+    const INSTALLER_PS1_SOURCES: [(&str, &str); 2] =
+        [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)];
 
     #[test]
     fn has_all_required_hook_macros() {
@@ -91,8 +88,6 @@ mod tests {
         );
     }
 
-    // ── Drift detection: generator output stays in sync with .ps1 sources ──
-
     #[test]
     fn installer_hooks_nsh_matches_template_plus_generated_macros() {
         let expected = render_expected_hooks(TEMPLATE, SWEEP_PS1, FIREWALL_PS1, RUN_HIDDEN_VBS);
@@ -104,7 +99,6 @@ mod tests {
 
     #[test]
     fn run_hidden_vbs_has_no_bom() {
-        // wscript.exe fails to parse a .vbs with a UTF-8 BOM.
         assert!(
             !RUN_HIDDEN_VBS.starts_with('\u{feff}'),
             "run-hidden.vbs must be ANSI/BOM-free (wscript chokes on a BOM)"
@@ -112,8 +106,29 @@ mod tests {
     }
 
     #[test]
+    fn ps1_sources_have_utf8_bom() {
+        for (name, ps1) in INSTALLER_PS1_SOURCES {
+            assert!(
+                ps1.starts_with('\u{feff}'),
+                "{name} must be UTF-8 with BOM (PowerShell 5.1 misreads a BOM-less .ps1)"
+            );
+            assert!(
+                !ps1.starts_with("\u{feff}\u{feff}"),
+                "{name} has a doubled BOM; the generator strips only one"
+            );
+        }
+    }
+
+    #[test]
+    fn installer_hooks_nsh_embeds_no_bom() {
+        assert!(
+            !HOOKS.contains('\u{feff}'),
+            "installer-hooks.nsh must not embed a BOM (generate-installer-nsh.sh strips it)"
+        );
+    }
+
+    #[test]
     fn install_hooks_run_powershell_via_hidden_shim() {
-        // All three PowerShell-invoking hooks go through the wscript shim.
         let shim_calls = HOOKS
             .matches("wscript.exe\" \"$PLUGINSDIR\\run-hidden.vbs")
             .count();
@@ -128,7 +143,6 @@ mod tests {
             3,
             "each shim hook must materialize run-hidden.vbs first"
         );
-        // No hook may launch powershell.exe directly via nsExec.
         assert!(
             !HOOKS.contains("nsExec::ExecToLog `\"$SYSDIR\\WindowsPowerShell"),
             "no hook may call powershell.exe directly via nsExec — must use the wscript shim"
@@ -143,8 +157,6 @@ mod tests {
         );
     }
 
-    // ── PowerShell scripts: contract surface ─────────────────────────────
-
     #[test]
     fn sweep_ps1_reads_required_env_vars() {
         for env in ["$env:SPW_INSTDIR", "$env:SPW_DATA_DIR"] {
@@ -154,7 +166,6 @@ mod tests {
 
     #[test]
     fn sweep_ps1_kills_all_three_target_categories() {
-        // Speedwave.exe (Tauri) + nodejs/* (host workers) + bin/speedwave.exe (CLI).
         assert!(
             SWEEP_PS1.contains(r"\Speedwave.exe"),
             "sweep.ps1 must target Speedwave.exe"
@@ -168,8 +179,6 @@ mod tests {
             SWEEP_PS1.contains(&cli_dir),
             "sweep.ps1 must target $dataDir{cli_dir} (CLI)"
         );
-        // The filename is per-instance, so the script mirrors installed_cli_filename
-        // instead of carrying a literal. Rename the rule there and here together.
         let prod = speedwave_runtime::consts::installed_cli_filename(
             true,
             std::path::Path::new("/home/u/.speedwave"),
@@ -235,7 +244,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_creates_wdf_allow_rules() {
-        // Host application ALLOW rules (New-NetFirewallRule -Program), separate from the Hyper-V rule.
         assert!(
             FIREWALL_PS1.contains("New-NetFirewallRule")
                 && FIREWALL_PS1.contains("Action      = 'Allow'")
@@ -246,7 +254,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_accepts_programs_param_split_on_semicolon() {
-        // Paths arrive as one ';'-joined [string] (PowerShell -File cannot bind a [string[]]).
         assert!(
             FIREWALL_PS1.contains("[string]$Programs")
                 && FIREWALL_PS1.contains("$Programs -split ';'"),
@@ -268,7 +275,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_installer_modes_fail_open() {
-        // Installer-invoked modes (install/uninstall) fail open via several exit-0 paths.
         let exits = FIREWALL_PS1.matches("exit 0").count();
         assert!(
             exits >= 4,
@@ -286,7 +292,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_ensure_checks_existence_before_signalling_elevation() {
-        // 'ensure' does the non-admin existence check and exits 3 only when the rule is missing.
         let ensure_idx = FIREWALL_PS1
             .find("$Mode -eq 'ensure'")
             .expect("ensure branch must exist");
@@ -305,7 +310,6 @@ mod tests {
 
     #[test]
     fn firewall_ps1_elevated_mode_does_not_self_relaunch() {
-        // install-elevated runs the privileged body directly; self-elevation is Rust-driven.
         assert!(
             !FIREWALL_PS1.contains("-Verb RunAs") && !FIREWALL_PS1.contains("RunAs"),
             "firewall.ps1 must not self-elevate; elevation is driven from Rust"
@@ -314,8 +318,6 @@ mod tests {
 
     #[test]
     fn installers_invoke_only_install_and_uninstall_modes() {
-        // Runtime-only modes (ensure, install-elevated) are Desktop-only; assert on the
-        // invocation pattern, not presence (the strings appear in the materialized ValidateSet).
         for needle in [
             "firewall.ps1\" -Mode ensure",
             "firewall.ps1\" -Mode install-elevated",
@@ -335,16 +337,13 @@ mod tests {
 
     #[test]
     fn materialized_ps1_scripts_contain_no_backtick() {
-        // Backtick is the NSIS FileWrite delimiter with no escape; it truncates the string.
-        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+        for (name, ps1) in INSTALLER_PS1_SOURCES {
             assert!(
                 !ps1.contains('`'),
                 "{name} contains a backtick — breaks NSIS FileWrite (use splatting)"
             );
         }
     }
-
-    // ── WiX fragments: MSI parity ────────────────────────────────────────
 
     #[test]
     fn sweep_wxs_runs_after_install_files_and_calls_powershell() {
@@ -373,9 +372,6 @@ mod tests {
 
     #[test]
     fn sweep_wxs_passes_installdir_via_file_arg_not_command_literal() {
-        // H-03: [INSTALLDIR] inside a -Command PS literal lets a crafted install
-        // path inject commands run as SYSTEM. It must be a -File script argument.
-        // Inspect the CustomAction command line only (skip the XML comment prose).
         let cmd = SWEEP_WXS
             .lines()
             .find(|l| l.contains("powershell.exe") && l.contains("Value="))
@@ -396,14 +392,10 @@ mod tests {
 
     #[test]
     fn sweep_wxs_installdir_arg_survives_trailing_backslash() {
-        // WiX resolves [INSTALLDIR] with a trailing "\". A lone "\" before the
-        // closing quote escapes it (Win32 argv), swallowing the next arg. The
-        // property must be doubled so the quoted arg still closes.
         let line = SWEEP_WXS
             .lines()
             .find(|l| l.contains("powershell.exe") && l.contains("Value="))
             .expect("sweep.wxs must have a powershell CustomAction Value line");
-        // Extract the command-line string inside Value="...".
         let inner = line
             .split_once("Value=\"")
             .and_then(|(_, rest)| rest.rsplit_once('"'))
@@ -414,7 +406,6 @@ mod tests {
             .replace("[%USERPROFILE]", "C:\\Users\\bob")
             .replace("[SystemFolder]", "C:\\Windows\\System32\\")
             .replace("&quot;", "\"");
-        // Count args split by the real Win32 backslash/quote rule; -DataDir must survive.
         let argv = win32_argv(&expanded);
         assert!(
             argv.iter().any(|a| a == "-DataDir"),
@@ -431,7 +422,6 @@ mod tests {
         );
     }
 
-    /// Minimal CommandLineToArgvW backslash/quote splitter for the test above.
     #[cfg(test)]
     fn win32_argv(cmd: &str) -> Vec<String> {
         let mut args = Vec::new();
@@ -506,8 +496,6 @@ mod tests {
         );
     }
 
-    // ── Negative invariants from the pre-refactor era ────────────────────
-
     #[test]
     fn no_global_image_name_kill() {
         let lower = HOOKS.to_lowercase();
@@ -529,9 +517,6 @@ mod tests {
         );
     }
 
-    // ── helpers ─────────────────────────────────────────────────────────
-
-    /// Returns the body of a `!macro NAME ... !macroend` block.
     fn section<'a>(src: &'a str, name: &str) -> &'a str {
         let start = src
             .find(&format!("!macro {name}"))
@@ -543,27 +528,13 @@ mod tests {
         &after[..end]
     }
 
-    /// Re-derives the expected `installer-hooks.nsh` from the template + the two `.ps1` sources,
-    /// mirroring `scripts/generate-installer-nsh.sh`; drift from the committed file fails the test.
     fn render_expected_hooks(
         template: &str,
         sweep_ps1: &str,
         firewall_ps1: &str,
         run_hidden_vbs: &str,
     ) -> String {
-        let mut embed = String::new();
-        embed.push_str(
-            "; ============================================================================\n",
-        );
-        embed.push_str("; GENERATED CONTENT BELOW — DO NOT EDIT BY HAND.\n");
-        embed.push_str(
-            "; Sources: windows/sweep.ps1, windows/firewall.ps1, windows/run-hidden.vbs\n",
-        );
-        embed.push_str("; Regenerate: make generate-installer-nsh\n");
-        embed.push_str(
-            "; ============================================================================\n\n",
-        );
-        embed.push_str(&emit_materialize_macro("sweep", "ps1", sweep_ps1));
+        let mut embed = emit_materialize_macro("sweep", "ps1", sweep_ps1);
         embed.push('\n');
         embed.push_str(&emit_materialize_macro("firewall", "ps1", firewall_ps1));
         embed.push('\n');
@@ -582,7 +553,6 @@ mod tests {
     }
 
     fn emit_materialize_macro(name: &str, ext: &str, src: &str) -> String {
-        // NSIS !define/label tokens cannot contain '-'; normalize to UPPER with '-' -> '_'.
         let upper = name.to_uppercase().replace('-', "_");
         let file = format!("{name}.{ext}");
         let id = format!("SW_{upper}_ID");
@@ -606,7 +576,6 @@ mod tests {
             for c in line.chars() {
                 match c {
                     '$' => esc.push_str("$$"),
-                    // Backtick has no NSIS escape; the generator rejects sources containing one.
                     '"' => esc.push_str("$\\\""),
                     other => esc.push(other),
                 }

@@ -1,32 +1,5 @@
-# Speedwave v2 — Developer Makefile
-#
-# Usage:
-#   make              — build everything
-#   make test         — run all tests
-#   make check        — lint + clippy + type-check
-#   make check-all    — full quality gate: lint + test + coverage + audit
-#   make coverage-html— generate & open HTML coverage reports
-#   make audit        — check dependencies for known vulnerabilities
-#   make dev          — start desktop in dev mode (Tauri + Angular)
-#                       add DEV_INSTANCE=<name> for a second, isolated instance
-#                       alongside it (its port is derived from the name)
-#
-# Prerequisites:
-#   - Rust toolchain (rustup)
-#   - Node.js 20+ (for MCP servers and Angular frontend)
-#   - cargo-tauri CLI (cargo install tauri-cli) — for desktop dev/build
-#   - cargo-llvm-cov (cargo install cargo-llvm-cov) — for Rust coverage
-#   - cargo-audit (cargo install cargo-audit) — for dependency audit
-#   - bats-core (brew install bats-core; macOS/CI only) — for E2E + script test suites
-#   - gitleaks (brew install gitleaks / choco install gitleaks) — required by the pre-commit hook
-#   - Swift 5.9+ (macOS only, for native OS CLI binaries)
-
-# Ensure cargo and Homebrew are in PATH even in non-interactive shells
-# (git hooks and CI run /bin/sh which does not source ~/.zshenv)
 export PATH := $(HOME)/.cargo/bin:/opt/homebrew/bin:$(PATH)
 
-# Windows (Git Bash + GnuWin32 make): npm/npx are bash scripts that the
-# bash-via-execve-from-make path cannot invoke directly. Use .cmd variants.
 ifeq ($(OS),Windows_NT)
 NPM := npm.cmd
 NPX := npx.cmd
@@ -35,15 +8,6 @@ NPM := npm
 NPX := npx
 endif
 
-# Dev instance selection (ADR-031). One `make dev` per worktree: DEV_INSTANCE
-# names the instance and everything that would otherwise collide between two
-# concurrent dev builds is derived from it. The data dir (and through its
-# basename the Lima VM, compose prefix and WSL distro), the bundle identifier
-# (tauri-plugin-single-instance keys its singleton socket on it, so a shared one
-# makes the second process exit and only focus the first window) and, for any
-# instance but the default, the Angular dev-server port.
-#   make dev                          : today's dev instance
-#   make dev DEV_INSTANCE=speed-533   : a second one, side by side
 DEV_INSTANCE ?= dev
 DEV_IDENTIFIER ?= pl.speedwave.desktop.$(DEV_INSTANCE)
 ifeq ($(DEV_INSTANCE),dev)
@@ -51,40 +15,24 @@ DEV_PRODUCT_NAME ?= Speedwave Dev
 else
 DEV_PRODUCT_NAME ?= Speedwave $(DEV_INSTANCE)
 endif
-# The default instance keeps the port where it is declared, in angular.json's
-# serve options and tauri.conf.json's devUrl (pinned equal by
-# dev-server-port.bats). Any other instance derives one from its own name, so a
-# worktree keeps the same URL across restarts and nobody has to track which port
-# is free: 24 bits of sha256 folded into 20000-39999, clear of the Angular
-# defaults below and of the macOS ephemeral range (49152+) above. Computed once,
-# and only when DEV_PORT was not given; `shasum` is the macOS spelling of
-# `sha256sum` (same fallback as the Lima tarball check below).
 ifneq ($(DEV_INSTANCE),dev)
 ifeq ($(origin DEV_PORT),undefined)
 DEV_PORT := $(shell printf '%s' '$(DEV_INSTANCE)' | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-6 | { read h; echo $$((20000 + 0x$$h % 20000)); })
 endif
 endif
-# Overriding the port means overriding both files at once, from here.
 ifeq ($(strip $(DEV_PORT)),)
 DEV_PORT_CONFIG :=
 else
 DEV_PORT_CONFIG := ,"build":{"devUrl":"http://localhost:$(DEV_PORT)","beforeDevCommand":{"script":"npx ng serve --port $(DEV_PORT)","cwd":"../src"}}
 endif
-# Exported rather than interpolated into the recipes: GnuWin32 make 3.81
-# mishandles inline JSON quoting, the same reason dev-tauri-windows.sh exists.
 DEV_TAURI_CONFIG = {"identifier":"$(DEV_IDENTIFIER)","productName":"$(DEV_PRODUCT_NAME)"$(DEV_PORT_CONFIG)}
 export DEV_TAURI_CONFIG
 
-# Isolate dev builds from production (~/.speedwave/).
-# Unit tests use fake_home/tmpdir — they ignore this variable.
-# E2E tests backup/restore this directory (not production ~/.speedwave/).
 SPEEDWAVE_DATA_DIR ?= $(HOME)/.speedwave-$(DEV_INSTANCE)
 export SPEEDWAVE_DATA_DIR
 
 LIMA_VERSION := $(shell cat .lima-version 2>/dev/null || echo 2.0.2)
 
-# No bats on a Windows host (no Chocolatey package; the rig runs it inside WSL), so the
-# hint is platform-picked once here and shared by the probe and all ten bats gates.
 ifeq ($(OS),Windows_NT)
 BATS_HINT = echo "     Windows: not provisioned — the bats suites run on macOS + CI"
 else
@@ -92,16 +40,6 @@ BATS_HINT = echo "     Install: brew install bats-core"
 endif
 REQUIRE_BATS = command -v bats >/dev/null 2>&1 || { echo "❌ bats not found."; $(BATS_HINT); exit 1; }
 
-# bats runs serially, never `--jobs N`: bundle-build-context.bats plants fixtures in shared
-# repo paths (see test-desktop-group-run), so siblings in one file would race.
-
-# Hard floor: dev/test must never run against the production data dir, even if a
-# user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
-# applies when it is unset). A data dir whose basename is exactly `.speedwave` is
-# production — matched both with a path separator (`*/.speedwave`) and bare
-# (`.speedwave`). An empty or whitespace-only value is ALSO production: it
-# resolves to ~/.speedwave in consts::data_dir_from. Portable: pure shell
-# `case`/`test`, no installed tool.
 guard-not-prod-data-dir:
 	@case "$(SPEEDWAVE_DATA_DIR)" in \
 	  */.speedwave | .speedwave) \
@@ -115,12 +53,6 @@ guard-not-prod-data-dir:
 	    exit 1; \
 	fi
 
-# DEV_INSTANCE ends up as the SPEEDWAVE_DATA_DIR basename, so it must satisfy the
-# same rule as consts::derive_instance_name_from (^[a-z][a-z0-9-]{0,63}$ once the
-# leading dot is stripped) or the app panics at startup instead of reporting a
-# typo. DEV_PORT is checked here too: the derived value is always a number, but an
-# explicitly passed one is whatever the caller typed. The rule is ASCII, while glob
-# ranges collate per locale, so the name check runs under LC_ALL=C.
 guard-dev-instance:
 	@export LC_ALL=C; \
 	name='$(DEV_INSTANCE)'; \
@@ -146,10 +78,6 @@ guard-dev-instance:
 	    echo "⚠️  DEV_INSTANCE=$(DEV_INSTANCE) but SPEEDWAVE_DATA_DIR=$(SPEEDWAVE_DATA_DIR) comes from the environment, so that is the data dir this instance gets." >&2; \
 	fi
 
-# Startup-only checks, split from guard-dev-instance so that resolving the config
-# (dev-config, and the tests that read it) never has to bind a port. A taken port
-# otherwise surfaces minutes later, in ng serve, after the whole build. Node is a
-# setup-dev prerequisite; where it is missing, skip the probe rather than refuse.
 guard-dev-port: guard-dev-instance
 	@if [ "$(DEV_INSTANCE)" != "dev" ]; then \
 	    echo "▶ dev instance $(DEV_INSTANCE): $(SPEEDWAVE_DATA_DIR), $(DEV_IDENTIFIER), http://localhost:$(DEV_PORT)"; \
@@ -158,8 +86,6 @@ guard-dev-port: guard-dev-instance
 	    node -e 'const s=require("net").createServer();s.once("error",e=>{console.error("❌ Refusing: port "+process.argv[1]+" is already in use ("+e.code+"). Pick another: make dev DEV_INSTANCE=$(DEV_INSTANCE) DEV_PORT=<port>");process.exit(1)});s.once("listening",()=>s.close());s.listen(Number(process.argv[1]),"127.0.0.1")' $(DEV_PORT) || exit 1; \
 	fi
 
-# What `make dev` would use right now. Read-only, and the fixture the
-# dev-server-port bats suite asserts against.
 dev-config: guard-dev-instance
 	@printf 'DEV_INSTANCE=%s\n' '$(DEV_INSTANCE)'
 	@printf 'SPEEDWAVE_DATA_DIR=%s\n' '$(SPEEDWAVE_DATA_DIR)'
@@ -180,8 +106,6 @@ dev-config: guard-dev-instance
         download-lima clean-lima \
         download-nodejs clean-nodejs \
         download-wsl-resources clean-wsl-resources
-
-# ── Developer setup (run once after cloning) ─────────────────────────────────
 
 REQUIRED_RUST_MINOR := 70
 
@@ -307,9 +231,6 @@ setup-dev:
 	@echo "  make test    # verify everything works"
 	@echo "  make dev     # start desktop in dev mode"
 
-# ── Windows one-shot toolchain install (requires admin; self-elevates) ───────
-# Package list SSOT: scripts/setup-dev-windows.ps1. Run once from Git Bash, then open
-# a NEW Git Bash and run `make setup-dev` + `make dev`.
 setup-dev-windows:
 	@case "$$(uname -s 2>/dev/null)" in \
 	  MINGW*|MSYS*|CYGWIN*) ;; \
@@ -318,23 +239,11 @@ setup-dev-windows:
 	@ps="$${SYSTEMROOT:-C:\\Windows}"; ps="$${ps//\\//}/System32/WindowsPowerShell/v1.0/powershell.exe"; \
 	 "$$ps" -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dev-windows.ps1
 
-# ── Aggregate targets ────────────────────────────────────────────────────────
-
 all: build
 
 build: build-runtime build-cli build-os-cli build-mcp build-angular
 	@echo "\n✅ All builds complete"
 
-# build-once + parallel-run. CI never calls this aggregate (it calls standalone
-# test-X targets, which keep their own build prereqs and are left untouched).
-# Phase 1 (sequential): guard + test-build-phase stage every shared artifact
-#   exactly once, so no two lanes ever build the same dist/target concurrently.
-# Phase 2 (parallel): a recursive `$(MAKE) -jN test-run-lanes` fans out the
-#   pure run-only lanes. test-mcp-run + test-desktop-build-run + test-desktop-run
-#   are grouped SERIAL (see test-desktop-group-run). A failing lane fails the
-#   whole `make test`: each `$(MAKE)` is its own recipe line, and the sub-make
-#   runs without -k, so the first non-zero exit aborts. Override fan-out width
-#   with `make test TEST_LANES_JOBS=N`.
 TEST_LANES_JOBS ?= 4
 test: guard-not-prod-data-dir
 	@"$(MAKE)" test-build-phase
@@ -344,8 +253,6 @@ test: guard-not-prod-data-dir
 check: check-clippy check-desktop-clippy check-proxy-clippy check-fmt check-mcp check-mcp-lint check-angular-lint
 	@echo "\n✅ All checks passed"
 
-# `cargo clean` twice: desktop/src-tauri is its own workspace, and on Windows its
-# target-dir is redirected out of the tree entirely (ADR-085 path budget).
 clean:
 	cargo clean
 	cd desktop/src-tauri && cargo clean
@@ -354,18 +261,12 @@ clean:
 	rm -rf native/macos/*/.build
 	@echo "✅ Clean"
 
-# ── Install dependencies (alias for setup-dev) ──────────────────────────────
-
 install-deps: setup-dev
-
-# ── Git hooks ────────────────────────────────────────────────────────────────
 
 install-hooks:
 	$(NPM) install
 	$(NPX) husky
 	@echo "✅ Git hooks installed"
-
-# ── Rust builds ──────────────────────────────────────────────────────────────
 
 build-runtime:
 	cargo build -p speedwave-runtime
@@ -373,20 +274,9 @@ build-runtime:
 build-cli:
 	cargo build -p speedwave-cli
 
-# Release-profile build of the CLI, used as a dependency of `build-tauri`
-# so the bundled CLI shipped inside the .app/.exe/.dmg is a release
-# binary. With a debug binary, the `SPEEDWAVE_ALLOW_UNSIGNED` bypass in
-# `signing::unsigned_bypass_active` would still be live in shipped
-# artifacts (it is `cfg(debug_assertions)`-gated, which only flips off
-# in the release profile). Keep `build-cli` (debug) untouched so
-# `make dev` and ad-hoc developer runs are not slowed down.
 build-cli-release:
 	cargo build -p speedwave-cli --release
 
-# Regenerates desktop/src-tauri/windows/installer-hooks.nsh from its template
-# + sweep.ps1 + firewall.ps1 (see scripts/generate-installer-nsh.sh). Cheap and
-# idempotent — safe to call unconditionally before any build that ships an
-# installer (Windows NSIS or MSI) or runs installer_hooks drift detector tests.
 generate-installer-nsh:
 	@bash scripts/generate-installer-nsh.sh
 
@@ -411,8 +301,6 @@ endif
 	@"$(MAKE)" verify-bundled-assets
 	cd desktop/src-tauri && cargo tauri build
 	@echo "\n✅ Tauri production bundle built"
-
-# ── Native OS CLI builds (macOS: Swift, Windows: Rust — planned) ─────────────
 
 build-native-macos:
 	@if [ "$$(uname)" != "Darwin" ]; then \
@@ -443,18 +331,11 @@ test-swift:
 bundle-native-assets:
 	@bash scripts/bundle-native-assets.sh
 
-# Copy the static third-party licenses we keep in-repo (whisper.cpp,
-# wasapi, cpal, transcription model weights — ADR-056) into the bundled
-# THIRD-PARTY-LICENSES/ dir, alongside the lima/nodejs/nerdctl licenses the
-# download-* targets fetch there. The static dir is VCS-tracked; the bundled
-# dir is generated.
 bundle-static-licenses:
 	@mkdir -p desktop/src-tauri/THIRD-PARTY-LICENSES
 	@cp desktop/src-tauri/licenses-static/* desktop/src-tauri/THIRD-PARTY-LICENSES/
 	@echo "✅ Static third-party licenses copied into THIRD-PARTY-LICENSES/"
 
-# Windows only: gate the ggml-vulkan shader build's path budget, then stage the pinned
-# vulkan-1.dll (ADR-085). CI runs the same pair as two steps in prepare-desktop-bundle.
 stage-vulkan-windows:
 	@bash scripts/check-vulkan-path-budget.sh
 	@bash scripts/stage-vulkan-runtime.sh
@@ -471,42 +352,18 @@ else
 	fi
 endif
 
-# ── MCP servers ──────────────────────────────────────────────────────────────
-
 build-mcp:
 	cd mcp-servers && $(NPM) run build
-
-# ── Angular frontend ─────────────────────────────────────────────────────────
 
 build-angular:
 	cd desktop/src && $(NPX) ng build
 
-# ── Rust tests ───────────────────────────────────────────────────────────────
-
-# Run a cargo command ($(1)) against an isolated throwaway data dir, then clean
-# up. Each run gets its OWN dir so tests never touch the shared production
-# ~/.speedwave and parallel worktrees never collide. We capture the `mktemp -d`
-# result DIRECTLY and guard it (`|| exit 1`), then put the data dir UNDER it —
-# so cleanup always removes the captured dir, never a path derived via dirname.
-# (A `mktemp -d` that returns empty must not let cleanup expand to `rm -rf /`.)
-# The basename `speedwave-test` is regex-valid (^[a-z][a-z0-9-]{0,63}$) — a bare
-# `mktemp -d` basename (tmp.XXXX) is NOT and would panic instance-name
-# derivation. With isolation the suite is parallel-safe, so the old
-# `--test-threads=1` cap is gone.
 define RUN_CARGO_ISOLATED
 	d=$$(mktemp -d) || exit 1; mkdir -p "$$d/speedwave-test"; \
 	  SPEEDWAVE_DATA_DIR="$$d/speedwave-test" $(1); \
 	  rc=$$?; rm -rf "$$d"; exit $$rc
 endef
 
-# ── Aggregate-only parallel infrastructure (used ONLY by `make test`) ─────────
-# CI invokes the standalone test-X targets, which keep their own build prereqs.
-# These build-once + run-only variants exist so the aggregate can build shared
-# artifacts ONCE (sequentially) then fan the run phases out in parallel.
-
-# Sequential build phase: every shared build the run lanes need, once, in
-# dependency order. Mirrors the build-side of test-desktop (the heaviest lane)
-# so its run variant can assume everything is staged. NOT used by CI.
 test-build-phase: generate-installer-nsh build-cli build-angular build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
@@ -525,7 +382,6 @@ endif
 	@"$(MAKE)" verify-bundled-assets
 	@echo "✅ Build phase complete"
 
-# Pure run-only lanes — NO build prereqs (test-build-phase staged everything).
 test-rust-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
 	"$(MAKE)" test-transcription
@@ -537,7 +393,6 @@ test-mcp-run:
 	cd mcp-servers && $(NPM) test
 	@echo "✅ MCP server tests passed"
 
-# Shared by test-desktop-build and test-desktop-build-run so the two can't drift.
 DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-build-context.bats \
   _tests/desktop/guard-prod-data-dir.bats _tests/desktop/verify-bundled-assets.bats \
   _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
@@ -555,20 +410,11 @@ test-desktop-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
-# Serial group: the lanes that touch REAL repo paths. bundle-build-context.bats
-# (test-desktop-build-run) plants fixtures in containers/ and rebuilds
-# mcp-servers/policies/wasm-pkg; test-mcp-run's policies tests import that wasm-pkg,
-# and test-desktop-run's build.rs re-runs on any change under containers/ or
-# mcp-servers/ (rerun-if-changed). Each `$(MAKE)` is its own command, so the first
-# non-zero exit aborts the recipe.
 test-desktop-group-run:
 	@"$(MAKE)" test-mcp-run
 	@"$(MAKE)" test-desktop-build-run
 	@"$(MAKE)" test-desktop-run
 
-# The fan-out set parallelized by `make test`. Everything here is mutually
-# shared-path-safe after test-build-phase; the one lane that touches real repo
-# paths is the serial test-desktop-group-run.
 test-run-lanes: test-rust-run test-angular-run test-entrypoint \
                 test-desktop-config test-ci test-desktop-group-run test-proxy
 
@@ -577,34 +423,15 @@ test-proxy: guard-not-prod-data-dir
 	@echo "✅ proxy tests passed"
 
 test-rust: guard-not-prod-data-dir
-	@# `test-support` is required, not cosmetic: the `required-features = ["test-support"]`
-	@# integration suites (apply_transaction_behaviour, lock suites) are silently skipped without it.
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime -p speedwave-cli --features speedwave-runtime/test-support)
-	@# The `audio-transcription` feature (host-side meeting transcription, ADR-056)
-	@# is off by default — the CLI never enables it — so the default run above
-	@# doesn't compile the `transcription` module. Test it explicitly here.
 	"$(MAKE)" test-transcription
 	@echo "✅ Rust tests passed"
 
 test-transcription: guard-not-prod-data-dir
 	@echo "🧪 Testing speedwave-runtime with the audio-transcription feature..."
-	@# Only the `transcription` module is gated behind this feature (see
-	@# `src/lib.rs` — `#[cfg(feature = "audio-transcription")] pub mod transcription;`).
-	@# The rest of the crate (compose, plugin, build, …) is identical with or
-	@# without the feature and is already exercised by `test-rust`. Without the
-	@# `transcription::` filter, cargo re-runs the whole suite a second time
-	@# (~100 compose tests at ~5s each), which alone blows past the CI job budget.
-	@# `transcription::` filter without `--lib` on purpose: this target is the RUN_STT_E2E
-	@# opt-in runner for transcription_pipeline_e2e.rs (CI's windows step uses --lib).
 	$(call RUN_CARGO_ISOLATED,cargo test -p speedwave-runtime --features audio-transcription transcription::)
 	@echo "✅ audio-transcription tests passed"
 
-# Runs the mcp-os upgrade-path test against the *real* bundled worker (not the
-# stub). Gated behind the `mcp-os-bundle-e2e` feature — never `#[ignore]`,
-# which nothing in the pipeline runs. `build-mcp` produces the source dists;
-# `bundle-build-context.sh` stages them into desktop/src-tauri/mcp-os/ with the
-# @speedwave/mcp-shared tree the worker resolves at runtime; then we run only
-# that one test under the feature.
 test-mcp-os-bundle: build-mcp guard-not-prod-data-dir
 	@echo "🧪 Staging the real mcp-os worker bundle..."
 	@bash scripts/bundle-build-context.sh
@@ -634,20 +461,12 @@ endif
 	@"$(MAKE)" bundle-static-licenses
 	@"$(MAKE)" verify-bundled-assets
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
-	@# The bundle is staged above (bundle-build-context.sh + build-mcp), so run
-	@# the mcp-os upgrade-path test against the real worker here (Unix-only, like
-	@# its `#[cfg(all(unix, feature = "mcp-os-bundle-e2e"))]` gate). Never
-	@# `#[ignore]`d — this is the make invocation that actually runs it.
 	@if [ "$(OS)" != "Windows_NT" ]; then "$(MAKE)" test-mcp-os-bundle; fi
 	@echo "✅ Desktop tests passed"
-
-# ── Angular tests ───────────────────────────────────────────────────────────
 
 test-angular:
 	cd desktop/src && $(NPX) ng test --no-watch
 	@echo "✅ Angular tests passed"
-
-# ── MCP server tests ────────────────────────────────────────────────────────
 
 test-mcp: build-mcp
 	cd mcp-servers && $(NPM) test
@@ -657,10 +476,6 @@ test-os: build-mcp
 	cd mcp-servers/os && $(NPX) vitest run
 	@echo "✅ OS MCP server tests passed"
 
-# pytest for the office worker's Python support-scripts. Builds a throwaway venv from
-# mcp-servers/office/requirements.txt (+ pytest). Heavy (matplotlib/numpy) — not part of
-# `make test`; run it explicitly, or rely on the office image build to exercise the scripts.
-# Tests that need a real matplotlib render self-skip on too-new Python interpreters.
 test-mcp-office-py:
 	@PY=$$(command -v python3.12 || command -v python3.11 || command -v python3); \
 	VENV="$${TMPDIR:-/tmp}/office-test-venv-$$$$"; \
@@ -671,8 +486,6 @@ test-mcp-office-py:
 	"$$VENV/bin/python" -m pytest mcp-servers/office/scripts -q; status=$$?; \
 	rm -rf "$$VENV"; exit $$status
 	@echo "✅ Office Python script tests passed"
-
-# ── Coverage ─────────────────────────────────────────────────────────────────
 
 coverage: coverage-rust coverage-mcp coverage-angular
 	@echo "\n✅ All coverage reports generated"
@@ -701,23 +514,16 @@ coverage-html: build-mcp
 	@echo "  Angular: desktop/src/coverage/speedwave-desktop-ui/index.html"
 	@[ "$$(uname)" = "Darwin" ] && open target/coverage/rust/html/index.html || true
 
-# ── E2E tests (requires bats-core) ──────────────────────────────────────────
-
 test-e2e: build-cli
 	@$(REQUIRE_BATS)
 	bats _tests/e2e/e2e-vm-excludes.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/speedwave.bats
 	SPEEDWAVE_BIN=./target/debug/speedwave bats _tests/e2e/plugin-tamper.bats
 
-# Plugin tamper / signature-bypass E2E. Runs against the *release* CLI
-# so the `SPEEDWAVE_ALLOW_UNSIGNED` debug bypass is verified to be
-# compiled out — see ADR-051 ("Build hygiene").
 test-e2e-plugin-tamper-release: build-cli-release
 	@$(REQUIRE_BATS)
 	SPEEDWAVE_BIN=./target/release/speedwave bats _tests/e2e/plugin-tamper.bats
 
-# `env` prefix is load-bearing (word-split at use sites, not a shell assignment); the
-# bundled-limactl path mirrors scripts/e2e-vm.sh's MACOS_ENGINE_BATS_PREAMBLE and engine.ts::engineExec (manual alignment).
 ENGINE_CONTRACT_EXEC ?= env LIMA_HOME=$(HOME)/.speedwave-dev/lima /Applications/Speedwave.app/Contents/Resources/lima/bin/limactl shell speedwave-dev -- sudo
 
 test-engine-contract:
@@ -750,27 +556,19 @@ test-desktop-build: build-angular build-mcp
 	bats $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
 
-# Fast config validation — stable, runs in `make test`.
 test-desktop-config:
 	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
-	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats
+	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
+	  _tests/desktop/ps1-utf8-bom.bats
 	@echo "✅ Desktop config tests passed"
 
-# Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
-# edge cases from breaking unrelated PRs.
 test-release-gate:
 	@$(REQUIRE_BATS)
 	@command -v jq >/dev/null 2>&1 || { echo "❌ jq not found. Install: brew install jq"; exit 1; }
 	bats _tests/desktop/verify-release-assets.bats
 	@echo "✅ Release-gate tests passed"
 
-# ── Desktop E2E tests ────────────────────────────────────────────────────────
-# Per-platform: builds release binary (with `e2e` feature flag for WebDriver support) and runs WebdriverIO E2E tests.
-# App embeds tauri-plugin-webdriver on port 4445 — no external driver needed.
-
-# Build only: download deps, compile CLI + MCP + Tauri binary. No test run.
-# Used by e2e-vm.sh (build as root, test as desktop user with display access).
 test-e2e-desktop-build: build-cli build-mcp build-os-cli
 	@if [ "$$(uname)" = "Darwin" ] && [ ! -s desktop/src-tauri/lima/bin/limactl ]; then "$(MAKE)" download-lima; fi
 	@if [ "$(OS)" = "Windows_NT" ] && [ ! -s desktop/src-tauri/wsl/nerdctl-full.tar.gz ]; then "$(MAKE)" download-wsl-resources; fi
@@ -793,25 +591,13 @@ endif
 	@echo "── Installing E2E deps..."
 	cd desktop/e2e && $(NPM) install --prefer-offline
 
-# Full E2E: build + run tests using the installed app artifact.
 test-e2e-desktop: test-e2e-desktop-build
 	@echo "── Running E2E specs..."
 	@"$(MAKE)" _e2e-run
 	@echo "✅ Desktop E2E tests passed"
 
-# Resolve the effective target dir: on Windows the desktop crate builds into a short
-# crate-local target-dir (ADR-085), which CARGO_TARGET_DIR alone does not describe.
 E2E_BINARY = $(shell bash scripts/cargo-target-dir.sh desktop/src-tauri)/release/speedwave-desktop
 
-# All platforms: app embeds tauri-plugin-webdriver on port 4445.
-# Launch app, wait for WebDriver ready, run wdio, cleanup.
-#
-# Moves ALL Speedwave state aside so the app sees a completely fresh system,
-# then restores everything after the test (success or failure, including Ctrl-C).
-#
-# State directories per platform:
-#   macOS:  ~/.speedwave/, ~/Library/Caches/lima/
-#   Windows: not supported for local E2E (use scripts/e2e-vm.sh windows)
 _e2e-run:
 	@echo "── Killing any existing Speedwave instances..."
 	@pkill -f speedwave-desktop 2>/dev/null || true
@@ -854,32 +640,23 @@ _e2e-run:
 	trap - EXIT; \
 	exit $$E2E_EXIT
 
-# Run E2E on a single platform via SSH to dedicated test machines
 _e2e-macos:
 	@bash scripts/e2e-vm.sh macos
 
 _e2e-windows:
 	@bash scripts/e2e-vm.sh windows
 
-# Run E2E on all platforms via SSH to dedicated test machines
 test-e2e-all:
 	@bash scripts/e2e-vm.sh all
 
-# Audio-transcription pipeline E2E on the Windows host (ADR-056/ADR-075):
-# wasapi capture + whisper transcription, verified natively (MSVC toolchain).
 test-e2e-audio:
 	@bash scripts/e2e-vm.sh windows-audio
 
-# Provision test machines for E2E testing (one-time setup)
 setup-e2e-vms:
 	@bash scripts/e2e-vm-setup.sh all
 
-# ── Linting ──────────────────────────────────────────────────────────────────
-
 check-clippy:
 	cargo clippy -p speedwave-runtime -p speedwave-cli --all-targets -- -D warnings
-	@# `--all-targets` lints test code too. `test-support` + `audio-transcription`
-	@# are off by default, so lint those modules/feature-gated tests explicitly.
 	cargo clippy -p speedwave-runtime --all-targets --features test-support,audio-transcription -- -D warnings
 	@echo "✅ Clippy: 0 warnings"
 
@@ -913,7 +690,6 @@ check-angular:
 	bats _tests/desktop/desktop-build.bats
 	@echo "✅ Angular production build + desktop path verification OK"
 
-# Shared by check-fmt and fmt so the two can't drift.
 PRETTIER_GLOBS := 'mcp-servers/*/src/**/*.ts' 'desktop/src/src/**/*.ts' '*.md'
 
 check-fmt:
@@ -931,17 +707,9 @@ check-angular-lint:
 	cd desktop/src && $(NPX) eslint 'src/**/*.ts'
 	@echo "✅ Angular ESLint passed"
 
-# ── Security audit ────────────────────────────────────────────────────────────
-
 audit: audit-rust audit-mcp audit-desktop
 	@echo "\n✅ No known vulnerabilities"
 
-# quick-xml <0.41 DoS advisories: transitive via self_update (CLI self-update only,
-# parses GitHub's release feed over pinned TLS). No fixed self_update release (pins ^0.37).
-# Remove both when self_update bumps quick-xml to >=0.41.
-#
-# glib unsoundness: informational, never fails cargo audit. glib 0.18.5 comes only via the
-# Linux+BSD-gated GTK stack, so it is never built for macOS/Windows. Drop at Tauri glib 0.20+.
 AUDIT_IGNORE := --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2024-0429
 
 audit-rust:
@@ -950,7 +718,6 @@ audit-rust:
 	cargo audit $(AUDIT_IGNORE) --file desktop/src-tauri/Cargo.lock
 	@echo "✅ Rust dependencies: no vulnerabilities"
 
-# Shared with CI, which runs these targets rather than its own npm audit line.
 NPM_AUDIT_LEVEL := high
 
 audit-mcp:
@@ -961,12 +728,8 @@ audit-desktop:
 	cd desktop/src && $(NPM) audit --audit-level=$(NPM_AUDIT_LEVEL) --omit=dev
 	@echo "✅ Desktop dependencies: no vulnerabilities"
 
-# ── Full quality gate (run before push) ──────────────────────────────────────
-
 check-all: check test coverage audit
 	@echo "\n✅ Full quality gate passed — safe to push"
-
-# ── Formatting ───────────────────────────────────────────────────────────────
 
 fmt:
 	cargo fmt --all
@@ -981,8 +744,6 @@ lint:
 	cd mcp-servers && $(NPX) eslint --fix .
 	cd desktop/src && $(NPX) eslint --fix 'src/**/*.ts'
 	@echo "✅ All lints passed"
-
-# ── Lima bundling (macOS Desktop .app only) ──────────────────────────────────
 
 download-lima:
 	@echo "Downloading Lima $(LIMA_VERSION)..."
@@ -1017,8 +778,6 @@ download-lima:
 
 clean-lima:
 	rm -rf desktop/src-tauri/lima desktop/src-tauri/THIRD-PARTY-LICENSES
-
-# ── Node.js bundling (all platforms — mcp-os worker) ─────────────────────────
 
 NODE_VERSION := $(shell cat .node-version)
 
@@ -1079,16 +838,10 @@ download-nodejs:
 clean-nodejs:
 	rm -rf desktop/src-tauri/nodejs
 
-# ── Windows offline bundle resources (WSL2 nerdctl-full + Ubuntu rootfs) ─────
-
 NERDCTL_FULL_VERSION     := $(shell grep -A1 '^pub const NERDCTL_FULL_VERSION' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 NERDCTL_FULL_SHA256_AMD64 := $(shell grep -A1 '^pub const NERDCTL_FULL_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 WSL_ROOTFS_URL_AMD64     := $(shell grep -A1 '^pub const WSL_ROOTFS_URL_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
 WSL_ROOTFS_SHA256_AMD64  := $(shell grep -A1 '^pub const WSL_ROOTFS_SHA256_AMD64' crates/speedwave-runtime/src/consts.rs | grep '"' | sed 's/.*"\(.*\)".*/\1/')
-
-# Downloads the nerdctl-full tarball and Ubuntu rootfs for bundling inside the
-# Windows NSIS installer. Run `make download-wsl-resources` before `make build-tauri`
-# on Windows, or in CI for windows-latest builds.
 
 download-wsl-resources:
 	@echo "Downloading Windows offline bundle resources..."
@@ -1107,8 +860,6 @@ download-wsl-resources:
 
 clean-wsl-resources:
 	rm -rf desktop/src-tauri/wsl
-
-# ── Development ──────────────────────────────────────────────────────────────
 
 ifeq ($(OS),Windows_NT)
 dev: guard-not-prod-data-dir guard-dev-port download-nodejs download-wsl-resources generate-installer-nsh
@@ -1136,8 +887,6 @@ dev: guard-not-prod-data-dir guard-dev-port build-cli build-os-cli build-mcp dow
 	@"$(MAKE)" verify-bundled-assets
 	cd desktop/src-tauri && env -u PORT SPEEDWAVE_RESOURCES_DIR="$$(pwd)" SPEEDWAVE_ALLOW_UNSIGNED=1 TAURI_CONFIG="$$DEV_TAURI_CONFIG" cargo tauri dev --config "$$DEV_TAURI_CONFIG"
 endif
-
-# ── Quick status ─────────────────────────────────────────────────────────────
 
 status: guard-not-prod-data-dir
 	@echo "=== Rust ==="
