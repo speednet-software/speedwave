@@ -65,7 +65,6 @@ struct Job {
     text: usize,
     range: Range<usize>,
     window: Window,
-    offsets: Vec<(usize, usize)>,
 }
 
 impl<B: Backend> Detector<B> {
@@ -137,6 +136,37 @@ impl<B: Backend> Detector<B> {
     ) -> Result<Vec<WindowPrediction>, DetectError> {
         let tokens = self.tokenizer.encode(text)?;
         let jobs = self.jobs_for(0, &tokens);
+        self.predict_jobs(&jobs, opts)
+    }
+
+    /// Spans from classifier output for `text`, as produced by `predict_windows`; `detect` is
+    /// `predict_windows` followed by this step.
+    pub fn spans_from_windows(
+        &self,
+        text: &str,
+        windows: &[WindowPrediction],
+        opts: &DetectOptions,
+    ) -> Result<Vec<Span>, DetectError> {
+        let tokens = self.tokenizer.encode(text)?;
+        self.postprocess(text, &tokens, windows, opts)
+    }
+
+    fn jobs_for(&self, text: usize, tokens: &[Token]) -> Vec<Job> {
+        window_ranges(tokens.len())
+            .into_iter()
+            .map(|range| Job {
+                text,
+                window: encode_window(&tokens[range.clone()], &self.config),
+                range,
+            })
+            .collect()
+    }
+
+    fn predict_jobs(
+        &self,
+        jobs: &[Job],
+        opts: &DetectOptions,
+    ) -> Result<Vec<WindowPrediction>, DetectError> {
         let mut out = Vec::with_capacity(jobs.len());
         for batch in jobs.chunks(opts.batch_windows.get()) {
             let (classes, probs) = self.run_batch(batch)?;
@@ -151,26 +181,6 @@ impl<B: Backend> Detector<B> {
             }
         }
         Ok(out)
-    }
-
-    fn jobs_for(&self, text: usize, tokens: &[Token]) -> Vec<Job> {
-        window_ranges(tokens.len())
-            .into_iter()
-            .map(|range| {
-                let chunk = &tokens[range.clone()];
-                let window = encode_window(chunk, &self.config);
-                let mut offsets = Vec::with_capacity(window.real_len);
-                offsets.push((0, 0));
-                offsets.extend(chunk.iter().map(|t| (t.start, t.end)));
-                offsets.push((0, 0));
-                Job {
-                    text,
-                    range,
-                    window,
-                    offsets,
-                }
-            })
-            .collect()
     }
 
     fn run_batch(&self, batch: &[Job]) -> Result<(Vec<usize>, Vec<f32>), DetectError> {
@@ -204,23 +214,61 @@ impl<B: Backend> Detector<B> {
         Ok((classes, probs))
     }
 
-    fn decode(&self, job: &Job, classes: &[usize], probs: &[f32], low: f32) -> Vec<(RawSpan, f32)> {
-        let tags: Vec<Tag> = (0..job.window.real_len)
-            .map(|k| {
-                if probs[k] >= low {
-                    self.labels.tag(classes[k]).unwrap_or(Tag::Outside)
+    fn window_offsets(
+        tokens: &[Token],
+        window: &WindowPrediction,
+    ) -> Result<Vec<(usize, usize)>, DetectError> {
+        let chunk = tokens.get(window.token_range.clone()).ok_or_else(|| {
+            DetectError::Model(format!(
+                "window {:?} lies outside the {} tokens of the text",
+                window.token_range,
+                tokens.len()
+            ))
+        })?;
+        let real_len = chunk.len() + 2;
+        if window.real_len != real_len
+            || window.classes.len() != real_len
+            || window.probs.len() != real_len
+        {
+            return Err(DetectError::Model(format!(
+                "window {:?} carries {} classes and {} probabilities for {} positions",
+                window.token_range,
+                window.classes.len(),
+                window.probs.len(),
+                real_len
+            )));
+        }
+        let mut offsets = Vec::with_capacity(real_len);
+        offsets.push((0, 0));
+        offsets.extend(chunk.iter().map(|t| (t.start, t.end)));
+        offsets.push((0, 0));
+        Ok(offsets)
+    }
+
+    fn decode(
+        &self,
+        offsets: &[(usize, usize)],
+        window: &WindowPrediction,
+        low: f32,
+    ) -> Vec<(RawSpan, f32)> {
+        let tags: Vec<Tag> = window
+            .classes
+            .iter()
+            .zip(&window.probs)
+            .map(|(&class, &prob)| {
+                if prob >= low {
+                    self.labels.tag(class).unwrap_or(Tag::Outside)
                 } else {
                     Tag::Outside
                 }
             })
             .collect();
-        bioes_to_spans(&tags, &job.offsets)
+        bioes_to_spans(&tags, offsets)
             .into_iter()
             .map(|span| {
-                let score = job
-                    .offsets
+                let score = offsets
                     .iter()
-                    .zip(probs)
+                    .zip(&window.probs)
                     .filter(|(&(s, e), _)| e > s && s < span.end && span.start < e)
                     .map(|(_, &p)| p)
                     .fold(0.0_f32, f32::max);
@@ -229,52 +277,62 @@ impl<B: Backend> Detector<B> {
             .collect()
     }
 
+    fn postprocess(
+        &self,
+        text: &str,
+        tokens: &[Token],
+        windows: &[WindowPrediction],
+        opts: &DetectOptions,
+    ) -> Result<Vec<Span>, DetectError> {
+        let min_score = opts.effective_min_score();
+        let low = self.low_score.min(min_score);
+        let mut scored = Vec::new();
+        for window in windows {
+            let offsets = Self::window_offsets(tokens, window)?;
+            scored.extend(self.decode(&offsets, window, low));
+        }
+        let kept: Vec<Span> = dedupe_best(scored)
+            .into_iter()
+            .filter(|(_, score)| *score >= min_score)
+            .map(|(raw, score)| Span {
+                start: raw.start,
+                end: raw.end,
+                label: raw.label,
+                confidence: score,
+            })
+            .collect();
+        let mut spans = snap_to_words(text, merge_same_label(kept));
+        spans.sort_by(|a, b| {
+            a.start
+                .cmp(&b.start)
+                .then(a.end.cmp(&b.end))
+                .then_with(|| a.label.as_str().cmp(b.label.as_str()))
+        });
+        Ok(spans)
+    }
+
     fn detect_all(
         &self,
         texts: &[&str],
         opts: &DetectOptions,
     ) -> Result<Vec<Vec<Span>>, DetectError> {
-        let min_score = opts.effective_min_score();
-        let low = self.low_score.min(min_score);
+        let mut tokens = Vec::with_capacity(texts.len());
         let mut jobs = Vec::new();
         for (index, text) in texts.iter().enumerate() {
-            let tokens = self.tokenizer.encode(text)?;
-            jobs.extend(self.jobs_for(index, &tokens));
+            let text_tokens = self.tokenizer.encode(text)?;
+            jobs.extend(self.jobs_for(index, &text_tokens));
+            tokens.push(text_tokens);
         }
-        let mut scored: Vec<Vec<(RawSpan, f32)>> = vec![Vec::new(); texts.len()];
-        for batch in jobs.chunks(opts.batch_windows.get()) {
-            let (classes, probs) = self.run_batch(batch)?;
-            for (i, job) in batch.iter().enumerate() {
-                let base = i * SEQ_LEN;
-                let window_classes = &classes[base..base + job.window.real_len];
-                let window_probs = &probs[base..base + job.window.real_len];
-                scored[job.text].extend(self.decode(job, window_classes, window_probs, low));
-            }
+        let mut windows: Vec<Vec<WindowPrediction>> = vec![Vec::new(); texts.len()];
+        for (job, prediction) in jobs.iter().zip(self.predict_jobs(&jobs, opts)?) {
+            windows[job.text].push(prediction);
         }
-        Ok(scored
-            .into_iter()
-            .zip(texts)
-            .map(|(list, text)| {
-                let kept: Vec<Span> = dedupe_best(list)
-                    .into_iter()
-                    .filter(|(_, score)| *score >= min_score)
-                    .map(|(raw, score)| Span {
-                        start: raw.start,
-                        end: raw.end,
-                        label: raw.label,
-                        confidence: score,
-                    })
-                    .collect();
-                let mut spans = snap_to_words(text, merge_same_label(kept));
-                spans.sort_by(|a, b| {
-                    a.start
-                        .cmp(&b.start)
-                        .then(a.end.cmp(&b.end))
-                        .then_with(|| a.label.as_str().cmp(b.label.as_str()))
-                });
-                spans
-            })
-            .collect())
+        texts
+            .iter()
+            .zip(&tokens)
+            .zip(&windows)
+            .map(|((text, tokens), windows)| self.postprocess(text, tokens, windows, opts))
+            .collect()
     }
 }
 
@@ -420,6 +478,38 @@ mod tests {
         }
         let single = detector.detect(texts[2], &opts).unwrap();
         assert_eq!(single, batches[2]);
+    }
+
+    #[test]
+    fn detect_is_predict_windows_followed_by_spans_from_windows() {
+        let (_dir, detector) = detector();
+        let text = "anna kowalski mieszka w łodzi";
+        let mut opts = DetectOptions::default();
+        opts.min_score = 0.0;
+        let windows = detector.predict_windows(text, &opts).unwrap();
+        let composed = detector.spans_from_windows(text, &windows, &opts).unwrap();
+        assert_eq!(composed, detector.detect(text, &opts).unwrap());
+    }
+
+    #[test]
+    fn spans_from_windows_rejects_windows_that_do_not_fit_the_text() {
+        let (_dir, detector) = detector();
+        let text = "anna kowalski";
+        let opts = DetectOptions::default();
+        let mut windows = detector.predict_windows(text, &opts).unwrap();
+        windows[0].probs.pop();
+        let err = detector
+            .spans_from_windows(text, &windows, &opts)
+            .unwrap_err();
+        assert!(matches!(err, DetectError::Model(_)), "{err}");
+        let err = detector
+            .spans_from_windows(
+                "anna",
+                &detector.predict_windows(text, &opts).unwrap(),
+                &opts,
+            )
+            .unwrap_err();
+        assert!(matches!(err, DetectError::Model(_)), "{err}");
     }
 
     #[test]
