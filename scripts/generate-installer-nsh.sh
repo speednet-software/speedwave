@@ -41,7 +41,8 @@ emit_materialize_macro() {
     exit 1
   fi
 
-  # Strip UTF-8 BOM (NSIS writes literal bytes; wscript requires no BOM for .vbs).
+  # Strip UTF-8 BOM: Unicode-installer FileWrite writes ACP bytes (PowerShell reads a BOM-less
+  # .ps1 as ACP), and wscript requires no BOM for .vbs.
   local stripped
   stripped="$(mktemp)"
   if head -c 3 "$src" | od -An -t x1 | tr -d ' \n' | grep -qi '^efbbbf$'; then

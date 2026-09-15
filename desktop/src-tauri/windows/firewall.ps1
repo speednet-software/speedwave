@@ -1,4 +1,4 @@
-# SSOT: Windows firewall rules for Speedwave under WSL2 mirrored networking.
+﻿# SSOT: Windows firewall rules for Speedwave under WSL2 mirrored networking.
 # Two layers (ADR-067): (1) a Hyper-V firewall rule scoped to the WSL
 # VMCreatorId governs container<->host traffic across the WSL VM boundary;
 # (2) host Windows Defender Firewall (WDF) per-program ALLOW rules suppress the

@@ -112,6 +112,17 @@ mod tests {
     }
 
     #[test]
+    fn ps1_sources_have_utf8_bom() {
+        // Windows PowerShell 5.1 reads a BOM-less .ps1 in the system ANSI code page.
+        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+            assert!(
+                ps1.starts_with('\u{feff}'),
+                "{name} must be UTF-8 with BOM (PowerShell 5.1 misreads a BOM-less .ps1)"
+            );
+        }
+    }
+
+    #[test]
     fn install_hooks_run_powershell_via_hidden_shim() {
         // All three PowerShell-invoking hooks go through the wscript shim.
         let shim_calls = HOOKS
