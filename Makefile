@@ -555,8 +555,13 @@ test-ci:
 
 test-desktop-build: build-angular build-mcp
 	@$(REQUIRE_BATS)
-	bats $(DESKTOP_BUILD_BATS)
+	bats --print-output-on-failure $(DESKTOP_BUILD_BATS)
 	@echo "✅ Desktop build tests passed"
+
+test-native-cli-plist:
+	@$(REQUIRE_BATS)
+	bats --print-output-on-failure _tests/desktop/native-cli-info-plist.bats
+	@echo "✅ Native CLI embedded-plist tests passed"
 
 test-desktop-config:
 	@$(REQUIRE_BATS)

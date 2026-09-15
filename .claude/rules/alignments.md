@@ -82,6 +82,7 @@ Two kinds: **test-guarded** (a failing test names the fix — trust it, never by
 
 ## Manual alignments — NO automated guard; update together in the same commit
 
+- **`scripts/build-native-macos.sh::resolve_binary_path` ↔ `_tests/desktop/native-cli-info-plist.bats::resolve_binary`** — the same three SwiftPM output candidates in the same precedence order (`.build/apple/Products/Release/`, `.build/universal-apple-macosx/release/`, `.build/release/`), then a `find` fallback. A candidate added to the script and not the test makes the test resolve a stale binary and pass; there is no cross-read test because both sides are shell.
 - **`consts::installed_cli_filename` ↔ `scripts/diagnose-cli.sh`** — the script rebuilds the instance name and the CLI filename in shell so it can diagnose a named instance (`SPEEDWAVE_DATA_DIR`, else `~/.speedwave`). Same trade-off as `e2e-vm.sh`'s basename derivation (ADR-031): no Rust dependency in a troubleshooting script. Changing the suffix rule = editing both.
 - **`tzdata` in EVERY container image** (apk/apt, or a zoneinfo COPY for scratch images like the proxy) — the host TZ injected by `tz.rs::detect_host_timezone()` degrades to a numeric offset without it. `apt_noninteractive.rs` catches the debconf-prompt hang, NOT a missing tzdata. New worker image = install tzdata in the same commit.
 - `windows-sys` version in `crates/speedwave-runtime/Cargo.toml` ↔ `desktop/src-tauri/Cargo.toml` (separate workspaces/lockfiles) — bump both + `cargo update -p windows-sys --precise` in both; a one-sided bump is invisible on a macOS host.

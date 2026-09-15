@@ -62,7 +62,7 @@ require_built_binaries() {
     for svc in $SERVICES; do
         [ -n "$(resolve_binary "$svc")" ] || missing="$missing $svc"
     done
-    [ -z "$missing" ] || skip "built binaries missing for:$missing — run 'make build-native-macos' first"
+    [ -z "$missing" ] || skip "built binaries missing for:$missing — run make build-native-macos (scripts/build-native-macos.sh for universal ones)"
 }
 
 # segedit reads single-arch Mach-O only, so thin a universal binary to the host arch first.
@@ -80,27 +80,31 @@ extract_embedded_plist() {
     segedit "$bin" -extract __TEXT __info_plist "$out" 2>/dev/null
 }
 
+# `// empty` keeps a missing key empty instead of the literal "null", so the
+# caller's emptiness check still reaches its skip.
 tauri_conf_version() {
     local conf="$REPO_ROOT/desktop/src-tauri/tauri.conf.json"
     if command -v jq >/dev/null 2>&1; then
-        jq -r '.version' "$conf"
+        jq -r '.version // empty' "$conf"
         return 0
     fi
-    grep -E '"version"' "$conf" | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+    # Anchored like scripts/build-native-macos.sh, so a nested "version" cannot win.
+    grep -E '^[[:space:]]*"version"[[:space:]]*:' "$conf" | head -1 |
+        sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
 }
 
-# Extracts one embedded plist key for a service, or fails naming the binary.
-embedded_key() {
-    local bin="$1" key="$2" out="$3"
-    extract_embedded_plist "$bin" "$out" || {
-        echo "Failed to extract embedded plist from $bin" >&2
+# Compares one key of an already-extracted plist, naming the service, key and
+# both values on failure — the only diagnostic a bats failure carries.
+assert_plist_key() {
+    local svc="$1" plist="$2" key="$3" expected="$4" actual
+    actual="$(plutil -extract "$key" raw "$plist" 2>/dev/null)" || {
+        echo "$svc-cli embedded plist carries no $key" >&2
         return 1
     }
-    plutil -extract "$key" raw "$out" 2>/dev/null
-}
-
-@test "every native CLI exists in build output (run make build-native-macos first)" {
-    require_built_binaries
+    [ "$actual" = "$expected" ] || {
+        echo "$svc-cli embedded $key='$actual', expected '$expected'" >&2
+        return 1
+    }
 }
 
 @test "every native CLI has __TEXT __info_plist section" {
@@ -118,52 +122,30 @@ embedded_key() {
     done
 }
 
-@test "embedded CFBundleIdentifier matches sub-identifier scheme" {
+@test "embedded plist carries the right identifier, executable and version" {
     require_built_binaries
-    local svc bin tmp expected actual
-    tmp="$BATS_TEST_TMPDIR/sw-plist"
-    for svc in $SERVICES; do
-        bin="$(resolve_binary "$svc")"
-        actual="$(embedded_key "$bin" CFBundleIdentifier "$tmp")" || return 1
-        expected="$(expected_bundle_id "$svc")"
-        if [ "$actual" != "$expected" ]; then
-            echo "$svc-cli embedded CFBundleIdentifier='$actual', expected '$expected'" >&2
-            echo "  TCC will bind the permission to the wrong identifier." >&2
-            return 1
-        fi
-    done
-}
-
-@test "embedded CFBundleExecutable matches binary basename" {
-    require_built_binaries
-    local svc bin tmp actual
-    tmp="$BATS_TEST_TMPDIR/sw-plist"
-    for svc in $SERVICES; do
-        bin="$(resolve_binary "$svc")"
-        actual="$(embedded_key "$bin" CFBundleExecutable "$tmp")" || return 1
-        if [ "$actual" != "$svc-cli" ]; then
-            echo "$svc-cli embedded CFBundleExecutable='$actual', expected '$svc-cli'" >&2
-            return 1
-        fi
-    done
-}
-
-@test "embedded CFBundleShortVersionString matches tauri.conf.json version" {
-    require_built_binaries
-    # build-native-macos.sh stamps tauri.conf.json's version into each
-    # CLI's Resources/Info.plist before swift build.
-    local tauri_version svc bin tmp actual
+    # One extraction per service serves all three keys; each thins a universal
+    # binary, so re-extracting per key would triple the lipo/segedit work.
+    local tauri_version svc bin tmp expected
     tauri_version="$(tauri_conf_version)"
     [ -n "$tauri_version" ] || skip "cannot read version from tauri.conf.json"
     tmp="$BATS_TEST_TMPDIR/sw-plist"
     for svc in $SERVICES; do
         bin="$(resolve_binary "$svc")"
-        actual="$(embedded_key "$bin" CFBundleShortVersionString "$tmp")" || return 1
-        if [ "$actual" != "$tauri_version" ]; then
-            echo "$svc-cli embedded CFBundleShortVersionString='$actual', expected '$tauri_version'" >&2
-            echo "  Run 'make build-native-macos' to re-stamp from tauri.conf.json." >&2
+        extract_embedded_plist "$bin" "$tmp" || {
+            echo "Failed to extract embedded plist from $bin" >&2
             return 1
-        fi
+        }
+        expected="$(expected_bundle_id "$svc")" || return 1
+        assert_plist_key "$svc" "$tmp" CFBundleIdentifier "$expected" || {
+            echo "  TCC will bind the permission to the wrong identifier." >&2
+            return 1
+        }
+        assert_plist_key "$svc" "$tmp" CFBundleExecutable "$svc-cli" || return 1
+        assert_plist_key "$svc" "$tmp" CFBundleShortVersionString "$tauri_version" || {
+            echo "  Only scripts/build-native-macos.sh re-stamps this from tauri.conf.json." >&2
+            return 1
+        }
     done
 }
 
@@ -177,7 +159,7 @@ embedded_key() {
             echo "Missing source Info.plist: $plist" >&2
             return 1
         }
-        key="$(expected_usage_key "$svc")"
+        key="$(expected_usage_key "$svc")" || return 1
         val="$(python3 -c "import plistlib;print(plistlib.load(open('$plist','rb')).get('$key',''))")"
         if [ -z "$val" ]; then
             echo "$svc/Resources/Info.plist missing or empty $key" >&2
