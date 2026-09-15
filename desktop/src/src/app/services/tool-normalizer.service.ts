@@ -1,22 +1,21 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable } from '@angular/core';
 import type { NormalizedToolInput } from '../models/chat';
-import { LoggerService } from './logger.service';
 
 /** Parses raw tool input JSON into typed display models based on tool name. */
 @Injectable({ providedIn: 'root' })
 export class ToolNormalizerService {
-  private log = inject(LoggerService);
-
   /**
    * Parses raw tool input JSON into a typed discriminated union for display (Bash, Read, Edit,
    * Write, Glob, Grep, TodoWrite, WebSearch, WebFetch, Agent); unrecognized falls back to `generic`.
    * @param toolName - The Claude tool name (e.g. "Bash", "Read").
    * @param inputJson - The raw JSON string of tool input parameters.
-   * @param inputComplete - False while input is still streaming; suppresses the parse-failure warn.
    */
-  normalize(toolName: string, inputJson: string, inputComplete = true): NormalizedToolInput {
+  normalize(toolName: string, inputJson: string): NormalizedToolInput {
     try {
       const parsed = JSON.parse(inputJson);
+      if (parsed === null || typeof parsed !== 'object') {
+        return { kind: 'generic', raw_json: inputJson };
+      }
       switch (toolName) {
         case 'Bash':
           return { kind: 'bash', command: parsed.command ?? '' };
@@ -63,13 +62,8 @@ export class ToolNormalizerService {
         default:
           return { kind: 'generic', raw_json: inputJson };
       }
-    } catch (err) {
-      // A partial parse failure is expected on every streaming delta — warn only on final input.
-      if (inputComplete) {
-        this.log.warn(
-          `Failed to parse tool input for "${toolName}": ${inputJson} (${String(err)})`
-        );
-      }
+    } catch {
+      // Unparseable input is displayed raw; the live stream path logs it once at ToolResult.
       return { kind: 'generic', raw_json: inputJson };
     }
   }

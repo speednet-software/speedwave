@@ -12,10 +12,8 @@ import { UiStateService } from '../services/ui-state.service';
 import { LoggerService } from '../services/logger.service';
 import { TranscriptionService } from '../services/transcription.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { createDeferred } from '../testing/deferred';
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('ChatComponent', () => {
   let component: ChatComponent;
@@ -77,12 +75,10 @@ describe('ChatComponent', () => {
     it('sets loadingTranscript true during fetch and false after it resolves', async () => {
       projectState.activeProject.set('test');
 
-      let releaseGetConversation: (() => void) | null = null;
+      const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseGetConversation = resolve;
-          });
+          await pendingGetConversation.promise;
           return { session_id: 's1', messages: [] };
         }
         return undefined;
@@ -92,7 +88,7 @@ describe('ChatComponent', () => {
       await Promise.resolve();
       expect(chatState.loadingTranscriptFromState()).toBe(true);
 
-      releaseGetConversation!();
+      pendingGetConversation.resolve();
       await resumePromise;
       expect(chatState.loadingTranscriptFromState()).toBe(false);
     });
@@ -114,12 +110,10 @@ describe('ChatComponent', () => {
       const dispose = vi.fn();
       const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
 
-      let releaseGetConversation: (() => void) | null = null;
+      const pendingGetConversation = createDeferred();
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_conversation') {
-          await new Promise<void>((resolve) => {
-            releaseGetConversation = resolve;
-          });
+          await pendingGetConversation.promise;
           return { session_id: 's1', messages: [] };
         }
         return undefined;
@@ -130,7 +124,7 @@ describe('ChatComponent', () => {
       expect(begin).toHaveBeenCalledTimes(1);
       expect(dispose).not.toHaveBeenCalled();
 
-      releaseGetConversation!();
+      pendingGetConversation.resolve();
       await resumePromise;
       expect(dispose).toHaveBeenCalledTimes(1);
     });

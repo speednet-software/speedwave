@@ -3,6 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { AdvancedSectionComponent } from './advanced-section.component';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { createDeferred } from '../../testing/deferred';
 
 describe('AdvancedSectionComponent', () => {
   let component: AdvancedSectionComponent;
@@ -49,15 +50,12 @@ describe('AdvancedSectionComponent', () => {
     });
 
     it('sets resetting during reset', async () => {
-      let resolveFn!: () => void;
+      const pendingReset = createDeferred();
       mockTauri.invokeHandler = (cmd: string) =>
-        new Promise<void>((resolve) => {
-          if (cmd === 'factory_reset') resolveFn = resolve;
-          else resolve();
-        });
+        cmd === 'factory_reset' ? pendingReset.promise : Promise.resolve();
       const promise = component.resetEnvironment();
       expect(component.resetting).toBe(true);
-      resolveFn();
+      pendingReset.resolve();
       await promise;
       expect(component.resetting).toBe(false);
       expect(component.confirmReset).toBe(false);

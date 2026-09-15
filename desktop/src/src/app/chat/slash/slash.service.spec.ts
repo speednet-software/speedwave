@@ -11,6 +11,8 @@ import {
 } from './slash.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+import { createDeferred } from '../../testing/deferred';
+import { makeMockLogger } from '../../testing/mock-logger';
 
 interface ControlShapeCase {
   readonly input: string;
@@ -100,24 +102,6 @@ class MockTauri {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     return this.invokeMock(cmd, args) as Promise<T>;
   }
-}
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
-
-function deferred<T>(): {
-  promise: Promise<T>;
-  resolve: (v: T) => void;
-  reject: (e: unknown) => void;
-} {
-  let resolve!: (v: T) => void;
-  let reject!: (e: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
 }
 
 describe('SlashService', () => {
@@ -280,7 +264,7 @@ describe('SlashService', () => {
   });
 
   it('a second concurrent refresh() no-ops while one is already in flight', async () => {
-    const first = deferred<SlashDiscovery>();
+    const first = createDeferred<SlashDiscovery>();
     tauri.invokeMock.mockReturnValueOnce(first.promise);
 
     const call1 = service.refresh('acme');
@@ -302,13 +286,13 @@ describe('SlashService', () => {
   });
 
   it('refresh() for a different project while one is in flight starts its own fetch', async () => {
-    const forA = deferred<SlashDiscovery>();
+    const forA = createDeferred<SlashDiscovery>();
     tauri.invokeMock.mockReturnValueOnce(forA.promise);
 
     const callA = service.refresh('project-a');
     expect(service.discovering()).toBe(true);
 
-    const forB = deferred<SlashDiscovery>();
+    const forB = createDeferred<SlashDiscovery>();
     tauri.invokeMock.mockReturnValueOnce(forB.promise);
     const callB = service.refresh('project-b');
 
@@ -342,7 +326,7 @@ describe('SlashService', () => {
   });
 
   it('refresh() same-project coalescing still holds while a different-project fetch is unaffected', async () => {
-    const forA = deferred<SlashDiscovery>();
+    const forA = createDeferred<SlashDiscovery>();
     tauri.invokeMock.mockReturnValueOnce(forA.promise);
 
     const callA1 = service.refresh('project-a');

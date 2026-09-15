@@ -3,6 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { OauthCompletionWatcher, type OauthWatchContext } from './oauth-completion-watcher';
 import { TauriService } from '../../services/tauri.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { createDeferred } from '../../testing/deferred';
 
 /**
  * Drains pending non-Zone microtasks.
@@ -106,14 +107,12 @@ describe('OauthCompletionWatcher', () => {
   it('overlapping probes fire the callback only once (in-flight guard)', async () => {
     // A slow get_auth_status must not let a second probe pass the same
     // false→true edge and fire a duplicate login callback.
-    let release: (v: unknown) => void = () => {};
+    const pendingProbe = createDeferred<unknown>();
     let firstProbe = true;
     mockTauri.invokeHandler = async () => {
       if (firstProbe) {
         firstProbe = false;
-        return new Promise((resolve) => {
-          release = resolve;
-        });
+        return pendingProbe.promise;
       }
       return authStatus(true);
     };
@@ -122,7 +121,7 @@ describe('OauthCompletionWatcher', () => {
 
     const first = watcher.checkNow();
     const second = watcher.checkNow(); // overlaps while the first probe hangs
-    release(authStatus(true));
+    pendingProbe.resolve(authStatus(true));
     await Promise.all([first, second]);
 
     expect(logins()).toBe(1);

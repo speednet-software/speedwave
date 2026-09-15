@@ -6,6 +6,7 @@ import { PluginDetailComponent } from './plugin-detail.component';
 import { TauriService } from '../../services/tauri.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { MockTauriService } from '../../testing/mock-tauri.service';
+import { createDeferred } from '../../testing/deferred';
 import { JsonSchema } from '../../models/plugin';
 
 const MOCK_SCHEMA: JsonSchema = {
@@ -1015,13 +1016,9 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
 
       // Hold remove_plugin pending to observe the mid-flight button state.
-      let resolveFn!: () => void;
+      const pendingRemove = createDeferred();
       mockTauri.invokeHandler = (cmd: string) => {
-        if (cmd === 'remove_plugin') {
-          return new Promise<void>((resolve) => {
-            resolveFn = resolve;
-          });
-        }
+        if (cmd === 'remove_plugin') return pendingRemove.promise;
         return defaultInvokeHandler(cmd);
       };
 
@@ -1048,7 +1045,7 @@ describe('PluginDetailComponent', () => {
       expect(cancelBtn.disabled).toBe(true);
 
       // Resolve so the test does not leak a pending Promise.
-      resolveFn();
+      pendingRemove.resolve();
       await promise;
     });
   });

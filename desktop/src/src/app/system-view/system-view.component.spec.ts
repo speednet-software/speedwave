@@ -4,6 +4,7 @@ import { SystemViewComponent, SYSTEM_REFRESH_INTERVAL_MS } from './system-view.c
 import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 import type { HealthReport } from '../models/health';
 
 const MOCK_HEALTHY_REPORT: HealthReport = {
@@ -268,14 +269,10 @@ describe('SystemViewComponent', () => {
   });
 
   it('disables the restart button while the restart is in flight', async () => {
-    const restartResolver: { current: (() => void) | null } = { current: null };
+    const pendingRestart = createDeferred();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'get_health') return MOCK_HEALTHY_REPORT;
-      if (cmd === 'recreate_project_containers') {
-        return new Promise<void>((resolve) => {
-          restartResolver.current = resolve;
-        });
-      }
+      if (cmd === 'recreate_project_containers') return pendingRestart.promise;
       return undefined;
     };
 
@@ -287,7 +284,7 @@ describe('SystemViewComponent', () => {
 
     expect(component.restarting.has('claude')).toBe(true);
 
-    restartResolver.current?.();
+    pendingRestart.resolve();
     await restartPromise;
     fixture.detectChanges();
 

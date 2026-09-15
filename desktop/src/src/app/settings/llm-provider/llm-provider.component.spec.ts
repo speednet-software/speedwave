@@ -9,10 +9,8 @@ import { ChatStateService } from '../../services/chat-state.service';
 import { LoggerService } from '../../services/logger.service';
 import { type LlmProviderEntry } from '../../models/llm';
 import { MockTauriService } from '../../testing/mock-tauri.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { createDeferred } from '../../testing/deferred';
+import { makeMockLogger } from '../../testing/mock-logger';
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   ollama: 'http://host.docker.internal:11434',
@@ -688,10 +686,7 @@ describe('LlmProviderComponent', () => {
   });
 
   it('no_op_load_keeps_save_disabled_when_auth_status_resolves_after_config_with_active_project', async () => {
-    let resolveAuthStatus: ((value: AuthStatusResponse) => void) | undefined;
-    const authStatusPromise = new Promise<AuthStatusResponse>((resolve) => {
-      resolveAuthStatus = resolve;
-    });
+    const pendingAuthStatus = createDeferred<AuthStatusResponse>();
     mockTauri.invokeHandler = async (cmd: string) => {
       switch (cmd) {
         case 'get_llm_config':
@@ -704,7 +699,7 @@ describe('LlmProviderComponent', () => {
             active: { provider_id: 'anthropic', model: 'claude-sonnet-4-6' },
           };
         case 'get_auth_status':
-          return authStatusPromise;
+          return pendingAuthStatus.promise;
         case 'list_anthropic_models':
           return TEST_ANTHROPIC_MODELS;
         default:
@@ -716,7 +711,7 @@ describe('LlmProviderComponent', () => {
     fixture.detectChanges();
     await flushMicrotasks();
 
-    resolveAuthStatus?.({
+    pendingAuthStatus.resolve({
       api_key_configured: false,
       oauth_authenticated: true,
       needs_anthropic_auth: false,
@@ -1374,33 +1369,27 @@ describe('LlmProviderComponent', () => {
   });
 
   it('dedupes_provider_change_and_blur_on_same_url', async () => {
-    let resolveFirst: (v: string[]) => void = () => {};
-    const hanging = new Promise<string[]>((resolve) => {
-      resolveFirst = resolve;
-    });
+    const hanging = createDeferred<string[]>();
     const { discoverCalls } = setupDiscoveryMock(mockTauri, {
       provider: 'ollama',
-      discover: async () => await hanging,
+      discover: async () => await hanging.promise,
     });
     component.provider.set('ollama');
     component.baseUrl.set('http://localhost:11434');
     const firstCall = component.discoverModels(false);
     await component.discoverModels(false);
     expect(discoverCalls.length).toBe(1);
-    resolveFirst(['m']);
+    hanging.resolve(['m']);
     await firstCall;
   });
 
   it('discards_stale_response_on_rapid_blur', async () => {
-    let resolveFirst: (v: string[]) => void = () => {};
-    const slow = new Promise<string[]>((r) => {
-      resolveFirst = r;
-    });
+    const slow = createDeferred<string[]>();
     let callIdx = 0;
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd === 'discover_llm_models') {
         callIdx += 1;
-        if (callIdx === 1) return await slow;
+        if (callIdx === 1) return await slow.promise;
         return { models: [{ id: 'model-from-second' }] };
       }
       return undefined;
@@ -1411,7 +1400,7 @@ describe('LlmProviderComponent', () => {
     await Promise.resolve();
     component.baseUrl.set('http://b.invalid');
     await component.discoverModels(false);
-    resolveFirst(['model-from-first']);
+    slow.resolve(['model-from-first']);
     await firstCall;
     await fixture.whenStable();
     const st = component.discoveryState();

@@ -92,10 +92,8 @@ BATS_HINT = echo "     Install: brew install bats-core"
 endif
 REQUIRE_BATS = command -v bats >/dev/null 2>&1 || { echo "❌ bats not found."; $(BATS_HINT); exit 1; }
 
-# bats runs serially. `--jobs N` is unsafe here: bundle-build-context.bats mutates
-# shared repo paths (mcp-servers/{os,shared}/dist) that cannot be tempdir-isolated,
-# so concurrent siblings in one file race and fail. The suites are small; the real
-# parallelism win is lane-level (separate task), not per-file bats jobs.
+# bats runs serially, never `--jobs N`: bundle-build-context.bats plants fixtures in shared
+# repo paths (see test-desktop-group-run), so siblings in one file would race.
 
 # Hard floor: dev/test must never run against the production data dir, even if a
 # user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
@@ -333,12 +331,10 @@ build: build-runtime build-cli build-os-cli build-mcp build-angular
 #   exactly once, so no two lanes ever build the same dist/target concurrently.
 # Phase 2 (parallel): a recursive `$(MAKE) -jN test-run-lanes` fans out the
 #   pure run-only lanes. test-mcp-run + test-desktop-build-run + test-desktop-run
-#   are grouped SERIAL (they share-mutate mcp-servers/*/dist via
-#   bundle-build-context.sh reads + bundle-build-context.bats's --ci rebuild —
-#   the same footgun that broke bats --jobs). A failing lane fails the whole
-#   `make test`: each `$(MAKE)` is its own recipe line, and the sub-make runs
-#   without -k, so the first non-zero exit aborts. Override fan-out width with
-#   `make test TEST_LANES_JOBS=N`.
+#   are grouped SERIAL (see test-desktop-group-run). A failing lane fails the
+#   whole `make test`: each `$(MAKE)` is its own recipe line, and the sub-make
+#   runs without -k, so the first non-zero exit aborts. Override fan-out width
+#   with `make test TEST_LANES_JOBS=N`.
 TEST_LANES_JOBS ?= 4
 test: guard-not-prod-data-dir
 	@"$(MAKE)" test-build-phase
@@ -559,12 +555,12 @@ test-desktop-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
-# Serial group: every lane that touches REAL repo paths. test-desktop-run's
-# bundle-build-context.sh READS mcp-servers/*/dist; bundle-build-context.bats's
-# `--ci` test (in test-desktop-build-run) transiently RENAMES + rebuilds those
-# same dirs; test-mcp-run consumes them. Concurrent = the bats --jobs footgun,
-# so run these three back-to-back. Each `$(MAKE)` is its own command — first
-# non-zero exit aborts the recipe, so failures propagate.
+# Serial group: the lanes that touch REAL repo paths. bundle-build-context.bats
+# (test-desktop-build-run) plants fixtures in containers/ and rebuilds
+# mcp-servers/policies/wasm-pkg; test-mcp-run's policies tests import that wasm-pkg,
+# and test-desktop-run's build.rs re-runs on any change under containers/ or
+# mcp-servers/ (rerun-if-changed). Each `$(MAKE)` is its own command, so the first
+# non-zero exit aborts the recipe.
 test-desktop-group-run:
 	@"$(MAKE)" test-mcp-run
 	@"$(MAKE)" test-desktop-build-run

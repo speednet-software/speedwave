@@ -9,12 +9,10 @@ import {
 import { TauriService } from './tauri.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 import { HealthStoreService } from './health-store.service';
 import type { HealthReport } from '../models/health';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 function makeHealth(overrides: Partial<HealthReport>): HealthReport {
   return {
@@ -1059,11 +1057,11 @@ describe('ProjectStateService', () => {
   describe('ensure re-entrancy', () => {
     it('runs a single container flow when re-entered from the rebuilding state', async () => {
       service.activeProject.set('test');
-      const releases: Array<() => void> = [];
+      const pendingCheck = createDeferred();
       const base = mockTauri.invokeHandler;
       mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
         if (cmd === 'run_system_check') {
-          await new Promise<void>((r) => releases.push(r));
+          await pendingCheck.promise;
           return undefined;
         }
         return base(cmd, args);
@@ -1075,7 +1073,7 @@ describe('ProjectStateService', () => {
       service.status.set('rebuilding');
       const second = service.ensureContainersRunning();
       await new Promise((r) => setTimeout(r, 0));
-      while (releases.length) releases.shift()!();
+      pendingCheck.resolve();
       await Promise.all([first, second]);
       expect(spy.mock.calls.filter((c) => c[0] === 'run_system_check')).toHaveLength(1);
     });
@@ -1677,25 +1675,21 @@ describe('ProjectStateService', () => {
         states.push({ restarting: service.restarting, needsRestart: service.needsRestart });
       });
 
-      let resolveInvoke!: () => void;
+      const pendingRestart = createDeferred();
       mockTauri.invokeHandler = (cmd: string) => {
-        if (cmd === 'restart_integration_containers') {
-          return new Promise<void>((resolve) => {
-            resolveInvoke = resolve;
-          });
-        }
+        if (cmd === 'restart_integration_containers') return pendingRestart.promise;
         return Promise.resolve(undefined);
       };
 
       const promise = service.restartContainers();
-      // Allow microtasks to settle so resolveInvoke is bound.
+      // Allow microtasks to settle so the restart invoke is in flight.
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
       expect(states).toHaveLength(1);
       expect(states[0]).toEqual({ restarting: true, needsRestart: true });
 
-      resolveInvoke();
+      pendingRestart.resolve();
       await promise;
 
       expect(states).toHaveLength(2);

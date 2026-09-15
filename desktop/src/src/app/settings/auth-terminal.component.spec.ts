@@ -5,10 +5,7 @@ import { AuthTerminalComponent } from './auth-terminal.component';
 import { TauriService } from '../services/tauri.service';
 import { LoggerService } from '../services/logger.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('AuthTerminalComponent', () => {
   let component: AuthTerminalComponent;

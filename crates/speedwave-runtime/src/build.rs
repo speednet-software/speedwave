@@ -2640,11 +2640,7 @@ mod tests {
 
     #[test]
     fn bundle_scripts_service_lists_are_in_sync() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
+        let repo_root = repo_root();
 
         let sh_content = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
             .expect("bundle-build-context.sh should exist");
@@ -2685,13 +2681,44 @@ mod tests {
     }
 
     #[test]
+    fn bundle_scripts_env_knobs_are_in_sync() {
+        // The bats suite isolates itself from the real tree through these two knobs; a knob
+        // present in one script only would silently leave the other platform's bundle unisolated.
+        let repo_root = repo_root();
+        let sh = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
+            .expect("bundle-build-context.sh should exist");
+        let ps1 = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
+            .expect("bundle-build-context.ps1 should exist");
+        // Both scripts comment with `#`; a knob named only in a comment is not a read.
+        let reads_outside_comments = |script: &str, read: &str| {
+            script
+                .lines()
+                .any(|line| !line.trim_start().starts_with('#') && line.contains(read))
+        };
+        assert!(
+            !reads_outside_comments(
+                "# $dest = if ($env:BUNDLE_DEST) { ... }",
+                "if ($env:BUNDLE_DEST)"
+            ),
+            "a knob read that appears only in a comment must not satisfy the guard"
+        );
+
+        for knob in ["BUNDLE_DEST", "BUNDLE_MCP_SERVERS_DIR"] {
+            assert!(
+                reads_outside_comments(&sh, &format!("${{{knob}:-")),
+                "bundle-build-context.sh must read ${knob} with a default (`${{{knob}:-...}}`)"
+            );
+            assert!(
+                reads_outside_comments(&ps1, &format!("if ($env:{knob})")),
+                "bundle-build-context.ps1 must read $env:{knob} (`if ($env:{knob}) ...`), like the .sh"
+            );
+        }
+    }
+
+    #[test]
     fn bundle_build_context_sh_covers_all_worker_images() {
         // SSOT: every IMAGES mcp- entry (except hub) must be in MCP_SERVICES in bundle-build-context.sh.
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
+        let repo_root = repo_root();
 
         let sh_content = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
             .expect("bundle-build-context.sh should exist");

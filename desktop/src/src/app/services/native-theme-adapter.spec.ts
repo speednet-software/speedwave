@@ -2,10 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { NativeThemeAdapter } from './native-theme-adapter';
 import { LoggerService } from './logger.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('NativeThemeAdapter', () => {
   let adapter: NativeThemeAdapter;
