@@ -541,20 +541,22 @@ mod tests {
     }
 
     #[test]
-    fn restart_reuses_the_persistent_token_and_prefers_the_previous_port() {
+    fn restart_reuses_the_persistent_token_and_the_port_of_a_stale_lock() {
+        // A clean stop removes the lock and the next start binds an ephemeral port, like
+        // every other host bridge. After a crash the lock survives, and its port is tried
+        // first so a rendered proxy.json stays valid.
         let tmp = tempfile::tempdir().unwrap();
         let loader = || -> Loader { Box::new(|| Err("no model in this test".to_string())) };
         let first = PiiNerService::start(tmp.path(), loader()).unwrap();
+        let lock_path = tmp.path().join(consts::PII_NER_LOCK_FILE);
         let (port, token) = {
-            let lock = lock::read(
-                &tmp.path().join(consts::PII_NER_LOCK_FILE),
-                LockService::PiiNer,
-            )
-            .unwrap();
+            let lock = lock::read(&lock_path, LockService::PiiNer).unwrap();
             (lock.port, lock.auth_token)
         };
         drop(first);
-        assert!(!tmp.path().join(consts::PII_NER_LOCK_FILE).exists());
+        assert!(!lock_path.exists());
+        let stale = LockFile::new(LockService::PiiNer, std::process::id(), port, token.clone());
+        lock::write(&lock_path, &stale).unwrap();
 
         let second = PiiNerService::start(tmp.path(), loader()).unwrap();
         let lock = lock::read(
