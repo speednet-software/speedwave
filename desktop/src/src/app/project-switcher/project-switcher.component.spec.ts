@@ -7,6 +7,7 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { UiStateService } from '../services/ui-state.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }));
 
@@ -333,13 +334,10 @@ describe('ProjectSwitcherComponent', () => {
 
     it('confirmRemove() marks the row as removing and blocks a second removal until it settles', async () => {
       // The backend may first boot a stopped engine, so the wait can be long.
-      let finishRemove: () => void = () => undefined;
+      const pendingRemove = createDeferred();
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       mockTauri.invokeHandler = async (cmd: string) => {
-        if (cmd === 'remove_project')
-          return new Promise<void>((resolve) => {
-            finishRemove = resolve;
-          });
+        if (cmd === 'remove_project') return pendingRemove.promise;
         if (cmd === 'list_projects')
           return {
             projects: [
@@ -384,7 +382,7 @@ describe('ProjectSwitcherComponent', () => {
       expect(invokeSpy).not.toHaveBeenCalledWith('remove_project', { name: 'gamma' });
       expect(component.removingName()).toBe('beta');
 
-      finishRemove();
+      pendingRemove.resolve();
       await inFlight;
       fixture.detectChanges();
       expect(component.removingName()).toBeNull();

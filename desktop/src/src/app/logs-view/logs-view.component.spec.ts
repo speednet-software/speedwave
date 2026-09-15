@@ -11,6 +11,7 @@ import { TauriService } from '../services/tauri.service';
 import { ProjectStateService } from '../services/project-state.service';
 import { HEALTH_REFRESH_INTERVAL_MS } from '../services/system-health.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
+import { createDeferred } from '../testing/deferred';
 
 const MOCK_LOGS = [
   'mcp_hub | [14:34:02.814] INFO  Dispatched tool call',
@@ -1060,24 +1061,25 @@ describe('LogsViewComponent — status bar layout', () => {
     expect(component.loading()).toBe(false); // settled after the initial fetch
 
     // Hold the fetch so we can observe `loading` mid-flight.
-    let release!: () => void;
+    let fetchGate = createDeferred();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
-      await new Promise<void>((r) => (release = r));
+      await fetchGate.promise;
       return '';
     };
 
     // Silent: `loading` stays false throughout.
     const silent = component['refresh'](true);
     expect(component.loading()).toBe(false);
-    release();
+    fetchGate.resolve();
     await silent;
     expect(component.loading()).toBe(false);
 
     // Non-silent (the explicit refresh button): `loading` flips to true then back.
+    fetchGate = createDeferred();
     const loud = component['refresh']();
     expect(component.loading()).toBe(true);
-    release();
+    fetchGate.resolve();
     await loud;
     expect(component.loading()).toBe(false);
   });
@@ -1086,10 +1088,10 @@ describe('LogsViewComponent — status bar layout', () => {
     await component.ngOnInit();
     const invokeSpy = vi.spyOn(mockTauri, 'invoke');
     const calls = () => invokeSpy.mock.calls.filter((c) => c[0] === 'get_all_logs').length;
-    let release!: () => void;
+    const fetchGate = createDeferred();
     mockTauri.invokeHandler = async (cmd: string) => {
       if (cmd !== 'get_all_logs') return undefined;
-      await new Promise<void>((r) => (release = r));
+      await fetchGate.promise;
       return '';
     };
 
@@ -1099,7 +1101,7 @@ describe('LogsViewComponent — status bar layout', () => {
     // A second silent tick while `first` is still in flight must be dropped.
     await component['refresh'](true);
     expect(calls()).toBe(before); // no extra invoke
-    release();
+    fetchGate.resolve();
     await first;
   });
 
