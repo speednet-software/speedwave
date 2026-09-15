@@ -3,6 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { SlashService, isBareSlash, type SlashDiscovery } from './slash.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+import { makeMockLogger } from '../../testing/mock-logger';
 
 describe('isBareSlash', () => {
   it('matches a lone slash, with or without surrounding whitespace', () => {
@@ -25,10 +26,6 @@ class MockTauri {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     return this.invokeMock(cmd, args) as Promise<T>;
   }
-}
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 
 describe('SlashService', () => {

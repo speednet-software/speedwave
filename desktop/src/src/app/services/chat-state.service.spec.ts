@@ -21,12 +21,9 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
-import type { ConversationTranscript, StreamChunk } from '../models/chat';
+import { makeMockLogger } from '../testing/mock-logger';
+import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
 
 describe('ChatStateService', () => {
   let service: ChatStateService;
@@ -812,6 +809,195 @@ describe('ChatStateService', () => {
         expect(block.tool.result_is_error).toBe(true);
         expect(block.tool.status).toBe('error');
       }
+    });
+
+    describe('tool input completion and parse warnings', () => {
+      const TRUNCATED = '{"to": "ab97ec49c3f64e4c0"';
+      const COMPLETE = '{"to":"ab97ec49c3f64e4c0","message":"Any progress?"}';
+
+      function toolBlock(index = 0): ToolUseBlock {
+        const block = service.currentBlocks[index];
+        if (block.type !== 'tool_use') throw new Error(`block ${index} is ${block.type}`);
+        return block.tool;
+      }
+
+      function startTool(inputDelta: string, toolName = 'SendMessage'): void {
+        service.handleStreamChunk({
+          chunk_type: 'ToolStart',
+          data: { tool_id: 't1', tool_name: toolName },
+        });
+        if (inputDelta) {
+          service.handleStreamChunk({
+            chunk_type: 'ToolInputDelta',
+            data: { tool_id: 't1', partial_json: inputDelta },
+          });
+        }
+      }
+
+      function complete(inputJson: string, toolId = 't1'): void {
+        service.handleStreamChunk({
+          chunk_type: 'ToolInputComplete',
+          data: { tool_id: toolId, input_json: inputJson },
+        });
+      }
+
+      function result(isError = false, toolId = 't1'): void {
+        service.handleStreamChunk({
+          chunk_type: 'ToolResult',
+          data: { tool_id: toolId, content: 'out', is_error: isError },
+        });
+      }
+
+      it('ToolInputComplete replaces the delta-assembled input_json', () => {
+        startTool(TRUNCATED);
+        complete(COMPLETE);
+        expect(toolBlock().input_json).toBe(COMPLETE);
+        expect(toolBlock().status).toBe('running');
+      });
+
+      it('ToolInputComplete warns once when the streamed input was incomplete', () => {
+        startTool(TRUNCATED);
+        complete(COMPLETE);
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+        const message = mockLogger.warn.mock.calls[0][0] as string;
+        expect(message).toContain('"SendMessage"');
+        expect(message).toContain('t1');
+        expect(message).toContain('incomplete after streaming');
+      });
+
+      it('ToolInputComplete keeps a streamed input that parses and stays silent', () => {
+        const streamed = '{"to": "ab97ec49c3f64e4c0", "message": "Any progress?"}';
+        startTool(streamed);
+        complete(COMPLETE);
+        expect(toolBlock().input_json).toBe(streamed);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('ToolInputComplete treats an empty streamed input completed to {} as a no-argument tool', () => {
+        startTool('', 'TodoRead');
+        complete('{}');
+        expect(toolBlock().input_json).toBe('{}');
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('ToolInputComplete warns when an empty streamed input is completed with real arguments', () => {
+        startTool('', 'Bash');
+        complete('{"command":"ls"}');
+        expect(toolBlock().input_json).toBe('{"command":"ls"}');
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+      });
+
+      it('ToolInputComplete for an unknown tool id leaves blocks untouched and stays silent', () => {
+        startTool(TRUNCATED);
+        const before = service.currentBlocks;
+        complete('{}', 'toolu_subagent');
+        expect(service.currentBlocks).toEqual(before);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('ToolResult warns exactly once for an unparseable input despite later state rebuilds', () => {
+        startTool(TRUNCATED);
+        result();
+        expect(toolBlock().status).toBe('done');
+        expect(toolBlock().input_json).toBe(TRUNCATED);
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+        expect(mockLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to parse tool input for "SendMessage"')
+        );
+
+        for (let i = 0; i < 25; i += 1) {
+          service.handleStreamChunk({ chunk_type: 'Text', data: { content: `delta ${i} ` } });
+        }
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+        service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'next turn' } });
+        expect(service.messages[0].blocks[0].type).toBe('tool_use');
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+      });
+
+      it('ToolResult with is_error also warns once for an unparseable input', () => {
+        startTool('{"command":', 'Bash');
+        result(true);
+        expect(toolBlock().status).toBe('error');
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+      });
+
+      it('ToolResult does not warn when input_json parses', () => {
+        startTool('{"file_path":"/a.ts"}', 'Read');
+        result();
+        expect(toolBlock().status).toBe('done');
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('ToolResult for a tool id without a block (subagent tool) does not warn', () => {
+        result(false, 'toolu_subagent');
+        expect(service.currentBlocks).toEqual([]);
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('a healed block reaches ToolResult without a parse warning', () => {
+        startTool(TRUNCATED);
+        complete(COMPLETE);
+        result();
+        expect(toolBlock().status).toBe('done');
+        expect(toolBlock().input_json).toBe(COMPLETE);
+        expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+        expect(mockLogger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('Failed to parse')
+        );
+      });
+
+      it('the parse warning names the tool, id and length but bounds the echoed input', () => {
+        const huge = '{"content":"' + 'x'.repeat(5000);
+        startTool(huge, 'Write');
+        result();
+        const message = mockLogger.warn.mock.calls[0][0] as string;
+        expect(message).toContain('"Write"');
+        expect(message).toContain('t1');
+        expect(message).toContain(`${huge.length} chars`);
+        expect(message).toContain('x'.repeat(50));
+        expect(message).not.toContain('x'.repeat(1000));
+      });
+
+      it('the parse warning preview never cuts a surrogate pair', () => {
+        const head = '{"content":"';
+        const input = head + 'x'.repeat(199 - head.length) + '😀' + 'y'.repeat(50);
+        startTool(input, 'Write');
+        result();
+        const message = mockLogger.warn.mock.calls[0][0] as string;
+        expect(message).toContain('😀');
+        expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      });
+
+      it('Result finalizes a still-running tool block as Interrupted', () => {
+        startTool(TRUNCATED);
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+        const block = service.messages[0].blocks[0];
+        expect(block.type).toBe('tool_use');
+        if (block.type === 'tool_use' && block.tool.status === 'error') {
+          expect(block.tool.result).toBe('Interrupted');
+        } else {
+          throw new Error('expected an errored tool block');
+        }
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('Error finalizes a still-running tool block as Interrupted', () => {
+        startTool(TRUNCATED);
+        service.handleStreamChunk({ chunk_type: 'Error', data: { content: 'Error: rate limit' } });
+        const [tool, error] = service.messages[0].blocks;
+        expect(tool.type === 'tool_use' && tool.tool.status).toBe('error');
+        expect(error.type).toBe('error');
+      });
+
+      it('stopConversation marks a streaming tool Interrupted without a parse warning', async () => {
+        startTool(TRUNCATED);
+        service.isStreaming = true;
+        await service.stopConversation();
+        const block = service.messages[0].blocks[0];
+        expect(block.type).toBe('tool_use');
+        if (block.type === 'tool_use') expect(block.tool.status).toBe('error');
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
     });
 
     it('Result finalizes currentBlocks into messages', () => {

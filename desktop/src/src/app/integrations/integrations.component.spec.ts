@@ -9,17 +9,9 @@ import { BetaService } from '../services/beta.service';
 import { MockTauriService } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
 import type { IntegrationStatusEntry } from '../models/integration';
+import { makeMockLogger } from '../testing/mock-logger';
 
 /** Mock LoggerService for unit tests (no Tauri context). */
-function makeMockLogger() {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  };
-}
-
 const MOCK_INTEGRATIONS = {
   services: [
     {
