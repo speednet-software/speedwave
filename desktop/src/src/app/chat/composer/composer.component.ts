@@ -855,7 +855,10 @@ export class ComposerComponent implements AfterViewInit {
       if (!this.slashOpen()) {
         this.setSlashOpen(true);
         const project = this.projectState.activeProject();
-        if (project && this.slashService.commands().length === 0) {
+        // An offline fallback is retried on every open; the backend caps how often it re-runs.
+        const stale =
+          this.slashService.commands().length === 0 || this.slashService.source() === 'Fallback';
+        if (project && stale) {
           void this.slashService.refresh(project);
         }
       }

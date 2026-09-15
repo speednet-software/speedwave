@@ -74,9 +74,12 @@ impl LockedRuntime {
 
     // ----- LOCKED: every call goes through with_acquired -----
 
-    /// Starts the project's compose stack (under the per-project lock).
+    /// Starts the project's compose stack (under the per-project lock). Containers may be
+    /// (re)created, so the project's slash-command cache is dropped either way.
     pub fn compose_up(&self, project: &str) -> anyhow::Result<()> {
-        with_acquired(project, || self.inner.compose_up(project))
+        let result = with_acquired(project, || self.inner.compose_up(project));
+        crate::slash::invalidate_cache(project);
+        result
     }
 
     /// Stops the project's compose stack (under the per-project lock).
@@ -84,9 +87,12 @@ impl LockedRuntime {
         with_acquired(project, || self.inner.compose_down(project))
     }
 
-    /// Recreates the project's compose stack (under the per-project lock).
+    /// Recreates the project's compose stack (under the per-project lock). A replaced claude
+    /// container kills an in-flight discovery, so the slash-command cache is dropped either way.
     pub fn compose_up_recreate(&self, project: &str) -> anyhow::Result<()> {
-        with_acquired(project, || self.inner.compose_up_recreate(project))
+        let result = with_acquired(project, || self.inner.compose_up_recreate(project));
+        crate::slash::invalidate_cache(project);
+        result
     }
 
     /// Recreates one built-in compose service without touching the rest of

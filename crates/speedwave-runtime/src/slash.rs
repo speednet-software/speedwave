@@ -18,6 +18,10 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
+/// Staleness for a fallback result. Short, because the usual cause is a
+/// container that is still starting and recovers within seconds.
+const FALLBACK_CACHE_STALENESS: Duration = Duration::from_secs(15);
+
 /// Polling interval while waiting for the init line.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -96,7 +100,7 @@ impl ProjectHandle {
 // Public API
 
 /// Discovers slash commands for `project`'s active Claude session. Returns a
-/// cached result younger than [`CACHE_STALENESS`], else runs+caches discovery.
+/// cached result younger than its staleness budget, else runs+caches discovery.
 pub fn discover_slash_commands(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -175,11 +179,20 @@ fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
         }
     };
     let entry = map.get(project_name)?;
-    if entry.stored_at.elapsed() < CACHE_STALENESS {
+    if entry.stored_at.elapsed() < staleness_for(entry.discovery.source) {
         Some(entry.discovery.clone())
     } else {
         map.remove(project_name);
         None
+    }
+}
+
+/// Staleness budget for a cached entry: a fallback expires quickly so a
+/// container that finished starting is picked up without an explicit refresh.
+fn staleness_for(source: DiscoverySource) -> Duration {
+    match source {
+        DiscoverySource::Init => CACHE_STALENESS,
+        DiscoverySource::Fallback => FALLBACK_CACHE_STALENESS,
     }
 }
 
@@ -195,6 +208,20 @@ fn cache_put(project_name: &str, discovery: SlashDiscovery) {
             );
         }
         Err(e) => log_cache_poisoned("cache_put", &e),
+    }
+}
+
+/// Ages a cached entry by `by` so staleness can be exercised without sleeping.
+#[cfg(test)]
+fn backdate_cache_entry(project_name: &str, by: Duration) {
+    let mut map = match cache().lock() {
+        Ok(map) => map,
+        Err(_) => return,
+    };
+    if let Some(entry) = map.get_mut(project_name) {
+        if let Some(aged) = entry.stored_at.checked_sub(by) {
+            entry.stored_at = aged;
+        }
     }
 }
 
@@ -308,11 +335,15 @@ fn run_discovery(
     let mut buf = String::new();
     let mut result: Option<RawDiscovery> = None;
     let mut got_line = false;
+    let mut exited = false;
 
     while start.elapsed() < DISCOVERY_TIMEOUT {
         buf.clear();
         match reader.read_line(&mut buf) {
-            Ok(0) => break, // EOF — process exited without init
+            Ok(0) => {
+                exited = true;
+                break;
+            }
             Ok(_) => {
                 got_line = true;
                 if let Some(parsed) = parse_init_line(&buf) {
@@ -342,15 +373,17 @@ fn run_discovery(
 
     match result {
         Some(parsed) => Ok(parsed),
-        None => {
-            if got_line {
-                anyhow::bail!("claude -p: no system/init event in stdout before timeout");
-            }
-            anyhow::bail!(
-                "claude -p: no output received within {}s",
-                DISCOVERY_TIMEOUT.as_secs()
-            );
+        None if exited && got_line => {
+            anyhow::bail!("claude -p exited before emitting system/init")
         }
+        None if exited => anyhow::bail!(
+            "claude -p exited before emitting system/init and produced no output at all \
+             (container stopped or recreated mid-discovery?)"
+        ),
+        None => anyhow::bail!(
+            "claude -p: no system/init line within {}s",
+            DISCOVERY_TIMEOUT.as_secs()
+        ),
     }
 }
 
@@ -936,7 +969,18 @@ mod tests {
             .build();
         let err = run_discovery(&runtime, "test-container").expect_err("should fail");
         let msg = err.to_string();
-        assert!(msg.contains("no system/init") || msg.contains("no output"));
+        assert!(msg.contains("exited before emitting system/init"), "{msg}");
+        assert!(!msg.contains("no output at all"), "{msg}");
+    }
+
+    #[test]
+    fn run_discovery_names_a_silent_exit() {
+        // A claude killed with its container yields EOF with no output — not a 60s timeout.
+        let (runtime, _) = MockRuntimeBuilder::new().with_exec_piped_script("").build();
+        let err = run_discovery(&runtime, "test-container").expect_err("should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("produced no output at all"), "{msg}");
+        assert!(!msg.contains("within"), "{msg}");
     }
 
     #[test]
@@ -985,6 +1029,127 @@ mod tests {
         // After invalidation, the failing runtime must produce Fallback.
         let third = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(third.source, DiscoverySource::Fallback);
+    }
+
+    #[test]
+    fn a_fallback_gets_a_shorter_staleness_budget_than_a_real_discovery() {
+        assert_eq!(staleness_for(DiscoverySource::Init), CACHE_STALENESS);
+        assert_eq!(
+            staleness_for(DiscoverySource::Fallback),
+            FALLBACK_CACHE_STALENESS
+        );
+        assert!(FALLBACK_CACHE_STALENESS < CACHE_STALENESS);
+    }
+
+    #[test]
+    fn a_cached_fallback_expires_and_a_recovered_container_wins() {
+        invalidate_all_caches();
+        let project = ProjectHandle::new(unique_project_name("fb-expiry"), std::env::temp_dir());
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        let first = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(first.source, DiscoverySource::Fallback);
+
+        backdate_cache_entry(
+            &project.name,
+            FALLBACK_CACHE_STALENESS + Duration::from_secs(1),
+        );
+
+        let script = format!("{}\n", sample_init_json());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        let second = discover_slash_commands(&working, &project).unwrap();
+        assert_eq!(second.source, DiscoverySource::Init);
+        assert!(second.commands.iter().any(|c| c.name == "my-skill"));
+    }
+
+    #[test]
+    fn a_cached_discovery_outlives_the_fallback_budget() {
+        invalidate_all_caches();
+        let script = format!("{}\n", sample_init_json());
+        let project = ProjectHandle::new(unique_project_name("init-ttl"), std::env::temp_dir());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        assert_eq!(
+            discover_slash_commands(&working, &project).unwrap().source,
+            DiscoverySource::Init
+        );
+
+        backdate_cache_entry(
+            &project.name,
+            FALLBACK_CACHE_STALENESS + Duration::from_secs(1),
+        );
+
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        let still_cached = discover_slash_commands(&failing, &project).unwrap();
+        assert_eq!(still_cached.source, DiscoverySource::Init);
+    }
+
+    fn cache_a_real_discovery(project: &ProjectHandle) {
+        let script = format!("{}\n", sample_init_json());
+        let (working, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_script(&script)
+            .build();
+        assert_eq!(
+            discover_slash_commands(&working, project).unwrap().source,
+            DiscoverySource::Init
+        );
+    }
+
+    #[test]
+    fn a_compose_recreate_drops_the_cached_discovery() {
+        invalidate_all_caches();
+        let project = ProjectHandle::new(unique_project_name("recreate"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        failing.compose_up_recreate(&project.name).unwrap();
+        // The cache no longer answers for the replaced container: discovery re-runs and reports it.
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Fallback
+        );
+    }
+
+    #[test]
+    fn a_compose_up_drops_the_cached_discovery() {
+        invalidate_all_caches();
+        let project = ProjectHandle::new(unique_project_name("up"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        failing.compose_up(&project.name).unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Fallback
+        );
+    }
+
+    #[test]
+    fn a_compose_recreate_for_another_project_keeps_the_cache() {
+        invalidate_all_caches();
+        let project = ProjectHandle::new(unique_project_name("other"), std::env::temp_dir());
+        cache_a_real_discovery(&project);
+
+        let (failing, _) = MockRuntimeBuilder::new()
+            .with_exec_piped_error("container not running")
+            .build();
+        failing
+            .compose_up_recreate(&unique_project_name("unrelated"))
+            .unwrap();
+        assert_eq!(
+            discover_slash_commands(&failing, &project).unwrap().source,
+            DiscoverySource::Init
+        );
     }
 
     #[test]
