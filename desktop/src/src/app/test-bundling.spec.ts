@@ -1,34 +1,35 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
-// esbuild takes the module format of an export-less file (every spec) from the nearest package.json;
-// `"type": "commonjs"` wraps the spec in a closure, so Vitest finds its `vi.mock` calls nested.
+// esbuild takes an export-less file's module format (every spec) from its nearest package.json;
+// anything but "type": "module" there can bundle the spec as CommonJS, nesting its vi.mock calls.
 
 /**
- * Reads the nearest package.json at or above `dir`, the manifest esbuild consults for module type.
- * @param dir - Directory the lookup starts from.
+ * Parses the package.json at `path`.
+ * @param path - Manifest file to read.
  */
-function nearestPackageManifest(dir: string): { name?: string; type?: string } {
-  for (let current = dir; ; current = dirname(current)) {
-    const candidate = join(current, 'package.json');
-    if (existsSync(candidate)) {
-      return JSON.parse(readFileSync(candidate, 'utf-8'));
-    }
-    if (dirname(current) === current) {
-      throw new Error(`test-bundling: no package.json at or above ${dir}`);
-    }
-  }
+function readManifest(path: string): { name?: string; type?: string } {
+  return JSON.parse(readFileSync(path, 'utf-8'));
 }
 
 describe('unit-test bundling', () => {
-  const manifest = nearestPackageManifest(__dirname);
-
-  it('resolves the desktop UI package manifest', () => {
-    expect(manifest.name).toBe('speedwave-desktop-ui');
+  it('declares the desktop UI package as ES modules', ({ task }) => {
+    const manifestPath = join(dirname(task.file.filepath), '..', '..', 'package.json');
+    const manifest = readManifest(manifestPath);
+    expect(manifest.name, `expected the desktop UI manifest at ${manifestPath}`).toBe(
+      'speedwave-desktop-ui'
+    );
+    expect(manifest.type, `${manifestPath} needs "type": "module" so specs bundle as ESM`).toBe(
+      'module'
+    );
   });
 
-  it('keeps spec files ES modules by not declaring the package CommonJS', () => {
-    expect(manifest.type).not.toBe('commonjs');
+  it('has no package.json under src that overrides the module type', ({ task }) => {
+    const srcRoot = join(dirname(task.file.filepath), '..');
+    const overriding = readdirSync(srcRoot, { recursive: true, encoding: 'utf-8' })
+      .filter((entry) => basename(entry) === 'package.json')
+      .filter((entry) => readManifest(join(srcRoot, entry)).type !== 'module');
+    expect(overriding, `set "type": "module" in or remove: ${overriding.join(', ')}`).toEqual([]);
   });
 });

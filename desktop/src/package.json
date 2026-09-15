@@ -9,6 +9,7 @@
     "type": "git",
     "url": "https://github.com/speednet-software/speedwave.git"
   },
+  "type": "module",
   "scripts": {
     "ng": "ng",
     "start": "ng serve",
