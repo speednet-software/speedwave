@@ -939,27 +939,29 @@ impl StreamParser {
 
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
-            if result_text.trim().is_empty() {
+            let error_text = if result_text.trim().is_empty() {
                 // `is_error=true` with empty `result`: placeholder chunk + DEBUG log.
                 log::warn!(
                     "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
                 );
                 log::debug!("empty-error result payload: {parsed}");
-                return (
-                    Some(StreamChunk::Error {
-                        content: "The LLM returned an error without details. \
-                             Check the provider server logs or try a different model."
-                            .to_string(),
-                    }),
-                    None,
-                );
-            }
+                "The LLM returned an error without details. \
+                     Check the provider server logs or try a different model."
+                    .to_string()
+            } else {
+                log::warn!("turn ended with an API error: {result_text}");
+                result_text.to_string()
+            };
+            let log_message = format!("error: {error_text}");
             return (
                 Some(StreamChunk::Error {
-                    content: result_text.to_string(),
+                    content: error_text,
                 }),
-                None,
+                Some(LogEntry {
+                    prefix: "RESULT",
+                    message: log_message,
+                }),
             );
         }
 
@@ -3434,13 +3436,18 @@ mod tests {
 
     #[test]
     fn parse_result_error_produces_error_chunk() {
+        // `write_log_line` sanitizes on write, so `parse_result` itself must
+        // return the raw (unsanitized) result text in both chunk and log entry.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
-        let chunk = parse_line_str(&mut parser, line).unwrap();
-        match chunk {
+        let (chunk, log_entry) = parse_line_full(&mut parser, line);
+        match chunk.unwrap() {
             StreamChunk::Error { content } => assert_eq!(content, "Something went wrong"),
             other => panic!("expected Error, got {other:?}"),
         }
+        let entry = log_entry.expect("error result must produce a log entry");
+        assert_eq!(entry.prefix, "RESULT");
+        assert_eq!(entry.message, "error: Something went wrong");
     }
 
     #[test]
@@ -3453,20 +3460,26 @@ mod tests {
             // Missing `result` key entirely — same semantics as empty.
             r#"{"type":"result","is_error":true}"#,
         ] {
-            let chunk = parse_line_str(&mut parser, line).unwrap_or_else(|| {
+            let (chunk, log_entry) = parse_line_full(&mut parser, line);
+            let chunk = chunk.unwrap_or_else(|| {
                 panic!(
                     "empty/missing error result must now produce a chunk, not be dropped: {line}"
                 )
             });
-            match chunk {
+            let content = match chunk {
                 StreamChunk::Error { content } => {
                     assert!(
                         !content.trim().is_empty(),
                         "placeholder content must be non-empty so the UI has something to render"
                     );
+                    content
                 }
                 other => panic!("expected Error chunk, got {other:?}"),
-            }
+            };
+            let entry = log_entry
+                .unwrap_or_else(|| panic!("empty/missing error result must also log: {line}"));
+            assert_eq!(entry.prefix, "RESULT");
+            assert_eq!(entry.message, format!("error: {content}"));
         }
     }
 
