@@ -1157,6 +1157,10 @@ mod tests {
         std::fs::write(root.join("mcp-os/shared/dist/index.js"), "export {};").unwrap();
         std::fs::write(root.join("mcp-os/shared/package.json"), "{}").unwrap();
         std::fs::write(root.join("mcp-os/shared/package-lock.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("pii-ner")).unwrap();
+        std::fs::write(root.join("pii-ner/manifest.json"), "{}").unwrap();
+        std::fs::write(root.join("pii-ner/redact-bert.safetensors"), "binary").unwrap();
+        std::fs::write(root.join("pii-ner/tokenizer.json"), "{}").unwrap();
         std::fs::write(
             root.join("mcp-os/shared/node_modules/pkg/index.js"),
             "module.exports = {};",
@@ -1719,6 +1723,10 @@ mod tests {
         std::fs::write(temp.path().join("mail-cli"), "").unwrap();
         std::fs::write(temp.path().join("notes-cli"), "").unwrap();
         std::fs::write(temp.path().join("audio-capture-cli"), "").unwrap();
+        std::fs::create_dir_all(temp.path().join("pii-ner")).unwrap();
+        std::fs::write(temp.path().join("pii-ner/manifest.json"), "").unwrap();
+        std::fs::write(temp.path().join("pii-ner/redact-bert.safetensors"), "").unwrap();
+        std::fs::write(temp.path().join("pii-ner/tokenizer.json"), "").unwrap();
 
         validate_bundled_runtime_assets(temp.path(), "macos", true).unwrap();
     }
