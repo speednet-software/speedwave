@@ -87,33 +87,32 @@ if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 }
 
 # -- Build context (containers + MCP server sources) --------------------------
 
-New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
-Copy-Item -Recurse containers "$dest\build-context\containers"
+# Copy-SourceTree <src> <dst>: mirrors copy_source_tree() in the .sh — never enters a directory
+#   named in bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced); parallel builds rewrite those.
+function Copy-SourceTree {
+    param([string]$src, [string]$dst)
+    New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $src -Force) {
+        if ($item.PSIsContainer) {
+            if ($item.Name -in 'target', 'dist', 'node_modules') { continue }
+            Copy-SourceTree $item.FullName (Join-Path $dst $item.Name)
+        } else {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $dst $item.Name)
+        }
+    }
+}
+
+Copy-SourceTree containers "$dest\build-context\containers"
 
 # Vendor crates/pii-engine into the context (mirrors the .sh): Containerfile.proxy COPYs it to
 # recreate the repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4)
 # since the proxy image builds from the `containers/` context alone.
-New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
-Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
+Copy-SourceTree crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
 
 # rules.yaml (mirrors the .sh): pii-engine's policy.rs include_str!s it repo-root-relative
 # (`../../../mcp-servers/policies/rules.yaml`) — Containerfile.proxy COPYs it alongside.
 New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
 Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
-
-# Host build outputs are never image content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS
-# (alignment test-enforced). Recursion stops at a match, mirroring the .sh `find -prune`.
-function Remove-BuildOutputs {
-    param([string]$root)
-    foreach ($dir in Get-ChildItem -Path $root -Directory -Force) {
-        if ($dir.Name -in 'target', 'dist', 'node_modules') {
-            Remove-Item -Recurse -Force $dir.FullName
-        } else {
-            Remove-BuildOutputs $dir.FullName
-        }
-    }
-}
-Remove-BuildOutputs "$dest\build-context\containers"
 
 # Strip CR from every .sh. UTF-8 without BOM — a BOM before the shebang
 # breaks Linux exec just like CRLF would.

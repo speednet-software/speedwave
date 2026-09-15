@@ -46,6 +46,8 @@ setup() {
 
 teardown() {
     rm_with_retry "$DEST"
+    # A test that plants fixtures in the real source tree records their root here.
+    if [ -n "${PLANT:-}" ]; then rm_with_retry "$PLANT"; fi
 }
 
 @test "bundle script exists and is executable" {
@@ -97,24 +99,36 @@ teardown() {
     fi
 }
 
-@test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
-    # Plant a dirty source tree; the trap removes it even on assertion failure.
-    local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"
-    trap 'rm_with_retry "$marker"' RETURN
-    # Non-empty dirs pin the prune to a recursive delete.
-    mkdir -p "$marker/target" "$marker/dist" "$marker/node_modules"
-    echo x > "$marker/target/blob"
-    echo x > "$marker/dist/blob"
-    echo x > "$marker/node_modules/blob"
-    echo x > "$marker/keep.txt"
+@test "bundle script never copies host build outputs into the staged containers/, at any depth (target, dist, node_modules)" {
+    # Each build-output dir holds an unreadable file, so a copy that enters one (even to prune it
+    # afterwards) fails: a parallel cargo or tsc run rewrites these dirs mid-copy.
+    PLANT="$BATS_TEST_DIRNAME/../../containers/.bats-build-outputs"
+    local base out blob
+    for base in "$PLANT" "$PLANT/nested/deeper"; do
+        mkdir -p "$base/src"
+        echo x > "$base/src/keep.txt"
+        for out in target dist node_modules; do
+            blob="$base/$out/sub/blob"
+            mkdir -p "${blob%/*}"
+            echo x > "$blob"
+            chmod 000 "$blob"
+            [ ! -r "$blob" ]
+        done
+    done
+    [ "$(find "$PLANT" -type f -name blob | wc -l)" -eq 6 ]
+    # Lookalike names and a plain file named dist are content: the exclusion is directory-gated.
+    mkdir -p "$PLANT/distribution"
+    echo x > "$PLANT/distribution/keep.txt"
+    echo x > "$PLANT/nested/dist"
 
     run "$SCRIPT"
     [ "$status" -eq 0 ]
-    # Sibling content survives; the three build-output dirs do not.
-    [ -f "$DEST/build-context/containers/.bats-prune-check/keep.txt" ]
-    [ ! -d "$DEST/build-context/containers/.bats-prune-check/target" ]
-    [ ! -d "$DEST/build-context/containers/.bats-prune-check/dist" ]
-    [ ! -d "$DEST/build-context/containers/.bats-prune-check/node_modules" ]
+    local staged="$DEST/build-context/containers/.bats-build-outputs"
+    [ -f "$staged/src/keep.txt" ]
+    [ -f "$staged/nested/deeper/src/keep.txt" ]
+    [ -f "$staged/distribution/keep.txt" ]
+    [ -f "$staged/nested/dist" ]
+    [ -z "$(find "$DEST/build-context/containers" -type d \( -name target -o -name dist -o -name node_modules \))" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
@@ -287,8 +301,8 @@ EOF
 }
 
 @test "bundle script references only existing source files" {
-    # Every literal cp source ($REPO_ROOT/… or $MCP_SERVERS_DIR/… without loop variables) must
-    # exist in the checkout; a typo there only surfaces as a failed bundle otherwise.
+    # Every literal cp or copy_source_tree source ($REPO_ROOT/… or $MCP_SERVERS_DIR/… without loop
+    # variables) must exist in the checkout; a typo there only surfaces as a failed bundle otherwise.
     local repo_root="$BATS_TEST_DIRNAME/../.."
     local checked=0 src resolved
     while IFS= read -r src; do
@@ -297,7 +311,7 @@ EOF
         [[ "$resolved" == *'$'* ]] && continue
         checked=$((checked + 1))
         [ -e "$resolved" ] || { echo "Source path does not exist: $src (resolved: $resolved)"; return 1; }
-    done < <(grep -E '^\s*cp ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR)/[^"]+"' | tr -d '"' | sort -u)
+    done < <(grep -E '^\s*(cp|copy_source_tree) ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR)/[^"]+"' | tr -d '"' | sort -u)
     [ "$checked" -gt 0 ]
 }
 
@@ -449,12 +463,27 @@ EOF
     [ ! -d "$DEST/.bundle.lock" ]
 }
 
-@test "bundle-build-context.ps1 checks LASTEXITCODE after every npm call" {
-    # Windows PowerShell 5.1 never turns a native non-zero exit into an error and no suite runs the
-    # .ps1, so an unchecked npm failure would ship a broken host-worker bundle silently.
+@test "bundle-build-context.ps1 starts with a UTF-8 BOM" {
+    # Windows PowerShell reads a BOM-less .ps1 in the system locale (cross-platform rules).
     local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
-    [ "$(grep -cE '^[[:space:]]*npm ' "$ps1")" -gt 0 ]
-    run awk '/^[[:space:]]*npm / { call = $0; if ((getline following) <= 0 || following !~ /\$LASTEXITCODE -ne 0/) print call }' "$ps1"
+    [ "$(od -An -tx1 -N3 "$ps1" | tr -d ' \n')" = "efbbbf" ]
+}
+
+@test "bundle-build-context.ps1 checks LASTEXITCODE after every native call" {
+    # PowerShell never fails on a native non-zero exit and no suite runs the .ps1, so a line led by
+    # a lowercase command word that is not a keyword (npm, bash, ...) must be followed by the check.
+    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
+    run awk '
+        pending != "" { if ($0 !~ /\$LASTEXITCODE -ne 0/) print "unchecked: " pending; pending = "" }
+        $1 ~ /^[a-z][a-z0-9._-]*$/ && $1 !~ /^(if|elseif|else|foreach|for|while|do|until|switch|function|filter|param|begin|process|end|try|catch|finally|trap|return|exit|throw|break|continue)$/ {
+            calls++
+            pending = $0
+        }
+        END {
+            if (pending != "") print "unchecked: " pending
+            if (calls == 0) print "vacuous: no native calls parsed"
+        }
+    ' "$ps1"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

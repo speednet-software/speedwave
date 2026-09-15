@@ -71,24 +71,25 @@ fi
 
 # -- Build context (containers + MCP server sources) --------------------------
 
-mkdir -p "$DEST/build-context"
-cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
+# copy_source_tree <src> <dst>: copies <src> into <dst> without entering any directory named in
+#   bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced); parallel builds rewrite those.
+copy_source_tree() {
+  mkdir -p "$2"
+  (cd "$1" && find . -type d \( -name target -o -name dist -o -name node_modules \) -prune -o -print0) |
+    tar -cf - -C "$1" --null --no-recursion -T - | tar -xf - -C "$2"
+}
+
+copy_source_tree "$REPO_ROOT/containers" "$DEST/build-context/containers"
 
 # Vendor crates/pii-engine into the context: Containerfile.proxy COPYs it to recreate the
 # repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4) since the
 # proxy image builds from the `containers/` context alone.
-mkdir -p "$DEST/build-context/containers/crates"
-cp -r "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
+copy_source_tree "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
 
 # rules.yaml: pii-engine's policy.rs include_str!s it repo-root-relative
 # (`../../../mcp-servers/policies/rules.yaml`) — Containerfile.proxy COPYs it alongside.
 mkdir -p "$DEST/build-context/containers/mcp-servers/policies"
 cp "$MCP_SERVERS_DIR/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"
-
-# Host build outputs (e.g. a dirty containers/proxy/target) are never image
-# content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced).
-find "$DEST/build-context/containers" -type d \
-    \( -name target -o -name dist -o -name node_modules \) -prune -exec rm -rf {} +
 
 # Linux kernel rejects #!/bin/bash\r with exit 127 (issue #603).
 # `sed -i.bak` preserves perms in place; `.bak` suffix is the portable form across BSD and GNU.

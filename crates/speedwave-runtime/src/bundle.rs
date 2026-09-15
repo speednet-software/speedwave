@@ -707,8 +707,8 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
     Ok(bytes_to_hex(&hasher.finalize()))
 }
 
-/// Host build-output dir names that are never image content — skipped from digests here, pruned by
-/// bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
+/// Host build-output dir names that are never image content — skipped from digests here, never copied
+/// by bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
 pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
@@ -865,6 +865,17 @@ mod tests {
         assert!(err.contains("symlink not allowed"), "got: {err}");
     }
 
+    /// Non-comment lines between a script line equal to `header` and the next line that is exactly `}`.
+    fn script_block_body<'a>(script: &'a str, header: &str) -> Vec<&'a str> {
+        script
+            .lines()
+            .skip_while(|l| l.trim_end() != header)
+            .skip(1)
+            .take_while(|l| l.trim_end() != "}")
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect()
+    }
+
     #[test]
     fn host_build_output_dirs_align_with_bundle_scripts_and_dockerignore() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -880,12 +891,27 @@ mod tests {
         let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
             .expect("containers/.dockerignore should exist");
 
-        // .sh prune: `\( -name target -o -name dist -o -name node_modules \) -prune`
-        let sh_line = sh
-            .lines()
-            .find(|l| l.contains("-prune"))
-            .expect("-prune find line should exist in .sh");
-        let sh_tokens: Vec<&str> = sh_line.split_whitespace().collect();
+        // The names are parsed from inside each copy helper: pruning after a full copy would still
+        // read target/ trees that a parallel cargo run rewrites mid-copy.
+        let decoy = "copy_source_tree() {\n  # find -prune\n  tar\n}\nfind . -name target -prune\n";
+        assert_eq!(
+            script_block_body(decoy, "copy_source_tree() {"),
+            ["  tar"],
+            "a commented prune or one after the helper must not satisfy the guard"
+        );
+        let sh_body = script_block_body(&sh, "copy_source_tree() {");
+        let sh_prunes: Vec<&str> = sh_body
+            .iter()
+            .copied()
+            .filter(|l| l.contains("-prune"))
+            .collect();
+        assert_eq!(
+            sh_prunes.len(),
+            1,
+            "copy_source_tree() in bundle-build-context.sh must hold exactly one find -prune line: {sh_body:?}"
+        );
+        // `find . -type d \( -name target -o -name dist -o -name node_modules \) -prune -o -print0`
+        let sh_tokens: Vec<&str> = sh_prunes[0].split_whitespace().collect();
         let mut sh_names: Vec<&str> = sh_tokens
             .windows(2)
             .filter(|w| w[0] == "-name")
@@ -893,12 +919,19 @@ mod tests {
             .collect();
         sh_names.sort_unstable();
 
-        // .ps1 prune: `if ($dir.Name -in 'target', 'dist', 'node_modules') {`
-        let ps1_line = ps1
-            .lines()
-            .find(|l| l.contains(" -in "))
-            .expect("-in prune line should exist in .ps1");
-        let mut ps1_names: Vec<&str> = ps1_line.split('\'').skip(1).step_by(2).collect();
+        let ps1_body = script_block_body(&ps1, "function Copy-SourceTree {");
+        let ps1_skips: Vec<&str> = ps1_body
+            .iter()
+            .copied()
+            .filter(|l| l.contains(" -in "))
+            .collect();
+        assert_eq!(
+            ps1_skips.len(),
+            1,
+            "Copy-SourceTree in bundle-build-context.ps1 must hold exactly one -in skip line: {ps1_body:?}"
+        );
+        // `if ($item.Name -in 'target', 'dist', 'node_modules') { continue }`
+        let mut ps1_names: Vec<&str> = ps1_skips[0].split('\'').skip(1).step_by(2).collect();
         ps1_names.sort_unstable();
 
         let mut expected: Vec<&str> = HOST_BUILD_OUTPUT_DIRS.to_vec();
@@ -906,11 +939,25 @@ mod tests {
 
         assert_eq!(
             sh_names, expected,
-            "bundle-build-context.sh prune must match HOST_BUILD_OUTPUT_DIRS"
+            "bundle-build-context.sh copy_source_tree() exclusion must match HOST_BUILD_OUTPUT_DIRS"
         );
         assert_eq!(
             ps1_names, expected,
-            "bundle-build-context.ps1 prune must match HOST_BUILD_OUTPUT_DIRS"
+            "bundle-build-context.ps1 Copy-SourceTree exclusion must match HOST_BUILD_OUTPUT_DIRS"
+        );
+        // Top-level calls only (the .ps1 recursion is indented): both scripts stage the same trees.
+        let sh_calls = sh
+            .lines()
+            .filter(|l| l.starts_with("copy_source_tree "))
+            .count();
+        let ps1_calls = ps1
+            .lines()
+            .filter(|l| l.starts_with("Copy-SourceTree "))
+            .count();
+        assert!(
+            sh_calls > 0 && sh_calls == ps1_calls,
+            "both bundle scripts must stage the same trees through their excluding copy \
+             (sh copy_source_tree calls: {sh_calls}, ps1 Copy-SourceTree calls: {ps1_calls})"
         );
         for name in HOST_BUILD_OUTPUT_DIRS {
             assert!(
