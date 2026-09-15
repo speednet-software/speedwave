@@ -14,8 +14,27 @@ echo "Arch: $(uname -m)"
 echo "Shell: $SHELL"
 echo ""
 
+DATA="${SPEEDWAVE_DATA_DIR:-$HOME/.speedwave}"
+INSTANCE="$(basename "$DATA" | sed 's/^\.//')"
+if [ "$INSTANCE" = "speedwave" ]; then
+  CLI_NAME="speedwave"
+else
+  CLI_NAME="speedwave-${INSTANCE#speedwave-}"
+fi
+
+echo "--- Instance ---"
+echo "Data dir: $DATA"
+echo "Instance: $INSTANCE"
+echo "CLI name: $CLI_NAME"
+if [ -n "${SPEEDWAVE_DATA_DIR:-}" ]; then
+  echo "Source: SPEEDWAVE_DATA_DIR"
+else
+  echo "Source: default (export SPEEDWAVE_DATA_DIR to diagnose another instance)"
+fi
+echo ""
+
 echo "--- Binary ---"
-CLI="$HOME/.local/bin/speedwave"
+CLI="$HOME/.local/bin/$CLI_NAME"
 if [ -f "$CLI" ]; then
   echo "File: EXISTS"
   ls -la "$CLI"
@@ -56,7 +75,6 @@ done
 echo ""
 
 echo "--- Speedwave data dir ---"
-DATA="$HOME/.speedwave"
 if [ -d "$DATA" ]; then
   echo "$DATA: EXISTS"
   echo "Contents:"
@@ -80,8 +98,8 @@ pgrep -fl Speedwave 2>/dev/null || echo "Speedwave.app is NOT running"
 echo ""
 
 echo "--- Direct CLI run ---"
-echo "Running: speedwave check 2>&1"
-speedwave check 2>&1 || true
+echo "Running: $CLI_NAME check 2>&1"
+"$CLI_NAME" check 2>&1 || true
 echo ""
 
 echo "=== Done ==="
