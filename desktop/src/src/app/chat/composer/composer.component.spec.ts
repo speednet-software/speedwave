@@ -745,4 +745,29 @@ describe('ComposerComponent', () => {
       expect(transcriptRow()).not.toBeNull();
     });
   });
+
+  describe('attachment error', () => {
+    function attachmentErrorEl(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-attachment-error"]');
+    }
+
+    function makeDropEvent(files: File[]): DragEvent {
+      const dataTransfer = { types: ['Files'], files, dropEffect: 'none' };
+      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
+      return ev;
+    }
+
+    it('shows an English error when an image is dropped with no active project', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'a.png', { type: 'image/png' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe(
+        'Select a project before attaching an image.'
+      );
+    });
+  });
 });

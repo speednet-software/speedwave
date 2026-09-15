@@ -654,7 +654,7 @@ export class ComposerComponent implements AfterViewInit {
     }
     const project = this.projectState.activeProject();
     if (!project) {
-      this.attachmentError.set('Wybierz projekt przed wklejeniem obrazka.');
+      this.attachmentError.set('Select a project before attaching an image.');
       return;
     }
 
