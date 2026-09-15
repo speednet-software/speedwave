@@ -68,6 +68,10 @@ pub trait HostAddressingComputer: Send + Sync {
 
 static HOST_ADDRESSING: std::sync::RwLock<Option<HostAddressing>> = std::sync::RwLock::new(None);
 
+/// Bumped by every invalidation so an in-flight `compute()` can tell its result predates
+/// the flush. Never read outside `host_addressing`/`invalidate_host_addressing_cache`.
+static ADDRESSING_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static COMPUTER: std::sync::RwLock<Option<std::sync::Arc<dyn HostAddressingComputer>>> =
     std::sync::RwLock::new(None);
 
@@ -80,6 +84,7 @@ pub fn host_addressing() -> anyhow::Result<HostAddressing> {
     {
         return Ok(addr);
     }
+    let generation = ADDRESSING_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
     let computer = current_computer();
     let addr = computer.compute()?;
     let mut write = HOST_ADDRESSING
@@ -88,7 +93,11 @@ pub fn host_addressing() -> anyhow::Result<HostAddressing> {
     if let Some(existing) = write.clone() {
         return Ok(existing);
     }
-    *write = Some(addr.clone());
+    // An invalidation during `compute()` (on Windows a multi-second `wsl.exe` probe) means
+    // `addr` may already be stale: serve it to this caller, but never cache it.
+    if ADDRESSING_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation {
+        *write = Some(addr.clone());
+    }
     Ok(addr)
 }
 
@@ -170,8 +179,12 @@ pub fn host_bind_port_for_container_facing(container_facing: u16) -> u16 {
     }
 }
 
-/// Clears the cached `HostAddressing` so the next call recomputes.
+/// Clears the cached `HostAddressing` so the next call recomputes, and bars a `compute()`
+/// already in flight from repopulating the cache with its pre-invalidation result.
 pub fn invalidate_host_addressing_cache() {
+    // Bump before clearing: a racing store either observes the new generation and skips,
+    // or lands first and is wiped by the clear below. Reversing the order loses the flush.
+    ADDRESSING_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut write) = HOST_ADDRESSING.write() {
         *write = None;
     }
@@ -505,6 +518,24 @@ mod resolver_tests {
         }
     }
 
+    /// First `compute()` parks between the two barriers so the test can invalidate
+    /// mid-computation; later calls return immediately.
+    struct BlockingComputer {
+        addr: HostAddressing,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    }
+    impl HostAddressingComputer for BlockingComputer {
+        fn compute(&self) -> anyhow::Result<HostAddressing> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                self.entered.wait();
+                self.release.wait();
+            }
+            Ok(self.addr.clone())
+        }
+    }
+
     struct FailingComputer(String);
     impl HostAddressingComputer for FailingComputer {
         fn compute(&self) -> anyhow::Result<HostAddressing> {
@@ -709,6 +740,33 @@ mod resolver_tests {
         assert!(
             (1..=4).contains(&n),
             "computer called {n} times — expected 1..=4 (one wins; losers see cached or recompute under race)"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn compute_racing_an_invalidation_does_not_repopulate_the_cache() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let _blocking = pin_addressing_computer(BlockingComputer {
+            addr: sample_addr(),
+            calls: std::sync::Arc::clone(&calls),
+            entered: std::sync::Arc::clone(&entered),
+            release: std::sync::Arc::clone(&release),
+        });
+
+        let racer = std::thread::spawn(host_addressing);
+        entered.wait();
+        invalidate_host_addressing_cache();
+        release.wait();
+        assert_eq!(racer.join().unwrap().unwrap(), sample_addr());
+
+        host_addressing().unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the invalidated cache must recompute, not serve the racer's pre-invalidation result"
         );
     }
 }
