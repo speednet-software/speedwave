@@ -545,7 +545,8 @@ test-ci:
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
 	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
-	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats
+	  _tests/ci/angular-coverage-gates.bats _tests/ci/makefile-path-precedence.bats \
+	  _tests/ci/bats-suite-wiring.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
