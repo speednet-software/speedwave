@@ -1120,7 +1120,10 @@ mod tests {
     }
 
     #[test]
-    fn scan_leaves_follow_system_then_message_content_order_and_skip_other_fields() {
+    fn scan_leaves_are_every_string_under_system_and_message_content_in_walk_order() {
+        // Structural strings ("type", tool ids) are leaves too: the list must index exactly
+        // the strings scan_json_value visits, in the same order (object keys sorted by
+        // serde_json), so the detector's per-leaf answer lands on the right string.
         let body = json!({
             "model": "claude",
             "system": [{"type": "text", "text": "sys"}],
@@ -1132,10 +1135,20 @@ mod tests {
             "metadata": {"user_id": "ignored"}
         });
         let leaves = collect_scan_leaves(&body);
-        assert_eq!(leaves.first().map(String::as_str), Some("sys"));
-        assert_eq!(leaves[1], "first");
-        assert!(leaves.contains(&"third".to_string()));
-        assert!(!leaves.iter().any(|l| l == "ignored" || l == "claude"));
+        assert_eq!(
+            leaves,
+            [
+                "sys",
+                "text",
+                "first",
+                "text",
+                "second",
+                "third",
+                "text",
+                "id",
+                "tool_result"
+            ]
+        );
         assert!(collect_scan_leaves(&json!({"model": "x"})).is_empty());
     }
 
@@ -1150,12 +1163,15 @@ mod tests {
             ]
         });
         let leaves = collect_scan_leaves(&body);
-        assert_eq!(leaves.len(), 4);
+        assert_eq!(
+            leaves,
+            ["Jan Kowalski", "nothing here", "mieszka w Gdańsku", "text"]
+        );
         let external = vec![
             vec![external(4, 12, "SURNAME")],
             vec![],
-            vec![],
             vec![external(10, 18, "CITY")],
+            vec![],
         ];
         let report = scan_request_with_external(&policy, &key, &mut body, Some(external)).unwrap();
         assert!(report.detections.is_empty());
