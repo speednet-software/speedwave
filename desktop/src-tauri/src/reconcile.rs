@@ -2747,6 +2747,7 @@ mod tests {
             mcp_os: SharedMcpOs::default(),
             oauth: SharedOauth::default(),
             auto_check_handle: SharedAutoCheckHandle::default(),
+            pii_ner: crate::pii_ner_service::SharedPiiNer::default(),
         };
 
         let first = run_exit_cleanup(&ctx);

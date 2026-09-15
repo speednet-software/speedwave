@@ -573,7 +573,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(
-            second.state().ready().unwrap_err(),
+            second.state().ready().map(|_| ()).unwrap_err(),
             "PII detector failed to load"
         );
     }
