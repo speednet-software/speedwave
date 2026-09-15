@@ -1,11 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { ToolNormalizerService } from './tool-normalizer.service';
 import { LoggerService } from './logger.service';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
+import { makeMockLogger } from '../testing/mock-logger';
 
 describe('ToolNormalizerService', () => {
   let service: ToolNormalizerService;
@@ -99,6 +96,12 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'generic', raw_json: 'not json' });
     expect(mockLogger.warn).not.toHaveBeenCalled();
     expect(mockLogger.error).not.toHaveBeenCalled();
+  });
+
+  it('returns generic for a JSON null or scalar input without throwing', () => {
+    expect(service.normalize('Bash', 'null')).toEqual({ kind: 'generic', raw_json: 'null' });
+    expect(service.normalize('Read', '42')).toEqual({ kind: 'generic', raw_json: '42' });
+    expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
   it('returns generic for empty string', () => {

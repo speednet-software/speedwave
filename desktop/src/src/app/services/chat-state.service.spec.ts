@@ -21,12 +21,9 @@ import { AnthropicModelsService } from './anthropic-models.service';
 import { LoggerService } from './logger.service';
 import { MockTauriService, MOCK_BUNDLE_RECONCILE_DONE } from '../testing/mock-tauri.service';
 import { createDeferred } from '../testing/deferred';
+import { makeMockLogger } from '../testing/mock-logger';
 import type { ConversationTranscript, StreamChunk, ToolUseBlock } from '../models/chat';
 import { DEFAULT_CONTEXT_TOKENS } from '../models/llm';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
 
 describe('ChatStateService', () => {
   let service: ChatStateService;
@@ -868,10 +865,11 @@ describe('ChatStateService', () => {
         expect(message).toContain('incomplete after streaming');
       });
 
-      it('ToolInputComplete does not warn when the streamed input already parses', () => {
-        startTool('{"to": "ab97ec49c3f64e4c0", "message": "Any progress?"}');
+      it('ToolInputComplete keeps a streamed input that parses and stays silent', () => {
+        const streamed = '{"to": "ab97ec49c3f64e4c0", "message": "Any progress?"}';
+        startTool(streamed);
         complete(COMPLETE);
-        expect(toolBlock().input_json).toBe(COMPLETE);
+        expect(toolBlock().input_json).toBe(streamed);
         expect(mockLogger.warn).not.toHaveBeenCalled();
       });
 
@@ -958,6 +956,37 @@ describe('ChatStateService', () => {
         expect(message).toContain(`${huge.length} chars`);
         expect(message).toContain('x'.repeat(50));
         expect(message).not.toContain('x'.repeat(1000));
+      });
+
+      it('the parse warning preview never cuts a surrogate pair', () => {
+        const head = '{"content":"';
+        const input = head + 'x'.repeat(199 - head.length) + '😀' + 'y'.repeat(50);
+        startTool(input, 'Write');
+        result();
+        const message = mockLogger.warn.mock.calls[0][0] as string;
+        expect(message).toContain('😀');
+        expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+      });
+
+      it('Result finalizes a still-running tool block as Interrupted', () => {
+        startTool(TRUNCATED);
+        service.handleStreamChunk({ chunk_type: 'Result', data: { session_id: 'sid' } });
+        const block = service.messages[0].blocks[0];
+        expect(block.type).toBe('tool_use');
+        if (block.type === 'tool_use' && block.tool.status === 'error') {
+          expect(block.tool.result).toBe('Interrupted');
+        } else {
+          throw new Error('expected an errored tool block');
+        }
+        expect(mockLogger.warn).not.toHaveBeenCalled();
+      });
+
+      it('Error finalizes a still-running tool block as Interrupted', () => {
+        startTool(TRUNCATED);
+        service.handleStreamChunk({ chunk_type: 'Error', data: { content: 'Error: rate limit' } });
+        const [tool, error] = service.messages[0].blocks;
+        expect(tool.type === 'tool_use' && tool.tool.status).toBe('error');
+        expect(error.type).toBe('error');
       });
 
       it('stopConversation marks a streaming tool Interrupted without a parse warning', async () => {

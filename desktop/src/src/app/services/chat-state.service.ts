@@ -715,25 +715,9 @@ export class ChatStateService {
     this.isStreaming = false;
 
     // 3. Keep the partial reply; drop ask_user blocks; mark running tools errored.
-    const keptBlocks = this._currentBlocks
-      .filter((b) => b.type !== 'ask_user')
-      .map((b) => {
-        if (b.type === 'tool_use' && b.tool.status === 'running') {
-          return {
-            ...b,
-            tool: {
-              type: 'tool_use' as const,
-              tool_id: b.tool.tool_id,
-              tool_name: b.tool.tool_name,
-              input_json: b.tool.input_json,
-              status: 'error' as const,
-              result: 'Interrupted',
-              result_is_error: true as const,
-            },
-          };
-        }
-        return b;
-      });
+    const keptBlocks = interruptRunningTools(
+      this._currentBlocks.filter((b) => b.type !== 'ask_user')
+    );
     if (keptBlocks.length > 0) {
       this._messages = [
         ...this._messages,
@@ -809,8 +793,10 @@ export class ChatStateService {
         break;
 
       case 'ToolInputComplete': {
+        // A stream that still parses stays as displayed; the complete input only heals a cut one.
         const streamed = findToolBlock(this._currentBlocks, chunk.data.tool_id);
-        if (streamed && isIncompleteStreamedInput(streamed.input_json, chunk.data.input_json)) {
+        if (!streamed || jsonParseError(streamed.input_json) === null) break;
+        if (!isNoArgumentTool(streamed.input_json, chunk.data.input_json)) {
           this.log.warn(
             `Tool input for "${streamed.tool_name}" (${streamed.tool_id}) was incomplete after ` +
               `streaming (${streamed.input_json.length} chars); replaced with the complete input ` +
@@ -827,7 +813,7 @@ export class ChatStateService {
 
       case 'ToolResult': {
         this._currentBlocks = completeToolBlock(this._currentBlocks, chunk.data);
-        // Logged once here, at the done/error transition — never from a render-time computed.
+        // Parse failures are logged once per block, only at this transition.
         const finished = findToolBlock(this._currentBlocks, chunk.data.tool_id);
         const parseError = finished ? jsonParseError(finished.input_json) : null;
         if (finished && parseError !== null) {
@@ -897,7 +883,7 @@ export class ChatStateService {
           const assistantUuid = chunk.data.assistant_uuid;
           const assistantEntry: ChatMessage = {
             role: 'assistant',
-            blocks: [...this._currentBlocks],
+            blocks: interruptRunningTools(this._currentBlocks),
             timestamp: Date.now(),
             uuid: assistantUuid,
             uuid_status: assistantUuid ? 'Committed' : undefined,
@@ -976,7 +962,7 @@ export class ChatStateService {
           chunk.data.content;
         const watchdogKind = watchdogErrorKind(errContent);
         this._currentBlocks = [
-          ...this._currentBlocks,
+          ...interruptRunningTools(this._currentBlocks),
           {
             type: 'error',
             content: errContent,
@@ -1551,11 +1537,18 @@ function appendOrCreateThinkingBlock(blocks: MessageBlock[], content: string): M
   return [...blocks, { type: 'thinking', content, collapsed: true }];
 }
 
+function updateToolBlock(
+  blocks: MessageBlock[],
+  toolId: string,
+  update: (tool: ToolUseBlock) => ToolUseBlock
+): MessageBlock[] {
+  return blocks.map((b) =>
+    b.type === 'tool_use' && b.tool.tool_id === toolId ? { ...b, tool: update(b.tool) } : b
+  );
+}
+
 function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string): MessageBlock[] {
-  return blocks.map((b) => {
-    if (b.type !== 'tool_use' || b.tool.tool_id !== toolId) return b;
-    return { ...b, tool: { ...b.tool, input_json: b.tool.input_json + delta } };
-  });
+  return updateToolBlock(blocks, toolId, (t) => ({ ...t, input_json: t.input_json + delta }));
 }
 
 function replaceToolInput(
@@ -1563,9 +1556,23 @@ function replaceToolInput(
   toolId: string,
   inputJson: string
 ): MessageBlock[] {
+  return updateToolBlock(blocks, toolId, (t) => ({ ...t, input_json: inputJson }));
+}
+
+// Tools still running when a turn ends without their result show as interrupted.
+function interruptRunningTools(blocks: MessageBlock[]): MessageBlock[] {
   return blocks.map((b) => {
-    if (b.type !== 'tool_use' || b.tool.tool_id !== toolId) return b;
-    return { ...b, tool: { ...b.tool, input_json: inputJson } };
+    if (b.type !== 'tool_use' || b.tool.status !== 'running') return b;
+    const tool: ToolUseBlock = {
+      type: 'tool_use',
+      tool_id: b.tool.tool_id,
+      tool_name: b.tool.tool_name,
+      input_json: b.tool.input_json,
+      status: 'error',
+      result: 'Interrupted',
+      result_is_error: true,
+    };
+    return { ...b, tool };
   });
 }
 
@@ -1586,19 +1593,19 @@ function jsonParseError(input: string): string | null {
   }
 }
 
-// By the time the full assistant message arrives every delta has been applied, so an
-// unparseable stream means lost deltas — except an empty stream completed to `{}` (no-arg tool).
-function isIncompleteStreamedInput(streamed: string, complete: string): boolean {
-  if (streamed === '' && complete === '{}') return false;
-  return jsonParseError(streamed) !== null;
+// An empty stream completed to `{}` is a tool without arguments, not a lost delta.
+function isNoArgumentTool(streamed: string, complete: string): boolean {
+  return streamed === '' && complete === '{}';
 }
 
 /** Longest tool-input excerpt echoed into a parse-failure log line. */
 const TOOL_INPUT_LOG_PREVIEW_CHARS = 200;
 
+// Code-point slice: a cut surrogate pair would make the log IPC reject the whole line.
 function previewForLog(input: string): string {
-  if (input.length <= TOOL_INPUT_LOG_PREVIEW_CHARS) return input;
-  return `${input.slice(0, TOOL_INPUT_LOG_PREVIEW_CHARS)}…`;
+  const points = Array.from(input);
+  if (points.length <= TOOL_INPUT_LOG_PREVIEW_CHARS) return input;
+  return `${points.slice(0, TOOL_INPUT_LOG_PREVIEW_CHARS).join('')}…`;
 }
 
 /**
@@ -1673,18 +1680,16 @@ function completeToolBlock(
   blocks: MessageBlock[],
   data: { tool_id: string; content: string; is_error: boolean }
 ): MessageBlock[] {
-  return blocks.map((b) => {
-    if (b.type !== 'tool_use' || b.tool.tool_id !== data.tool_id) return b;
+  return updateToolBlock(blocks, data.tool_id, (t) => {
     const base = {
       type: 'tool_use' as const,
-      tool_id: b.tool.tool_id,
-      tool_name: b.tool.tool_name,
-      input_json: b.tool.input_json,
+      tool_id: t.tool_id,
+      tool_name: t.tool_name,
+      input_json: t.input_json,
     };
-    const tool: ToolUseBlock = data.is_error
+    return data.is_error
       ? { ...base, status: 'error', result: data.content, result_is_error: true }
       : { ...base, status: 'done', result: data.content, result_is_error: false };
-    return { ...b, tool };
   });
 }
 

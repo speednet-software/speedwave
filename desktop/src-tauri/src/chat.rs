@@ -332,13 +332,6 @@ pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
 }
 
-/// Turn boundary where the reader drops streamed block state: a terminal chunk
-/// or `system/init`. Mid-turn `system` lines (task/hook/status) keep it.
-fn resets_block_state(parsed: &serde_json::Value, is_terminal: bool) -> bool {
-    is_terminal
-        || (parsed["type"].as_str() == Some("system") && parsed["subtype"].as_str() == Some("init"))
-}
-
 /// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
 /// malformed fields. `None` when `usage` is not a JSON object.
 pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
@@ -449,8 +442,6 @@ fn option_to_vec(
 pub struct StreamParser {
     /// Maps content block index to (tool_use_id, tool_name).
     active_blocks: HashMap<u64, (String, String)>,
-    /// Accumulated input_json per tool_id (built from ToolInputDelta chunks).
-    tool_input: HashMap<String, String>,
     /// Provisional assistant UUID (ADR-046), committed onto `Result` and
     /// `take`n there so an error turn can't reuse a stale id.
     pending_assistant_uuid: Option<String>,
@@ -482,7 +473,6 @@ impl StreamParser {
     pub fn new() -> Self {
         Self {
             active_blocks: HashMap::new(),
-            tool_input: HashMap::new(),
             pending_assistant_uuid: None,
             committed_user_uuids: std::collections::HashSet::new(),
             previous_session_usage: TurnUsage::default(),
@@ -617,11 +607,10 @@ impl StreamParser {
             .collect()
     }
 
-    /// Reset per-message block state (e.g. on `message_stop`). Does NOT reset
-    /// the session-wide usage snapshot — only `new_session()` does.
+    /// Reset per-message block state (on `message_start`/`message_stop`). Does
+    /// NOT reset the session-wide usage snapshot — only `new_session()` does.
     pub fn reset(&mut self) {
         self.active_blocks.clear();
-        self.tool_input.clear();
         // pending_assistant_uuid NOT cleared (message_stop can precede the
         // result; parse_result .take()s it); committed_user_uuids persists too.
     }
@@ -841,11 +830,6 @@ impl StreamParser {
                             Some(t) => t,
                             None => return (None, None),
                         };
-                        // Accumulate input JSON for AskUserQuestion detection on block stop
-                        self.tool_input
-                            .entry(tool_id.clone())
-                            .or_default()
-                            .push_str(partial);
                         // Suppress ToolInputDelta for AskUserQuestion — frontend doesn't need partial JSON
                         if tool_name == ASK_USER_TOOL_NAME {
                             (None, None)
@@ -871,15 +855,14 @@ impl StreamParser {
                             prefix: "TOOL",
                             message: format!("stop: {} ({})", tool_name, tool_id),
                         });
-                        // AskUserQuestion uses control_request; just clean up input.
-                        self.tool_input.remove(&tool_id);
                         return (None, log_entry);
                     }
                 }
                 (None, None)
             }
 
-            "message_stop" => {
+            // Content-block indices restart with every API message.
+            "message_start" | "message_stop" => {
                 self.reset();
                 (None, None)
             }
@@ -1873,13 +1856,12 @@ impl ChatSession {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
-                if is_terminal || msg_type == "system" {
+                // A terminal chunk ends the turn; any later content chunk opens
+                // the next one, so an EOF mid-turn still surfaces as a crash.
+                if is_terminal {
                     got_result = true;
-                }
-                // Interrupts emit Result with no message_stop; mid-turn system
-                // lines are not boundaries (a reset there drops tool input deltas).
-                if resets_block_state(&parsed, is_terminal) {
-                    parser.reset();
+                } else if !chunks.is_empty() {
+                    got_result = false;
                 }
                 for chunk in chunks {
                     emit_sanitized_chunk(&app_handle, chunk, &display_policy);
@@ -2288,9 +2270,51 @@ mod tests {
         );
     }
 
+    /// Enforcement: only the parser resets block state (`message_start`/
+    /// `message_stop`); a reader-side reset on any other line drops tool input deltas.
+    #[test]
+    fn stdout_reader_never_resets_the_parser() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let resets = prod
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && t.contains("parser.reset()")
+            })
+            .count();
+        assert_eq!(
+            resets, 0,
+            "the stdout reader must not call parser.reset(); found {resets}"
+        );
+    }
+
+    /// `chunk_type` tags declared in a TS `StreamChunk` union body; comment lines
+    /// are skipped so a doc example cannot masquerade as a variant.
+    fn ts_chunk_type_tags(union_body: &str) -> Vec<String> {
+        union_body
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.starts_with("/*") && !l.starts_with('*') && !l.starts_with("//"))
+            .flat_map(|l| {
+                l.split("chunk_type: '")
+                    .skip(1)
+                    .filter_map(|s| s.split('\'').next())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ts_chunk_type_tags_skips_comment_examples() {
+        let body = "  | {\n      /** e.g. { chunk_type: 'Foo' } */\n      chunk_type: 'Bar';\n    }\n  | { chunk_type: 'Baz'; data: { x: string } };";
+        assert_eq!(ts_chunk_type_tags(body), vec!["Bar", "Baz"]);
+    }
+
     /// Rust `StreamChunk` variants ↔ TS `StreamChunk` union (`chunk_type` tags).
     #[test]
-    fn stream_chunk_variants_match_ts_union() {
+    fn stream_chunk_variant_set_matches_ts_union() {
         let rust_src = include_str!("chat.rs");
         let start = rust_src
             .find("pub enum StreamChunk {")
@@ -2317,12 +2341,7 @@ mod tests {
             .expect("chat.ts must declare `export type StreamChunk`");
         let rest = &ts_src[idx + marker.len()..];
         let union = &rest[..rest.find("\nexport ").unwrap_or(rest.len())];
-        let mut ts: Vec<String> = union
-            .split("chunk_type: '")
-            .skip(1)
-            .filter_map(|s| s.split('\'').next())
-            .map(String::from)
-            .collect();
+        let mut ts = ts_chunk_type_tags(union);
         ts.sort();
 
         assert_eq!(
@@ -3298,55 +3317,40 @@ mod tests {
         assert!(parser.active_blocks.is_empty());
     }
 
-    /// Regression: an interrupted turn emits `result` without `message_stop`,
-    /// so the stdout-reader calls `parser.reset()` after every terminal chunk.
-    #[test]
-    fn reset_after_result_prevents_stale_tool_contamination() {
-        let mut parser = StreamParser::new();
+    const MESSAGE_START_LINE: &str = r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_next","role":"assistant","content":[]}}}"#;
 
-        // Turn 1: a tool starts at index 0 and receives a partial input delta.
+    #[test]
+    fn parse_message_start_resets_parser_state() {
+        let mut parser = StreamParser::new();
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_Y","name":"Edit","input":{}}}}"#;
+        parse_line_str(&mut parser, start);
+        parse_line_str(&mut parser, MESSAGE_START_LINE);
+        assert!(parser.active_blocks.is_empty());
+    }
+
+    /// An interrupted turn emits `result` without `message_stop`; the next
+    /// message's `message_start` drops its block state before index reuse.
+    #[test]
+    fn message_start_clears_stale_blocks_from_an_interrupted_turn() {
+        let mut parser = StreamParser::new();
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_OLD","name":"Read","input":{}}}}"#;
         parse_line_str(&mut parser, start);
-        assert!(parser.active_blocks.contains_key(&0));
-
-        // Simulate the reader's `reset()` after `result` (parse_line does not).
         let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
         parse_line_str(&mut parser, result);
-        parser.reset();
-
+        parse_line_str(&mut parser, MESSAGE_START_LINE);
         assert!(parser.active_blocks.is_empty());
-        assert!(parser.tool_input.is_empty());
 
-        // Turn 2 reuses index 0; without the reset above, the input delta
-        // would route to the OLD tool_id.
+        // Turn 2 reuses index 0: the delta must route to the NEW tool_id.
         let start2 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_NEW","name":"Edit","input":{}}}}"#;
         parse_line_str(&mut parser, start2);
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x\"}"}}}"#;
-        let chunk = parse_line_str(&mut parser, delta).expect("expected ToolInputDelta");
-        match chunk {
+        match parse_line_str(&mut parser, delta).expect("expected ToolInputDelta") {
             StreamChunk::ToolInputDelta { tool_id, .. } => assert_eq!(tool_id, "toolu_NEW"),
             other => panic!("expected ToolInputDelta for toolu_NEW, got {other:?}"),
         }
     }
 
-    // ── Reader turn boundary: block state survives mid-turn `system` lines ──
-
-    /// Mirrors the stdout-reader loop: parse, then drop block state only when
-    /// `resets_block_state` says the line is a turn boundary.
-    fn feed_like_reader(
-        parser: &mut StreamParser,
-        line: &str,
-    ) -> (Vec<StreamChunk>, Option<LogEntry>) {
-        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid json");
-        let (chunks, log) = parser.parse_line(&parsed);
-        let is_terminal = chunks
-            .iter()
-            .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
-        if resets_block_state(&parsed, is_terminal) {
-            parser.reset();
-        }
-        (chunks, log)
-    }
+    // ── Mid-turn `system` lines never touch block state ──
 
     const TOOL_START_LINE: &str = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_MID","name":"Write","input":{}}}}"#;
     const TOOL_DELTA_LINE: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/x\"}"}}}"#;
@@ -3356,25 +3360,23 @@ mod tests {
     #[test]
     fn mid_turn_system_line_keeps_streaming_tool_block() {
         let mut parser = StreamParser::new();
-        feed_like_reader(&mut parser, TOOL_START_LINE);
+        parse_line_str(&mut parser, TOOL_START_LINE);
         let system =
             r#"{"type":"system","subtype":"task_progress","task_id":"t1","description":"bg"}"#;
-        let (chunks, _) = feed_like_reader(&mut parser, system);
-        assert!(chunks.is_empty());
+        assert!(parse_line_all_str(&mut parser, system).is_empty());
 
-        let (chunks, _) = feed_like_reader(&mut parser, TOOL_DELTA_LINE);
-        match chunks.as_slice() {
-            [StreamChunk::ToolInputDelta {
+        match parse_line_str(&mut parser, TOOL_DELTA_LINE) {
+            Some(StreamChunk::ToolInputDelta {
                 tool_id,
                 partial_json,
-            }] => {
+            }) => {
                 assert_eq!(tool_id, "toolu_MID");
                 assert_eq!(partial_json, r#"{"file_path":"/x"}"#);
             }
             other => panic!("delta after a mid-turn system line must still route: {other:?}"),
         }
 
-        let (_, log) = feed_like_reader(&mut parser, TOOL_STOP_LINE);
+        let (_, log) = parse_line_full(&mut parser, TOOL_STOP_LINE);
         let log = log.expect("content_block_stop must log TOOL: stop");
         assert_eq!(log.prefix, "TOOL");
         assert_eq!(log.message, "stop: Write (toolu_MID)");
@@ -3383,6 +3385,7 @@ mod tests {
     #[test]
     fn every_documented_mid_turn_system_subtype_keeps_block_state() {
         let subtypes = [
+            "init",
             "status",
             "api_retry",
             "task_started",
@@ -3396,9 +3399,9 @@ mod tests {
         ];
         for subtype in subtypes {
             let mut parser = StreamParser::new();
-            feed_like_reader(&mut parser, TOOL_START_LINE);
+            parse_line_str(&mut parser, TOOL_START_LINE);
             let line = format!(r#"{{"type":"system","subtype":"{subtype}"}}"#);
-            feed_like_reader(&mut parser, &line);
+            parse_line_str(&mut parser, &line);
             assert!(
                 parser.active_blocks.contains_key(&0),
                 "system/{subtype} must not drop block state"
@@ -3409,58 +3412,12 @@ mod tests {
     #[test]
     fn non_actionable_system_text_keeps_block_state() {
         let mut parser = StreamParser::new();
-        feed_like_reader(&mut parser, TOOL_START_LINE);
+        parse_line_str(&mut parser, TOOL_START_LINE);
         let line = r#"{"type":"system","subtype":"status","message":"Compacting conversation"}"#;
-        let (chunks, log) = feed_like_reader(&mut parser, line);
-        assert!(chunks.is_empty());
+        let (chunk, log) = parse_line_full(&mut parser, line);
+        assert!(chunk.is_none());
         assert_eq!(log.expect("system text is logged").prefix, "SYSTEM");
         assert!(parser.active_blocks.contains_key(&0));
-    }
-
-    #[test]
-    fn system_init_line_is_a_turn_boundary() {
-        let mut parser = StreamParser::new();
-        feed_like_reader(&mut parser, TOOL_START_LINE);
-        feed_like_reader(&mut parser, TOOL_DELTA_LINE);
-        let init = r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-x"}"#;
-        feed_like_reader(&mut parser, init);
-        assert!(parser.active_blocks.is_empty());
-        assert!(parser.tool_input.is_empty());
-    }
-
-    #[test]
-    fn actionable_system_error_is_a_turn_boundary() {
-        let mut parser = StreamParser::new();
-        feed_like_reader(&mut parser, TOOL_START_LINE);
-        let line = r#"{"type":"system","message":"Error: something broke"}"#;
-        let (chunks, _) = feed_like_reader(&mut parser, line);
-        assert!(matches!(chunks.as_slice(), [StreamChunk::Error { .. }]));
-        assert!(parser.active_blocks.is_empty());
-    }
-
-    #[test]
-    fn result_line_is_a_turn_boundary_without_message_stop() {
-        let mut parser = StreamParser::new();
-        feed_like_reader(&mut parser, TOOL_START_LINE);
-        feed_like_reader(&mut parser, TOOL_DELTA_LINE);
-        let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
-        feed_like_reader(&mut parser, result);
-        assert!(parser.active_blocks.is_empty());
-        assert!(parser.tool_input.is_empty());
-    }
-
-    #[test]
-    fn resets_block_state_only_on_terminal_chunks_and_system_init() {
-        let system_mid = serde_json::json!({"type":"system","subtype":"task_progress"});
-        let system_init = serde_json::json!({"type":"system","subtype":"init"});
-        let system_bare = serde_json::json!({"type":"system"});
-        let stream = serde_json::json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}});
-        assert!(!resets_block_state(&system_mid, false));
-        assert!(!resets_block_state(&system_bare, false));
-        assert!(!resets_block_state(&stream, false));
-        assert!(resets_block_state(&system_init, false));
-        assert!(resets_block_state(&stream, true));
-        assert!(resets_block_state(&system_mid, true));
     }
 
     // ── assistant line: complete tool input (self-heal for lost deltas) ──
@@ -3561,17 +3518,17 @@ mod tests {
     fn assistant_line_complete_input_follows_block_stop_in_reader_order() {
         // Field order: start → mid-turn system line → stop → full assistant line.
         let mut parser = StreamParser::new();
-        feed_like_reader(&mut parser, TOOL_START_LINE);
-        feed_like_reader(
+        parse_line_str(&mut parser, TOOL_START_LINE);
+        parse_line_str(
             &mut parser,
             r#"{"type":"system","subtype":"hook_started","hook_name":"x"}"#,
         );
-        feed_like_reader(&mut parser, TOOL_STOP_LINE);
+        parse_line_str(&mut parser, TOOL_STOP_LINE);
         let line = assistant_tool_use_line(
             "null",
             r#"{"type":"tool_use","id":"toolu_MID","name":"Write","input":{"file_path":"/x","content":"full"}}"#,
         );
-        let (chunks, _) = feed_like_reader(&mut parser, &line);
+        let chunks = parse_line_all_str(&mut parser, &line);
         assert!(matches!(
             chunks.as_slice(),
             [StreamChunk::ToolInputComplete { tool_id, .. }] if tool_id == "toolu_MID"
@@ -4756,7 +4713,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_ask_user_question_cleans_up_tool_input() {
+    fn parse_ask_user_question_cleans_up_active_blocks() {
         let mut parser = StreamParser::new();
 
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask2","name":"AskUserQuestion"}}}"#;
@@ -4768,8 +4725,6 @@ mod tests {
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         parse_line_str(&mut parser, stop);
 
-        // tool_input should be cleaned up after emission
-        assert!(parser.tool_input.is_empty());
         assert!(parser.active_blocks.is_empty());
     }
 

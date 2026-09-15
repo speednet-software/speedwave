@@ -13,6 +13,9 @@ export class ToolNormalizerService {
   normalize(toolName: string, inputJson: string): NormalizedToolInput {
     try {
       const parsed = JSON.parse(inputJson);
+      if (parsed === null || typeof parsed !== 'object') {
+        return { kind: 'generic', raw_json: inputJson };
+      }
       switch (toolName) {
         case 'Bash':
           return { kind: 'bash', command: parsed.command ?? '' };
@@ -60,7 +63,7 @@ export class ToolNormalizerService {
           return { kind: 'generic', raw_json: inputJson };
       }
     } catch {
-      // Unparseable input is displayed raw; chat-state logs it once when the block completes.
+      // Unparseable input is displayed raw; the live stream path logs it once at ToolResult.
       return { kind: 'generic', raw_json: inputJson };
     }
   }

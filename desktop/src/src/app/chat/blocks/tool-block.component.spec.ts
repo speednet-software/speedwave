@@ -3,11 +3,8 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ToolBlockComponent } from './tool-block.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
 import { LoggerService } from '../../services/logger.service';
+import { makeMockLogger } from '../../testing/mock-logger';
 import type { ToolUseBlock } from '../../models/chat';
-
-function makeMockLogger() {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-}
 
 describe('ToolBlockComponent', () => {
   let component: ToolBlockComponent;
@@ -556,7 +553,16 @@ describe('ToolBlockComponent', () => {
       expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
+    it('keeps the normalized reference when the block is rebuilt with equal fields', () => {
+      const tool = makeTool();
+      setTool(tool);
+      const first = component.normalized();
+      setTool({ ...tool });
+      expect(component.normalized()).toBe(first);
+    });
+
     it('re-setting an unparseable done block with fresh objects never logs', () => {
+      const spy = vi.spyOn(TestBed.inject(ToolNormalizerService), 'normalize');
       // Every chat-state mutation rebuilds the block objects; the log must not scale with it.
       const tool = makeTool({
         status: 'done',
@@ -567,6 +573,7 @@ describe('ToolBlockComponent', () => {
         setTool({ ...tool });
         expect(component.normalized()).toEqual({ kind: 'generic', raw_json: '{"to": "ab97"' });
       }
+      expect(spy).toHaveBeenCalledTimes(1);
       expect(mockLogger.warn).not.toHaveBeenCalled();
       expect(mockLogger.error).not.toHaveBeenCalled();
     });
