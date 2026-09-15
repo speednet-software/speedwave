@@ -644,7 +644,7 @@ endif
 # ── Angular tests ───────────────────────────────────────────────────────────
 
 test-angular:
-	cd desktop/src && $(NPX) ng test --no-watch --runner-config vitest.config.ts
+	cd desktop/src && $(NPX) ng test --no-watch
 	@echo "✅ Angular tests passed"
 
 # ── MCP server tests ────────────────────────────────────────────────────────
@@ -694,11 +694,11 @@ coverage-html: build-mcp
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "❌ cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
 	cargo llvm-cov -p speedwave-runtime -p speedwave-cli --html --output-dir target/coverage/rust
 	cd mcp-servers && $(NPM) run test:coverage
-	cd desktop/src && $(NPX) ng test --no-watch --coverage
+	"$(MAKE)" coverage-angular
 	@echo "\n✅ Coverage reports generated:"
 	@echo "  Rust:    target/coverage/rust/html/index.html"
 	@echo "  MCP:     mcp-servers/coverage/index.html"
-	@echo "  Angular: desktop/src/coverage/index.html"
+	@echo "  Angular: desktop/src/coverage/speedwave-desktop-ui/index.html"
 	@[ "$$(uname)" = "Darwin" ] && open target/coverage/rust/html/index.html || true
 
 # ── E2E tests (requires bats-core) ──────────────────────────────────────────
@@ -741,7 +741,8 @@ test-ci:
 	bats _tests/ci/validate-pr-title-main.bats _tests/ci/windows-only-test-list.bats \
 	  _tests/ci/rust-coverage-gates.bats _tests/ci/dependabot-cargo-workspaces.bats \
 	  _tests/ci/composite-action-pins.bats _tests/ci/node-version-pin.bats \
-	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats
+	  _tests/ci/bats-assertion-hygiene.bats _tests/ci/ci-gate.bats \
+	  _tests/ci/angular-coverage-gates.bats
 	@echo "✅ CI workflow tests passed"
 
 test-desktop-build: build-angular build-mcp
