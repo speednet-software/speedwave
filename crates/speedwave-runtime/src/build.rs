@@ -2682,8 +2682,8 @@ mod tests {
 
     #[test]
     fn bundle_scripts_env_knobs_are_in_sync() {
-        // The bats suite isolates itself from the real tree through these two knobs; a knob
-        // present in one script only would silently leave the other platform's bundle unisolated.
+        // The bats suite isolates itself from the real tree through these knobs; a knob present
+        // in one script only would silently leave the other platform's bundle unisolated.
         let repo_root = repo_root();
         let sh = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
             .expect("bundle-build-context.sh should exist");
@@ -2703,7 +2703,12 @@ mod tests {
             "a knob read that appears only in a comment must not satisfy the guard"
         );
 
-        for knob in ["BUNDLE_DEST", "BUNDLE_MCP_SERVERS_DIR"] {
+        for knob in [
+            "BUNDLE_DEST",
+            "BUNDLE_MCP_SERVERS_DIR",
+            "BUNDLE_CONTAINERS_DIR",
+            "BUNDLE_WASM_PKG_DIR",
+        ] {
             assert!(
                 reads_outside_comments(&sh, &format!("${{{knob}:-")),
                 "bundle-build-context.sh must read ${knob} with a default (`${{{knob}:-...}}`)"

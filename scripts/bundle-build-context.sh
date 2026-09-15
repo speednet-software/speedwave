@@ -9,19 +9,25 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # `make test`/`make dev` don't race (_tests/desktop/bundle-build-context.bats).
 DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 mkdir -p "$DEST"
-# The mcp-servers tree the bundle is staged from and --ci rebuilds; the bats --ci test points
-# it at a scratch copy so npm ci + dist rebuilds never touch the tree a concurrent run reads.
+# The source trees the bundle is staged from (--ci rebuilds mcp-servers); the bats suite points
+# them at scratch copies so its fixtures and rebuilds never touch the tree a concurrent run reads.
 MCP_SERVERS_DIR="${BUNDLE_MCP_SERVERS_DIR:-$REPO_ROOT/mcp-servers}"
+CONTAINERS_DIR="${BUNDLE_CONTAINERS_DIR:-$REPO_ROOT/containers}"
 if [ ! -d "$MCP_SERVERS_DIR" ]; then
   echo "ERROR: mcp-servers tree not found at $MCP_SERVERS_DIR (BUNDLE_MCP_SERVERS_DIR)." >&2
   exit 1
 fi
+if [ ! -d "$CONTAINERS_DIR" ]; then
+  echo "ERROR: containers tree not found at $CONTAINERS_DIR (BUNDLE_CONTAINERS_DIR)." >&2
+  exit 1
+fi
 
 LOCK_DIR="$DEST/.bundle.lock"
-# mcp-servers/policies/wasm-pkg is a single shared source-tree location (not under $DEST) —
-# a second lock guards it from concurrent writers across different $BUNDLE_DEST invocations.
-WASM_PKG_DIR="$REPO_ROOT/mcp-servers/policies/wasm-pkg"
-WASM_LOCK_DIR="$REPO_ROOT/mcp-servers/policies/.wasm-build.lock"
+# The wasm out dir is shared by every $BUNDLE_DEST run (the real policies/wasm-pkg unless the bats
+# suite redirects it), so a second lock beside it serializes its writers.
+WASM_PKG_DIR="${BUNDLE_WASM_PKG_DIR:-$REPO_ROOT/mcp-servers/policies/wasm-pkg}"
+WASM_LOCK_DIR="$(dirname "$WASM_PKG_DIR")/.wasm-build.lock"
+mkdir -p "$(dirname "$WASM_PKG_DIR")"
 
 # acquire_lock <dir>: mkdir-based mutex, atomic cross-platform; a lock whose holder PID is
 # dead is reclaimed. Arms trap before PID write to prevent deadlock if PID write fails.
@@ -72,7 +78,7 @@ fi
 # -- Build context (containers + MCP server sources) --------------------------
 
 mkdir -p "$DEST/build-context"
-cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
+cp -r "$CONTAINERS_DIR" "$DEST/build-context/containers"
 
 # Vendor crates/pii-engine into the context: Containerfile.proxy COPYs it to recreate the
 # repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4) since the
@@ -114,8 +120,8 @@ for svc in $MCP_SERVICES; do
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
   # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
   [ -d "$svc_src/templates" ] && cp -r "$svc_src/templates" "$svc_dest/"
-  # policies: wasm-pkg is built into the real tree ($WASM_PKG_DIR, not $MCP_SERVERS_DIR) just above;
-  # stage that real artifact, never a placeholder (the hub Containerfile COPYs policies/wasm-pkg).
+  # policies: wasm-pkg is built into $WASM_PKG_DIR (not $MCP_SERVERS_DIR) just above; stage that
+  # real artifact, never a placeholder (the hub Containerfile COPYs policies/wasm-pkg).
   if [ "$svc" = "policies" ]; then
     cp -r "$WASM_PKG_DIR" "$svc_dest/wasm-pkg"
   fi

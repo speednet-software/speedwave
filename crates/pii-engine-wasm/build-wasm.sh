@@ -4,6 +4,9 @@ set -euo pipefail
 # Output goes to a known, gitignored directory: mcp-servers/policies/wasm-pkg/.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$SCRIPT_DIR/../../mcp-servers/policies/wasm-pkg}"
+# The rm and wasm-pack's --out-dir below both resolve a relative path from the crate dir, so
+# anchor a caller-relative one (bundle-build-context.ps1 passes one) before the cd.
+case "$OUT" in /* | [A-Za-z]:*) ;; *) OUT="$PWD/$OUT" ;; esac
 cd "$SCRIPT_DIR"
 
 # wasm-pack never cleans its out-dir: a stale *_bg.wasm (e.g. from an older crate name)
