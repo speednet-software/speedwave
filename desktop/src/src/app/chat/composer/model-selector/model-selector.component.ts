@@ -234,7 +234,7 @@ export class ModelSelectorComponent {
 
   /** Full catalog entry backing the displayed model id (`[1m]` suffix stripped). */
   private readonly currentModelEntry = computed<AnthropicModel | null>(() => {
-    const bare = this.displayModel().replace(/\[1m\]$/, '');
+    const bare = this.displayModel().replace(/(\[1m\])+$/, '');
     return this.anthropicCatalog().find((m) => m.id === bare) ?? null;
   });
 

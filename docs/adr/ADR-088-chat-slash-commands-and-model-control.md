@@ -346,6 +346,21 @@ persistent model pick, decision 3 amendment). Speedwave never sets
 (env-vars.md) and compose bakes env in at container create; the renderer guard
 `assert_no_effort_level_forced` pins that.
 
+**Amendment (2026-09-15: an empty conversation respawns instead of taking the
+wire).** A process spawned without `--effort` keeps the launch hold described
+above and refuses a live `/effort`, and that refusal never reaches the chat: the
+control chip is emitted from the outgoing line (`chat.rs::send_message_with_emit`)
+and Claude Code's synthetic confirmation is not rendered. The accepted gap therefore
+cannot rely on the verbatim reply. `ChatStateService.applyEffortSelection` now
+respawns whenever the conversation is still empty (`hasConversation()` false),
+live session or not, so the pin reaches the new process as `--effort` at launch.
+A pick while any turn streams, including a first turn whose session id has not
+arrived yet, is queued and wired when the turn ends. A pick in a non-empty
+conversation still takes the wire, so the gap remains only for a session that
+switched to a hold model before its first effort pick. Both idle-respawn paths
+(model and effort) claim `initialized` like `startNewConversation`, so a remounted
+chat view cannot start a second session over the respawned one.
+
 ### 6. Proxy effort/thinking-field translation: verified, not dropped
 
 Design work leading into this ADR carried a provisional expectation that the

@@ -3479,6 +3479,95 @@ describe('LlmProviderComponent', () => {
       ).not.toBeNull();
     });
 
+    it('save during a running OpenRouter test for an older key re-tests the current key first', async () => {
+      const probedKeys: unknown[] = [];
+      const resolvers: ((value: unknown) => void)[] = [];
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'discover_llm_models') {
+          probedKeys.push((args?.['args'] as { apiKey?: string } | undefined)?.apiKey);
+          return new Promise((resolve) => resolvers.push(resolve));
+        }
+        if (cmd === 'update_llm_config') saveInvoked = true;
+        return undefined;
+      };
+      const row = component.extraProviders()[0];
+      component.toggleExtraExpanded(row);
+      component.selectExtraProvider(row);
+      component.onExtraKeyInput(row, 'sk-or-old');
+
+      const test = component.discoverExtraModels(row);
+      component.onExtraKeyInput(row, 'sk-or-new');
+      const save = component.saveConfig();
+      await flushMicrotasks();
+      resolvers[0]({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
+      await test;
+      await vi.waitFor(() => expect(probedKeys).toEqual(['sk-or-old', 'sk-or-new']));
+      expect(saveInvoked).toBe(false);
+
+      resolvers[1]({ models: [{ id: 'anthropic/claude-sonnet-5' }] });
+      await save;
+      expect(saveInvoked).toBe(true);
+    });
+
+    it('save during a running local connection test joins it instead of probing twice', async () => {
+      const resolvers: ((value: unknown) => void)[] = [];
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') return new Promise((resolve) => resolvers.push(resolve));
+        if (cmd === 'update_llm_config') saveInvoked = true;
+        return undefined;
+      };
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      const test = component.discoverModels(true);
+      const save = component.saveConfig();
+      await flushMicrotasks();
+      expect(resolvers).toHaveLength(1);
+      expect(saveInvoked).toBe(false);
+
+      resolvers[0]({ models: [{ id: 'llama3.3' }], messages_endpoint_ok: true });
+      await Promise.all([test, save]);
+      expect(resolvers).toHaveLength(1);
+      expect(saveInvoked).toBe(true);
+    });
+
+    it('a superseded local probe cannot overwrite the latest outcome that gates Save', async () => {
+      const pending: { resolve: (v: unknown) => void; reject: (e: unknown) => void }[] = [];
+      let saveInvoked = false;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'discover_llm_models') {
+          return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+        }
+        if (cmd === 'update_llm_config') saveInvoked = true;
+        return undefined;
+      };
+      component.provider.set('local');
+      component.selectedTarget.set('local');
+      component.baseUrl.set('http://host.docker.internal:11434');
+      component.model.set('llama3.3');
+
+      const first = component.discoverModels(true);
+      const second = component.discoverModels(true);
+      await flushMicrotasks();
+      pending[1].reject(new Error('offline'));
+      await second;
+      pending[0].resolve({ models: [{ id: 'llama3.3' }], messages_endpoint_ok: true });
+      await first;
+      expect(component.discoveryState().kind).toBe('failed');
+
+      const save = component.saveConfig();
+      await flushMicrotasks();
+      expect(pending).toHaveLength(3);
+      expect(saveInvoked).toBe(false);
+      pending[2].resolve({ models: [{ id: 'llama3.3' }], messages_endpoint_ok: true });
+      await save;
+      expect(saveInvoked).toBe(true);
+    });
+
     it('a second test-connection click during a running test starts no second probe', async () => {
       let resolveDiscover = null as ((value: unknown) => void) | null;
       let discoverCalls = 0;

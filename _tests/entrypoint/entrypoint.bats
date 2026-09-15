@@ -671,6 +671,35 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "drops a slash-free non-Claude settings.json model when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # A routed local tag without a slash (Ollama-style) is just as unroutable on /anthropic.
+    printf '{"model":"llama3.3"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "keeps a Claude Code alias settings.json model when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    printf '{"model":"fable[1m]"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='fable[1m]'?0:1)"
+    [ "$status" -eq 0 ]
+}
+
+@test "leaves settings.json byte-identical when the template merge changes nothing" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    # Compact on purpose: any rewrite would pretty-print it, so byte equality proves no write.
+    printf '{"effortLevel":"low","model":"claude-opus-5"}' > "${TEST_HOME}/.claude/settings.json"
+    run bash "${ENTRYPOINT}" echo ok
+    [ "$status" -eq 0 ]
+    run cat "${TEST_HOME}/.claude/settings.json"
+    [ "$output" = '{"effortLevel":"low","model":"claude-opus-5"}' ]
+}
+
 # ── SPEEDWAVE_PLUGINS: symlink plugin resources ─────────────────────────────────────────────────────
 
 @test "SPEEDWAVE_PLUGINS creates symlinks for all resource types" {

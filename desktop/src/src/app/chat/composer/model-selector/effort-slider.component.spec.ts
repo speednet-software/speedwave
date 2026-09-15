@@ -167,6 +167,61 @@ describe('EffortSliderComponent', () => {
     expect(emitted).toEqual(['xhigh']);
   });
 
+  function mockTrackRect(): void {
+    const track = fixture.nativeElement.querySelector('.relative') as HTMLElement;
+    const rect = {
+      left: 0,
+      width: 100,
+      top: 0,
+      height: 16,
+      right: 100,
+      bottom: 16,
+      x: 0,
+      y: 0,
+      toJSON: () => rect,
+    };
+    vi.spyOn(track, 'getBoundingClientRect').mockReturnValue(rect);
+  }
+
+  it('a cancelled drag commits nothing, even on a later hover and pointerup', () => {
+    setInputs(FULL_STOPS, 'low');
+    const emitted: string[] = [];
+    fixture.componentInstance.levelSelected.subscribe((l) => emitted.push(l));
+    mockTrackRect();
+
+    const handle = slider();
+    handle.dispatchEvent(new PointerEvent('pointerdown', { clientX: 0, pointerId: 1 }));
+    handle.dispatchEvent(new PointerEvent('pointermove', { clientX: 75, pointerId: 1 }));
+    handle.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1 }));
+    handle.dispatchEvent(new PointerEvent('pointermove', { clientX: 100, pointerId: 1 }));
+    handle.dispatchEvent(new PointerEvent('pointerup', { clientX: 100, pointerId: 1 }));
+    fixture.detectChanges();
+
+    expect(emitted).toEqual([]);
+    expect(handle.getAttribute('aria-valuetext')).toBe('Low');
+  });
+
+  it('an input change mid-drag ends the drag, so the release commits nothing', () => {
+    setInputs(FULL_STOPS, 'low');
+    const emitted: string[] = [];
+    fixture.componentInstance.levelSelected.subscribe((l) => emitted.push(l));
+    mockTrackRect();
+
+    const handle = slider();
+    handle.dispatchEvent(new PointerEvent('pointerdown', { clientX: 0, pointerId: 1 }));
+    handle.dispatchEvent(new PointerEvent('pointermove', { clientX: 100, pointerId: 1 }));
+    fixture.detectChanges();
+    expect(handle.getAttribute('aria-valuetext')).toBe('Max');
+
+    fixture.componentRef.setInput('activeLevel', 'medium');
+    fixture.detectChanges();
+    handle.dispatchEvent(new PointerEvent('pointerup', { clientX: 100, pointerId: 1 }));
+    fixture.detectChanges();
+
+    expect(emitted).toEqual([]);
+    expect(handle.getAttribute('aria-valuetext')).toBe('Medium');
+  });
+
   it('pointermove without a preceding pointerdown is ignored', () => {
     setInputs(FULL_STOPS, 'low');
     const track = fixture.nativeElement.querySelector('.relative') as HTMLElement;

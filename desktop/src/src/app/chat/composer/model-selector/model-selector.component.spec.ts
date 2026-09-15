@@ -1110,6 +1110,21 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
     expect(slider.getAttribute('aria-valuemax')).toBe('4');
   });
 
+  it('resolves a doubled [1m] wire suffix to its catalog entry for the label and effort default', async () => {
+    setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', null);
+    fixture.componentRef.setInput('projectId', 'proj-double-1m');
+    fixture.componentRef.setInput('sessionModel', 'claude-opus-4-7[1m][1m]');
+    await flush(fixture);
+
+    expect(
+      fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]')).nativeElement
+        .textContent
+    ).toContain('Opus 4.7 [1m]');
+    await openPopover(fixture);
+    const slider = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));
+    expect(slider.nativeElement.getAttribute('aria-valuetext')).toBe('Xhigh');
+  });
+
   it('shows the model and effort segments side by side in the pill', async () => {
     setSummaryAndPin(fixture, tauriInvoke, 'claude-sonnet-5', 'high');
     fixture.componentRef.setInput('projectId', 'proj-pill');

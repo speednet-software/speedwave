@@ -22,25 +22,32 @@ async function triggerRestart(): Promise<void> {
   }
 }
 
-/** Restarts the app, reconnects wdio's `browser` to the relaunched process via the public
- *  `reloadSession()` command (retried until the port rebinds), and waits for remount. */
+/** Restarts the app, reconnects wdio's `browser` via `reloadSession()` until the session lands on
+ *  the relaunched process (not the dying one still bound to the port), and waits for remount. */
 export async function restartAppAndReconnect(timeoutMs = DEFAULT_RESTART_TIMEOUT_MS): Promise<void> {
+  const restartRequestedAt = Date.now();
   await triggerRestart();
   // Let the dying process release the WebDriver port before the first reconnect attempt.
   await new Promise((resolve) => setTimeout(resolve, 3_000));
 
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    let lastError: unknown;
     try {
       await browser.reloadSession();
-      break;
+      // The dying instance keeps serving sessions through its exit cleanup (spec 07), so only
+      // a page loaded after the restart request proves the session reached the new process.
+      const pageLoadedAt = await browser.execute(() => performance.timeOrigin);
+      if (pageLoadedAt >= restartRequestedAt) break;
+      lastError = new Error('session landed on the pre-restart instance');
     } catch (err) {
-      if (Date.now() >= deadline) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`app never rebound the WebDriver port after restart: ${msg}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      lastError = err;
     }
+    if (Date.now() >= deadline) {
+      const msg = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new Error(`app never rebound the WebDriver port after restart: ${msg}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 
   await $('[data-testid="project-pill"]').waitForExist({

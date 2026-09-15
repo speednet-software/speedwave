@@ -14,8 +14,8 @@ export async function lastSpawnArgs(): Promise<string[]> {
   });
 }
 
-/** Polls until `lastSpawnArgs()` differs from `priorArgs`, proving a NEW spawn happened; the
- *  recorder is one process-global slot, so a stale earlier value would pass a non-empty check. */
+/** Polls until `lastSpawnArgs()` is non-empty and differs from `priorArgs`, proving a NEW spawn: an
+ *  app restart empties the one-slot recorder, and a stale earlier value would pass a non-empty check. */
 export async function waitForFreshSpawnArgs(
   priorArgs: string[],
   timeoutMs = 30_000
@@ -24,7 +24,7 @@ export async function waitForFreshSpawnArgs(
   await browser.waitUntil(
     async () => {
       current = await lastSpawnArgs();
-      return JSON.stringify(current) !== JSON.stringify(priorArgs);
+      return current.length > 0 && JSON.stringify(current) !== JSON.stringify(priorArgs);
     },
     {
       timeout: timeoutMs,

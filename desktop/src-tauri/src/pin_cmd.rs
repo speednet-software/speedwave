@@ -15,8 +15,8 @@ fn resolve_project_name(project_id: &str) -> Result<String, String> {
     Ok(project.name.clone())
 }
 
-/// One-time takeover of a legacy `effortLevel` into the project's config pin when it has
-/// none; the key is removed from the file either way. Idempotent once a pin exists.
+/// One-time takeover of a legacy `effortLevel` into a registered, unpinned project's config
+/// pin; best-effort, so an unreadable settings.json is logged and never blocks a spawn.
 pub(crate) fn ensure_effort_pin_migrated_in(
     data_dir: &std::path::Path,
     project_name: &str,
@@ -24,14 +24,19 @@ pub(crate) fn ensure_effort_pin_migrated_in(
     config::with_config_lock_in(data_dir, || {
         let config_path = data_dir.join("config.json");
         let mut user_config = config::load_user_config_from(&config_path)?;
-        let already_pinned = user_config
+        let needs_takeover = user_config
             .find_project(project_name)
-            .is_some_and(|p| p.effort_pin.is_some());
-        if already_pinned {
+            .is_some_and(|p| p.effort_pin.is_none());
+        if !needs_takeover {
             return Ok(());
         }
-        let legacy = crate::claude_settings::take_legacy_effort_pin(data_dir, project_name)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let legacy = match crate::claude_settings::take_legacy_effort_pin(data_dir, project_name) {
+            Ok(legacy) => legacy,
+            Err(e) => {
+                log::warn!("legacy effort pin migration skipped for {project_name}: {e}");
+                return Ok(());
+            }
+        };
         let Some(level) =
             legacy.filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
         else {
@@ -85,8 +90,8 @@ pub(crate) fn set_effort_pin(project_id: String, level: String) -> Result<(), St
     set_effort_pin_in(speedwave_runtime::consts::data_dir(), &project_name, &level)
 }
 
-/// Pre-session badge hint: the settings `model` pin first (CC aliases resolved, unknown
-/// values verbatim), else the newest `claude-*` transcript model (foreign ids never leak).
+/// Pre-session badge hint: the settings `model` pin first (CC aliases resolved), else the newest
+/// transcript model; only `claude-*` ids qualify, so a foreign provider id never leaks.
 #[tauri::command]
 pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
@@ -99,10 +104,12 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
 /// Testable core of [`get_model_hint`]: explicit `data_dir` so the source order can be
 /// unit-tested against a tempdir.
 fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
-    if let Some(pin) = crate::claude_settings::get_model_pin(data_dir, project) {
-        return Some(speedwave_runtime::defaults::resolve_model_alias(&pin));
-    }
-    crate::history::last_session_model_impl(data_dir, project, |m| m.starts_with("claude-"))
+    let pin = crate::claude_settings::get_model_pin(data_dir, project)
+        .map(|pin| speedwave_runtime::defaults::resolve_model_alias(&pin))
+        .filter(|model| model.starts_with("claude-"));
+    pin.or_else(|| {
+        crate::history::last_session_model_impl(data_dir, project, |m| m.starts_with("claude-"))
+    })
 }
 
 /// Persists an Anthropic model pick as the settings.json `model` key for the next spawn;
@@ -407,13 +414,71 @@ mod tests {
     }
 
     #[test]
-    fn get_model_hint_in_shows_an_unrecognized_pin_value_verbatim_never_default() {
+    fn get_model_hint_in_shows_an_unrecognized_claude_pin_verbatim_never_default() {
         let tmp = tempfile::tempdir().unwrap();
-        write_model_pin(tmp.path(), "proj", "some-mystery-value");
+        write_model_pin(tmp.path(), "proj", "claude-mystery-9");
         assert_eq!(
             get_model_hint_in(tmp.path(), "proj"),
-            Some("some-mystery-value".to_string())
+            Some("claude-mystery-9".to_string())
         );
+    }
+
+    /// A slash-free routed model id left in settings.json by an interactive CLI session.
+    #[test]
+    fn get_model_hint_in_skips_a_foreign_pin_and_falls_back_to_transcript_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_model_pin(tmp.path(), "proj", "llama3.3");
+        write_transcript_session(tmp.path(), "proj", "claude-opus-4-8");
+        assert_eq!(
+            get_model_hint_in(tmp.path(), "proj"),
+            Some("claude-opus-4-8".to_string())
+        );
+    }
+
+    #[test]
+    fn get_model_hint_in_returns_none_for_a_foreign_pin_without_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_model_pin(tmp.path(), "proj", "llama3.3");
+        assert_eq!(get_model_hint_in(tmp.path(), "proj"), None);
+    }
+
+    fn write_settings(data_dir: &Path, project: &str, contents: &str) -> std::path::PathBuf {
+        let path = speedwave_runtime::claude_home::claude_home_dir(data_dir, project)
+            .join(".claude")
+            .join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn ensure_effort_pin_migrated_in_skips_a_malformed_settings_file_without_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        let settings_path = write_settings(tmp.path(), "proj", "not json");
+
+        ensure_effort_pin_migrated_in(tmp.path(), "proj").unwrap();
+
+        let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        assert_eq!(cfg.find_project("proj").unwrap().effort_pin, None);
+        assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), "not json");
+    }
+
+    #[test]
+    fn ensure_effort_pin_migrated_in_keeps_the_legacy_key_for_an_unregistered_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_config_with_project(tmp.path(), "proj");
+        let settings_path = write_settings(tmp.path(), "ghost", r#"{"effortLevel":"xhigh"}"#);
+
+        ensure_effort_pin_migrated_in(tmp.path(), "ghost").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            r#"{"effortLevel":"xhigh"}"#,
+            "the legacy value must survive until the project is registered"
+        );
+        let cfg = config::load_user_config_from(&tmp.path().join("config.json")).unwrap();
+        assert!(cfg.find_project("ghost").is_none());
     }
 
     #[test]

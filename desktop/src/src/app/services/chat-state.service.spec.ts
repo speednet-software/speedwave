@@ -1689,13 +1689,19 @@ describe('ChatStateService', () => {
       expect(service.pendingModelOverride()).toBeNull();
     });
 
-    it('applyEffortSelection with a live idle session writes the pin then sends the wire /effort', async () => {
+    it('applyEffortSelection with a live idle conversation writes the pin then sends the wire /effort', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
       });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
       await Promise.resolve();
+      expect(service.hasConversation()).toBe(true);
       invokeSpy.mockClear();
 
       await service.applyEffortSelection('low');
@@ -1774,6 +1780,90 @@ describe('ChatStateService', () => {
         ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
       );
       expect(effortSend).toBeUndefined();
+    });
+
+    it('applyEffortSelection on a live session with no conversation yet respawns instead of wiring /effort', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-idle' },
+      });
+      await Promise.resolve();
+      expect(service.hasConversation()).toBe(false);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyEffortSelection('low');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+      );
+      expect(effortSend).toBeUndefined();
+    });
+
+    it('applyEffortSelection while the first turn streams before any session id queues it for the turn end', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.isStreaming = true;
+
+      await service.applyEffortSelection('max');
+      expect(
+        invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+        )
+      ).toBeUndefined();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-5', session_id: 'sess-first' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-first' },
+      } as never);
+      await vi.waitFor(() => {
+        const effortSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort max')
+        );
+        expect(effortSend).toBeDefined();
+      });
+    });
+
+    it('an idle model-pick respawn claims init() so a remount starts no second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
+    });
+
+    it('an idle effort-pick respawn claims init() so a remount starts no second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyEffortSelection('high');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
     });
 
     it('applyModelSelection during a streaming turn queues the switch instead of silently dropping it', async () => {

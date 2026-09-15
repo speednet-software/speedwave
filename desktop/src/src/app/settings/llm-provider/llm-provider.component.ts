@@ -650,6 +650,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
   /** Outcome of the last local connection test (button or Save-triggered), keyed by `localConnectionFingerprint`; 'null' after a base_url/key edit invalidates it (SPEED-555). */
   private testedLocalConnection: { fp: string; passed: boolean } | null = null;
 
+  /** The running local connection test and the fingerprint it probes, so a Save joins it instead of probing twice. */
+  private localTestInFlight: { fp: string; done: Promise<void> } | null = null;
+
   /** Local connection fingerprint as of the last persisted save (or load); an unchanged fingerprint skips a redundant Save-time probe (SPEED-555). */
   private loadedLocalConnectionFp: string = NEVER_SAVED_LOCAL_FP;
 
@@ -1024,6 +1027,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       this.apiKeyTouched(),
       this.apiKey()
     );
+    let settle = (): void => undefined;
+    const done = new Promise<void>((resolve) => (settle = resolve));
+    this.localTestInFlight = { fp, done };
 
     try {
       // Tri-state via `LlmConfigUpdate.api_key` (see types.rs).
@@ -1045,10 +1051,10 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       // POST /v1/messages explicitly rejected (404/405) fails the whole test, not just a warning (SPEED-555).
       const messagesOk = result.messages_endpoint_ok ?? null;
       const passed = messagesOk !== false;
-      this.testedLocalConnection = { fp, passed };
       // Stale-discard: drop responses whose id doesn't match the latest trigger.
       const live = this.discoveryState();
       if (live.kind !== 'in-flight' || live.id !== id) return;
+      this.testedLocalConnection = { fp, passed };
       if (!passed) {
         this.discoveryState.set({ kind: 'failed', url: effectiveUrl, reason: 'messages-endpoint' });
         return;
@@ -1058,11 +1064,14 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       const { reason, status } = classifyDiscoveryFailure(msg);
-      this.testedLocalConnection = { fp, passed: false };
       const live = this.discoveryState();
       if (live.kind !== 'in-flight' || live.id !== id) return;
+      this.testedLocalConnection = { fp, passed: false };
       this.discoveryState.set({ kind: 'failed', url: effectiveUrl, reason, status });
       // No errorOccurred.emit — discovery failure is silent degradation.
+    } finally {
+      if (this.localTestInFlight?.done === done) this.localTestInFlight = null;
+      settle();
     }
   }
 
@@ -1434,7 +1443,8 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
         this.apiKey()
       );
       if (this.needsConnectionProbe(fp, this.loadedLocalConnectionFp, this.testedLocalConnection)) {
-        await this.discoverModels(true);
+        if (this.localTestInFlight?.fp === fp) await this.localTestInFlight.done;
+        else await this.discoverModels(true);
         if (this.discoveryState().kind !== 'ready') {
           this.saving.set(false);
           this.cdr.markForCheck();
@@ -1449,7 +1459,9 @@ export class LlmProviderComponent implements OnInit, OnDestroy {
       );
       if (this.needsConnectionProbe(fp, activeExtra.savedFp, activeExtra.lastTest)) {
         await this.discoverExtraModels(activeExtra);
-        if (!activeExtra.lastTest?.passed) {
+        // A joined test may have probed an earlier key; only a result for these values counts.
+        if (activeExtra.lastTest?.fp !== fp) await this.discoverExtraModels(activeExtra);
+        if (!(activeExtra.lastTest?.fp === fp && activeExtra.lastTest.passed)) {
           this.saving.set(false);
           this.cdr.markForCheck();
           return;

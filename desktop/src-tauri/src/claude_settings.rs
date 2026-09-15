@@ -82,8 +82,8 @@ fn settings_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
         .join("settings.json")
 }
 
-/// Sibling lock file serializing this module's read-modify-write of
-/// `settings.json` against the in-container Claude Code process's own writes.
+/// Sibling lock file serializing this module's host-side read-modify-writes; entrypoint.sh cannot
+/// take it, so its container-start merge rewrites `settings.json` only when the merge changes it.
 fn settings_lock_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
     speedwave_runtime::claude_home::claude_home_dir(data_dir, project)
         .join(".claude")

@@ -56,6 +56,7 @@ export function capitalizeLevel(level: string): string {
           (pointerdown)="onHandlePointerDown($event)"
           (pointermove)="onHandlePointerMove($event, track)"
           (pointerup)="onHandlePointerUp($event)"
+          (pointercancel)="onHandlePointerCancel()"
         ></div>
       </div>
       <div class="mono mt-2 flex justify-between text-[10px] text-[var(--ink-mute)]">
@@ -81,11 +82,12 @@ export class EffortSliderComponent {
 
   /** Resets any tentative move when the slider's inputs change out from under it. */
   constructor() {
-    // An external change (resync, popover reopened on another model) discards a
-    // tentative arrow move that belonged to the previous state.
+    // An external change (resync, popover reopened on another model) discards a tentative arrow
+    // move or drag that belonged to the previous state, so a later release commits nothing.
     effect(() => {
       this.stops();
       this.activeLevel();
+      this.dragging = false;
       this.pending.set(null);
     });
   }
@@ -166,6 +168,12 @@ export class EffortSliderComponent {
     const max = this.stops().length - 1;
     const idx = Math.round(Math.min(1, Math.max(0, ratio)) * max);
     this.pending.set(idx);
+  }
+
+  /** A cancelled gesture (e.g. a touch drag turned into a scroll) ends the drag without committing. */
+  protected onHandlePointerCancel(): void {
+    this.dragging = false;
+    this.pending.set(null);
   }
 
   /**

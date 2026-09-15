@@ -281,6 +281,9 @@ fn control_command_from_synthetic_entry(parsed: &serde_json::Value) -> Option<St
             .collect::<Vec<_>>()
             .join("\n"),
     };
+    if !text_is_synthetic(&text) {
+        return None;
+    }
     let name = tag_body(&text, "command-name")?.trim();
     let args = tag_body(&text, "command-args").unwrap_or("").trim();
     let line = format!("{name} {args}");
@@ -2061,6 +2064,36 @@ mod tests {
         let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
         assert_eq!(transcript.messages.len(), 1);
         assert_eq!(transcript.messages[0].content, "real question");
+    }
+
+    #[test]
+    fn get_conversation_keeps_a_typed_message_that_merely_mentions_command_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"Can you explain what <command-name>/model</command-name> and <command-args>sonnet</command-args> mean?"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(
+            transcript.messages[0].content,
+            "Can you explain what <command-name>/model</command-name> and <command-args>sonnet</command-args> mean?"
+        );
+        assert!(
+            !transcript.messages[0]
+                .blocks
+                .iter()
+                .flatten()
+                .any(|b| matches!(b, MessageBlock::ControlChip { .. })),
+            "a typed question must never be rebuilt into a control chip"
+        );
     }
 
     #[test]

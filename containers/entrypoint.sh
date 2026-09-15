@@ -246,20 +246,25 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
     if [ ! -e "${_dest}" ]; then
         cp "${_tmpl}" "${_dest}"
     else
-        # Merge template keys; on the unrouted (Anthropic) path drop a foreign provider/model
-        # id a routed session's /model left behind (ADR-073 amendment). Atomic; node failure → skip.
+        # Merge template keys; on the unrouted (Anthropic) path drop a non-Claude model id a routed
+        # session left behind (ADR-073 amendment). Written only on change: a host pin write races a rewrite.
         node -e "
 const fs = require('fs');
 ${JS_WRITE_ATOMIC}
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
 const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
-const foreign = typeof merged.model === 'string' && merged.model.includes('/');
+let changed = cur === null || typeof cur !== 'object' || Array.isArray(cur)
+  || Object.keys(tmpl).some((k) => !Object.prototype.hasOwnProperty.call(cur, k));
+const foreign = typeof merged.model === 'string' && !/^(claude-.+|[a-z]+(\[1m\])?)\$/.test(merged.model);
 if (!process.env.ANTHROPIC_MODEL && foreign) {
   console.error('entrypoint: dropping foreign settings.json model ' + merged.model);
   delete merged.model;
+  changed = true;
 }
-writeAtomic('${_dest}', JSON.stringify(merged, null, 2) + '\n');
+if (changed) {
+  writeAtomic('${_dest}', JSON.stringify(merged, null, 2) + '\n');
+}
 " || echo 'entrypoint: settings.json merge skipped' >&2
     fi
     unset _tmpl _dest

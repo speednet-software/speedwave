@@ -172,8 +172,8 @@ export class ChatStateService {
   }
 
   /**
-   * Persists the effort pin, then applies it: wire `/effort` on an idle live session,
-   * queued mid-turn, or a respawn of the eager idle pre-first-turn process (SPEED-538).
+   * Persists the effort pin, then applies it: queued mid-turn, wired as `/effort` into a live
+   * conversation, or by respawning a session that has no conversation yet (SPEED-538).
    * @param level - One of `defaults::EFFORT_LEVELS`.
    */
   async applyEffortSelection(level: string): Promise<void> {
@@ -189,13 +189,15 @@ export class ChatStateService {
       this._modelSelectionError.set(msg);
       return;
     }
-    if (this.hasLiveSession()) {
-      if (this.isStreaming) this._pendingEffortOverride.set(level);
-      else await this.sendMessage(`/effort ${level}`);
-    } else if (!this.isStreaming && !this._resumeInProgress) {
-      // The eager idle pre-first-turn process already read its --effort at
-      // spawn; respawn so the first reply honours the pin just written.
+    if (this.isStreaming) {
+      this._pendingEffortOverride.set(level);
+    } else if (this.hasLiveSession() && this.hasConversation()) {
+      await this.sendMessage(`/effort ${level}`);
+    } else if (!this._resumeInProgress) {
+      // A process launched without --effort may refuse a live /effort (launch hold), so an empty
+      // conversation respawns to read the pin at launch; claiming init() blocks a remount's second start.
       this.resetForNewConversation();
+      this.initialized = true;
       await this.startChatSession();
     }
   }
@@ -237,9 +239,10 @@ export class ChatStateService {
       if (this.isStreaming) this._pendingModelOverride.set(sel.wireId);
       else await this.sendMessage(`/model ${sel.wireId}`);
     } else if (isAnthropic && !this.isStreaming && !this._resumeInProgress) {
-      // Idle pre-first-turn spawn: the respawned process re-reads the pin
-      // from settings.json, so the first reply honors it without a queued --model.
+      // Idle pre-first-turn spawn re-reads the settings.json pin; claiming init() keeps a
+      // remount from starting a second session over it (as startNewConversation does).
       this.resetForNewConversation();
+      this.initialized = true;
       await this.startChatSession();
     }
   }
