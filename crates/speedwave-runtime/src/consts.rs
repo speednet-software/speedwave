@@ -95,6 +95,9 @@ pub const CLAUDE_SESSION_LOG_FILE: &str = "claude-session.log";
 pub const ENTRYPOINT_LOG_FILE: &str = ".speedwave-entrypoint.log";
 /// Path to the Claude Code binary inside the container.
 pub const CLAUDE_BINARY: &str = "/usr/local/bin/claude";
+/// Claude Code env switch that turns off background prefetches, telemetry and update checks.
+pub const CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str =
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
 
 /// PATH set inside containers for the `speedwave` user.
 /// Claude Code installs to `~/.local/bin`, so it must be on PATH.
