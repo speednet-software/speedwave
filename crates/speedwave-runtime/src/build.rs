@@ -2621,7 +2621,12 @@ mod tests {
             "a knob read that appears only in a comment must not satisfy the guard"
         );
 
-        for knob in ["BUNDLE_DEST", "BUNDLE_MCP_SERVERS_DIR"] {
+        for knob in [
+            "BUNDLE_DEST",
+            "BUNDLE_MCP_SERVERS_DIR",
+            "BUNDLE_CONTAINERS_DIR",
+            "BUNDLE_WASM_PKG_DIR",
+        ] {
             assert!(
                 reads_outside_comments(&sh, &format!("${{{knob}:-")),
                 "bundle-build-context.sh must read ${knob} with a default (`${{{knob}:-...}}`)"

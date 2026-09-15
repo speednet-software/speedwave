@@ -4,14 +4,21 @@ $ErrorActionPreference = 'Stop'
 $dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 $mcpServersDir = if ($env:BUNDLE_MCP_SERVERS_DIR) { $env:BUNDLE_MCP_SERVERS_DIR } else { 'mcp-servers' }
+$containersDir = if ($env:BUNDLE_CONTAINERS_DIR) { $env:BUNDLE_CONTAINERS_DIR } else { 'containers' }
 if (-not (Test-Path -Path $mcpServersDir -PathType Container)) {
     [Console]::Error.WriteLine("ERROR: mcp-servers tree not found at $mcpServersDir (BUNDLE_MCP_SERVERS_DIR).")
     exit 1
 }
+if (-not (Test-Path -Path $containersDir -PathType Container)) {
+    [Console]::Error.WriteLine("ERROR: containers tree not found at $containersDir (BUNDLE_CONTAINERS_DIR).")
+    exit 1
+}
 
 $lockDir = "$dest\.bundle.lock"
-$wasmPkgDir = 'mcp-servers/policies/wasm-pkg'
-$wasmLockDir = 'mcp-servers/policies/.wasm-build.lock'
+$wasmPkgDir = if ($env:BUNDLE_WASM_PKG_DIR) { $env:BUNDLE_WASM_PKG_DIR } else { 'mcp-servers/policies/wasm-pkg' }
+$wasmParentDir = Split-Path -Parent $wasmPkgDir
+$wasmLockDir = Join-Path $wasmParentDir '.wasm-build.lock'
+New-Item -ItemType Directory -Path $wasmParentDir -Force | Out-Null
 
 function Test-LockHolderDead {
     param([string]$dir)
@@ -66,7 +73,7 @@ if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 }
 
 
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
-Copy-Item -Recurse containers "$dest\build-context\containers"
+Copy-Item -Recurse $containersDir "$dest\build-context\containers"
 
 New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
 Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
