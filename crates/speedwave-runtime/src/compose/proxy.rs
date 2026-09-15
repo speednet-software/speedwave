@@ -29,10 +29,12 @@ struct RenderRoute {
 }
 
 #[derive(Serialize)]
-struct RenderConfig {
+struct RenderConfig<'a> {
     routes: Vec<RenderRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     caller_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ner: Option<&'a super::pii_ner::NerRenderConfig>,
 }
 
 /// Port the proxy container listens on (fixed in the forwarder binary).
@@ -99,6 +101,16 @@ pub fn render_proxy_config(llm: &LlmConfig) -> String {
 /// [`render_proxy_config`] plus the optional per-project `caller_token` the
 /// proxy's auth middleware requires on `/v1/*`.
 pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> String {
+    render_proxy_config_full(llm, caller_token, None)
+}
+
+/// [`render_proxy_config_with`] plus the optional `ner` section pointing the proxy at the
+/// live host-side detector (ADR-089).
+pub(crate) fn render_proxy_config_full(
+    llm: &LlmConfig,
+    caller_token: Option<&str>,
+    ner: Option<&super::pii_ner::NerRenderConfig>,
+) -> String {
     let mut routes = Vec::new();
 
     // OAuth vs API key render the same passthrough route; the kind is learned
@@ -177,12 +189,14 @@ pub fn render_proxy_config_with(llm: &LlmConfig, caller_token: Option<&str>) -> 
     serde_json::to_string(&RenderConfig {
         routes,
         caller_token: caller_token.map(str::to_string),
+        ner,
     })
     .unwrap_or_else(|_| r#"{"routes":[]}"#.into())
 }
 
 /// Renders + atomically persists the config (0600 + fsync) under
-/// `<data_dir>/proxy/<project>/`. Trusts the resolved `has_api_key` flag.
+/// `<data_dir>/proxy/<project>/`. Trusts the resolved `has_api_key` flag. The `ner`
+/// section is rendered only while the host detector's lock names a live process.
 pub fn write_proxy_config_in(
     data_dir: &Path,
     project: &str,
@@ -195,7 +209,14 @@ pub fn write_proxy_config_in(
         crate::fs_perms::ensure_owner_only_dir(parent)?;
     }
     let token = ensure_caller_token_in(data_dir, project)?;
-    let content = render_proxy_config_with(llm, Some(&token));
+    let ner = super::pii_ner::live_service_in(data_dir).map(|live| {
+        log::info!(
+            "rendering proxy.json with the host PII NER detector on port {}",
+            live.port
+        );
+        super::pii_ner::ner_render_config(&live)
+    });
+    let content = render_proxy_config_full(llm, Some(&token), ner.as_ref());
     crate::fs_perms::write_restricted_file_atomic(&path, &content)?;
     Ok(path)
 }
@@ -406,6 +427,56 @@ mod tests {
         assert!(
             written.contains(&format!(r#""caller_token":"{token}""#)),
             "written proxy.json must carry the caller token"
+        );
+    }
+
+    #[test]
+    fn write_proxy_config_renders_ner_only_for_a_live_detector() {
+        use crate::host_mcp_process::lock::{self, LockFile, LockService};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = full_provider_mix();
+        write_proxy_config_in(dir.path(), "proj", &cfg).unwrap();
+        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
+        assert!(!written.contains(r#""ner":"#));
+        assert_eq!(
+            super::super::pii_ner::ner_url_state(&written, None),
+            super::super::pii_ner::NerUrlState::Absent
+        );
+
+        let lock = LockFile::new(
+            LockService::PiiNer,
+            std::process::id(),
+            50444,
+            "ner-tok".into(),
+        );
+        lock::write(&dir.path().join(crate::consts::PII_NER_LOCK_FILE), &lock).unwrap();
+        write_proxy_config_in(dir.path(), "proj", &cfg).unwrap();
+        let written = std::fs::read_to_string(proxy_config_path_in(dir.path(), "proj")).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(doc["ner"]["token"], "ner-tok");
+        assert_eq!(doc["ner"]["min_confidence"], 0.6);
+        assert_eq!(doc["ner"]["required"], false);
+        assert_eq!(
+            doc["ner"]["labels"].as_array().unwrap().len(),
+            super::super::pii_ner::DEFAULT_NER_LABELS.len()
+        );
+        assert_eq!(
+            super::super::pii_ner::ner_url_state(&written, Some(50444)),
+            super::super::pii_ner::NerUrlState::Current
+        );
+        assert!(written.contains(r#""caller_token":"#));
+    }
+
+    #[test]
+    fn render_full_places_ner_after_the_caller_token() {
+        let live = super::super::pii_ner::LiveNerService::test_new(50555, "t");
+        let ner = super::super::pii_ner::ner_render_config(&live);
+        let rendered = render_proxy_config_full(&full_provider_mix(), Some("c"), Some(&ner));
+        let tail = r#","caller_token":"c","ner":{"url":"http://host.docker.internal:50555","token":"t","min_confidence":0.6,"labels":["#;
+        assert!(rendered.contains(tail), "{rendered}");
+        assert_eq!(
+            render_proxy_config_full(&full_provider_mix(), Some("c"), None),
+            render_proxy_config_with(&full_provider_mix(), Some("c"))
         );
     }
 

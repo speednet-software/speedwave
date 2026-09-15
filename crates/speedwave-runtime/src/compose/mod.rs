@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 // so the public path `compose::*` is preserved for external callers.
 mod addressing;
 mod llm;
+mod pii_ner;
 mod plugins;
 mod proxy;
 mod quoting;
@@ -29,6 +30,12 @@ pub use proxy::{
     proxy_config_dir_in, proxy_config_path_in, remove_llm_provider_key_in, render_proxy_config,
     spw_key_env_name, write_llm_provider_key_in, write_proxy_config_in, PROXY_BASE_URL,
     PROXY_CALLER_AUTH_HEADER, PROXY_PORT,
+};
+
+// Host-side PII NER detector wiring (ADR-089): lock reader, proxy.json `ner` state, defaults.
+pub use pii_ner::{
+    live_service_in as live_pii_ner_service_in, ner_url_state, validate_ner_url, LiveNerService,
+    NerUrlState, DEFAULT_NER_LABELS, DEFAULT_NER_MIN_CONFIDENCE,
 };
 
 // Host addressing SSOT (ADR-067) — public API surface.
@@ -1246,7 +1253,7 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
-    const SECURITY_RULE_COUNT: usize = 52;
+    const SECURITY_RULE_COUNT: usize = 53;
 
     /// Repo root (holds `containers/`, `mcp-servers/`), derived from this crate's manifest dir —
     /// the injected bundle build root, so manifest resolution never reads the process-global env.

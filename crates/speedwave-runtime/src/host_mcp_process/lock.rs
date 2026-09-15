@@ -15,6 +15,8 @@ pub enum LockService {
     McpOs,
     /// The OAuth host process.
     Oauth,
+    /// The in-process PII NER detector service of the Desktop app (ADR-089).
+    PiiNer,
 }
 
 impl LockService {
@@ -23,6 +25,7 @@ impl LockService {
         match self {
             LockService::McpOs => "mcp-os",
             LockService::Oauth => "oauth",
+            LockService::PiiNer => "pii-ner",
         }
     }
 }
@@ -187,6 +190,17 @@ mod tests {
     fn lockservice_tags_are_stable() {
         assert_eq!(LockService::McpOs.tag(), "mcp-os");
         assert_eq!(LockService::Oauth.tag(), "oauth");
+        assert_eq!(LockService::PiiNer.tag(), "pii-ner");
+    }
+
+    #[test]
+    fn read_rejects_a_lock_of_another_service() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pii-ner.lock.json");
+        let lock = LockFile::new(LockService::PiiNer, 4242, 50123, "tok".into());
+        write(&path, &lock).unwrap();
+        assert_eq!(read(&path, LockService::PiiNer), Some(lock));
+        assert!(read(&path, LockService::McpOs).is_none());
     }
 
     #[test]

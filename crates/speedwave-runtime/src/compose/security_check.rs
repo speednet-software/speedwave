@@ -378,6 +378,14 @@ pub enum SecurityRule {
     ))]
     SpeedwaveProxyVolumes,
 
+    /// `proxy.json` `ner.url`, when rendered, is exactly `http://<gateway alias>:<port>`
+    /// (ADR-089): request text goes only to the host-side detector, never elsewhere.
+    #[strum(to_string = "PROXY_NER_URL")]
+    #[strum(props(
+        description = "proxy.json ner.url targets the host gateway alias over http with no path"
+    ))]
+    SpeedwaveProxyNerUrl,
+
     /// The native managed-settings.json mount on claude is :ro from the
     /// per-project managed dir at the exact `/etc/claude-code/` target (MDM telemetry).
     #[strum(to_string = "MANAGED_SETTINGS_MOUNT")]
@@ -586,6 +594,7 @@ impl SecurityCheck {
             Self::check_builtin_atlassian_volumes(&doc, expected_paths),
             // proxy mount profile (ADR-073)
             Self::check_proxy_volumes(&doc, expected_paths),
+            Self::check_proxy_ner_url(data_dir, project),
             // MDM telemetry managed-settings mount profile
             Self::check_claude_managed_settings(
                 &doc,
@@ -1437,6 +1446,34 @@ impl SecurityCheck {
             SecurityRule::HubPolicyMount,
         ));
         violations
+    }
+
+    /// A rendered `ner.url` must point at the host gateway alias over plain http with no
+    /// path: the only legitimate reader of request text outside the proxy is the host detector.
+    fn check_proxy_ner_url(data_dir: &std::path::Path, project: &str) -> Vec<SecurityViolation> {
+        let path = super::proxy::proxy_config_path_in(data_dir, project);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return Vec::new();
+        };
+        let Some(url) = doc.pointer("/ner/url") else {
+            return Vec::new();
+        };
+        let verdict = match url.as_str() {
+            Some(url) => super::pii_ner::validate_ner_url(url).map(|_| ()),
+            None => Err("ner.url is not a string".to_string()),
+        };
+        match verdict {
+            Ok(()) => Vec::new(),
+            Err(reason) => vec![SecurityViolation {
+                container: "proxy".into(),
+                rule: SecurityRule::SpeedwaveProxyNerUrl,
+                message: format!("proxy.json ner.url is not the host detector endpoint: {reason}"),
+                remediation: "Re-render the compose so proxy.json is regenerated from the                               live pii-ner lock; never hand-edit proxy.json.",
+            }],
+        }
     }
 
     /// Mirrors [`Self::check_hub_policy_mount`] for the proxy service (same
@@ -2703,6 +2740,62 @@ mod tests {
             v.is_empty(),
             "correct mount under lock must pass, got: {v:?}"
         );
+    }
+
+    fn write_proxy_json(data_dir: &std::path::Path, body: &str) {
+        let path = super::super::proxy::proxy_config_path_in(data_dir, "p");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn proxy_ner_url_rule_is_silent_without_a_config_or_a_ner_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").is_empty());
+        write_proxy_json(tmp.path(), r#"{"routes":[]}"#);
+        assert!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").is_empty());
+        write_proxy_json(
+            tmp.path(),
+            r#"{"routes":[],"ner":{"url":"http://host.docker.internal:50123","token":"t"}}"#,
+        );
+        assert!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").is_empty());
+    }
+
+    #[test]
+    fn proxy_ner_url_rule_rejects_foreign_hosts_schemes_and_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        for url in [
+            "http://10.0.0.5:50123",
+            "https://host.docker.internal:50123",
+            "http://host.docker.internal:50123/v1/detect",
+            "http://host.docker.internal",
+        ] {
+            write_proxy_json(
+                tmp.path(),
+                &format!(r#"{{"routes":[],"ner":{{"url":"{url}","token":"t"}}}}"#),
+            );
+            let v = SecurityCheck::check_proxy_ner_url(tmp.path(), "p");
+            assert_eq!(v.len(), 1, "{url}");
+            assert_eq!(v[0].rule, SecurityRule::SpeedwaveProxyNerUrl);
+            assert_eq!(v[0].container, "proxy");
+        }
+        write_proxy_json(tmp.path(), r#"{"routes":[],"ner":{"url":7}}"#);
+        assert_eq!(SecurityCheck::check_proxy_ner_url(tmp.path(), "p").len(), 1);
+    }
+
+    #[test]
+    fn run_reports_a_bad_proxy_ner_url_against_the_proxy_container() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_proxy_json(
+            tmp.path(),
+            r#"{"routes":[],"ner":{"url":"http://evil.example:50123","token":"t"}}"#,
+        );
+        let doc = "services:\n  claude:\n    volumes: []\n";
+        let expected = SecurityExpectedPaths::from_raw("/p", "/t");
+        let v = SecurityCheck::run_with_data_dir(doc, "p", &[], &expected, tmp.path());
+        assert!(v
+            .iter()
+            .any(|x| x.rule == SecurityRule::SpeedwaveProxyNerUrl && x.container == "proxy"));
     }
 
     #[test]

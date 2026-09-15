@@ -17,6 +17,7 @@ mod config;
 mod count_tokens;
 mod forward;
 mod keys;
+mod ner;
 mod pii;
 mod rewrite;
 mod router;
@@ -759,5 +760,202 @@ mod tests {
         assert!(body_text.contains("content_block_start"));
         assert!(body_text.contains("content_block_stop"));
         assert!(body_text.contains("data: [DONE]"));
+    }
+
+    /// Mock host NER detector: answers `status` with `body`, counting calls and capturing
+    /// the last request body.
+    async fn spawn_mock_ner(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    ) {
+        use axum::response::IntoResponse;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (calls_h, seen_h) = (calls.clone(), seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/v1/detect",
+                axum::routing::post(move |headers: HeaderMap, req: Bytes| {
+                    let (calls, seen) = (calls_h.clone(), seen_h.clone());
+                    async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        *seen.lock().await = req.to_vec();
+                        if headers
+                            .get(crate::ner::NER_AUTH_HEADER)
+                            .and_then(|v| v.to_str().ok())
+                            != Some("ner-secret")
+                        {
+                            return StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            body,
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        (addr, calls, seen)
+    }
+
+    fn ner_client(addr: &std::net::SocketAddr, required: bool) -> crate::ner::NerClient {
+        crate::ner::NerClient::for_test(crate::ner::NerConfig {
+            url: format!("http://{addr}"),
+            token: "ner-secret".to_string(),
+            min_confidence: 0.6,
+            labels: vec!["SURNAME".to_string(), "CITY".to_string()],
+            required,
+            timeout_ms: 2000,
+        })
+    }
+
+    async fn post_with_ner(
+        ner: crate::ner::NerClient,
+        audit_dir: &std::path::Path,
+    ) -> (axum::http::StatusCode, Vec<u8>) {
+        let usage_dir = tempfile::tempdir().unwrap();
+        let (upstream, captured) = spawn_capturing_backend().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut cfg = config_pointing_at(&upstream, usage_dir.path().join("usage.jsonl"));
+        cfg.ner = Some(Arc::new(ner));
+        cfg.audit_dir = Some(audit_dir.to_path_buf());
+        let app = build_router(Arc::new(cfg));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"local/x","system":"Jan Kowalski","messages":[{"role":"user","content":"mieszka w Gdańsku"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let _ = resp.into_body().collect().await.unwrap();
+        (status, captured.lock().await.clone())
+    }
+
+    fn audit_rows(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(dir.join("audit-proxy.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn v1_messages_seals_detector_spans_with_one_call_per_request() {
+        let (ner_addr, calls, seen) = spawn_mock_ner(
+            200,
+            r#"{"spans":[[{"start":4,"end":12,"label":"SURNAME","confidence":0.97}],[{"start":10,"end":18,"label":"CITY","confidence":0.9},{"start":0,"end":7,"label":"URL","confidence":0.99}]]}"#,
+        )
+        .await;
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (status, forwarded) =
+            post_with_ner(ner_client(&ner_addr, false), audit_dir.path()).await;
+        assert_eq!(status, 200);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let request: serde_json::Value = serde_json::from_slice(&seen.lock().await).unwrap();
+        assert_eq!(
+            request["texts"],
+            serde_json::json!(["Jan Kowalski", "mieszka w Gdańsku"])
+        );
+
+        let body = String::from_utf8(forwarded).unwrap();
+        assert!(body.contains("Jan [SURNAME:TOKEN_"), "{body}");
+        assert!(body.contains("mieszka w [CITY:TOKEN_"), "{body}");
+        assert!(
+            !body.contains("Kowalski") && !body.contains("Gda"),
+            "{body}"
+        );
+        let rows = audit_rows(audit_dir.path());
+        assert!(rows.iter().all(|r| r["source"] == "ner"), "{rows:?}");
+        assert!(rows
+            .iter()
+            .any(|r| r["category"] == "SURNAME" && r["action"] == "tokenized"));
+        assert!(rows.iter().any(|r| r["category"] == "CITY"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_detector_degrades_to_rules_and_audits_the_gap() {
+        let (ner_addr, _, _) = spawn_mock_ner(503, r#"{"error":"loading"}"#).await;
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (status, forwarded) =
+            post_with_ner(ner_client(&ner_addr, false), audit_dir.path()).await;
+        assert_eq!(status, 200);
+        let body = String::from_utf8(forwarded).unwrap();
+        assert!(body.contains("Jan Kowalski"), "{body}");
+        let rows = audit_rows(audit_dir.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["category"], crate::audit::NER_UNAVAILABLE_CATEGORY);
+        assert_eq!(rows[0]["action"], "passed");
+    }
+
+    #[tokio::test]
+    async fn required_detector_that_is_unavailable_fails_the_request() {
+        let (ner_addr, _, _) = spawn_mock_ner(503, r#"{"error":"loading"}"#).await;
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (status, forwarded) =
+            post_with_ner(ner_client(&ner_addr, true), audit_dir.path()).await;
+        assert_eq!(status, 503);
+        assert!(forwarded.is_empty(), "nothing may reach the upstream");
+    }
+
+    #[tokio::test]
+    async fn malformed_or_mismatched_detector_answers_count_as_unavailable() {
+        for body in [
+            r#"{"spans":[[]]}"#,
+            r#"not json"#,
+            r#"{"spans":[[],[],[]]}"#,
+        ] {
+            let (ner_addr, _, _) = spawn_mock_ner(200, body).await;
+            let audit_dir = tempfile::tempdir().unwrap();
+            let (status, forwarded) =
+                post_with_ner(ner_client(&ner_addr, false), audit_dir.path()).await;
+            assert_eq!(status, 200, "{body}");
+            assert!(
+                String::from_utf8(forwarded).unwrap().contains("Kowalski"),
+                "{body}"
+            );
+            assert_eq!(audit_rows(audit_dir.path()).len(), 1, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_detector_token_is_unavailable_not_fatal() {
+        let (ner_addr, _, _) = spawn_mock_ner(200, r#"{"spans":[[],[]]}"#).await;
+        let mut client_cfg = crate::ner::NerConfig {
+            url: format!("http://{ner_addr}"),
+            token: "wrong".to_string(),
+            min_confidence: 0.6,
+            labels: vec![],
+            required: false,
+            timeout_ms: 2000,
+        };
+        client_cfg.labels.push("SURNAME".to_string());
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (status, _) = post_with_ner(
+            crate::ner::NerClient::for_test(client_cfg),
+            audit_dir.path(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            audit_rows(audit_dir.path())[0]["category"],
+            "NER_UNAVAILABLE"
+        );
     }
 }

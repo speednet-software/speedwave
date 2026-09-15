@@ -59,6 +59,16 @@ pub const MCP_OS_LOCK_FILE: &str = "mcp-os.lock.json";
 /// Log filename for the mcp-os host process.
 pub const MCP_OS_LOG_FILE: &str = "mcp-os.log";
 
+/// Single-file lock of the host-side PII NER detector (Desktop in-process HTTP service);
+/// the proxy renderer reads `{pid, port, authToken}` from it (ADR-089).
+pub const PII_NER_LOCK_FILE: &str = "pii-ner.lock.json";
+/// Persistent bearer secret of the PII NER detector (0600); stable across restarts so a
+/// rendered `proxy.json` only changes when the port does.
+pub const PII_NER_AUTH_TOKEN_FILE: &str = "pii-ner-auth-token";
+/// Header the proxy presents the detector token in; mirror of
+/// `containers/proxy/src/ner.rs::NER_AUTH_HEADER` (cross-read test below).
+pub const PII_NER_AUTH_HEADER: &str = "x-speedwave-pii-ner-auth";
+
 /// Per-project unified lock file in each per-project state dir; SSOT for compose
 /// port injection + watchdog (supersedes the split `port`/`pid`/`auth-token` files).
 pub const PER_PROJECT_LOCK_FILE: &str = "lock.json";
@@ -2648,6 +2658,19 @@ mod tests {
         assert_eq!(
             &cap[1], HOST_GATEWAY_ALIAS,
             "TS HOST_GATEWAY_ALIAS must match Rust consts::HOST_GATEWAY_ALIAS"
+        );
+    }
+
+    #[test]
+    fn pii_ner_auth_header_matches_proxy_ner_rs() {
+        let src = include_str!("../../../containers/proxy/src/ner.rs");
+        let re = regex::Regex::new(r#"pub const NER_AUTH_HEADER: &str = "([^"]+)";"#).unwrap();
+        let cap = re
+            .captures(src)
+            .expect("containers/proxy/src/ner.rs must declare `pub const NER_AUTH_HEADER`");
+        assert_eq!(
+            &cap[1], PII_NER_AUTH_HEADER,
+            "proxy NER_AUTH_HEADER must match consts::PII_NER_AUTH_HEADER"
         );
     }
 

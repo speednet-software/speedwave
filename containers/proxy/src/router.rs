@@ -78,6 +78,9 @@ pub struct Config {
     /// Resolved once at startup from `AUDIT_DIR`, like `usage_path` — no env read per request.
     #[serde(skip, default = "resolve_audit_dir")]
     pub audit_dir: Option<PathBuf>,
+    /// Host-side NER detector (ADR-089); present only when the renderer saw a live detector.
+    #[serde(skip)]
+    pub ner: Option<std::sync::Arc<crate::ner::NerClient>>,
 }
 
 /// Reads `AUDIT_DIR` once; `None` when unset (audit writer becomes a no-op).
@@ -95,6 +98,7 @@ impl std::fmt::Debug for Config {
                 &self.caller_token.as_ref().map(|_| "[redacted]"),
             )
             .field("usage_path", &self.usage_path)
+            .field("ner", &self.ner)
             .finish_non_exhaustive()
     }
 }
@@ -128,6 +132,7 @@ impl Default for Config {
             client: build_forward_client(),
             pii: crate::pii::load_engine_state(),
             audit_dir: resolve_audit_dir(),
+            ner: None,
         }
     }
 }
@@ -138,6 +143,8 @@ struct RoutesFile {
     routes: Vec<Route>,
     #[serde(default)]
     caller_token: Option<String>,
+    #[serde(default)]
+    ner: Option<crate::ner::NerConfig>,
 }
 
 impl Config {
@@ -148,9 +155,17 @@ impl Config {
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
         let parsed: RoutesFile =
             serde_json::from_str(&raw).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+        let ner = match parsed.ner {
+            Some(cfg) => Some(std::sync::Arc::new(
+                crate::ner::NerClient::from_config(cfg)
+                    .map_err(|e| format!("invalid ner section in {}: {e}", path.display()))?,
+            )),
+            None => None,
+        };
         Ok(Self {
             routes: parsed.routes,
             caller_token: parsed.caller_token,
+            ner,
             ..Self::default()
         })
     }
@@ -301,5 +316,44 @@ mod tests {
         assert!(
             matches!(&cfg.routes[2].auth, Auth::Swap { env, scheme } if env == "SPW_KEY_LOCAL" && *scheme == Scheme::None)
         );
+    }
+
+    fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("proxy.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_from_without_a_ner_section_has_no_detector() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), r#"{"routes":[],"caller_token":"c"}"#);
+        let cfg = Config::load_from(&path).unwrap();
+        assert!(cfg.ner.is_none());
+        assert_eq!(cfg.caller_token.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn load_from_builds_the_detector_client_from_a_rendered_ner_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"routes":[],"ner":{"url":"http://host.docker.internal:50123","token":"t","min_confidence":0.6,"labels":["SURNAME"],"required":true}}"#,
+        );
+        let cfg = Config::load_from(&path).unwrap();
+        let ner = cfg.ner.as_ref().unwrap();
+        assert!(ner.required());
+        assert!(!format!("{cfg:?}").contains("\"t\""));
+    }
+
+    #[test]
+    fn load_from_rejects_a_ner_url_outside_the_host_gateway() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"routes":[],"ner":{"url":"http://10.0.0.7:50123","token":"t"}}"#,
+        );
+        let err = Config::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("invalid ner section"), "{err}");
     }
 }
