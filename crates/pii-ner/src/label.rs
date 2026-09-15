@@ -134,15 +134,6 @@ pub(crate) enum Tag {
     Single(Label),
 }
 
-impl Tag {
-    pub(crate) fn label(self) -> Option<Label> {
-        match self {
-            Tag::Outside => None,
-            Tag::Begin(l) | Tag::Inside(l) | Tag::End(l) | Tag::Single(l) => Some(l),
-        }
-    }
-}
-
 impl FromStr for Tag {
     type Err = LabelParseError;
 
@@ -232,7 +223,7 @@ mod tests {
         assert_eq!(set.len(), 3);
         assert_eq!(set.tag(2), Some(Tag::Single(Label::Org)));
         assert_eq!(set.tag(3), None);
-        let bad: Vec<String> = ["B-SSN".to_string()];
+        let bad = vec!["B-SSN".to_string()];
         assert!(matches!(
             LabelSet::from_names(&bad),
             Err(LoadError::Labels(_))

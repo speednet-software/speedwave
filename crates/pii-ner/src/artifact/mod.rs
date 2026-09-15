@@ -1,6 +1,6 @@
 //! The bundled model artifact: manifest, tokenizer and int8 weights.
 
-mod manifest;
+pub(crate) mod manifest;
 mod quant;
 pub(crate) mod weights;
 
@@ -122,7 +122,9 @@ mod tests {
 
     #[test]
     fn open_rejects_missing_dir_with_io_error() {
-        let err = Artifact::open(Path::new("/definitely/not/here")).unwrap_err();
+        let err = Artifact::open(Path::new("/definitely/not/here"))
+            .map(|_| ())
+            .unwrap_err();
         assert!(matches!(err, LoadError::Io { .. }), "{err}");
     }
 }

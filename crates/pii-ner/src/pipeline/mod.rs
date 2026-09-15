@@ -528,8 +528,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_tiny_artifact(dir.path());
         std::fs::write(dir.path().join("w.safetensors"), b"garbage").unwrap();
-        let err =
-            Detector::<CpuBackend>::load(dir.path(), Default::default(), Device::Cpu).unwrap_err();
+        let err = Detector::<CpuBackend>::load(dir.path(), Default::default(), Device::Cpu)
+            .map(|_| ())
+            .unwrap_err();
         assert!(matches!(err, LoadError::Checksum { .. }), "{err}");
     }
 }
