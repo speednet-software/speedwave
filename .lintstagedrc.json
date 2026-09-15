@@ -5,7 +5,7 @@
   ],
   "desktop/src/src/**/*.ts": [
     "prettier --write",
-    "eslint --config desktop/src/eslint.config.js --fix"
+    "eslint --config desktop/src/eslint.config.cjs --fix"
   ],
   "desktop/src/**/*.html": [
     "prettier --write"
