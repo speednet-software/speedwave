@@ -119,7 +119,7 @@ pub struct ScanReport {
     pub external: Vec<Detection>,
 }
 
-/// Every string leaf [`scan_request`] scans, in scan order: `system` first, then each
+/// Every string leaf [`scan_request_with_external`] scans, in scan order: `system` first, then each
 /// `messages[].content`. The detector receives exactly this list and answers per leaf.
 pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
     let mut leaves = Vec::new();
@@ -144,12 +144,8 @@ pub fn collect_scan_leaves(body: &serde_json::Value) -> Vec<String> {
     leaves
 }
 
-/// Scans `system` and every `messages[].content` (tool results included); other protocol
-/// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
-///
-/// Each scanned subtree is then keyword-masked (design doc §7.3): masking runs strictly after
-/// tokenization so a keyword occurring inside a value that also matched a PII rule is already
-/// sealed behind a token span and cannot be re-exposed by the keyword pass.
+/// [`scan_request_with_external`] without detector spans; the rule-only path the tests use.
+#[cfg(test)]
 pub fn scan_request(
     policy: &CompiledPolicy,
     key: &EngineKey,
@@ -158,7 +154,14 @@ pub fn scan_request(
     scan_request_with_external(policy, key, body, None).map(|report| report.detections)
 }
 
-/// [`scan_request`] that also seals detector spans, given one list per leaf in the order of
+/// Scans `system` and every `messages[].content` (tool results included); other protocol
+/// fields are untouched. An `Err` may leave `body` partially mutated. The caller must discard it.
+///
+/// Each scanned subtree is then keyword-masked (design doc §7.3): masking runs strictly after
+/// tokenization so a keyword occurring inside a value that also matched a PII rule is already
+/// sealed behind a token span and cannot be re-exposed by the keyword pass.
+///
+/// `external` seals detector spans as well, one list per leaf in the order of
 /// [`collect_scan_leaves`]; a list count that does not match the leaves is an error.
 pub fn scan_request_with_external(
     policy: &CompiledPolicy,
@@ -241,7 +244,7 @@ pub fn unmask_keywords_text(text: &str, keywords: &[CompiledKeyword]) -> String 
 }
 
 /// Full inbound response rewrite (design doc §5.1, §7.2/§7.3): keywords unmasked first
-/// (alias → match), then PII token spans decrypted — the inverse of `scan_request`'s
+/// (alias → match), then PII token spans decrypted — the inverse of `scan_request_with_external`'s
 /// tokenize-then-mask order. Fail-closed: a token failing SIV verification is an `Err`,
 /// never a silent pass-through of the literal span.
 pub fn unmask_and_detokenize_response(

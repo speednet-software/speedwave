@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(line["tool"], serde_json::Value::Null);
     }
 
-    /// Full round trip end to end: what the outbound `scan_request` leaves in a request
+    /// Full round trip end to end: what the outbound scan leaves in a request
     /// (a PII token span plus a masked keyword alias) is exactly what a real model would
     /// echo back; the inbound rewrite must hand the client the original plaintext, with no
     /// token span or alias surviving in the streamed response body (design doc §5.1/§7.3).
@@ -636,7 +636,7 @@ mod tests {
 
         // Exactly what the outbound scan left in the request the model actually saw.
         let mut body = serde_json::json!({"system": "Contact bob@example.com at Coca-Cola"});
-        crate::pii::scan_request(&policy, &key, &mut body).unwrap();
+        crate::pii::scan_request_with_external(&policy, &key, &mut body, None).unwrap();
         let upstream_echo = body["system"].as_str().unwrap().to_string();
         assert!(upstream_echo.contains("[EMAIL:TOKEN_"));
         assert!(upstream_echo.contains("Brandex"));
@@ -716,7 +716,7 @@ mod tests {
 
         let original = "Contact user.ee7b972986@example.com at Coca-Cola";
         let mut body = serde_json::json!({ "system": original });
-        crate::pii::scan_request(&policy, &key, &mut body).unwrap();
+        crate::pii::scan_request_with_external(&policy, &key, &mut body, None).unwrap();
         let upstream_echo = body["system"].as_str().unwrap().to_string();
         assert!(upstream_echo.contains("[EMAIL:TOKEN_"));
         assert!(upstream_echo.contains("Brandex"));
@@ -845,7 +845,8 @@ mod tests {
             .unwrap();
         let status = resp.status();
         let _ = resp.into_body().collect().await.unwrap();
-        (status, captured.lock().await.clone())
+        let body_sent = captured.lock().await.clone();
+        (status, body_sent)
     }
 
     fn audit_rows(dir: &std::path::Path) -> Vec<serde_json::Value> {
