@@ -225,7 +225,10 @@ pub(crate) mod test_support {
 
     fn int8_pattern(len: usize, seed: u32) -> Vec<i8> {
         (0..len)
-            .map(|i| (((i as u32).wrapping_mul(40_503).wrapping_add(seed) >> 8) % 200) as i8 - 100)
+            .map(|i| {
+                ((((i as u32).wrapping_mul(40_503).wrapping_add(seed) >> 8) % 200) as i32 - 100)
+                    as i8
+            })
             .collect()
     }
 

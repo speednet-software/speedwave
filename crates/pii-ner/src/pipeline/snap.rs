@@ -110,11 +110,11 @@ mod tests {
     }
 
     #[test]
-    fn edges_and_spaces_are_respected() {
+    fn spans_grow_into_every_word_they_touch_and_clamp_to_the_text() {
         assert_eq!(snapped("abc def", 0, 1), "abc");
         assert_eq!(snapped("abc def", 6, 7), "def");
-        assert_eq!(snapped("abc def", 3, 4), "");
-        assert_eq!(snapped("abc", 9, 12), "");
+        assert_eq!(snapped("abc def", 3, 4), "abc def");
+        assert_eq!(snapped("abc", 9, 12), "abc");
     }
 
     #[test]
