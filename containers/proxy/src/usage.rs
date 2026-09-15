@@ -25,6 +25,14 @@ pub struct UsageLine {
     pub cache_write: u64,
 }
 
+/// One in-band `{"type":"error"}` SSE frame — Anthropic can emit this mid-stream after a
+/// 200 with partial content already sent, ending the transport normally regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InBandError {
+    pub kind: String,
+    pub message: String,
+}
+
 /// Accumulates SSE usage frames for a single request.
 #[derive(Default)]
 pub struct UsageAcc {
@@ -40,6 +48,8 @@ pub struct UsageAcc {
     pub saw_usage: bool,
     /// Elapsed ms to the first output `text_delta` frame; `None` if none seen.
     pub ttft_ms: Option<u64>,
+    /// Set by the first in-band `error` frame seen; first error wins.
+    pub in_band_error: Option<InBandError>,
 }
 
 /// Latches `acc.ttft_ms` to elapsed ms on the first non-empty output `text_delta` (not
@@ -140,6 +150,21 @@ pub fn sniff(frame: &Value, acc: &mut UsageAcc) {
                         acc.cache_write = v;
                     }
                 }
+            }
+        }
+        "error" => {
+            if acc.in_band_error.is_none() {
+                let err = frame.get("error");
+                let field = |name: &str| {
+                    err.and_then(|e| e.get(name))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string()
+                };
+                acc.in_band_error = Some(InBandError {
+                    kind: field("type"),
+                    message: field("message"),
+                });
             }
         }
         _ => {}
@@ -721,5 +746,79 @@ mod tests {
             &mut acc,
         );
         assert_eq!(acc.ttft_ms, first, "ttft must latch on the first token");
+    }
+
+    #[test]
+    fn sniff_captures_in_band_error_type_and_message() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"error","error":{"type":"api_error","message":"Internal server error"}}),
+            &mut a,
+        );
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "api_error");
+        assert_eq!(err.message, "Internal server error");
+    }
+
+    #[test]
+    fn sniff_in_band_error_falls_back_to_unknown_on_missing_fields() {
+        let mut a = UsageAcc::default();
+        sniff(&json!({"type":"error"}), &mut a);
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "unknown");
+        assert_eq!(err.message, "unknown");
+    }
+
+    #[test]
+    fn sniff_in_band_error_falls_back_to_unknown_when_error_field_is_a_string() {
+        let mut a = UsageAcc::default();
+        sniff(&json!({"type":"error","error":"boom"}), &mut a);
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "unknown");
+        assert_eq!(err.message, "unknown");
+    }
+
+    #[test]
+    fn sniff_in_band_error_falls_back_to_unknown_when_error_field_is_a_number() {
+        let mut a = UsageAcc::default();
+        sniff(&json!({"type":"error","error":42}), &mut a);
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "unknown");
+        assert_eq!(err.message, "unknown");
+    }
+
+    #[test]
+    fn sniff_first_in_band_error_wins() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"error","error":{"type":"first","message":"m1"}}),
+            &mut a,
+        );
+        sniff(
+            &json!({"type":"error","error":{"type":"second","message":"m2"}}),
+            &mut a,
+        );
+        let err = a.in_band_error.unwrap();
+        assert_eq!(err.kind, "first", "first in-band error must win");
+    }
+
+    #[test]
+    fn sniff_non_error_frames_leave_in_band_error_none() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_start","message":{"id":"x","usage":{"input_tokens":1}}}),
+            &mut a,
+        );
+        assert!(a.in_band_error.is_none());
+    }
+
+    #[test]
+    fn sniff_message_delta_never_sets_in_band_error() {
+        let mut a = UsageAcc::default();
+        sniff(
+            &json!({"type":"message_delta","usage":{"output_tokens":5}}),
+            &mut a,
+        );
+        assert!(a.in_band_error.is_none());
     }
 }
