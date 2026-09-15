@@ -92,9 +92,6 @@ BATS_HINT = echo "     Install: brew install bats-core"
 endif
 REQUIRE_BATS = command -v bats >/dev/null 2>&1 || { echo "❌ bats not found."; $(BATS_HINT); exit 1; }
 
-# bats runs serially, never `--jobs N`: bundle-build-context.bats plants fixtures in shared
-# repo paths (see test-desktop-group-run), so siblings in one file would race.
-
 # Hard floor: dev/test must never run against the production data dir, even if a
 # user exported SPEEDWAVE_DATA_DIR=~/.speedwave (the `?=` default above only
 # applies when it is unset). A data dir whose basename is exactly `.speedwave` is
@@ -169,7 +166,7 @@ dev-config: guard-dev-instance
         build-runtime build-cli build-desktop build-tauri build-mcp build-angular \
         build-native-macos build-os-cli bundle-native-assets bundle-static-licenses verify-bundled-assets stage-vulkan-windows \
         test-rust test-transcription test-cli test-desktop test-angular test-mcp test-os test-swift test-e2e test-entrypoint test-ci test-desktop-build \
-        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-desktop-group-run test-run-lanes test-proxy \
+        test-build-phase test-rust-run test-angular-run test-mcp-run test-desktop-build-run test-desktop-run test-run-lanes test-proxy \
         test-e2e-desktop _e2e-macos _e2e-windows test-e2e-all test-e2e-audio setup-e2e-vms \
         test-e2e-plugin-tamper-release test-engine-contract test-e2e-update-dirty \
         check-clippy check-desktop-clippy check-proxy-clippy check-angular check-mcp check-fmt \
@@ -330,11 +327,9 @@ build: build-runtime build-cli build-os-cli build-mcp build-angular
 # Phase 1 (sequential): guard + test-build-phase stage every shared artifact
 #   exactly once, so no two lanes ever build the same dist/target concurrently.
 # Phase 2 (parallel): a recursive `$(MAKE) -jN test-run-lanes` fans out the
-#   pure run-only lanes. test-mcp-run + test-desktop-build-run + test-desktop-run
-#   are grouped SERIAL (see test-desktop-group-run). A failing lane fails the
-#   whole `make test`: each `$(MAKE)` is its own recipe line, and the sub-make
-#   runs without -k, so the first non-zero exit aborts. Override fan-out width
-#   with `make test TEST_LANES_JOBS=N`.
+#   pure run-only lanes. A failing lane fails the whole `make test`: each
+#   `$(MAKE)` is its own recipe line, and the sub-make runs without -k, so the
+#   first non-zero exit aborts. Override fan-out width with `make test TEST_LANES_JOBS=N`.
 TEST_LANES_JOBS ?= 4
 test: guard-not-prod-data-dir
 	@"$(MAKE)" test-build-phase
@@ -555,22 +550,10 @@ test-desktop-run: guard-not-prod-data-dir
 	$(call RUN_CARGO_ISOLATED,sh -c 'cd desktop/src-tauri && cargo test')
 	@echo "✅ Desktop tests passed"
 
-# Serial group: the lanes that touch REAL repo paths. bundle-build-context.bats
-# (test-desktop-build-run) plants fixtures in containers/ and rebuilds
-# mcp-servers/policies/wasm-pkg; test-mcp-run's policies tests import that wasm-pkg,
-# and test-desktop-run's build.rs re-runs on any change under containers/ or
-# mcp-servers/ (rerun-if-changed). Each `$(MAKE)` is its own command, so the first
-# non-zero exit aborts the recipe.
-test-desktop-group-run:
-	@"$(MAKE)" test-mcp-run
-	@"$(MAKE)" test-desktop-build-run
-	@"$(MAKE)" test-desktop-run
-
-# The fan-out set parallelized by `make test`. Everything here is mutually
-# shared-path-safe after test-build-phase; the one lane that touches real repo
-# paths is the serial test-desktop-group-run.
-test-run-lanes: test-rust-run test-angular-run test-entrypoint \
-                test-desktop-config test-ci test-desktop-group-run test-proxy
+# Fan-out set for `make test`: no lane writes a repo path another lane reads (bundle-build-context.bats
+# stages, plants fixtures and builds wasm only under per-test temp dirs), so every lane runs in parallel.
+test-run-lanes: test-rust-run test-angular-run test-entrypoint test-desktop-config test-ci \
+                test-mcp-run test-desktop-build-run test-desktop-run test-proxy
 
 test-proxy: guard-not-prod-data-dir
 	cd containers/proxy && cargo test --locked

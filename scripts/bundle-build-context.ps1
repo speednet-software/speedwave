@@ -7,21 +7,30 @@ $ErrorActionPreference = 'Stop'
 # so concurrent test + dev runs do not race on the same files (mirrors the .sh).
 $dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
-# The mcp-servers tree the bundle is staged from (mirrors the .sh); a scratch copy keeps a
-# test rebuild off the real tree a concurrent run reads.
+# The source trees the bundle is staged from (mirrors the .sh); scratch copies keep test fixtures
+# and rebuilds off the real tree a concurrent run reads.
 $mcpServersDir = if ($env:BUNDLE_MCP_SERVERS_DIR) { $env:BUNDLE_MCP_SERVERS_DIR } else { 'mcp-servers' }
+$containersDir = if ($env:BUNDLE_CONTAINERS_DIR) { $env:BUNDLE_CONTAINERS_DIR } else { 'containers' }
 if (-not (Test-Path -Path $mcpServersDir -PathType Container)) {
     [Console]::Error.WriteLine("ERROR: mcp-servers tree not found at $mcpServersDir (BUNDLE_MCP_SERVERS_DIR).")
+    exit 1
+}
+if (-not (Test-Path -Path $containersDir -PathType Container)) {
+    [Console]::Error.WriteLine("ERROR: containers tree not found at $containersDir (BUNDLE_CONTAINERS_DIR).")
     exit 1
 }
 
 # Serialize concurrent runs on DEST (mirrors the .sh mkdir-mutex): non-atomic body can bake a
 # 0-byte package.json into a worker image otherwise; a lock whose holder PID is dead is reclaimed.
 $lockDir = "$dest\.bundle.lock"
-# mcp-servers/policies/wasm-pkg is a single shared source-tree location (not under $dest) — a
-# second lock guards it from concurrent writers across different $env:BUNDLE_DEST invocations.
-$wasmPkgDir = 'mcp-servers/policies/wasm-pkg'
-$wasmLockDir = 'mcp-servers/policies/.wasm-build.lock'
+# The wasm out dir is shared by every $env:BUNDLE_DEST run (mirrors the .sh), so a second lock
+# beside it serializes its writers.
+$wasmPkgDir = if ($env:BUNDLE_WASM_PKG_DIR) { $env:BUNDLE_WASM_PKG_DIR } else { 'mcp-servers/policies/wasm-pkg' }
+$wasmParentDir = Split-Path -Parent $wasmPkgDir
+# A bare out dir name has no parent part: use the current dir, like the .sh `dirname`.
+if (-not $wasmParentDir) { $wasmParentDir = '.' }
+$wasmLockDir = Join-Path $wasmParentDir '.wasm-build.lock'
+New-Item -ItemType Directory -Path $wasmParentDir -Force | Out-Null
 
 # Is the PID in a lock dir a live process? Returns $true only when Get-Process proves the holder
 # is gone; any other error or a missing/blank PID is treated as ALIVE to never reclaim a live lock.
@@ -39,8 +48,11 @@ function Test-LockHolderDead {
     }
 }
 
-# Acquire-Lock <dir>: mkdir-based mutex (mirrors the .sh acquire_lock); reclaims a lock whose
-# holder PID is dead. Returns $true when acquired (caller arranges finally release).
+# Locks this run owns; the finally below releases only these (mirrors the .sh cleanup stack).
+$heldLocks = [System.Collections.Generic.List[string]]::new()
+
+# Acquire-Lock <dir>: mkdir-based mutex (mirrors the .sh acquire_lock); reclaims a lock whose holder
+# PID is dead. Registers the lock before the PID write, so a failed write still releases it.
 function Acquire-Lock {
     param([string]$dir)
     while ($true) {
@@ -55,16 +67,15 @@ function Acquire-Lock {
             Start-Sleep -Milliseconds 300
         }
     }
+    $heldLocks.Add($dir)
     "$PID" | Out-File -FilePath "$dir\pid" -Encoding ascii
     return $true
 }
 
-# Acquire both locks, then wrap main script in try/finally to release them both.
+# The acquisitions sit inside the try, so the finally also covers a failure while taking a lock.
+try {
 Acquire-Lock $lockDir | Out-Null
 Acquire-Lock $wasmLockDir | Out-Null
-
-# From here both locks are held; the finally releases them on any exit.
-try {
 
 # Clean destination
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
@@ -88,7 +99,7 @@ if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 }
 # -- Build context (containers + MCP server sources) --------------------------
 
 New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
-Copy-Item -Recurse containers "$dest\build-context\containers"
+Copy-Item -Recurse $containersDir "$dest\build-context\containers"
 
 # Vendor crates/pii-engine into the context (mirrors the .sh): Containerfile.proxy COPYs it to
 # recreate the repo's `../../crates/pii-engine` relative layout (proxy/Cargo.toml, ADR-073 F4)
@@ -152,8 +163,8 @@ foreach ($svc in $services) {
     if (Test-Path "$svcSrc\templates") {
         Copy-Item -Recurse "$svcSrc\templates" "$svcDest\templates"
     }
-    # policies: wasm-pkg is built into the real tree ($wasmPkgDir, not $mcpServersDir) just above;
-    # stage that real artifact, never a placeholder (the hub Containerfile COPYs policies/wasm-pkg).
+    # policies: wasm-pkg is built into $wasmPkgDir (not $mcpServersDir) just above; stage that
+    # real artifact, never a placeholder (the hub Containerfile COPYs policies/wasm-pkg).
     if ($svc -eq 'policies') {
         New-Item -ItemType Directory -Path "$svcDest\wasm-pkg" -Force | Out-Null
         Copy-Item -Recurse "$wasmPkgDir\*" "$svcDest\wasm-pkg\" -Force
@@ -204,6 +215,6 @@ Stage-Host-Worker -worker oauth -bundle oauth
 Write-Host "Build context bundled into $dest"
 
 } finally {
-    # Release both mutexes on any exit (mirrors the .sh trap).
-    Remove-Item -Recurse -Force $lockDir,$wasmLockDir -ErrorAction SilentlyContinue
+    # Release only the mutexes this run took, on any exit (mirrors the .sh trap).
+    if ($heldLocks.Count -gt 0) { Remove-Item -Recurse -Force $heldLocks -ErrorAction SilentlyContinue }
 }
