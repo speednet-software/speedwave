@@ -17,6 +17,7 @@ if (-not (Test-Path -Path $containersDir -PathType Container)) {
 $lockDir = "$dest\.bundle.lock"
 $wasmPkgDir = if ($env:BUNDLE_WASM_PKG_DIR) { $env:BUNDLE_WASM_PKG_DIR } else { 'mcp-servers/policies/wasm-pkg' }
 $wasmParentDir = Split-Path -Parent $wasmPkgDir
+if (-not $wasmParentDir) { $wasmParentDir = '.' }
 $wasmLockDir = Join-Path $wasmParentDir '.wasm-build.lock'
 New-Item -ItemType Directory -Path $wasmParentDir -Force | Out-Null
 
@@ -34,6 +35,8 @@ function Test-LockHolderDead {
     }
 }
 
+$heldLocks = [System.Collections.Generic.List[string]]::new()
+
 function Acquire-Lock {
     param([string]$dir)
     while ($true) {
@@ -48,14 +51,14 @@ function Acquire-Lock {
             Start-Sleep -Milliseconds 300
         }
     }
+    $heldLocks.Add($dir)
     "$PID" | Out-File -FilePath "$dir\pid" -Encoding ascii
     return $true
 }
 
+try {
 Acquire-Lock $lockDir | Out-Null
 Acquire-Lock $wasmLockDir | Out-Null
-
-try {
 
 Remove-Item -Recurse -Force "$dest\build-context","$dest\mcp-os","$dest\oauth" -ErrorAction SilentlyContinue
 
@@ -168,5 +171,5 @@ Stage-Host-Worker -worker oauth -bundle oauth
 Write-Host "Build context bundled into $dest"
 
 } finally {
-    Remove-Item -Recurse -Force $lockDir,$wasmLockDir -ErrorAction SilentlyContinue
+    if ($heldLocks.Count -gt 0) { Remove-Item -Recurse -Force $heldLocks -ErrorAction SilentlyContinue }
 }

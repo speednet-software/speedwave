@@ -21,21 +21,8 @@ WASM_PKG_DIR="${BUNDLE_WASM_PKG_DIR:-$REPO_ROOT/mcp-servers/policies/wasm-pkg}"
 WASM_LOCK_DIR="$(dirname "$WASM_PKG_DIR")/.wasm-build.lock"
 mkdir -p "$(dirname "$WASM_PKG_DIR")"
 
-_LOCK_CLEANUP=""
-acquire_lock() {
-  local dir="$1" holder
-  while ! mkdir "$dir" 2>/dev/null; do
-    holder="$(cat "$dir/pid" 2>/dev/null || true)"
-    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-      rm -rf "$dir"  
-      continue
-    fi
-    sleep 0.3
-  done
-  _LOCK_CLEANUP="rm -rf '$dir' 2>/dev/null || true; $_LOCK_CLEANUP"
-  trap 'eval "$_LOCK_CLEANUP"' EXIT INT TERM
-  echo "$$" >"$dir/pid"
-}
+# shellcheck source=mkdir-lock.sh
+source "$REPO_ROOT/scripts/mkdir-lock.sh"
 
 acquire_lock "$LOCK_DIR"
 acquire_lock "$WASM_LOCK_DIR"

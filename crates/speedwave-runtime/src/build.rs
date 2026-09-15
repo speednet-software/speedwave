@@ -2603,38 +2603,136 @@ mod tests {
 
     #[test]
     fn bundle_scripts_env_knobs_are_in_sync() {
+        const KNOBS: [&str; 4] = [
+            "BUNDLE_DEST",
+            "BUNDLE_MCP_SERVERS_DIR",
+            "BUNDLE_CONTAINERS_DIR",
+            "BUNDLE_WASM_PKG_DIR",
+        ];
+        fn ps1_operands(line: &str) -> Vec<String> {
+            let mut operands = vec![String::new()];
+            let mut chars = line.chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' | '\'' => {
+                        operands.push(chars.by_ref().take_while(|&q| q != c).collect());
+                        operands.push(String::new());
+                    }
+                    '#' if operands.last().is_some_and(String::is_empty) => break,
+                    c if c.is_whitespace() => operands.push(String::new()),
+                    c => {
+                        if let Some(word) = operands.last_mut() {
+                            word.push(c);
+                        }
+                    }
+                }
+            }
+            operands.retain(|operand| !operand.is_empty());
+            operands
+        }
+
         let repo_root = repo_root();
         let sh = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.sh"))
             .expect("bundle-build-context.sh should exist");
         let ps1 = std::fs::read_to_string(repo_root.join("scripts/bundle-build-context.ps1"))
             .expect("bundle-build-context.ps1 should exist");
-        let reads_outside_comments = |script: &str, read: &str| {
+        let code_lines = |script: &str| -> Vec<String> {
             script
                 .lines()
-                .any(|line| !line.trim_start().starts_with('#') && line.contains(read))
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .map(str::to_string)
+                .collect()
+        };
+        let squash = |line: &str| line.split_whitespace().collect::<String>();
+        let sh_read = |knob: &str| format!("${{{knob}:-");
+        let ps1_read = |knob: &str| format!("if($env:{knob})");
+        let find_read = |script: &str, read: &str| {
+            code_lines(script)
+                .iter()
+                .map(|line| squash(line))
+                .find(|line| line.contains(read))
+        };
+        let is_knob_read = |line: &str, read: &dyn Fn(&str) -> String| {
+            let line = squash(line);
+            KNOBS.into_iter().any(|knob| line.contains(&read(knob)))
         };
         assert!(
-            !reads_outside_comments(
+            find_read(
                 "# $dest = if ($env:BUNDLE_DEST) { ... }",
-                "if ($env:BUNDLE_DEST)"
-            ),
+                &ps1_read("BUNDLE_DEST")
+            )
+            .is_none(),
             "a knob read that appears only in a comment must not satisfy the guard"
         );
+        assert_eq!(
+            ps1_operands(r#"Copy-Item -Recurse containers "$dest\ctx\containers" # containers"#),
+            [
+                "Copy-Item",
+                "-Recurse",
+                "containers",
+                r"$dest\ctx\containers"
+            ],
+            "a quoted string is one operand and a trailing comment is not scanned"
+        );
+        assert!(
+            !ps1_operands(r#"[Console]::Error.WriteLine("ERROR: containers tree not found")"#)
+                .iter()
+                .any(|operand| operand.starts_with("containers")),
+            "message text inside a quoted string is not a path operand"
+        );
 
-        for knob in [
-            "BUNDLE_DEST",
-            "BUNDLE_MCP_SERVERS_DIR",
-            "BUNDLE_CONTAINERS_DIR",
-            "BUNDLE_WASM_PKG_DIR",
-        ] {
-            assert!(
-                reads_outside_comments(&sh, &format!("${{{knob}:-")),
-                "bundle-build-context.sh must read ${knob} with a default (`${{{knob}:-...}}`)"
+        for knob in KNOBS {
+            let sh_line = find_read(&sh, &sh_read(knob)).unwrap_or_else(|| {
+                panic!(
+                    "bundle-build-context.sh must read ${knob} with a default (`${{{knob}:-...}}`)"
+                )
+            });
+            let ps1_line = find_read(&ps1, &ps1_read(knob)).unwrap_or_else(|| {
+                panic!("bundle-build-context.ps1 must read $env:{knob} (`if ($env:{knob}) ...`), like the .sh")
+            });
+            let default = sh_line
+                .split_once(&sh_read(knob))
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(default, _)| default.trim_start_matches("$REPO_ROOT/").to_string())
+                .unwrap_or_else(|| {
+                    panic!("no ${knob} default parsed in bundle-build-context.sh: {sh_line}")
+                });
+            let ps1_default = ps1_line
+                .split_once("else{'")
+                .and_then(|(_, rest)| rest.split_once("'}"))
+                .map(|(default, _)| default.replace('\\', "/"));
+            assert_eq!(
+                Some(&default),
+                ps1_default.as_ref(),
+                "bundle-build-context.sh and .ps1 must default {knob} to the same repo path"
             );
-            assert!(
-                reads_outside_comments(&ps1, &format!("if ($env:{knob})")),
-                "bundle-build-context.ps1 must read $env:{knob} (`if ($env:{knob}) ...`), like the .sh"
-            );
+
+            let sh_hardcoded = format!("$REPO_ROOT/{default}");
+            for line in code_lines(&sh)
+                .iter()
+                .filter(|line| !is_knob_read(line, &sh_read))
+            {
+                assert!(
+                    !line.contains(&sh_hardcoded),
+                    "bundle-build-context.sh must stage through its {knob} variable, not `{sh_hardcoded}`: {line}"
+                );
+            }
+            for line in code_lines(&ps1)
+                .iter()
+                .filter(|line| !is_knob_read(line, &ps1_read))
+            {
+                let hardcoded = ps1_operands(line).iter().any(|operand| {
+                    operand
+                        .trim_start_matches('(')
+                        .replace('\\', "/")
+                        .strip_prefix(default.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                });
+                assert!(
+                    !hardcoded,
+                    "bundle-build-context.ps1 must stage through its {knob} variable, not a hard-coded `{default}`: {line}"
+                );
+            }
         }
     }
 

@@ -30,14 +30,15 @@ stage_tracked_copy() {
 }
 
 assert_run_waits_for_lock() {
-    local lock="$1" sentinel="$DEST/build-context/held-sentinel" pid i rc=0 why=""
-    mkdir -p "$lock" "$DEST/build-context"
+    local lock="$1" sentinel="$2" pid i rc=0 why=""
+    shift 2
+    mkdir -p "$lock" "$(dirname "$sentinel")"
     echo "$$" > "$lock/pid"
     touch "$sentinel"
     [ "$(cat "$lock/pid")" = "$$" ]
     [ -f "$sentinel" ]
 
-    "$SCRIPT" &
+    "$@" &
     pid=$!
     for i in 1 2 3 4 5 6 7 8 9 10; do
         [ -f "$sentinel" ] || why="started its body while $lock was held"
@@ -49,7 +50,7 @@ assert_run_waits_for_lock() {
     if [ -n "$why" ]; then
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
-        echo "script $why"
+        echo "$* $why"
         return 1
     fi
 
@@ -57,7 +58,6 @@ assert_run_waits_for_lock() {
     wait "$pid" || rc=$?
     [ "$rc" -eq 0 ]
     [ ! -e "$sentinel" ]
-    [ -d "$DEST/build-context/containers" ]
     [ ! -d "$lock" ]
 }
 
@@ -71,7 +71,9 @@ tree_fingerprint() {
 setup() {
     DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats.XXXXXX")"
     export BUNDLE_DEST="$DEST"
-    export BUNDLE_WASM_PKG_DIR="$DEST/wasm/wasm-pkg"
+    WASM_DIR="$DEST/wasm"
+    export BUNDLE_WASM_PKG_DIR="$WASM_DIR/wasm-pkg"
+    WASM_LOCK="$WASM_DIR/.wasm-build.lock"
 }
 
 teardown() {
@@ -196,21 +198,68 @@ teardown() {
 }
 
 @test "build-wasm.sh anchors a relative out dir to the caller's cwd, not the crate dir" {
-    local stub_dir="$DEST/stub-bin" caller="$DEST/caller"
-    mkdir -p "$stub_dir" "$caller/rel/wasm-pkg"
+    local stub_dir="$DEST/stub-bin" caller="$DEST/caller" rel
+    mkdir -p "$stub_dir"
     cat >"$stub_dir/wasm-pack" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$WASM_PACK_ARGS"
 EOF
     chmod +x "$stub_dir/wasm-pack"
-    echo stale > "$caller/rel/wasm-pkg/stale_bg.wasm"
-    [ -f "$caller/rel/wasm-pkg/stale_bg.wasm" ]
 
-    WASM_PACK_ARGS="$DEST/wasm-pack-args" PATH="$stub_dir:$PATH" \
-        run bash -c 'cd "$1" && bash "$2" rel/wasm-pkg' _ "$caller" "$BUILD_WASM"
-    [ "$status" -eq 0 ]
-    [ ! -e "$caller/rel/wasm-pkg" ]
-    [ "$(grep -A1 -x -e '--out-dir' "$DEST/wasm-pack-args" | tail -n 1)" = "$(cd "$caller" && pwd)/rel/wasm-pkg" ]
+    for rel in 'rel/wasm-pkg' 'rel\wasm-pkg'; do
+        mkdir -p "$caller/rel/wasm-pkg"
+        echo stale > "$caller/rel/wasm-pkg/stale_bg.wasm"
+        [ -f "$caller/rel/wasm-pkg/stale_bg.wasm" ]
+
+        WASM_PACK_ARGS="$DEST/wasm-pack-args" PATH="$stub_dir:$PATH" \
+            run bash -c 'cd "$1" && bash "$2" "$3"' _ "$caller" "$BUILD_WASM" "$rel"
+        [ "$status" -eq 0 ]
+        [ ! -e "$caller/rel/wasm-pkg" ]
+        [ "$(grep -A1 -x -e '--out-dir' "$DEST/wasm-pack-args" | tail -n 1)" = "$(cd "$caller" && pwd)/rel/wasm-pkg" ]
+    done
+}
+
+@test "build-wasm.sh keeps the same absolute path forms as scripts/cargo-target-dir.sh" {
+    local absolute='/* | [A-Za-z]:* | \\\\*)'
+    [ "$(grep -cF -- "$absolute" "$BUILD_WASM")" -eq 1 ]
+    [ "$(grep -cF -- "$absolute" "$BATS_TEST_DIRNAME/../../scripts/cargo-target-dir.sh")" -eq 1 ]
+}
+
+@test "build-wasm.sh --lock waits on the lock beside its out dir until it is released" {
+    local stub_dir="$DEST/stub-bin" out="$DEST/npm-build/wasm-pkg"
+    mkdir -p "$stub_dir"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/wasm-pack"
+    chmod +x "$stub_dir/wasm-pack"
+
+    assert_run_waits_for_lock "$DEST/npm-build/.wasm-build.lock" "$out/stale_bg.wasm" \
+        env PATH="$stub_dir:$PATH" bash "$BUILD_WASM" --lock "$out"
+}
+
+@test "build-wasm.sh without --lock builds under a lock its caller already holds" {
+    local stub_dir="$DEST/stub-bin" out="$DEST/bundle-build/wasm-pkg" lock="$DEST/bundle-build/.wasm-build.lock" pid i
+    mkdir -p "$stub_dir" "$lock" "$out"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_dir/wasm-pack"
+    chmod +x "$stub_dir/wasm-pack"
+    echo "$$" > "$lock/pid"
+    echo stale > "$out/stale_bg.wasm"
+    [ "$(cat "$lock/pid")" = "$$" ]
+    [ -f "$out/stale_bg.wasm" ]
+
+    env PATH="$stub_dir:$PATH" bash "$BUILD_WASM" "$out" &
+    pid=$!
+    for i in $(seq 50); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "build-wasm.sh waited on the lock its caller holds"
+        return 1
+    fi
+    wait "$pid"
+    [ ! -e "$out/stale_bg.wasm" ]
+    [ "$(cat "$lock/pid")" = "$$" ]
 }
 
 @test "bundle script fails hard when the wasm toolchain is unavailable" {
@@ -390,7 +439,7 @@ EOF
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ ! -d "$DEST/.bundle.lock" ]
-    [ ! -d "$(dirname "$BUNDLE_WASM_PKG_DIR")/.wasm-build.lock" ]
+    [ ! -d "$WASM_LOCK" ]
 }
 
 @test "bundle script reclaims a stale lock whose holder PID is dead" {
@@ -403,11 +452,13 @@ EOF
 }
 
 @test "lock held by a live holder blocks a second run until released" {
-    assert_run_waits_for_lock "$DEST/.bundle.lock"
+    assert_run_waits_for_lock "$DEST/.bundle.lock" "$DEST/build-context/held-sentinel" "$SCRIPT"
+    [ -d "$DEST/build-context/containers" ]
 }
 
 @test "wasm-build lock beside BUNDLE_WASM_PKG_DIR blocks a run until released" {
-    assert_run_waits_for_lock "$(dirname "$BUNDLE_WASM_PKG_DIR")/.wasm-build.lock"
+    assert_run_waits_for_lock "$WASM_LOCK" "$DEST/build-context/held-sentinel" "$SCRIPT"
+    [ -d "$DEST/build-context/containers" ]
 }
 
 @test "concurrent runs on the same DEST both finish with a valid package.json" {
@@ -439,7 +490,7 @@ EOF
         [ ! -e "$DEST/wasm-pack-ran" ]
         [ ! -d "$DEST/mcp-os" ]
         [ ! -d "$DEST/.bundle.lock" ]
-        [ ! -d "$(dirname "$BUNDLE_WASM_PKG_DIR")" ]
+        [ ! -d "$WASM_DIR" ]
     done
 }
 
@@ -449,6 +500,36 @@ EOF
     run awk '/^[[:space:]]*npm / { call = $0; if ((getline following) <= 0 || following !~ /\$LASTEXITCODE -ne 0/) print call }' "$ps1"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+@test "bundle-build-context.ps1 releases on every exit only the locks it acquired" {
+    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
+    [ "$(grep -c '^try {$' "$ps1")" -eq 1 ]
+    [ "$(grep -c '^} finally {$' "$ps1")" -eq 1 ]
+    run awk '
+        /^try \{$/ { in_try = 1 }
+        /^\} finally \{$/ { in_try = 0; in_finally = 1 }
+        /^[[:space:]]*Acquire-Lock \$/ { if (in_try) inside++; else outside++ }
+        /\$heldLocks\.Add\(\$dir\)/ { added = NR }
+        /Out-File -FilePath "\$dir\\pid"/ { pid_write = NR }
+        in_finally && /Remove-Item/ { removes = $0 }
+        END {
+            if (inside != 2 || outside != 0) print "Acquire-Lock calls inside the try: " inside ", outside: " outside
+            if (!added || !pid_write || added > pid_write) print "a lock must be registered before its PID write"
+            if (removes !~ /\$heldLocks/ || removes ~ /\$lockDir|\$wasmLockDir/) print "the finally must remove only $heldLocks: " removes
+        }' "$ps1"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "bundle-build-context.ps1 derives the wasm lock dir for a bare out dir name, like dirname" {
+    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
+    run awk '
+        index($0, "$wasmParentDir = Split-Path -Parent $wasmPkgDir") == 1 { split_at = NR }
+        index($0, "if (-not $wasmParentDir) { $wasmParentDir = ") == 1 { fallback_at = NR; fallback = $0 }
+        index($0, "$wasmLockDir = Join-Path $wasmParentDir") == 1 { join_at = NR }
+        END { exit !(split_at && split_at < fallback_at && fallback_at < join_at && fallback ~ /= .\.. \}$/) }' "$ps1"
+    [ "$status" -eq 0 ]
 }
 
 @test "bundle script --ci builds a clean scratch copy and leaves a concurrent run on the real tree intact" {
