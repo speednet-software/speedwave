@@ -1,21 +1,43 @@
-//! E2E-only startup helpers (`feature = "e2e"`); compiled for tests so the
-//! helper stays covered on every platform.
-
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
-/// Must match tauri-plugin-webdriver's hardcoded 127.0.0.1:4445 bind.
 pub const E2E_WEBDRIVER_PORT: u16 = 4445;
 
-/// A held port surfaces as `AddrInUse`; on Windows it can also surface as
-/// WSAEACCES → `PermissionDenied` (SO_EXCLUSIVEADDRUSE, port-exclusion ranges).
+#[cfg(any(test, feature = "e2e"))]
+static LAST_SPAWN_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(any(test, feature = "e2e"))]
+pub fn record_spawn_args(args: &[String]) {
+    if let Ok(mut guard) = LAST_SPAWN_ARGS.lock() {
+        *guard = args.to_vec();
+    }
+}
+
+#[cfg(any(test, feature = "e2e"))]
+pub fn last_spawn_args() -> Vec<String> {
+    LAST_SPAWN_ARGS
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "e2e")]
+#[tauri::command]
+pub fn e2e_last_spawn_args() -> Vec<String> {
+    last_spawn_args()
+}
+
+#[cfg(feature = "e2e")]
+#[tauri::command]
+pub fn e2e_restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 fn is_retryable_bind_error(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::AddrInUse
         || (cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
-/// Blocks until `addr` is bindable (the probe listener is dropped immediately)
-/// or `deadline` elapses — a relaunch must not race the dying instance's port.
 pub fn wait_until_port_free(
     addr: SocketAddr,
     deadline: Duration,
@@ -40,6 +62,27 @@ pub fn wait_until_port_free(
 #[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_and_read_round_trip() {
+        let args = vec!["--effort".to_string(), "max".to_string()];
+        record_spawn_args(&args);
+        assert_eq!(last_spawn_args(), args);
+    }
+
+    #[test]
+    fn record_overwrites_the_previous_value() {
+        record_spawn_args(&["first".to_string()]);
+        record_spawn_args(&["second".to_string()]);
+        assert_eq!(last_spawn_args(), vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn record_spawn_args_accepts_an_empty_slice() {
+        record_spawn_args(&["marker-nonempty".to_string()]);
+        record_spawn_args(&[]);
+        assert_eq!(last_spawn_args(), Vec::<String>::new());
+    }
 
     #[test]
     fn returns_immediately_when_port_free() {

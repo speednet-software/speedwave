@@ -14,7 +14,8 @@ paths:
 
 Never hand-write a path/value/model-string where an SSOT exists; a wrong literal is fixed by calling the SSOT, not by correcting the string.
 
-- `defaults.rs::ANTHROPIC_MODELS` — Anthropic model catalog (id, family, context window, latest flag); frontend reads it via `list_anthropic_models` + `AnthropicModelsService`. Never hard-code model strings.
+- `defaults.rs::ANTHROPIC_MODELS` — Anthropic model catalog (id, family, context window, latest flag, per-model `effort_levels` + `default_effort`); frontend reads it via `list_anthropic_models` + `AnthropicModelsService`. Never hard-code model strings.
+- `defaults.rs::EFFORT_LEVELS` — the Claude Code effort levels Speedwave can pin (`low` … `max`, slider order); pin validation and the catalog's per-model level lists derive from it, never a second list.
 - `defaults.rs::CLAUDE_VERSION` — the Claude Code version pin (concrete semver, never `latest`).
 - `defaults.rs::BUNDLED_PLUGINS` / `BUNDLED_PLUGIN_MARKETPLACE` — the official Anthropic plugins installed+enabled at container start, rendered into the claude service env by `compose/mod.rs`; never hand-list the plugin set elsewhere.
 - `resources.rs` — every container mem/CPU/tmpfs/shm number + Lima VM sizing (`host/2` clamped; macOS-only — WSL2 memory is deliberately unmanaged). Always-on containers: `CLAUDE_RESOURCES` (fixed 6 GiB) / `HUB_RESOURCES` / `PROXY_RESOURCES`; per-worker limits on `consts::McpServiceDescriptor.resources`; plugin envelope in `consts.rs` (`PLUGIN_*`). Limits are ceilings, not reservations — overcommit is OK. Minimum supported host: `MIN_SUPPORTED_HOST_GIB` (16 GiB) — never design or size features for smaller hosts.

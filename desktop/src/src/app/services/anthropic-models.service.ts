@@ -28,13 +28,11 @@ export class AnthropicModelsService {
           this.cache = result;
           return result;
         }
-        // Non-array payload is a contract violation; not caching.
         this.logger.warn(
           `list_anthropic_models returned a non-array payload (${typeof result}); not caching`
         );
         return [];
       } catch (e: unknown) {
-        // Do NOT cache on failure — leave `cache` null so the next call retries.
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.warn(`list_anthropic_models failed: ${msg}`);
         return [];
@@ -56,7 +54,6 @@ export class AnthropicModelsService {
     if (!trimmed) return null;
     const direct = this.cache.find((m) => m.id === trimmed);
     if (direct) return direct.context_tokens;
-    // Session metadata may carry the short form (`opus-4.7`); try prefixed too.
     const candidate = trimmed.startsWith('claude-')
       ? trimmed
       : `claude-${trimmed.replace('.', '-')}`;
@@ -74,6 +71,26 @@ export class AnthropicModelsService {
   }
 
   /**
+   * Catalog family display label (e.g. "Opus 4.8") for a model id.
+   * @param modelId - CC-selectable id; `[1m]` suffix tolerated.
+   * @returns Label or `null` when the id is not in the catalog.
+   */
+  familyLabelFor(modelId: string | null | undefined): string | null {
+    if (!this.cache || !modelId) return null;
+    const bare = modelId.replace(/(\[1m\])+$/, '');
+    const hit = this.cache.find((m) => m.id === bare || m.id === modelId);
+    return hit?.family ?? null;
+  }
+
+  /**
+   * The catalog entries offered by the composer selector — legacy (non-`selectable`)
+   * entries stay in the full catalog for pricing history but are excluded here.
+   */
+  selectableModels(): AnthropicModel[] {
+    return (this.cache ?? []).filter((m) => m.selectable);
+  }
+
+  /**
    * The Settings placeholder hint: the latest non-`premium` entry, falling back
    * to the first `latest` then the first entry. `null` while loading or empty.
    */
@@ -88,5 +105,21 @@ export class AnthropicModelsService {
   resetForTesting(): void {
     this.cache = null;
     this.inflight = null;
+  }
+
+  /**
+   * Narrow write-through for the composer's model selector: mutates exactly
+   * one provider's model under the config lock (`set_provider_model`), never
+   * the full-form settings save. Rejected server-side for Anthropic entries.
+   * @param projectId - Project this write applies to.
+   * @param providerId - `LlmProviderEntry.id` to update.
+   * @param model - New model id (wire-shaped per the id triad).
+   */
+  async setProviderModel(projectId: string, providerId: string, model: string): Promise<void> {
+    await this.tauri.invoke<void>('set_provider_model', {
+      projectId,
+      providerId,
+      model,
+    });
   }
 }

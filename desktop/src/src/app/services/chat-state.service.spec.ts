@@ -72,7 +72,6 @@ describe('ChatStateService', () => {
 
     service = TestBed.inject(ChatStateService);
 
-    // Reset state between tests
     service._setState({ messages: [], currentBlocks: [], sessionStats: null });
     service.isStreaming = false;
   });
@@ -105,10 +104,8 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
-      // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
 
-      // A non-auth start_chat failure surfaces in the UI.
       expect(projectState.status()).toBe('error');
       expect(projectState.error).toContain('chat backend crashed');
       expect(mockLogger.error).toHaveBeenCalledWith(
@@ -132,12 +129,10 @@ describe('ChatStateService', () => {
 
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
-      // A resume supersedes the in-flight start, then the stale start_chat fails.
       service.beginStartingSession();
       pendingStart.reject(new Error('chat backend crashed'));
       await new Promise((r) => setTimeout(r, 0));
 
-      // The superseded failure must NOT clobber the resumed session's state.
       expect(projectState.status()).not.toBe('error');
       expect(mockLogger.error).not.toHaveBeenCalledWith(
         expect.stringContaining('Failed to start chat session')
@@ -166,7 +161,6 @@ describe('ChatStateService', () => {
 
     it('only runs init once', async () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
-      // First init — projectState is not ready so chat may wait
       const projectState = TestBed.inject(ProjectStateService);
       await projectState.init();
       await service.init();
@@ -181,10 +175,6 @@ describe('ChatStateService', () => {
   });
 
   describe('startNewConversation', () => {
-    /**
-     * Handler answering the bootstrap commands.
-     * @param startChat - what the `start_chat` command does.
-     */
     function readyHandler(startChat: () => void) {
       return async (cmd: string) => {
         if (cmd === 'start_chat') return startChat();
@@ -232,7 +222,6 @@ describe('ChatStateService', () => {
 
       await service.startNewConversation();
 
-      // A send that beats the listener loses its reply, so the attach must come first.
       expect(order.indexOf('listen:chat_stream')).toBeGreaterThanOrEqual(0);
       expect(order.indexOf('listen:chat_stream')).toBeLessThan(order.indexOf('invoke:start_chat'));
     });
@@ -263,12 +252,9 @@ describe('ChatStateService', () => {
 
       await expect(service.startNewConversation()).rejects.toThrow(NEW_CONVERSATION_FAILED);
 
-      // The clear already happened, but the durable id survives so a restart can
-      // still resume what the user was in.
       expect(service.messages.length).toBe(0);
       expect(service.lastKnownSessionId).toBe('sess-old');
 
-      // The slot is free again once the project recovers: a retry really starts a session.
       fail = false;
       projectState.status.set('ready');
       const spy = vi.spyOn(mockTauri, 'invoke');
@@ -345,14 +331,11 @@ describe('ChatStateService', () => {
       await vi.waitFor(() => {
         expect(calls).toContain('start_chat');
       });
-      // Supersede the in-flight start, then let it finish and unwind.
       const resuming = service.resumeConversation('sess-resumed');
       pendingStart.resolve();
 
       await expect(starting).rejects.toThrow(NEW_CONVERSATION_BUSY);
-      // Asserted before the resume settles: its own seed would mask a clobber here.
       expect(service.lastKnownSessionId).toBe('sess-resumed');
-      // The resume still owns the busy flag the superseded start shares.
       expect(service.newConversationBlockedReason()).toBe(NEW_CONVERSATION_BUSY);
 
       pendingResume.resolve();
@@ -425,7 +408,6 @@ describe('ChatStateService', () => {
         throw new Error('Tauri not available');
       };
 
-      // Should not throw
       await service.init();
       expect(service).toBeTruthy();
     });
@@ -441,8 +423,6 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].blocks[0]).toEqual({ type: 'text', content: 'Hello' });
       expect(service.isStreaming).toBe(true);
-      // String input is wrapped via `chatInputFromText` into a text-only
-      // `ChatInput` and serialized to `WireContentBlock[]` for transport.
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [{ type: 'text', text: 'Hello' }],
         displayText: 'Hello',
@@ -465,7 +445,6 @@ describe('ChatStateService', () => {
         ],
       });
 
-      // Wire format: pure text with the `@…` reference, no `image` block on stdin.
       expect(spy).toHaveBeenCalledWith('send_message', {
         blocks: [
           {
@@ -475,7 +454,6 @@ describe('ChatStateService', () => {
         ],
         displayText: 'Co tu widać?',
       });
-      // History entry holds a metadata-only image placeholder (no bytes).
       expect(service.messages[0].blocks).toEqual([
         { type: 'text', content: 'Co tu widać?' },
         { type: 'image', media_type: 'image/png', alt: 'paste-1.png' },
@@ -518,7 +496,6 @@ describe('ChatStateService', () => {
       await service.sendMessage('/');
       await service.sendMessage('  /  ');
       await service.sendMessage('   ');
-      // Never streamed, never reached the backend.
       expect(service.messages).toHaveLength(0);
       expect(service.isStreaming).toBe(false);
       expect(calls).not.toContain('send_message');
@@ -569,7 +546,6 @@ describe('ChatStateService', () => {
 
       await service.sendMessage('Hello');
 
-      // First send_message fails → list_projects → start_chat → retry send_message
       expect(sendAttempt).toBe(2);
       expect(service.messages).toHaveLength(1);
       expect(service.messages[0].role).toBe('user');
@@ -596,8 +572,6 @@ describe('ChatStateService', () => {
     });
 
     it('waits (no competing start_chat) when a resume start is in progress', async () => {
-      // A racing "no active session" send must wait for the in-flight resume,
-      // not fire a competing start_chat that tears down the resumed session.
       let sendAttempt = 0;
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -611,7 +585,6 @@ describe('ChatStateService', () => {
       };
 
       const endStartingSession = service.beginStartingSession();
-      // Release the start shortly after, mimicking resume_conversation finishing.
       setTimeout(() => endStartingSession(), 20);
 
       await service.sendMessage('Resumed send');
@@ -678,6 +651,107 @@ describe('ChatStateService', () => {
       expect(service.messages).toHaveLength(2);
       const errorBlock = service.messages[1].blocks[0];
       expect(errorBlock.type).toBe('error');
+    });
+  });
+
+  describe('control-shape check runs on the wire text, not displayText', () => {
+    const PLAN_MODE_PREFIX = '[Plan mode] Produce a plan only.\n\n';
+
+    it('suppresses the optimistic bubble when the wire text is control-shaped even though displayText carries a plan-mode prefix', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      await service.sendMessage(
+        { text: '/model claude-sonnet-5', attachments: [] },
+        '/model claude-sonnet-5'
+      );
+
+      expect(service.messages).toHaveLength(0);
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: '/model claude-sonnet-5' }],
+        displayText: '/model claude-sonnet-5',
+      });
+    });
+
+    it('shows the optimistic bubble when displayText looks control-shaped but the wire text (plan-mode prefixed) is not', async () => {
+      const spy = vi.spyOn(mockTauri, 'invoke');
+      spy.mockResolvedValue(undefined);
+
+      const wireText = `${PLAN_MODE_PREFIX}/model claude-sonnet-5`;
+      await service.sendMessage({ text: wireText, attachments: [] }, '/model claude-sonnet-5');
+
+      expect(service.messages).toHaveLength(1);
+      expect(service.messages[0].role).toBe('user');
+      expect(service.messages[0].blocks[0]).toEqual({
+        type: 'text',
+        content: '/model claude-sonnet-5',
+      });
+      expect(spy).toHaveBeenCalledWith('send_message', {
+        blocks: [{ type: 'text', text: wireText }],
+        displayText: '/model claude-sonnet-5',
+      });
+    });
+  });
+
+  describe('ControlChip chunk handling', () => {
+    it('appends a chip message when a control-shaped send is emitted', () => {
+      const beforeLen = service.messages.length;
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-sonnet-5' },
+      });
+
+      expect(service.messages.length).toBe(beforeLen + 1);
+      const last = service.messages[service.messages.length - 1];
+      expect(last.role).toBe('user');
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+      ]);
+    });
+
+    it('appends a chip message carrying a uuid when the chunk provides one', () => {
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'effort', argument: 'high', uuid: 'u_effort_1' },
+      });
+
+      const last = service.messages[service.messages.length - 1];
+      expect(last.uuid).toBe('u_effort_1');
+      expect(last.uuid_status).toBe('Committed');
+      expect(last.blocks).toEqual([{ type: 'chip', command: 'effort', argument: 'high' }]);
+    });
+
+    it('appends a chip with no uuid when the chunk carries none (the normal live-send case)', () => {
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-opus-4-8' },
+      });
+      const last = service.messages[service.messages.length - 1];
+      expect(last.uuid).toBeUndefined();
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-opus-4-8' },
+      ]);
+    });
+
+    it('ControlChip then QueueDrained for the same control text yields exactly one chip, no plain bubble', () => {
+      const beforeLen = service.messages.length;
+
+      service.handleStreamChunk({
+        chunk_type: 'ControlChip',
+        data: { command: 'model', argument: 'claude-sonnet-5' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'QueueDrained',
+        data: { session_id: 's-1', text: '/model claude-sonnet-5' },
+      });
+
+      expect(service.messages.length).toBe(beforeLen + 1);
+      const last = service.messages[service.messages.length - 1];
+      expect(last.blocks).toEqual([
+        { type: 'chip', command: 'model', argument: 'claude-sonnet-5' },
+      ]);
+      expect(service.messages.some((m) => m.blocks.some((b) => b.type === 'text'))).toBe(false);
     });
   });
 
@@ -1033,7 +1107,6 @@ describe('ChatStateService', () => {
         data: {
           session_id: 'abc',
           total_cost: 0.05,
-          // Turn-sum usage is inflated (tool-heavy turn) — must not reach ctx.
           usage: { input_tokens: 4864, output_tokens: 1808, cache_read_tokens: 464_000 },
           context_usage: {
             input_tokens: 2,
@@ -1050,7 +1123,6 @@ describe('ChatStateService', () => {
         cache_read_tokens: 66_844,
         cache_write_tokens: 4920,
       });
-      // 2 + 66,844 + 4,920 (input-only, no output)
       expect(service.lastContextTokens).toBe(71_766);
     });
 
@@ -1069,7 +1141,6 @@ describe('ChatStateService', () => {
           },
         },
       });
-      // Next turn: e.g. a local slash command — no API call, no context_usage.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'y' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -1082,8 +1153,6 @@ describe('ChatStateService', () => {
 
     it('footer total comes from get_conversation_cost (single aggregator), not a frontend sum', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
-      // get_conversation_cost is the SSOT total (no frontend delta sum); the
-      // footer mirrors whatever the aggregator returns.
       let aggregatorTotal = 0.2;
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
@@ -1098,17 +1167,15 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.99 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // First turn: footer = the aggregator total, not CC's 0.99 estimate.
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.2, 6);
 
-      aggregatorTotal = 0.5; // proxy recorded a second turn; aggregator now sums both.
+      aggregatorTotal = 0.5;
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'b' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 1.5 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // Footer mirrors the aggregator (Rust sums the sidecar), no frontend delta.
       expect(service.sessionStats?.total_cost).toBeCloseTo(0.5, 6);
     });
 
@@ -1136,7 +1203,6 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', assistant_uuid: 'msg_2', total_cost: 0.2 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // Both turns' uuids must reach the aggregator, not just the latest.
       expect(sentIds).toContain('msg_1');
       expect(sentIds).toContain('msg_2');
     });
@@ -1145,7 +1211,7 @@ describe('ChatStateService', () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
-        if (cmd === 'get_usage_for_response') return null; // proxy hasn't recorded this turn yet
+        if (cmd === 'get_usage_for_response') return null;
         if (cmd === 'get_conversation_cost') return 9.99;
         return undefined;
       });
@@ -1155,7 +1221,6 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // Line not present yet → footer stays on the live CC value, aggregator not consulted.
       expect(service.sessionStats?.total_cost).toBe(0.42);
       expect(spy).not.toHaveBeenCalledWith('get_conversation_cost', expect.anything());
     });
@@ -1163,14 +1228,12 @@ describe('ChatStateService', () => {
     it('reconcile hides the per-message cost when the proxy SSOT is free/null', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
-        // Local is free → null cost (rendered "—"), never $0.00.
         if (cmd === 'get_usage_for_response') return { cost_usd: null, cost_source: 'free' };
         return undefined;
       });
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        // CC reports a non-zero turn_cost (local estimate); proxy says free/null.
         data: { session_id: 'abc', assistant_uuid: 'msg_1', turn_cost: 0.046 },
       });
       await new Promise((r) => setTimeout(r, 0));
@@ -1182,8 +1245,6 @@ describe('ChatStateService', () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       const spy = vi.spyOn(mockTauri, 'invoke');
       spy.mockImplementation(async (cmd: string) => {
-        // The turn's line is present (unpriced); the session aggregator returns
-        // null (nothing priced) → footer stays null ("—"), not CC's estimate.
         if (cmd === 'get_usage_for_response')
           return { cost_usd: null, cost_source: 'subscription' };
         if (cmd === 'get_conversation_cost') return null;
@@ -1195,19 +1256,16 @@ describe('ChatStateService', () => {
         data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.42 },
       });
       await new Promise((r) => setTimeout(r, 0));
-      // Subscription is unpriced → null (rendered "—"), replacing CC's $0.42 estimate.
       expect(service.sessionStats?.total_cost).toBeNull();
     });
 
     it('local provider suppresses the live CC cost preview (no $0.00x flicker)', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('proj');
       vi.spyOn(mockTauri, 'invoke').mockResolvedValue(undefined);
-      // Simulate an active local provider (no real cost).
       (service as unknown as { _currentProvider: string | null })._currentProvider = 'local';
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
-        // CC still emits an estimate for the local model; it must be ignored.
         data: { session_id: 'abc', assistant_uuid: 'msg_1', total_cost: 0.002, turn_cost: 0.002 },
       });
       await new Promise((r) => setTimeout(r, 0));
@@ -1220,8 +1278,6 @@ describe('ChatStateService', () => {
       vi.useFakeTimers();
       try {
         TestBed.inject(ProjectStateService).activeProject.set('proj');
-        // First read: OpenRouter cost deferred (null); later reads priced
-        // (actual). Footer aggregator follows the same arc.
         let priced = false;
         vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
           if (cmd === 'get_usage_for_response') {
@@ -1236,7 +1292,6 @@ describe('ChatStateService', () => {
         service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
         service.handleStreamChunk({
           chunk_type: 'Result',
-          // model + usage give the entry a `meta` so per-message cost can attach.
           data: {
             session_id: 'abc',
             assistant_uuid: 'msg_1',
@@ -1251,12 +1306,9 @@ describe('ChatStateService', () => {
           },
         });
         await vi.advanceTimersByTimeAsync(0);
-        // Initial reconcile: deferred keeps the live preview (footer 0.99), not
-        // blanked; per-message stays on its preview (here undefined).
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeUndefined();
         expect(service.sessionStats?.total_cost).toBe(0.99);
 
-        // OpenRouter finishes pricing; the retry must pick it up.
         priced = true;
         await vi.advanceTimersByTimeAsync(5000);
 
@@ -1289,16 +1341,14 @@ describe('ChatStateService', () => {
             session_id: 'abc',
             assistant_uuid: 'msg_1',
             total_cost: 0.5,
-            turn_cost: 0.5, // CC preview attaches a visible per-message cost
+            turn_cost: 0.5,
             model: 'openrouter/anthropic/claude-haiku-4.5',
           },
         });
         await vi.advanceTimersByTimeAsync(0);
-        // Bug #31: deferred must NOT blank the flashed preview — it stays visible.
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0.5);
         expect(service.sessionStats?.total_cost).toBe(0.5);
 
-        // Once OpenRouter prices it, the terminal value overwrites the preview.
         priced = true;
         await vi.advanceTimersByTimeAsync(5000);
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBeCloseTo(0.0046, 6);
@@ -1312,8 +1362,6 @@ describe('ChatStateService', () => {
       vi.useFakeTimers();
       try {
         TestBed.inject(ProjectStateService).activeProject.set('proj');
-        // OpenRouter can take far longer than the early backoff to price a
-        // large generation; the retry window must outlast that.
         let elapsed = 0;
         vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
           if (cmd === 'get_usage_for_response') {
@@ -1331,16 +1379,14 @@ describe('ChatStateService', () => {
           data: {
             session_id: 'abc',
             assistant_uuid: 'msg_1',
-            total_cost: 0.13, // inflated CC live preview
+            total_cost: 0.13,
             turn_cost: 0.13,
             model: 'openrouter/z-ai/glm-5-turbo',
           },
         });
         await vi.advanceTimersByTimeAsync(0);
-        // Still deferred at first → preview stays.
         expect(service.messages.find((m) => m.uuid === 'msg_1')?.meta?.cost).toBe(0.13);
 
-        // Advance past OpenRouter's pricing latency in small steps.
         for (let t = 0; t < 35_000; t += 5000) {
           elapsed += 5000;
           await vi.advanceTimersByTimeAsync(5000);
@@ -1364,7 +1410,7 @@ describe('ChatStateService', () => {
             return { cost_usd: null, cost_source: 'deferred' };
           }
           if (cmd === 'get_conversation_cost') return null;
-          return undefined; // send_message etc. resolve
+          return undefined;
         });
 
         service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'a' } });
@@ -1375,12 +1421,9 @@ describe('ChatStateService', () => {
         await vi.advanceTimersByTimeAsync(0);
         const callsAfterFirst = calls;
 
-        // A new turn (sendMessage bumps `_turnId`) must abandon msg_1's stale
-        // deferred retry instead of firing through its backoff.
         await service.sendMessage('next question');
         await vi.advanceTimersByTimeAsync(10_000);
 
-        // No unbounded growth: the superseded retry stopped (allow the in-flight one).
         expect(calls).toBeLessThanOrEqual(callsAfterFirst + 1);
       } finally {
         vi.useRealTimers();
@@ -1478,7 +1521,6 @@ describe('ChatStateService', () => {
     });
 
     it('does not notify on unknown chunk type', () => {
-      // No state change ⇒ no rebuild ⇒ the state() signal keeps its identity.
       const before = service.state();
 
       service.handleStreamChunk({
@@ -1607,7 +1649,6 @@ describe('ChatStateService', () => {
       const sig = service.sessionStatsFromState();
       expect(sig?.session_id).toBe('abc');
       expect(sig?.total_cost).toBe(0.5);
-      // Signal and getter agree.
       expect(service.sessionStatsFromState()).toBe(service.sessionStats);
     });
 
@@ -1643,6 +1684,433 @@ describe('ChatStateService', () => {
       });
 
       expect(service.sessionStats?.model).toBeUndefined();
+    });
+  });
+
+  describe('pendingModelOverride', () => {
+    it('pendingModelOverride is null when nothing was set', () => {
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('a no-session Anthropic pick persists the pin and respawns without ever queuing (SPEED-544)', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.pendingModelOverride()).toBeNull();
+      const startCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
+      expect(startCall?.[1]).toEqual({ project: 'test' });
+    });
+
+    it('a reset during an in-flight resume discards its transcript and starts fresh', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      let resolveTranscript: ((t: ConversationTranscript) => void) | null = null;
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation')
+          return new Promise<ConversationTranscript>((resolve) => {
+            resolveTranscript = resolve;
+          });
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      const resume = service.resumeConversation('old-sess');
+      await new Promise((r) => setTimeout(r, 0));
+      service.resetForNewConversation();
+      resolveTranscript!({
+        session_id: 'old-sess',
+        messages: [{ role: 'assistant', content: 'old reply', timestamp: null }],
+      });
+      await resume;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(service.messagesFromState()).toHaveLength(0);
+      expect(service.lastKnownSessionId).toBeNull();
+      const startCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'start_chat');
+      expect(startCall).toBeDefined();
+    });
+
+    it('an undisturbed resume still loads its transcript and seeds the session id', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'get_conversation')
+          return {
+            session_id: 'old-sess',
+            messages: [{ role: 'assistant', content: 'old reply', timestamp: null }],
+          };
+        return undefined;
+      };
+
+      await service.resumeConversation('old-sess');
+
+      expect(service.messagesFromState()).toHaveLength(1);
+      expect(service.lastKnownSessionId).toBe('old-sess');
+    });
+
+    it('SystemInit never flushes a queued mid-stream pick; only Result (turn end) does', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      service.isStreaming = true;
+      invokeSpy.mockClear();
+
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-restart' },
+      });
+      await Promise.resolve();
+      let modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeUndefined();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-restart' },
+      } as never);
+      await vi.waitFor(() => {
+        modelSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+        );
+        expect(modelSend).toBeDefined();
+      });
+      expect(JSON.stringify(modelSend?.[1])).toContain('/model claude-haiku-4-5');
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('applyEffortSelection with a live idle conversation writes the pin then sends the wire /effort', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello' } });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      await Promise.resolve();
+      expect(service.hasConversation()).toBe(true);
+      invokeSpy.mockClear();
+
+      await service.applyEffortSelection('low');
+      const pinCallIdx = invokeSpy.mock.calls.findIndex(([cmd]) => cmd === 'set_effort_pin');
+      const effortSendIdx = invokeSpy.mock.calls.findIndex(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort low')
+      );
+      expect(pinCallIdx).toBeGreaterThanOrEqual(0);
+      expect(effortSendIdx).toBeGreaterThan(pinCallIdx);
+    });
+
+    it('applyEffortSelection mid-stream queues and flushes the wire /effort after the turn', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+      service.isStreaming = true;
+
+      await service.applyEffortSelection('xhigh');
+      let effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort ')
+      );
+      expect(effortSend).toBeUndefined();
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      await vi.waitFor(() => {
+        effortSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort xhigh')
+        );
+        expect(effortSend).toBeDefined();
+      });
+    });
+
+    it('applyEffortSelection blocks the wire and sets an error when the pin write fails', async () => {
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'set_effort_pin') throw new Error('locked config');
+        return undefined;
+      });
+
+      await service.applyEffortSelection('low');
+
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+      );
+      expect(effortSend).toBeUndefined();
+      expect(service.modelSelectionError()).toContain('locked config');
+    });
+
+    it('applyEffortSelection without a live session respawns the idle pre-first-turn process', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyEffortSelection('low');
+      await new Promise((r) => setTimeout(r, 0));
+
+      const pinCall = invokeSpy.mock.calls.find(([cmd]) => cmd === 'set_effort_pin');
+      expect(pinCall).toBeDefined();
+      const startCalls = invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat');
+      expect(startCalls.length).toBeGreaterThan(0);
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+      );
+      expect(effortSend).toBeUndefined();
+    });
+
+    it('applyEffortSelection on a live session with no conversation yet respawns instead of wiring /effort', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-fable-5', session_id: 'sess-idle' },
+      });
+      await Promise.resolve();
+      expect(service.hasConversation()).toBe(false);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyEffortSelection('low');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
+      const effortSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+      );
+      expect(effortSend).toBeUndefined();
+    });
+
+    it('applyEffortSelection while the first turn streams before any session id queues it for the turn end', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.isStreaming = true;
+
+      await service.applyEffortSelection('max');
+      expect(
+        invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort')
+        )
+      ).toBeUndefined();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-5', session_id: 'sess-first' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-first' },
+      } as never);
+      await vi.waitFor(() => {
+        const effortSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/effort max')
+        );
+        expect(effortSend).toBeDefined();
+      });
+    });
+
+    it('an idle model-pick respawn claims init() so a remount starts no second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
+    });
+
+    it('an idle effort-pick respawn claims init() so a remount starts no second session', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      projectState.status.set('ready');
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyEffortSelection('high');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(1);
+    });
+
+    it('applyModelSelection during a streaming turn queues the switch instead of silently dropping it', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      const modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeUndefined();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+    });
+
+    it('resetForNewConversation clears a queued mid-stream pick so it cannot leak into the fresh session', async () => {
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-old' },
+      });
+      await Promise.resolve();
+      service.isStreaming = true;
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+
+      service.isStreaming = false;
+      service.resetForNewConversation();
+      expect(service.pendingModelOverride()).toBeNull();
+
+      invokeSpy.mockClear();
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-new' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-new' },
+      } as never);
+      await new Promise((r) => setTimeout(r, 0));
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
+    });
+
+    it('resumeConversation clears a queued mid-stream pick so a later SystemInit/Result sends no /model', async () => {
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      mockTauri.invokeHandler = async () => undefined;
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'old-sess' },
+      });
+      await Promise.resolve();
+      service.isStreaming = true;
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+      service.isStreaming = false;
+
+      await service.resumeConversation('old-sess');
+      expect(service.pendingModelOverride()).toBeNull();
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'old-sess' },
+      });
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'old-sess' },
+      } as never);
+      await new Promise((r) => setTimeout(r, 0));
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('a project switch clears a queued mid-stream pick so a later SystemInit sends no /model', async () => {
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      service.isStreaming = true;
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-4-8-1m',
+        wireId: 'claude-opus-4-8[1m]',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(service.pendingModelOverride()).toBe('claude-opus-4-8[1m]');
+      service.isStreaming = false;
+
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      mockTauri.dispatchEvent('project_switch_started', { project: 'other-project' });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(service.pendingModelOverride()).toBeNull();
+
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-other' },
+      });
+      await Promise.resolve();
+
+      const modelSendCall = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSendCall).toBeUndefined();
     });
   });
 
@@ -1771,7 +2239,6 @@ describe('ChatStateService', () => {
 
       service.resetForNewConversation();
 
-      // Reset wipes legacy fields and the rebuild projects an empty tree.
       expect(service.state().entries).toEqual([]);
       expect(service.state().is_streaming).toBe(false);
     });
@@ -1804,7 +2271,7 @@ describe('ChatStateService', () => {
           blocks: [{ type: 'text', content: 'a' }],
           timestamp: 2,
           uuid: 'gen-1',
-          meta: { cost: 0.13 }, // stale inflated preview from a deferred turn
+          meta: { cost: 0.13 },
         },
       ]);
 
@@ -1819,8 +2286,6 @@ describe('ChatStateService', () => {
       const before = service.state();
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
 
-      // A mutating chunk rebuilds the tree to a fresh identity and the
-      // streaming projection reflects the new content.
       expect(service.state()).not.toBe(before);
       expect(service.currentBlocksFromState()).toEqual([{ type: 'text', content: 'hi' }]);
       expect(service.isStreamingFromState()).toBe(true);
@@ -1999,7 +2464,6 @@ describe('ChatStateService', () => {
       });
 
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      // The renderer pre-joins labels — service treats `value` as opaque.
       await service.submitAnswer('toolu_ask1', 0, 'A, B');
 
       expect(invokeSpy).toHaveBeenCalledWith('submit_question_answer', {
@@ -2080,9 +2544,43 @@ describe('ChatStateService', () => {
     });
   });
 
+  describe('chip block persistence round-trip', () => {
+    it('messageBlocksToState round-trips a control-chip block instead of dropping it', () => {
+      const block = { type: 'chip' as const, command: 'model', argument: 'claude-sonnet-5' };
+      const state = messageBlocksToState([block]);
+      expect(state).toEqual([{ kind: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
+      const recovered = stateBlocksToMessageBlocks(state);
+      expect(recovered).toEqual([block]);
+    });
+
+    it('a ControlChip message projected through the full state tree keeps its chip block', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'effort', argument: 'high' }],
+            timestamp: 1,
+            uuid: 'msg_chip_1',
+            uuid_status: 'Committed',
+          },
+        ],
+      });
+      service.handleStreamChunk({ chunk_type: 'Text', data: { content: '' } });
+
+      const projectedEntry = service.state().entries[0];
+      expect(projectedEntry.blocks).toEqual([
+        { kind: 'chip', command: 'effort', argument: 'high' },
+      ]);
+
+      const projectedMessage = service.messagesFromState()[0];
+      expect(projectedMessage.blocks).toEqual([
+        { type: 'chip', command: 'effort', argument: 'high' },
+      ]);
+    });
+  });
+
   describe('stateBlocksToMessageBlocks unknown-kind handling (ADR-042 drift guard)', () => {
     it('renders a placeholder error block instead of silently dropping an unknown kind', () => {
-      // Simulate a new Rust MessageBlock variant the TS union does not yet know.
       const unknown = { kind: 'future_widget', payload: 42 } as unknown as Parameters<
         typeof stateBlocksToMessageBlocks
       >[0][number];
@@ -2143,7 +2641,6 @@ describe('ChatStateService', () => {
   describe('auth error routing', () => {
     it('surfaces auth error as auth_required status', async () => {
       const projectState = TestBed.inject(ProjectStateService);
-      // Bypass normal init — set ready directly so startChatSession fires
       projectState.activeProject.set('test');
       projectState.status.set('ready');
 
@@ -2154,7 +2651,6 @@ describe('ChatStateService', () => {
       };
 
       await service.init();
-      // startChatSession is fire-and-forget — flush microtask queue
       await new Promise((r) => setTimeout(r, 0));
       expect(projectState.status()).toBe('auth_required');
     });
@@ -2186,16 +2682,13 @@ describe('ChatStateService', () => {
 
   describe('session startup timeout', () => {
     it('shows error when startingSession does not clear within deadline', async () => {
-      // Invoke sendMessage without full init.
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'send_message') throw new Error('no active session');
         return undefined;
       };
 
-      // Simulate startingSession permanently stuck true
       (service as unknown as { startingSession: boolean }).startingSession = true;
 
-      // First 5 Date.now() calls return base, the rest return past the deadline.
       const base = 1000000;
       let nowCall = 0;
       const spy = vi.spyOn(Date, 'now').mockImplementation(() => {
@@ -2206,7 +2699,6 @@ describe('ChatStateService', () => {
       await service.sendMessage('hello');
       spy.mockRestore();
 
-      // Should have 2 messages: user + assistant error
       expect(service.messages).toHaveLength(2);
       const lastMsg = service.messages[1];
       expect(lastMsg.role).toBe('assistant');
@@ -2299,7 +2791,6 @@ describe('ChatStateService', () => {
       service._setState({ currentBlocks: [{ type: 'text', content: 'x' }] });
       await service.stopConversation();
       expect(service.isStreaming).toBe(false);
-      // partial assistant + error block from the failed stop = 2 messages.
       expect(service.messages).toHaveLength(2);
       const errorBlock = service.messages[1].blocks[0];
       expect(errorBlock.type).toBe('error');
@@ -2315,7 +2806,6 @@ describe('ChatStateService', () => {
       service._setState({ currentBlocks: [{ type: 'text', content: 'x' }] });
       await service.stopConversation();
       expect(service.isStreaming).toBe(false);
-      // Only the partial assistant message — no extra error block.
       expect(service.messages).toHaveLength(1);
     });
 
@@ -2346,8 +2836,6 @@ describe('ChatStateService', () => {
     });
 
     it('QueueDrained after Result dispatches the queued turn (not-streaming gate must pass it)', async () => {
-      // Real dispatch order: Result flips isStreaming=false, THEN the backend
-      // drain emits QueueDrained; dropping it strands the chip + the new turn.
       mockTauri.isRunningInTauri = () => true;
       await service.init();
       service._setState({ pendingQueue: { text: 'queued follow-up', queued_at: 1 } });
@@ -2375,7 +2863,6 @@ describe('ChatStateService', () => {
         lastUser?.blocks.some((b) => b.type === 'text' && b.content === 'queued follow-up')
       ).toBe(true);
 
-      // The dispatched turn's content must now flow (it used to be dropped).
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Text',
         data: { content: 'ACK' },
@@ -2390,14 +2877,12 @@ describe('ChatStateService', () => {
       await service.init();
       service.isStreaming = true;
       await service.stopConversation();
-      // Simulate a buffered chunk from the dying turn arriving after stop.
       mockTauri.dispatchEvent('chat_stream', {
         chunk_type: 'Text',
         data: { content: 'late content from stopped turn' },
       });
       expect(service.isStreaming).toBe(false);
       expect(service.currentBlocks).toEqual([]);
-      // Must not be appended — only the (empty) partial-then-stop noop ran.
       const lateText = service.messages.some((m) =>
         m.blocks.some((b) => b.type === 'text' && b.content === 'late content from stopped turn')
       );
@@ -2547,7 +3032,6 @@ describe('ChatStateService', () => {
       });
       expect(service.messages[1].uuid).toBe('u-2');
       expect(service.messages[1].uuid_status).toBe('Committed');
-      // Already-committed entries are untouched.
       expect(service.messages[0].uuid).toBe('u-1');
     });
 
@@ -2562,7 +3046,6 @@ describe('ChatStateService', () => {
         chunk_type: 'UserMessageCommit',
         data: { uuid: 'u-2' },
       });
-      // Same object — no mutation, no replacement.
       expect(service.messages).toBe(before);
     });
 
@@ -2633,7 +3116,7 @@ describe('ChatStateService', () => {
       });
       expect(service.lastContextTokens).toBe(24771);
       (service as unknown as { resetCoreStreamState(): void }).resetCoreStreamState();
-      expect(service.lastContextTokens).toBe(24771); // durable across reset
+      expect(service.lastContextTokens).toBe(24771);
     });
   });
 
@@ -2840,7 +3323,6 @@ describe('ChatStateService', () => {
 
     it('retryLastAssistant is a no-op when canRetry is false', async () => {
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      // No setup — empty session, no anchor.
       await service.retryLastAssistant();
       expect(invokeSpy).not.toHaveBeenCalled();
       expect(service.isStreaming).toBe(false);
@@ -2855,7 +3337,6 @@ describe('ChatStateService', () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       await service.retryLastAssistant();
       expect(service.isStreaming).toBe(false);
-      // Original two entries restored, plus an error-bearing assistant entry.
       expect(service.messages).toHaveLength(3);
       const last = service.messages[2];
       expect(last.role).toBe('assistant');
@@ -2864,6 +3345,193 @@ describe('ChatStateService', () => {
         'Retry failed'
       );
       errSpy.mockRestore();
+    });
+
+    it('canRetryLastAssistant returns false when the anchor candidate is a control-chip message', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'a' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('canRetryLastAssistant keeps the real anchor when a chip trails the last assistant', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'real question' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'effort', argument: 'high' }],
+            timestamp: 3,
+            uuid: 'msg_user_2',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+
+      expect(service.canRetryLastAssistant()).toBe(true);
+    });
+
+    it('canRetryLastAssistant returns false when a chip sits directly before the last assistant', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+
+      expect(service.canRetryLastAssistant()).toBe(false);
+    });
+
+    it('retryEnabled signal (state-tree path) stays false when a chip sits directly before the last assistant', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'ok', utilization: null, resets_at: null },
+      });
+
+      expect(service.retryEnabled()).toBe(false);
+    });
+
+    it('retryEnabled signal (state-tree path) stays true when the anchor is a real question, chip trailing', () => {
+      service._setState({
+        messages: [
+          {
+            role: 'user',
+            blocks: [{ type: 'text', content: 'real question' }],
+            timestamp: 1,
+            uuid: 'msg_user_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'assistant',
+            blocks: [{ type: 'text', content: 'real answer' }],
+            timestamp: 2,
+            uuid: 'msg_assist_1',
+            uuid_status: 'Committed',
+          },
+          {
+            role: 'user',
+            blocks: [{ type: 'chip', command: 'effort', argument: 'high' }],
+            timestamp: 3,
+            uuid: 'msg_user_2',
+            uuid_status: 'Committed',
+          },
+        ],
+        sessionStats: {
+          session_id: '550e8400-e29b-41d4-a716-446655440000',
+          total_cost: 0,
+          usage: undefined,
+          model: undefined,
+          rate_limit: undefined,
+          context_window_size: 200_000,
+          total_output_tokens: 0,
+        },
+      });
+      service.isStreaming = false;
+      service.handleStreamChunk({
+        chunk_type: 'RateLimit',
+        data: { status: 'ok', utilization: null, resets_at: null },
+      });
+
+      expect(service.retryEnabled()).toBe(true);
     });
   });
 
@@ -2897,13 +3565,10 @@ describe('ChatStateService', () => {
         cache_read_tokens: 10,
         cache_write_tokens: 0,
       });
-      // Backend turn_cost wins (authoritative)
       expect(meta?.cost).toBe(0.018);
     });
 
     it('does not compute cost on the frontend when backend omits turn_cost', () => {
-      // No frontend pricing (proxy is SSOT): absent turn_cost leaves cost
-      // undefined until reconcileFooterCost fills it from the proxy.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'hi' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -2918,12 +3583,10 @@ describe('ChatStateService', () => {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
           },
-          // turn_cost intentionally omitted
         },
       });
 
       const meta = service.messages[0].meta;
-      // model + usage are still recorded; cost stays undefined (no fabrication).
       expect(meta?.model).toBe('claude-sonnet-4-6');
       expect(meta?.cost).toBeUndefined();
     });
@@ -2966,7 +3629,6 @@ describe('ChatStateService', () => {
     it('simulates patch sequence: Add → Replace meta provisional → Replace meta final', () => {
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hi.' } });
 
-      // Provisional: no turn_cost → cost stays undefined (no frontend pricing).
       service.handleStreamChunk({
         chunk_type: 'Result',
         data: {
@@ -2980,17 +3642,13 @@ describe('ChatStateService', () => {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
           },
-          // Provisional: backend still computing authoritative cost
         },
       });
 
-      // After provisional: model recorded, cost undefined (no frontend pricing).
       const provisional = service.messages[0].meta;
       expect(provisional?.model).toBe('claude-haiku-4-5');
       expect(provisional?.cost).toBeUndefined();
 
-      // Simulate final Result in a fresh assistant turn — replaces the
-      // previous entry behaviour is per-turn. Test that turn_cost wins.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Final.' } });
       service.handleStreamChunk({
         chunk_type: 'Result',
@@ -3005,7 +3663,7 @@ describe('ChatStateService', () => {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
           },
-          turn_cost: 0.007, // authoritative — overrides pricing.ts fallback
+          turn_cost: 0.007,
         },
       });
 
@@ -3015,7 +3673,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── ADR-045 — queued message ─────────────────────────────────────────────
   describe('queueMessage / cancelQueuedMessage / QueueDrained', () => {
     function setSession(id: string): void {
       service._setState({
@@ -3108,7 +3765,6 @@ describe('ChatStateService', () => {
       };
       const prior = await service.queueMessage('next');
       expect(prior).toBeNull();
-      // No silent drop: the slot (and chip) exist immediately, backend waits.
       expect(calls).not.toContain('queue_message');
       expect(service.pendingQueue?.text).toBe('next');
     });
@@ -3169,7 +3825,6 @@ describe('ChatStateService', () => {
       await service.cancelQueuedMessage();
       expect(service.pendingQueue).toBeNull();
 
-      // A late session id must NOT resurrect the cancelled message.
       service.handleStreamChunk({
         chunk_type: 'SystemInit',
         data: { model: 'm', session_id: 'late-2' },
@@ -3248,7 +3903,6 @@ describe('ChatStateService', () => {
       const prior = await service.queueMessage('next');
       warnSpy.mockRestore();
       expect(prior).toBeNull();
-      // The chip must not vanish on a failed registration — no silent drop.
       expect(service.pendingQueue?.text).toBe('next');
     });
 
@@ -3259,7 +3913,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── ADR-042 — state-tree signal projections (legacy fields → tree) ──────
   describe('state-tree signal projections', () => {
     it('initial state matches DEFAULT_STATE_TREE', () => {
       const s = service.state();
@@ -3307,7 +3960,6 @@ describe('ChatStateService', () => {
 
     it('pendingQueueFromState mirrors pending_queue field after notifyChange', () => {
       service._setState({ pendingQueue: { text: 'next', queued_at: 1 } });
-      // _setState does NOT trigger notifyChange — drive a chunk to fire it.
       service.handleStreamChunk({ chunk_type: 'Text', data: { content: 'tick' } });
       expect(service.pendingQueueFromState()?.text).toBe('next');
     });
@@ -3335,7 +3987,6 @@ describe('ChatStateService', () => {
       });
       const before = service.sessionStats;
       service.seedSessionId('sess-x');
-      // Same reference — nothing replaced.
       expect(service.sessionStats).toBe(before);
       expect(service.sessionStats?.total_cost).toBe(0.123);
     });
@@ -3354,8 +4005,6 @@ describe('ChatStateService', () => {
         return undefined;
       };
       await service.refreshLlmConfigCache();
-      // Internal state — accessed through a controlled cast since the field
-      // is intentionally private.
       const internal = service as unknown as { _persistedContextTokens: number | null };
       expect(internal._persistedContextTokens).toBe(32_768);
     });
@@ -3381,8 +4030,6 @@ describe('ChatStateService', () => {
     });
 
     it('does not dedupe — every call hits the backend', async () => {
-      // Regression guard: dedupe was removed (cheap command) — skipping
-      // re-fetches per project silently broke the post-save footer refresh.
       let calls = 0;
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_llm_config') {
@@ -3399,7 +4046,6 @@ describe('ChatStateService', () => {
   });
 
   describe('resolveContextWindow priority chain', () => {
-    // resolveContextWindow is private; cast to assert on each tier directly.
     type Internal = {
       resolveContextWindow: (live: number | undefined, model: string | undefined) => number;
       _persistedContextTokens: number | null;
@@ -3414,8 +4060,6 @@ describe('ChatStateService', () => {
     });
 
     it('falls back to the Anthropic SSOT when no live value is available', async () => {
-      // Populate the injected AnthropicModelsService cache via its public
-      // list() once with a fixture backend.
       const anthropic = TestBed.inject(AnthropicModelsService);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_anthropic_models') {
@@ -3458,8 +4102,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── context meter sizes by the conversation model, not a subagent ──
-
   describe('context meter uses the conversation model, not a subagent model', () => {
     it('reports the conversation model and its window despite a subagent-heavy usage', () => {
       service.handleStreamChunk({
@@ -3474,7 +4116,6 @@ describe('ChatStateService', () => {
           total_cost: 0.5,
           model: 'claude-fable-5',
           context_window_size: 1_000_000,
-          // Turn-sum usage inflated by subagent output — must not move ctx or model.
           usage: { input_tokens: 4_000, output_tokens: 300_000 },
           context_usage: {
             input_tokens: 100_000,
@@ -3490,8 +4131,6 @@ describe('ChatStateService', () => {
     });
 
     it('falls back to the Anthropic SSOT window when context_window_size is absent', async () => {
-      // Regression fixture: the conversation model had no modelUsage entry
-      // this turn (Rust sends None), so the frontend resolves the SSOT window.
       const anthropic = TestBed.inject(AnthropicModelsService);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'list_anthropic_models') {
@@ -3524,8 +4163,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── mapContextOverflowError ────────────────────────────────────────────────
-
   describe('mapContextOverflowError', () => {
     it('maps llama.cpp context-overflow to a friendly message; passes others through', () => {
       expect(mapContextOverflowError('exceeds the available context size (8192 tokens)')).toContain(
@@ -3553,8 +4190,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── mapNotLoggedInError ─────────────────────────────────────────────────────
-
   describe('mapNotLoggedInError', () => {
     it('maps Claude Code\'s "not logged in" error to a Settings-pointing message', () => {
       expect(mapNotLoggedInError('Not logged in · Please run /login')).toContain('Settings');
@@ -3575,8 +4210,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── isNotAuthenticatedError gate predicate ─────────────────────────────────
-
   describe('isNotAuthenticatedError', () => {
     it('matches the backend "not authenticated" phrasings', () => {
       expect(
@@ -3591,8 +4224,6 @@ describe('ChatStateService', () => {
       expect(isNotAuthenticatedError('')).toBe(false);
     });
   });
-
-  // ── handleStreamChunk Error — context-overflow mapping ────────────────────
 
   describe('handleStreamChunk Error — context-overflow mapping', () => {
     it('replaces a known context-overflow error with the friendly message', () => {
@@ -3629,8 +4260,6 @@ describe('ChatStateService', () => {
       }
     });
   });
-
-  // ── handleStreamChunk Error — not-logged-in mapping ────────────────────────
 
   describe('handleStreamChunk Error — not-logged-in mapping', () => {
     it('replaces Claude Code\'s "not logged in" error with a Settings-pointing message', () => {
@@ -3716,24 +4345,16 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── resume on restart (service-owned, survives an unmounted ChatComponent) ──
-
   describe('resume on restart', () => {
-    /** Casts onto the private restart-lifecycle notifiers used to drive the path. */
     type RestartInternal = {
       notifyRestartBegin(): Promise<void>;
       notifyReady(): void;
     };
-    /** Casts onto private token fields so a test can force history (not) fitting. */
     type TokensInternal = {
       _lastContextTokens: number | null;
       _persistedContextTokens: number | null;
     };
 
-    /**
-     * Fires restart-begin (interrupt) then restart-complete (resume) + flush.
-     * @param projectState - ProjectStateService instance to notify.
-     */
     async function fireRestart(projectState: ProjectStateService): Promise<void> {
       await (projectState as unknown as RestartInternal).notifyRestartBegin();
       projectState.notifyRestartComplete();
@@ -3744,15 +4365,12 @@ describe('ChatStateService', () => {
 
     beforeEach(async () => {
       projectState = TestBed.inject(ProjectStateService);
-      // projectState.init() wires the Tauri listeners that translate
-      // project_switch_started → 'switching' for the switch-clears-id test.
       await projectState.init();
       projectState.activeProject.set('test');
       await service.init();
     });
 
     it('resumes the durable session with NO ChatComponent mounted (key regression)', async () => {
-      // No decider registered (component never mounted) → service auto-resumes.
       service.seedSessionId('sess-1');
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -3803,8 +4421,6 @@ describe('ChatStateService', () => {
                   cache_write_tokens: 4920,
                 },
               },
-              // Trailing sidechain (subagent) line: history.rs strips its
-              // usage, so the seed must fall back to the previous message.
               { role: 'assistant', content: 'subagent output' },
             ],
           };
@@ -3814,7 +4430,6 @@ describe('ChatStateService', () => {
 
       await fireRestart(projectState);
 
-      // Last usage-bearing main-chain call wins — truthful before any live Result.
       expect(service.sessionStats?.context_usage?.cache_read_tokens).toBe(66_844);
       expect(service.lastContextTokens).toBe(71_766);
     });
@@ -3837,8 +4452,6 @@ describe('ChatStateService', () => {
                   cache_write_tokens: 100,
                 },
               },
-              // Trailing main-chain line with all-zero usage (e.g. an aborted
-              // API call) must not overwrite the real prior context occupancy.
               {
                 role: 'assistant',
                 content: 'a2',
@@ -3893,7 +4506,6 @@ describe('ChatStateService', () => {
 
     it('auto-resumes when unmounted even if history does not fit the target window', async () => {
       service.seedSessionId('sess-2');
-      // History exceeds the window → would prompt if mounted; unmounted ⇒ resume.
       (service as unknown as TokensInternal)._lastContextTokens = 25229;
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       const calls: string[] = [];
@@ -3922,7 +4534,6 @@ describe('ChatStateService', () => {
 
       await fireRestart(projectState);
 
-      // 'fresh' must NOT resume, MUST start a clean session, and clear the durable id.
       expect(calls).not.toContain('resume_conversation');
       expect(calls).toContain('start_chat');
       expect(service.lastKnownSessionId).toBeNull();
@@ -3948,14 +4559,12 @@ describe('ChatStateService', () => {
     it('re-reads the llm config so a GROWN post-restart window auto-resumes without asking', async () => {
       service.seedSessionId('sess-window');
       (service as unknown as TokensInternal)._lastContextTokens = 25229;
-      // Stale cache from the PREVIOUS model: too small — would wrongly ask.
       (service as unknown as TokensInternal)._persistedContextTokens = 8192;
       const decider = vi.fn(() => Promise.resolve('fresh' as const));
       service.setResumeDecider(decider);
       const calls: string[] = [];
       mockTauri.invokeHandler = async (cmd: string) => {
         calls.push(cmd);
-        // The post-restart model has a big window: history fits.
         if (cmd === 'get_llm_config') return { provider: 'anthropic', context_tokens: 200_000 };
         if (cmd === 'get_conversation') return { session_id: 'sess-window', messages: [] };
         return undefined;
@@ -3970,7 +4579,6 @@ describe('ChatStateService', () => {
     it('re-reads the llm config so a SHRUNK post-restart window asks instead of blind-resuming', async () => {
       service.seedSessionId('sess-shrunk');
       (service as unknown as TokensInternal)._lastContextTokens = 25229;
-      // Stale cache from the PREVIOUS model: big — would wrongly auto-resume.
       (service as unknown as TokensInternal)._persistedContextTokens = 200_000;
       const decider = vi.fn(() => Promise.resolve('resume' as const));
       service.setResumeDecider(decider);
@@ -3984,9 +4592,8 @@ describe('ChatStateService', () => {
 
       await fireRestart(projectState);
 
-      // The decision saw the NEW (smaller) window and asked the mounted view.
       expect(decider).toHaveBeenCalledTimes(1);
-      expect(calls).toContain('resume_conversation'); // decider chose resume
+      expect(calls).toContain('resume_conversation');
     });
 
     it('does nothing on restart when no durable session id is known', async () => {
@@ -4051,8 +4658,6 @@ describe('ChatStateService', () => {
     });
 
     it('a remount init() mid-resume does not start a competing start_chat', async () => {
-      // Regression: resetForNewConversation zeroed `initialized`, so the remount
-      // init() started a fresh start_chat that clobbered the in-flight resume.
       projectState.status.set('ready');
       service.seedSessionId('sess-mid');
       const pendingResume = createDeferred();
@@ -4070,23 +4675,19 @@ describe('ChatStateService', () => {
       };
 
       const restartDone = fireRestart(projectState);
-      // The llm-config re-read precedes the resume RPC; wait until it's in flight.
       await vi.waitFor(() => {
         expect(calls).toContain('resume_conversation');
       });
-      // Remount while resume is still in flight.
       await service.init();
       pendingResume.resolve();
       await restartDone;
 
-      // The released resume pipeline settles asynchronously; wait for its load.
       await vi.waitFor(() => {
         expect(service.messagesFromState()[0]?.blocks[0]).toEqual({
           type: 'text',
           content: 'restored',
         });
       });
-      // Asserted after full settle: even a late competing start_chat would show.
       expect(calls).not.toContain('start_chat');
     });
 
@@ -4101,7 +4702,6 @@ describe('ChatStateService', () => {
       };
 
       await fireRestart(projectState);
-      // Resume finished: _resumeInProgress is false but _lastKnownSessionId holds.
       await service.init();
       await new Promise((r) => setTimeout(r, 0));
 
@@ -4110,7 +4710,6 @@ describe('ChatStateService', () => {
     });
 
     it('newConversation reset then init() still starts a fresh session', async () => {
-      // Negative control: the guard must not block the legitimate fresh-start path.
       projectState.status.set('ready');
       service.resetForNewConversation();
       const calls: string[] = [];
@@ -4126,8 +4725,6 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── resumeConversation transcript failure (non-blocking notice) ────────────
-
   describe('resumeConversation transcript failure', () => {
     it('keeps the session live and shows a notice when get_conversation fails but resume succeeds', async () => {
       TestBed.inject(ProjectStateService).activeProject.set('test');
@@ -4141,11 +4738,9 @@ describe('ChatStateService', () => {
       await service.resumeConversation('sess-notice');
 
       expect(calls).toContain('resume_conversation');
-      // Session stays live: durable + footer ids seeded so retry/queue work.
       expect(service.lastKnownSessionId).toBe('sess-notice');
       expect(service.sessionStats?.session_id).toBe('sess-notice');
       expect(service.isStreaming).toBe(false);
-      // Non-blocking notice explains the empty scrollback.
       const blocks = service.messages.flatMap((m) => m.blocks);
       const notice = blocks.find((b) => b.type === 'error');
       expect(notice).toBeDefined();
@@ -4180,19 +4775,15 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── historyFitsTarget pure predicate ───────────────────────────────────────
-
   describe('historyFitsTarget', () => {
     it('fits, exceeds, and unknown', () => {
       expect(historyFitsTarget(8000, 131072)).toBe(true);
       expect(historyFitsTarget(25229, 8192)).toBe(false);
-      expect(historyFitsTarget(null, 8192)).toBe(true); // no history → safe to resume
-      expect(historyFitsTarget(25229, null)).toBe(false); // unknown window → ask, don't auto-resume
-      expect(historyFitsTarget(8192, 8192)).toBe(false); // equal → does NOT fit
+      expect(historyFitsTarget(null, 8192)).toBe(true);
+      expect(historyFitsTarget(25229, null)).toBe(false);
+      expect(historyFitsTarget(8192, 8192)).toBe(false);
     });
   });
-
-  // ── toChatMessages per-message meta (resumed footer) ────────────────────────
 
   describe('toChatMessages per-message meta', () => {
     it('maps model + usage into ChatMessage.meta', () => {
@@ -4259,13 +4850,7 @@ describe('ChatStateService', () => {
     });
   });
 
-  // ── toChatMessages — history tool-block normalization ──────────────────────
-
   describe('toChatMessages history tool-block normalization', () => {
-    /**
-     * Wraps raw history-shaped blocks into a one-message transcript.
-     * @param blocks - Raw blocks as the backend history payload ships them.
-     */
     function transcriptWith(blocks: unknown[]): ConversationTranscript {
       return {
         session_id: '00000000-0000-0000-0000-000000000000',
@@ -4372,6 +4957,292 @@ describe('ChatStateService', () => {
       };
       const [msg] = toChatMessages(transcriptWith([nested]));
       expect(msg.blocks).toEqual([nested]);
+    });
+
+    it('normalizes a history control_chip block into the live-path chip view-model', () => {
+      const [msg] = toChatMessages(
+        transcriptWith([{ type: 'control_chip', command: 'model', argument: 'claude-sonnet-5' }])
+      );
+      expect(msg.blocks).toEqual([{ type: 'chip', command: 'model', argument: 'claude-sonnet-5' }]);
+    });
+  });
+
+  describe('applyModelSelection', () => {
+    it('awaits setProviderModel BEFORE sending the wire command for a live non-anthropic selection', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const calls: string[] = [];
+      let resolveSet!: () => void;
+      vi.spyOn(anthropicModels, 'setProviderModel').mockImplementation(
+        () =>
+          new Promise<void>((r) => {
+            calls.push('setProviderModel-start');
+            resolveSet = () => {
+              calls.push('setProviderModel-resolved');
+              r();
+            };
+          })
+      );
+      vi.spyOn(service, 'sendMessage').mockImplementation(async () => {
+        calls.push('sendMessage');
+      });
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'my-or/anthropic/claude-sonnet-5', session_id: 'sess-1' },
+      });
+
+      const pending = service.applyModelSelection({
+        catalogId: 'anthropic/claude-haiku-4-5',
+        wireId: 'my-or/anthropic/claude-haiku-4-5',
+        providerId: 'my-or',
+        kind: 'open_router',
+      });
+      expect(calls).toEqual(['setProviderModel-start']);
+      resolveSet();
+      await pending;
+      expect(calls).toEqual(['setProviderModel-start', 'setProviderModel-resolved', 'sendMessage']);
+      expect(invokeSpy).not.toHaveBeenCalledWith('set_model_pin', expect.anything());
+    });
+
+    it('does not send the wire command when setProviderModel rejects', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      vi.spyOn(anthropicModels, 'setProviderModel').mockRejectedValue(new Error('locked config'));
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'anthropic/claude-haiku-4-5',
+        wireId: 'my-or/anthropic/claude-haiku-4-5',
+        providerId: 'my-or',
+        kind: 'open_router',
+      });
+
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.modelSelectionError()).toContain('locked config');
+    });
+
+    it('persists the model pin BEFORE sending the wire command for a live anthropic selection', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const setProviderModelSpy = vi.spyOn(anthropicModels, 'setProviderModel');
+      const calls: string[] = [];
+      let resolvePin!: () => void;
+      vi.spyOn(mockTauri, 'invoke').mockImplementation(async (cmd: string) => {
+        if (cmd === 'set_model_pin') {
+          return new Promise((r) => {
+            calls.push('set_model_pin-start');
+            resolvePin = () => {
+              calls.push('set_model_pin-resolved');
+              r(undefined);
+            };
+          });
+        }
+        return undefined;
+      });
+      vi.spyOn(service, 'sendMessage').mockImplementation(async () => {
+        calls.push('sendMessage');
+      });
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-2' },
+      });
+
+      const pending = service.applyModelSelection({
+        catalogId: 'claude-opus-4-8',
+        wireId: 'claude-opus-4-8',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(calls).toEqual(['set_model_pin-start']);
+      resolvePin();
+      await pending;
+      expect(calls).toEqual(['set_model_pin-start', 'set_model_pin-resolved', 'sendMessage']);
+      expect(setProviderModelSpy).not.toHaveBeenCalled();
+    });
+
+    it('blocks the wire and surfaces an error when the model pin write fails on a live session', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_model_pin') throw new Error('unknown Anthropic model');
+        return undefined;
+      };
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-sonnet-5', session_id: 'sess-3' },
+      });
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-4-8',
+        wireId: 'claude-opus-4-8',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.modelSelectionError()).toContain('unknown Anthropic model');
+    });
+
+    it('persists the model pin and sends nothing further when no session or project is active', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'claude-opus-4-8',
+        wireId: 'claude-opus-4-8',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: '',
+        model: 'claude-opus-4-8',
+      });
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('an idle pre-first-turn anthropic pick persists the pin and respawns with no model argument at all', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const pinCallIndex = invokeSpy.mock.calls.findIndex(([cmd]) => cmd === 'set_model_pin');
+      const startCalls = invokeSpy.mock.calls
+        .map((call, i) => ({ cmd: call[0], args: call[1], i }))
+        .filter(({ cmd }) => cmd === 'start_chat');
+      expect(pinCallIndex).toBeGreaterThanOrEqual(0);
+      expect(invokeSpy.mock.calls[pinCallIndex][1]).toEqual({
+        projectId: 'test',
+        model: 'claude-sonnet-5',
+      });
+      expect(startCalls.at(-1)?.i).toBeGreaterThan(pinCallIndex);
+      expect(startCalls.at(-1)?.args).toEqual({ project: 'test' });
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('a still-session-less streaming pick persists the pin without respawning or queuing', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('test');
+      service.isStreaming = true;
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: 'test',
+        model: 'claude-sonnet-5',
+      });
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('blocks the respawn and surfaces an error when the model pin write fails with no live session', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const projectState = TestBed.inject(ProjectStateService);
+      await projectState.init();
+      projectState.activeProject.set('test');
+      await service.init();
+      await new Promise((r) => setTimeout(r, 0));
+      mockTauri.invokeHandler = async (cmd: string) => {
+        if (cmd === 'set_model_pin') throw new Error('locked settings.json');
+        return undefined;
+      };
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+
+      await service.applyModelSelection({
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(service.modelSelectionError()).toContain('locked settings.json');
+      expect(invokeSpy.mock.calls.filter(([cmd]) => cmd === 'start_chat')).toHaveLength(0);
+    });
+
+    it('a mid-stream pick on a live session persists the pin immediately and wires it after the turn ends', async () => {
+      const service = TestBed.inject(ChatStateService);
+      const invokeSpy = vi.spyOn(mockTauri, 'invoke');
+      service.handleStreamChunk({
+        chunk_type: 'SystemInit',
+        data: { model: 'claude-opus-4-8', session_id: 'sess-live' },
+      });
+      await Promise.resolve();
+      invokeSpy.mockClear();
+      service.isStreaming = true;
+
+      await service.applyModelSelection({
+        catalogId: 'claude-haiku-4-5',
+        wireId: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+      expect(invokeSpy).toHaveBeenCalledWith('set_model_pin', {
+        projectId: expect.any(String),
+        model: 'claude-haiku-4-5',
+      });
+      let modelSend = invokeSpy.mock.calls.find(
+        ([cmd, args]) => cmd === 'send_message' && JSON.stringify(args).includes('/model ')
+      );
+      expect(modelSend).toBeUndefined();
+      expect(service.pendingModelOverride()).toBe('claude-haiku-4-5');
+
+      service.handleStreamChunk({
+        chunk_type: 'Result',
+        data: { session_id: 'sess-live' },
+      } as never);
+      await vi.waitFor(() => {
+        modelSend = invokeSpy.mock.calls.find(
+          ([cmd, args]) =>
+            cmd === 'send_message' && JSON.stringify(args).includes('/model claude-haiku-4-5')
+        );
+        expect(modelSend).toBeDefined();
+      });
+      expect(service.pendingModelOverride()).toBeNull();
+    });
+
+    it('does nothing further for a no-session non-anthropic selection beyond the write-through', async () => {
+      const service = TestBed.inject(ChatStateService);
+      TestBed.inject(ProjectStateService).activeProject.set('proj');
+      const anthropicModels = TestBed.inject(AnthropicModelsService);
+      const setProviderModelSpy = vi
+        .spyOn(anthropicModels, 'setProviderModel')
+        .mockResolvedValue(undefined);
+      const sendMessageSpy = vi.spyOn(service, 'sendMessage').mockResolvedValue(undefined);
+
+      await service.applyModelSelection({
+        catalogId: 'llama4',
+        wireId: 'my-ollama/llama4',
+        providerId: 'my-ollama',
+        kind: 'local',
+      });
+
+      expect(setProviderModelSpy).toHaveBeenCalledWith(expect.any(String), 'my-ollama', 'llama4');
+      expect(sendMessageSpy).not.toHaveBeenCalled();
+      expect(service.pendingModelOverride()).toBeNull();
     });
   });
 });

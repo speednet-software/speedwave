@@ -5141,6 +5141,7 @@ dependencies = [
  "chrono",
  "ctrlc",
  "dirs",
+ "fs2",
  "futures-util",
  "http",
  "jsonschema",

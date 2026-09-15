@@ -1,12 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Trap TERM from the very top — a stop during the startup phase (hub wait,
-# runtime Claude install) must exit promptly, not eat the 10s SIGKILL timeout.
 trap 'exit 0' TERM INT
 
-# Startup diagnostics: truncated each start, mirrored to stderr. Every write is
-# guarded — a read-only or symlinked claude-home degrades to stderr, never fails the start.
 _DIAG_LOG="${HOME}/.speedwave-entrypoint.log"
 _DIAG_FAILURES=0
 if [ -L "${_DIAG_LOG}" ] || { [ -e "${_DIAG_LOG}" ] && [ ! -f "${_DIAG_LOG}" ]; }; then
@@ -18,8 +14,6 @@ else
     echo "=== speedwave entrypoint $(date -Iseconds 2>/dev/null || date) ===" >> "${_DIAG_LOG}" 2>/dev/null || _DIAG_LOG=""
 fi
 
-# Secrets must never reach disk: collapse newlines, redact token-shaped values, cap length.
-# Shapes mirrored from crates/speedwave-runtime/src/log_sanitizer.rs RULES (kept in sync manually).
 _diag_redact() {
     printf '%s' "$*" | tr '\n' ' ' \
         | sed -E \
@@ -44,10 +38,6 @@ _diag_footer() {
     return 0
 }
 
-# Shared Node snippet for the JSON writers below (settings.json merge, hook
-# registration, .claude.json onboarding): fsync-before-rename is mandatory
-# (virtiofs/drvfs tear otherwise; see cross-platform rules). Each writer runs
-# in its own `node -e` process, so this is interpolated into each script.
 read -r -d '' JS_WRITE_ATOMIC << 'EOF' || true
 const writeAtomic = (p, data) => {
   const fd = fs.openSync(p + ".tmp", "w");
@@ -58,26 +48,20 @@ const writeAtomic = (p, data) => {
 };
 EOF
 
-# Disable auto-updater unconditionally — Speedwave pins Claude Code versions
 export DISABLE_AUTOUPDATER=1
 
-# Ensure full color support for Claude Code TUI
 export TERM="${TERM:-xterm-256color}"
 
-# Claude Code binary is baked into the image at /usr/local/bin/claude.
-# Fallback: if missing (e.g. custom image), install at runtime.
 export PATH="/usr/local/bin:${HOME}/.local/bin:${PATH}"
 
 CLAUDE_VERSION="${CLAUDE_VERSION:?CLAUDE_VERSION env var is required}"
 
-# Resources mount point — overridable for testing
 SPEEDWAVE_RESOURCES="${SPEEDWAVE_RESOURCES:-/speedwave/resources}"
 
 if ! command -v claude &> /dev/null; then
     echo "Claude Code not found — installing via install-claude.sh (${CLAUDE_VERSION})..."
     /usr/local/bin/install-claude.sh "${CLAUDE_VERSION}"
 else
-    # Surface image/env version skew; not auto-repaired (needs image rebuild).
     installed_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
     if [ -n "$installed_version" ] && [ "$installed_version" != "$CLAUDE_VERSION" ]; then
         echo "WARNING: image has Claude Code ${installed_version} but the pinned version is ${CLAUDE_VERSION} — run 'speedwave update' to rebuild the image" >&2
@@ -86,24 +70,18 @@ else
     _diag INFO CLAUDE "version ${installed_version} (pinned ${CLAUDE_VERSION})"
 fi
 
-# Symlink ~/.local/bin/claude → /usr/local/bin/claude so exec shells find it on PATH.
 if [ -x /usr/local/bin/claude ]; then
     mkdir -p "${HOME}/.local/bin"
     ln -sf /usr/local/bin/claude "${HOME}/.local/bin/claude"
 fi
 
-# Ensure .bashrc exports PATH so nerdctl exec sessions see ~/.local/bin
 if ! grep -q '\.local/bin' "${HOME}/.bashrc" 2>/dev/null; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
 fi
 
-# Ensure ~/.claude exists before symlinking anything
 mkdir -p "${HOME}/.claude"
 
-# Symlink claude-resources per-entry; integrations/<svc>/ gated by ENABLED_SERVICES.
-# Owned links tracked in ~/.claude/.speedwave-managed-links. See ADR-022.
 
-# Reverse migration: an older run may have left whole-directory symlinks.
 for resource_type in skills commands agents hooks; do
     target="${HOME}/.claude/${resource_type}"
     if [ -L "${target}" ]; then
@@ -112,7 +90,6 @@ for resource_type in skills commands agents hooks; do
     mkdir -p "${target}"
 done
 
-# Drop links managed by the previous run BEFORE creating the new set.
 state_file="${HOME}/.claude/.speedwave-managed-links"
 if [ -f "${state_file}" ]; then
     while IFS= read -r link; do
@@ -123,8 +100,6 @@ fi
 new_state="$(mktemp)"
 trap 'rm -f "${new_state}"' EXIT
 
-# Comma-split ENABLED_SERVICES into a Bash array, trimming whitespace per entry.
-# Source is compose.rs (Rust SSOT TOGGLEABLE_MCP_SERVICES), not user input.
 ENABLED_SVCS=()
 OS_ENABLED=false
 if [ -n "${ENABLED_SERVICES:-}" ]; then
@@ -139,8 +114,6 @@ if [ -n "${ENABLED_SERVICES:-}" ]; then
     done
 fi
 
-# OS sub-services linked when `os` in ENABLED_SERVICES AND name not in DISABLED_OS_SERVICES.
-# OS_AVAILABLE_SUBS and DISABLED_OS_SERVICES are injected by compose.rs from TOGGLEABLE_OS_SERVICES.
 DISABLED_OS_SVCS=()
 if [ -n "${DISABLED_OS_SERVICES:-}" ]; then
     IFS=',' read -ra _raw_dis <<< "${DISABLED_OS_SERVICES}"
@@ -172,15 +145,12 @@ if [ "${OS_ENABLED}" = true ] && [ "${#OS_AVAILABLE[@]}" -gt 0 ]; then
     done
 fi
 
-# Hook declaration dirs (hooks/hooks.json), collected by the symlink passes below
-# under the same enablement gates and merged into settings.json (ADR-078).
 hook_decl_dirs=()
 
 for resource_type in skills commands agents hooks; do
     src_dir="${SPEEDWAVE_RESOURCES}/${resource_type}"
     [ -d "${src_dir}" ] || continue
 
-    # Core entries — always-on. Skip the `integrations/` bucket which is gated below.
     if [ "${resource_type}" = "hooks" ] && [ -f "${src_dir}/hooks.json" ]; then
         hook_decl_dirs+=("${src_dir}")
     fi
@@ -188,15 +158,12 @@ for resource_type in skills commands agents hooks; do
         [ -e "${entry}" ] || continue
         name="$(basename "${entry}")"
         [ "${name}" = "integrations" ] && continue
-        # hooks.json is a registration manifest (ADR-078), not a hook script.
         [ "${resource_type}" = "hooks" ] && [ "${name}" = "hooks.json" ] && continue
         link="${HOME}/.claude/${resource_type}/${name}"
         ln -sfn "${entry}" "${link}"
         echo "${link}" >> "${new_state}"
     done
 
-    # Integration-bound entries — symlinked when config_key in ENABLED_SERVICES.
-    # `os` is filtered here; its sub-services are handled below.
     integrations_dir="${src_dir}/integrations"
     if [ -d "${integrations_dir}" ] && [ "${#ENABLED_SVCS[@]}" -gt 0 ]; then
         for svc in "${ENABLED_SVCS[@]}"; do
@@ -212,7 +179,6 @@ for resource_type in skills commands agents hooks; do
         done
     fi
 
-    # OS sub-services: linked only when `os` is enabled AND the sub-service is not disabled.
     if [ -d "${integrations_dir}" ] && [ "${#OS_ENABLED_SUBS[@]}" -gt 0 ]; then
         for sub in "${OS_ENABLED_SUBS[@]}"; do
             src="${integrations_dir}/${sub}"
@@ -227,16 +193,12 @@ for resource_type in skills commands agents hooks; do
     fi
 done
 
-# Symlink read-only resource files (auto-update on new Speedwave versions).
-# Teams override via project-level .claude/ (ADR-022 scope precedence).
 for resource_file in statusline.sh CLAUDE.md; do
     if [ -f "${SPEEDWAVE_RESOURCES}/${resource_file}" ]; then
         ln -sf "${SPEEDWAVE_RESOURCES}/${resource_file}" "${HOME}/.claude/${resource_file}"
     fi
 done
 
-# settings.json must be a WRITABLE copy, not a symlink (Claude Code writes it).
-# Replace a stale symlink, then key-merge template keys absent from the on-disk file.
 if [ -L "${HOME}/.claude/settings.json" ]; then
     rm -f "${HOME}/.claude/settings.json"
 fi
@@ -246,39 +208,36 @@ if [ -f "${SPEEDWAVE_RESOURCES}/settings.json" ]; then
     if [ ! -e "${_dest}" ]; then
         cp "${_tmpl}" "${_dest}"
     else
-        # Merge template keys; on the unrouted (Anthropic) path drop a foreign provider/model
-        # id a routed session's /model left behind (ADR-073 amendment). Atomic; node failure → skip.
         node -e "
 const fs = require('fs');
 ${JS_WRITE_ATOMIC}
 const tmpl = JSON.parse(fs.readFileSync('${_tmpl}', 'utf8'));
 const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
-const foreign = typeof merged.model === 'string' && merged.model.includes('/');
+let changed = cur === null || typeof cur !== 'object' || Array.isArray(cur)
+  || Object.keys(tmpl).some((k) => !Object.prototype.hasOwnProperty.call(cur, k));
+const foreign = typeof merged.model === 'string' && !/^(claude-.+|[a-z]+(\[1m\])?)\$/.test(merged.model);
 if (!process.env.ANTHROPIC_MODEL && foreign) {
   console.error('entrypoint: dropping foreign settings.json model ' + merged.model);
   delete merged.model;
+  changed = true;
 }
-writeAtomic('${_dest}', JSON.stringify(merged, null, 2) + '\n');
+if (changed) {
+  writeAtomic('${_dest}', JSON.stringify(merged, null, 2) + '\n');
+}
 " || echo 'entrypoint: settings.json merge skipped' >&2
     fi
     unset _tmpl _dest
 fi
 
-# output-styles: symlink individual file (not directory) to preserve user's custom styles
 if [ -f "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" ]; then
     mkdir -p "${HOME}/.claude/output-styles"
     ln -sf "${SPEEDWAVE_RESOURCES}/output-styles/Speedwave.md" "${HOME}/.claude/output-styles/Speedwave.md"
 fi
 
-# Install bundled official Anthropic plugins (defaults::BUNDLED_PLUGINS); only installs plugins
-# not already present, so `/plugin disable` survives a restart. Non-fatal and bounded.
-# v2: pre-v2 markers were poisoned by the empty-list bug below — ignore and remove them.
 _bundled_marker="${HOME}/.claude/.speedwave-bundled-plugins-installed.v2"
 rm -f "${HOME}/.claude/.speedwave-bundled-plugins-installed"
 
-# One-time removal of a plugin Speedwave used to bundle (ADR-087). Runs only while the marker
-# records the plugin as installed by Speedwave (a `#found` line is the user's own). Non-fatal.
 _retired="superpowers@claude-plugins-official"
 _retired_keep=""
 if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; then
@@ -287,24 +246,20 @@ if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; 
         _diag WARN CONFIG "jq not found — retired plugin removal skipped"
         _retired_keep="${_retired}"
     else
-        # Blank or malformed list output means unknown, not absent: fall through to the uninstall.
         _present="$(timeout 30 claude plugin list --json 2>/dev/null | jq -r \
             --arg id "${_retired}" --arg name "${_retired%@*}" --arg mp "${_retired#*@}" \
             'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp)) | tostring' \
             2>/dev/null)" || _present=""
         _gone=0
         if [ "${_present}" = "false" ]; then
-            # Absent at every scope, so the leftover cache tree is dead weight too.
             rm -rf "${HOME}/.claude/plugins/cache/${_retired#*@}/${_retired%@*}"
             _gone=1
             _diag INFO SKIP "${_retired} not installed; dropping its marker entry"
         elif _err="$(timeout 60 claude plugin uninstall "${_retired}" 2>&1 >/dev/null)"; then
-            # CC leaves the plugin's cache tree behind; nothing loads it, but it is dead weight.
             rm -rf "${HOME}/.claude/plugins/cache/${_retired#*@}/${_retired%@*}"
             _gone=1
             _diag INFO OK "uninstalled retired plugin ${_retired}"
         elif [[ "${_err}" == *"not found in installed plugins"* ]]; then
-            # Gone at user scope only; a project-scope install may still use the cache, so keep it.
             _gone=1
             _diag INFO SKIP "${_retired} already removed; dropping its marker entry"
         else
@@ -313,7 +268,6 @@ if [ -f "${_bundled_marker}" ] && grep -qxF "${_retired}" "${_bundled_marker}"; 
             _retired_keep="${_retired}"
         fi
         if [ "${_gone}" -eq 1 ]; then
-            # grep -v exits 1 when it drops the last line; exit >1 or a missing .tmp means the write failed.
             _rc=0
             grep -vxF "${_retired}" "${_bundled_marker}" > "${_bundled_marker}.tmp" || _rc=$?
             if [ "${_rc}" -gt 1 ] || [ ! -f "${_bundled_marker}.tmp" ] || ! mv "${_bundled_marker}.tmp" "${_bundled_marker}"; then
@@ -335,9 +289,6 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
         _diag WARN CONFIG "invalid bundled-plugin marketplace: ${_mp}"
         SPEEDWAVE_BUNDLED_PLUGINS=""
     fi
-    # Skip listing/installing entirely once every configured plugin was recorded
-    # as handled by a previous run — the common case on every restart after the
-    # first. A changed marketplace or a newly bundled plugin still falls through.
     _all_recorded=1
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ -f "${_bundled_marker}" ]; then
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
@@ -357,13 +308,10 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
     fi
     if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS}" ] && [ "${_all_recorded}" -eq 0 ]; then
         _new_marker="$(mktemp)"
-        # A retired plugin whose removal did not complete keeps its line so the next start retries.
         if [ -n "${_retired_keep}" ]; then
             echo "${_retired_keep}" >> "${_new_marker}"
         fi
         _mp_add_attempted=""
-        # The CLI can print NOTHING with exit 0 on a cold start; blank means unknown,
-        # never "everything installed" (jq 1.6's -e exits 0 on empty input).
         _installed="$(timeout 30 claude plugin list --json 2>/dev/null || echo '[]')"
         [ -n "${_installed//[$' \t\n\r']/}" ] || _installed='[]'
         for _plugin in ${SPEEDWAVE_BUNDLED_PLUGINS//,/ }; do
@@ -372,14 +320,11 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                 _diag WARN CONFIG "invalid bundled-plugin name: ${_plugin}"
                 continue
             fi
-            # Match a composite id ("name@marketplace") OR separate name+marketplace
-            # fields; only a literal `true` skips — jq exit codes are version-dependent.
             _match="$(printf '%s' "${_installed}" | jq \
                 --arg id "${_plugin}@${_mp}" --arg name "${_plugin}" --arg mp "${_mp}" \
                 'any(.[]; (.id == $id) or (.name == $name and .marketplace == $mp))' \
                 2>/dev/null)" || _match=""
             if [ "${_match}" = "true" ]; then
-                # Carry over Speedwave's own install record; a first sighting is the user's (#found).
                 if grep -qxF "${_plugin}@${_mp}" "${_bundled_marker}" 2>/dev/null; then
                     echo "${_plugin}@${_mp}" >> "${_new_marker}"
                 else
@@ -388,19 +333,14 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
                 _diag INFO SKIP "${_plugin}@${_mp} (already installed)"
                 continue
             fi
-            # CC registers the official marketplace only on interactive TTY startup —
-            # headless/CLI runs never do, so a fresh HOME must add it before installing.
             if [ "${_mp}" = "claude-plugins-official" ] && [ -z "${_mp_add_attempted}" ] \
                 && ! jq -e --arg mp "${_mp}" '.[$mp] | type == "object"' "${HOME}/.claude/plugins/known_marketplaces.json" >/dev/null 2>&1; then
-                # One network attempt per start (deliberate latency bound) — once the
-                # registration is durable, the jq check above skips the subprocess.
                 _mp_add_attempted=1
                 if ! _err="$(timeout 150 claude plugin marketplace add "anthropics/${_mp}" 2>&1 >/dev/null)"; then
                     echo "WARNING: failed to add plugin marketplace ${_mp}: ${_err} (continuing)" >&2
                     _diag WARN CONFIG "marketplace add ${_mp}: ${_err}"
                 fi
             fi
-            # CC ≥2.1.232 re-syncs the marketplace catalog inside install — needs headroom over 60s.
             if _err="$(timeout 120 claude plugin install "${_plugin}@${_mp}" 2>&1 >/dev/null)"; then
                 echo "${_plugin}@${_mp}" >> "${_new_marker}"
                 _diag INFO OK "${_plugin}@${_mp}"
@@ -419,8 +359,6 @@ if [ -n "${SPEEDWAVE_BUNDLED_PLUGINS:-}" ]; then
 fi
 unset _bundled_marker _retired_keep
 
-# Symlink plugin resources — same managed-link tracking as core/integration entries
-# so toggling a plugin off cleans up its links on the next restart.
 if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     for plugin in ${SPEEDWAVE_PLUGINS//,/ }; do
         if ! echo "${plugin}" | grep -qE '^[a-z][a-z0-9-]{0,63}$'; then
@@ -449,8 +387,6 @@ if [ -n "${SPEEDWAVE_PLUGINS:-}" ]; then
     done
 fi
 
-# Atomically replace the state file (sorted+deduplicated).
-# On sort failure the previous state_file is kept untouched.
 if sort -u "${new_state}" -o "${new_state}"; then
     mv "${new_state}" "${state_file}"
 else
@@ -458,8 +394,6 @@ else
     exit 1
 fi
 
-# Register the collected hooks.json declarations in ~/.claude/settings.json —
-# Claude Code runs hooks only from the settings "hooks" key (ADR-078).
 _managed_hooks="${HOME}/.claude/.speedwave-managed-hooks"
 if [ "${#hook_decl_dirs[@]}" -gt 0 ] || [ -f "${_managed_hooks}" ]; then
     _decl_dirs=""
@@ -477,7 +411,6 @@ const statePath = process.env.SPW_MANAGED_HOOKS_FILE;
 const declDirs = (process.env.SPW_HOOK_DECL_DIRS || "").split("\n").filter(Boolean);
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-// Key-order-insensitive fingerprint for matching previously injected entries.
 const stable = (v) => JSON.stringify(v, (k, val) =>
   isObj(val) ? Object.keys(val).sort().reduce((o, key) => ((o[key] = val[key]), o), {}) : val);
 const validDecl = (decl) => isObj(decl) && Object.entries(decl).every(([event, groups]) =>
@@ -504,9 +437,6 @@ if (fs.existsSync(statePath)) {
   catch (e) { console.error("WARNING: managed-hooks state unparseable (" + e.message + ") — hooks of disabled sources may stay registered until re-enabled and disabled again"); }
 }
 
-// Drop entries injected by the previous run, matched by the managed marker id
-// (ADR-078 Amendment 1) rather than structural equality — a user-authored
-// hook that happens to be byte-identical to a managed one is never matched.
 for (const [event, groups] of Object.entries(prev)) {
   if (!Array.isArray(hooks[event]) || !Array.isArray(groups)) continue;
   for (const g of groups) {
@@ -527,8 +457,6 @@ for (const dir of declDirs) {
   for (const [event, groups] of Object.entries(decl)) {
     groups.forEach((g, idx) => {
       for (const h of g.hooks) h.command = h.command.split("${SPEEDWAVE_HOOK_DIR}").join(dir);
-      // Deterministic per (source, event, index) — stable across restarts of
-      // the same source, distinct from any user-authored group.
       g._speedwaveHookId = dir + "#" + event + "#" + idx;
       (managed[event] = managed[event] || []).push(g);
     });
@@ -540,9 +468,6 @@ for (const [event, groups] of Object.entries(managed)) {
     console.error("WARNING: settings.json hooks." + event + " is not an array — skipping its managed hooks");
     continue;
   }
-  // Skip entries already registered under this marker id: heals a crash
-  // between the two writes below and a lost manifest without ever
-  // double-registering a hook.
   for (const g of groups) {
     if (!hooks[event].some((c) => isObj(c) && c._speedwaveHookId === g._speedwaveHookId)) hooks[event].push(g);
   }
@@ -562,11 +487,8 @@ if (Object.keys(managed).length > 0) {
 fi
 unset _managed_hooks
 
-# Generate MCP config for Claude Code — tells it where the MCP hub lives.
-# MCP_HUB_PORT is injected by compose.template.yml; default matches PORT_BASE.
 MCP_HUB_PORT="${MCP_HUB_PORT:-4000}"
 
-# Claude sees ONLY the hub — all services (including mcp-os) are behind it.
 cat > "${HOME}/.claude/mcp-config.json" << EOF
 {
   "mcpServers": {
@@ -578,15 +500,10 @@ cat > "${HOME}/.claude/mcp-config.json" << EOF
 }
 EOF
 
-# Pre-seed .claude.json: pre-accept the /workspace trust dialog.
-# Set onboarding only when logged in, else leave it for the OAuth flow.
 creds_valid() {
     local f="${HOME}/.claude/.credentials.json"
-    # Non-empty and ends with `}` (a complete JSON object, not a truncated write).
     [ -s "$f" ] && [ "$(tr -d '[:space:]' < "$f" | tail -c 1)" = "}" ]
 }
-# Fresh file: write the always-on /workspace trust+onboarding skeleton (no creds
-# needed — both are per-workspace, independent of login).
 if [ ! -f "${HOME}/.claude.json" ]; then
     cat > "${HOME}/.claude.json" << 'EOF'
 {
@@ -599,8 +516,6 @@ if [ ! -f "${HOME}/.claude.json" ]; then
 }
 EOF
 fi
-# Merge runs only when logged in: it owns the login-gated top-level fields and
-# re-asserts the /workspace booleans (also seeded by the fresh skeleton above).
 if creds_valid; then
     node -e "
 const fs = require('fs');
@@ -624,7 +539,6 @@ if (changed) {
 fi
 
 
-# Wait for MCP hub to accept connections before Claude starts; bail after ~30s.
 if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
     wait_for_hub() {
         local host="mcp-hub" port="${MCP_HUB_PORT}" attempts=30
@@ -642,16 +556,13 @@ if [ -z "${SPEEDWAVE_SKIP_HUB_WAIT:-}" ]; then
     wait_for_hub || true
 fi
 
-# Health check marker
 touch "${CLAUDE_READY_MARKER:-/tmp/claude-ready}"
 
-# Execute the passed command (or keep container alive waiting for exec)
 if [ $# -gt 0 ]; then
     _diag_footer
     exec "$@"
 else
     _diag_footer
-    # PID1 must trap TERM and kill the background sleep on exit.
     trap 'kill "$!" 2>/dev/null; exit 0' TERM INT
     while :; do sleep 86400 & wait $!; done
 fi

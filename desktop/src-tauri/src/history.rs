@@ -1,5 +1,3 @@
-/// Chat history — reads Claude Code JSONL session files and project memory.
-/// Public fns delegate to `_impl(data_dir: &Path)` variants that tests call directly.
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -7,9 +5,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use speedwave_runtime::consts;
 
-// ── Types ───────────────────────────────────────────────────────────────────────────────
-
-/// Summary of a single conversation (session file).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationSummary {
     pub session_id: String,
@@ -18,60 +13,46 @@ pub struct ConversationSummary {
     pub message_count: usize,
 }
 
-/// Rich block types for detailed message rendering.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum MessageBlock {
-    /// Text content.
     #[serde(rename = "text")]
     Text { content: String },
-    /// Thinking / extended thinking content.
     #[serde(rename = "thinking")]
     Thinking { content: String },
-    /// Tool invocation with input JSON.
     #[serde(rename = "tool_use")]
     ToolUse {
         tool_name: String,
         input_json: String,
     },
-    /// Tool execution result.
     #[serde(rename = "tool_result")]
     ToolResult { content: String, is_error: bool },
-    /// Error content.
     #[serde(rename = "error")]
     Error { content: String },
+    #[serde(rename = "control_chip")]
+    ControlChip { command: String, argument: String },
 }
 
-/// A single message extracted from a JSONL session.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
-    /// Rich blocks for detailed rendering (optional — backward-compatible).
-    /// When `Some`, frontend uses block-based rendering; when `None`, falls back to `content`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<MessageBlock>>,
     pub timestamp: Option<String>,
-    /// Stable JSONL UUID; anchors the retry-last-turn rewind point (ADR-046).
-    /// `None` when the line lacks a `uuid` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
-    /// Per-message model id (assistant turns only); restores the resumed footer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Per-message token usage (assistant turns only). Reuses the chat SSOT.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::chat::TurnUsage>,
 }
 
-/// Full transcript of a conversation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConversationTranscript {
     pub session_id: String,
     pub messages: Vec<ConversationMessage>,
 }
-
-// ── Path helpers ────────────────────────────────────────────────────────────────────────
 
 fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
     data_dir
@@ -80,13 +61,11 @@ fn claude_dot_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
         .join(".claude")
 }
 
-fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
+pub(crate) fn sessions_dir_impl(data_dir: &Path, project: &str) -> PathBuf {
     let projects_dir = claude_dot_dir_impl(data_dir, project).join("projects");
     resolve_workspace_dir(&projects_dir)
 }
 
-/// Resolves the workspace subdirectory inside `.claude/projects/`.
-/// `/workspace` → `-workspace`; falls back to newest-by-mtime auto-discovery.
 fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
     let default = projects_dir.join("-workspace");
     if default.is_dir() {
@@ -108,7 +87,6 @@ fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
                 return candidates.remove(0);
             }
             if candidates.len() > 1 {
-                // Sort by mtime (newest first), alphabetical as tiebreak.
                 candidates.sort_by(|a, b| {
                     let ma = a.metadata().and_then(|m| m.modified()).ok();
                     let mb = b.metadata().and_then(|m| m.modified()).ok();
@@ -126,10 +104,6 @@ fn resolve_workspace_dir(projects_dir: &Path) -> PathBuf {
     default
 }
 
-// ── Validation ──────────────────────────────────────────────────────────────────────────
-
-/// Validate that `id` looks like a lowercase UUID v4 hex string.
-/// Accepts: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12, hex digits).
 pub fn validate_session_id(id: &str) -> anyhow::Result<()> {
     validate_session_id_impl(id)
 }
@@ -154,10 +128,6 @@ fn validate_session_id_impl(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── JSONL parsing helpers ───────────────────────────────────────────────────────────────
-
-/// Extract displayable text from a JSONL message line.
-/// Returns `None` if the line should be skipped.
 fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
     let parsed: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -169,8 +139,10 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
 
     let msg_type = parsed["type"].as_str().unwrap_or("");
 
-    // Skip synthetic `type:"user"` meta-entries via `isMeta` (top-level or nested) or content sniffing.
     if msg_type == "user" {
+        if let Some(line) = control_command_from_synthetic_entry(&parsed) {
+            return Some(control_line_message(&parsed, line));
+        }
         let reason = if parsed["isMeta"].as_bool().unwrap_or(false) {
             Some("isMeta")
         } else if parsed["message"]["isMeta"].as_bool().unwrap_or(false) {
@@ -193,19 +165,12 @@ fn parse_jsonl_message(line: &str) -> Option<ConversationMessage> {
         "user" => parse_user_message(&parsed),
         "assistant" => parse_assistant_message(&parsed),
         "result" => parse_result_message(&parsed),
-        _ => {
-            // file-history-snapshot, system, progress, unknown — skip
-            None
-        }
+        _ => None,
     }
 }
 
-/// Bytes of the file tail read by [`last_message_timestamp`]. Sized to comfortably
-/// hold the last several JSONL lines (incl. trailing `last-prompt`/`ai-title`).
 const TAIL_READ_BYTES: u64 = 64 * 1024;
 
-/// Timestamp of the last JSONL line carrying one — the session's last activity.
-/// Scans only the final [`TAIL_READ_BYTES`] backwards; `None` if none present.
 fn last_message_timestamp(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path).ok()?;
@@ -215,8 +180,6 @@ fn last_message_timestamp(path: &Path) -> Option<String> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     let tail = String::from_utf8_lossy(&buf);
-    // When we started mid-file the first line may be partial — drop it. `skip`
-    // (not slicing) stays panic-free even if the tail read returned no lines.
     let lines: Vec<&str> = tail.lines().collect();
     let scan_from = if start > 0 { 1 } else { 0 };
     for line in lines.iter().skip(scan_from).rev() {
@@ -229,14 +192,11 @@ fn last_message_timestamp(path: &Path) -> Option<String> {
     None
 }
 
-/// Detects synthetic `type:"user"` entries with no `isMeta` flag by sniffing content.
-/// Caller must ensure `parsed["type"] == "user"`.
 fn is_synthetic_user_entry(parsed: &serde_json::Value) -> bool {
     let content = &parsed["message"]["content"];
     if let Some(s) = content.as_str() {
         text_is_synthetic(s)
     } else if let Some(arr) = content.as_array() {
-        // Check each text block so a synthetic tag in any block is caught.
         arr.iter()
             .filter(|b| b["type"].as_str() == Some("text"))
             .filter_map(|b| b["text"].as_str())
@@ -257,13 +217,54 @@ fn text_is_synthetic(s: &str) -> bool {
         || trimmed.starts_with("Commands are in the form `/command [args]`")
 }
 
+fn control_command_from_synthetic_entry(parsed: &serde_json::Value) -> Option<String> {
+    let content = &parsed["message"]["content"];
+    let text = match content.as_str() {
+        Some(s) => s.to_string(),
+        None => content
+            .as_array()?
+            .iter()
+            .filter(|b| b["type"].as_str() == Some("text"))
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    if !text_is_synthetic(&text) {
+        return None;
+    }
+    let name = tag_body(&text, "command-name")?.trim();
+    let args = tag_body(&text, "command-args").unwrap_or("").trim();
+    let line = format!("{name} {args}");
+    speedwave_runtime::slash::parse_control_command(&line)
+        .is_some()
+        .then_some(line)
+}
+
+fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&format!("</{tag}>"))? + start;
+    Some(&text[start..end])
+}
+
+fn control_line_message(parsed: &serde_json::Value, line: String) -> ConversationMessage {
+    ConversationMessage {
+        role: "user".to_string(),
+        content: line.clone(),
+        blocks: Some(vec![MessageBlock::Text { content: line }]),
+        timestamp: parsed["timestamp"].as_str().map(String::from),
+        uuid: parsed["uuid"].as_str().map(String::from),
+        model: None,
+        usage: None,
+    }
+}
+
 fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage> {
     let message = &parsed["message"];
     let content = &message["content"];
     let timestamp = parsed["timestamp"].as_str().map(String::from);
     let uuid = parsed["uuid"].as_str().map(String::from);
 
-    // content can be a plain string
     if let Some(text) = content.as_str() {
         if text.is_empty() {
             return None;
@@ -281,9 +282,7 @@ fn parse_user_message(parsed: &serde_json::Value) -> Option<ConversationMessage>
         });
     }
 
-    // content can be an array of blocks
     if let Some(raw_blocks) = content.as_array() {
-        // Skip messages where content is only tool_result blocks
         let has_non_tool_result = raw_blocks
             .iter()
             .any(|b| b["type"].as_str().unwrap_or("") != "tool_result");
@@ -369,17 +368,13 @@ fn parse_assistant_message(parsed: &serde_json::Value) -> Option<ConversationMes
         return None;
     }
 
-    // Flat content fallback (for sidebar preview and legacy rendering)
     let flat_content = if parts.is_empty() {
-        // Thinking-only messages — provide a placeholder
         "[thinking]".to_string()
     } else {
         parts.join("\n")
     };
 
     let model = message["model"].as_str().map(String::from);
-    // JSONL field names differ from TurnUsage; chat SSOT remaps on parse. Sidechain (subagent)
-    // calls have their own context — never attach their usage or resume seed reads a foreign size.
     let usage = if crate::chat::is_sidechain_event(parsed) {
         None
     } else {
@@ -408,7 +403,6 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     }
 
     let timestamp = parsed["timestamp"].as_str().map(String::from);
-    // Result lines carry no stable per-turn uuid; leave `None`.
     let uuid = None;
 
     if is_error {
@@ -438,10 +432,6 @@ fn parse_result_message(parsed: &serde_json::Value) -> Option<ConversationMessag
     })
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────────────────
-
-/// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
-/// Safe for multi-byte UTF-8 content (operates on char boundaries, not bytes).
 fn truncate_preview(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {
@@ -451,7 +441,33 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
     format!("{end}...")
 }
 
-/// List all conversations for a project, sorted newest first.
+fn fold_history_control_chips(messages: &mut Vec<ConversationMessage>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let chip = match messages[i].blocks.as_deref() {
+            Some([MessageBlock::Text { content }]) if messages[i].role == "user" => {
+                speedwave_runtime::slash::parse_control_command(content)
+                    .map(|(command, argument)| (command.to_string(), argument.to_string()))
+            }
+            _ => None,
+        };
+        let Some((command, argument)) = chip else {
+            i += 1;
+            continue;
+        };
+        messages[i].blocks = Some(vec![MessageBlock::ControlChip { command, argument }]);
+
+        let next_is_synthetic = messages.get(i + 1).is_some_and(|m| {
+            m.role == "assistant"
+                && m.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL)
+        });
+        if next_is_synthetic {
+            messages.remove(i + 1);
+        }
+        i += 1;
+    }
+}
+
 pub fn list_conversations(project: &str) -> anyhow::Result<Vec<ConversationSummary>> {
     list_conversations_impl(consts::data_dir(), project)
 }
@@ -479,24 +495,19 @@ fn list_conversations_impl(
         };
         let path = entry.path();
 
-        // Only process .jsonl files
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
 
-        // Extract session_id from filename (strip .jsonl)
         let session_id = match path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s.to_string(),
             None => continue,
         };
 
-        // Validate it's a UUID — skip non-UUID filenames.
-        // This also prevents reading .credentials.json (not a valid UUID).
         if validate_session_id_impl(&session_id).is_err() {
             continue;
         }
 
-        // Scan first ~50 lines for timestamp, preview, and approximate count.
         let file = match fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
@@ -512,8 +523,6 @@ fn list_conversations_impl(
         let mut user_message_count: usize = 0;
         let mut last_assistant_content: Option<String> = None;
         const MAX_SCAN_LINES: usize = 50;
-        // Whether the head scan saw the whole file — gates the junk-slash drop
-        // below (a real 2nd user message past the cap must keep the session).
         let mut scanned_lines: usize = 0;
 
         for line in reader.lines().take(MAX_SCAN_LINES) {
@@ -523,7 +532,13 @@ fn list_conversations_impl(
             };
             scanned_lines += 1;
             if let Some(msg) = parse_jsonl_message(&line) {
-                // Deduplicate: skip result whose content is a substring of the preceding assistant message.
+                let is_control_chip_user = msg.role == "user"
+                    && speedwave_runtime::slash::parse_control_command(&msg.content).is_some();
+                let is_synthetic_chip_reply = msg.role == "assistant"
+                    && msg.model.as_deref() == Some(crate::session_model::SYNTHETIC_MODEL);
+                if is_control_chip_user || is_synthetic_chip_reply {
+                    continue;
+                }
                 if msg.role == "assistant" {
                     if let Some(ref prev) = last_assistant_content {
                         if prev.contains(&msg.content) {
@@ -538,8 +553,6 @@ fn list_conversations_impl(
                 if msg.role == "user" {
                     user_message_count += 1;
                 }
-                // Head-scan timestamp is only a fallback for when the tail read
-                // below finds none; the tail is the authoritative last activity.
                 if msg.timestamp.is_some() {
                     last_timestamp = msg.timestamp.clone();
                 }
@@ -549,12 +562,8 @@ fn list_conversations_impl(
             }
         }
 
-        // The head scan saw the whole file iff it stopped before its cap; then
-        // `last_timestamp`/`user_message_count` are authoritative.
         let head_saw_whole_file = scanned_lines < MAX_SCAN_LINES;
 
-        // Re-read the tail only when the head was truncated; tail wins when
-        // present (a fully-scanned short file already has the last activity).
         if !head_saw_whole_file {
             if let Some(ts) = last_message_timestamp(&path) {
                 last_timestamp = Some(ts);
@@ -565,8 +574,6 @@ fn list_conversations_impl(
             continue;
         }
 
-        // Drop junk sessions whose sole user message is a lone `/`, only when the
-        // head saw the whole file. Real `/code-review` and 2nd messages survive.
         if head_saw_whole_file
             && user_message_count == 1
             && speedwave_runtime::slash::is_bare_slash(&preview)
@@ -582,7 +589,6 @@ fn list_conversations_impl(
         });
     }
 
-    // Sort by last activity, newest first (None last).
     summaries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     if dir.is_dir() && summaries.is_empty() {
@@ -595,7 +601,6 @@ fn list_conversations_impl(
     Ok(summaries)
 }
 
-/// Get the full transcript for a specific session.
 pub fn get_conversation(project: &str, session_id: &str) -> anyhow::Result<ConversationTranscript> {
     get_conversation_impl(consts::data_dir(), project, session_id)
 }
@@ -618,7 +623,6 @@ fn get_conversation_impl(
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
         if let Some(msg) = parse_jsonl_message(&line) {
-            // Deduplicate: skip result whose content is a substring of the preceding assistant message.
             if msg.role == "assistant" {
                 if let Some(ref prev) = last_assistant_content {
                     if prev.contains(&msg.content) {
@@ -633,13 +637,14 @@ fn get_conversation_impl(
         }
     }
 
+    fold_history_control_chips(&mut messages);
+
     Ok(ConversationTranscript {
         session_id: session_id.to_string(),
         messages,
     })
 }
 
-/// Read the project memory file (MEMORY.md). Returns empty string if missing.
 pub fn get_project_memory(project: &str) -> anyhow::Result<String> {
     get_project_memory_impl(consts::data_dir(), project)
 }
@@ -655,8 +660,6 @@ fn get_project_memory_impl(data_dir: &Path, project: &str) -> anyhow::Result<Str
     }
 }
 
-/// Delete a conversation's JSONL file. Idempotent: a missing file is treated
-/// as success so a double-click on the trash icon doesn't surface an error.
 pub fn delete_conversation(project: &str, session_id: &str) -> anyhow::Result<()> {
     delete_conversation_impl(consts::data_dir(), project, session_id)
 }
@@ -675,35 +678,72 @@ fn delete_conversation_impl(
     }
 }
 
-// ── Resume snapshot ─────────────────────────────────────────────────────────────────────
-
-/// Cumulative session state recovered from a transcript. Seeds the
-/// `StreamParser` on resume so the first new turn reports a real delta.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResumeSnapshot {
-    /// Cumulative input tokens across the session.
     pub input_tokens: u64,
-    /// Cumulative output tokens across the session.
     pub output_tokens: u64,
-    /// Cumulative cache-read tokens.
     pub cache_read_tokens: u64,
-    /// Cumulative cache-write (creation) tokens.
     pub cache_write_tokens: u64,
-    /// Cumulative cost in USD reported by the CLI in the most recent
-    /// `result` line (`total_cost_usd`, falling back to `total_cost`).
     pub total_cost: Option<f64>,
-    /// Most recently observed model. Pulled from the latest `result`'s
-    /// `modelUsage` keys; falls back to the last `system init` model.
     pub model: Option<String>,
-    /// Usage of the last main-chain assistant line (`message.usage`) —
-    /// context-window occupancy at the point the session was left off.
     pub context_usage: Option<crate::chat::TurnUsage>,
 }
 
-/// Compute the cumulative session snapshot from a JSONL transcript: usage/cost
-/// prefer the latest `modelUsage`; `model` is the conversation model, `modelUsage` a fallback.
 pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
+}
+
+const LAST_SESSION_MODEL_SCAN_CAP: usize = 20;
+
+pub(crate) fn last_session_model_impl(
+    data_dir: &Path,
+    project: &str,
+    accept: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let dir = sessions_dir_impl(data_dir, project);
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .map(|e| {
+            let modified = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (modified, e.path())
+        })
+        .collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries
+        .into_iter()
+        .take(LAST_SESSION_MODEL_SCAN_CAP)
+        .find_map(|(_, path)| session_start_model(&path).filter(|m| accept(m)))
+}
+
+fn session_start_model(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    for line in BufReader::new(file)
+        .lines()
+        .take(10_000)
+        .map_while(Result::ok)
+    {
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let model = match parsed["type"].as_str().unwrap_or("") {
+            "system" if parsed["subtype"].as_str() == Some("init") => parsed["model"].as_str(),
+            "assistant" => parsed["message"]["model"].as_str(),
+            _ => None,
+        };
+        match model {
+            Some(m) if !m.is_empty() && m != crate::session_model::SYNTHETIC_MODEL => {
+                return Some(m.to_string());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn compute_resume_snapshot_impl(
@@ -720,14 +760,13 @@ fn compute_resume_snapshot_impl(
     const MAX_TRANSCRIPT_LINES: usize = 10_000;
     let reader = BufReader::new(file);
 
-    // Running sum of flat `usage` blocks; fallback when no `modelUsage`.
     let mut summed = ResumeSnapshot::default();
-    // Cumulative snapshot from the most recent `result` carrying `modelUsage`.
     let mut latest_cumulative: Option<ResumeSnapshot> = None;
     let mut latest_cost: Option<f64> = None;
     let mut latest_modelusage_model: Option<String> = None;
-    let mut latest_conversation_model: Option<String> = None;
+    let mut latest_init_model: Option<String> = None;
     let mut last_context_usage: Option<crate::chat::TurnUsage> = None;
+    let mut tracker = crate::session_model::SessionModelTracker::default();
 
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
         let line = line.map_err(|e| anyhow::anyhow!("io error reading session: {e}"))?;
@@ -745,8 +784,6 @@ fn compute_resume_snapshot_impl(
                     latest_cost = Some(cost);
                 }
                 if let Some(usage) = parsed.get("usage") {
-                    // Summing keeps its legacy-name fallback; field names are
-                    // the chat SSOT consts (cf. `turn_usage_from_jsonl`).
                     let read_u64 = |k: &str| usage.get(k).and_then(serde_json::Value::as_u64);
                     summed.input_tokens = summed
                         .input_tokens
@@ -789,7 +826,6 @@ fn compute_resume_snapshot_impl(
                         if any_field {
                             latest_cumulative = Some(cumulative);
                         }
-                        // Fallback only: the top-outputTokens entry may be a subagent model.
                         if let Some((top_model, _)) = model_usage.iter().max_by_key(|(_, stats)| {
                             stats
                                 .get("outputTokens")
@@ -805,24 +841,21 @@ fn compute_resume_snapshot_impl(
                 if parsed["subtype"].as_str() == Some("init") {
                     if let Some(model) = parsed["model"].as_str() {
                         if !model.is_empty() {
-                            latest_conversation_model = Some(model.to_string());
+                            latest_init_model = Some(model.to_string());
+                            tracker.observe_init(model);
                         }
                     }
                 }
             }
             "assistant" => {
-                // Last main-chain call's usage = context occupancy; sidechain
-                // (subagent) lines have their own context and are skipped.
                 if !crate::chat::is_sidechain_event(&parsed) {
+                    if let Some(model) = parsed["message"]["model"].as_str() {
+                        tracker.observe_assistant(model);
+                    }
                     if let Some(u) = crate::chat::turn_usage_from_jsonl(&parsed["message"]["usage"])
                     {
                         if u != crate::chat::TurnUsage::default() {
                             last_context_usage = Some(u);
-                        }
-                    }
-                    if let Some(m) = parsed["message"]["model"].as_str() {
-                        if !m.is_empty() {
-                            latest_conversation_model = Some(m.to_string());
                         }
                     }
                 }
@@ -833,20 +866,20 @@ fn compute_resume_snapshot_impl(
 
     let mut snap = latest_cumulative.unwrap_or(summed);
     snap.total_cost = latest_cost;
-    snap.model = latest_conversation_model.or(latest_modelusage_model);
+    snap.model = tracker
+        .resolve()
+        .map(str::to_string)
+        .or(latest_modelusage_model)
+        .or(latest_init_model);
     snap.context_usage = last_context_usage;
     Ok(snap)
 }
-
-// ── Tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test code asserts via unwrap")]
 mod tests {
     use super::*;
 
-    /// Create the sessions directory structure inside a tempdir.
-    /// `data_dir` acts as the data directory (like `~/.speedwave`).
     fn setup_sessions_dir(data_dir: &Path, project: &str) -> PathBuf {
         let dir = sessions_dir_impl(data_dir, project);
         fs::create_dir_all(&dir).unwrap();
@@ -858,7 +891,184 @@ mod tests {
         fs::write(&path, lines.join("\n")).unwrap();
     }
 
-    // ── validate_session_id ────────────────────────────────────────
+    fn user_msg(uuid: &str, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+            blocks: Some(vec![MessageBlock::Text {
+                content: content.to_string(),
+            }]),
+            timestamp: None,
+            uuid: Some(uuid.to_string()),
+            model: None,
+            usage: None,
+        }
+    }
+
+    fn assistant_msg(model: Option<&str>, content: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            blocks: Some(vec![MessageBlock::Text {
+                content: content.to_string(),
+            }]),
+            timestamp: None,
+            uuid: None,
+            model: model.map(str::to_string),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_converts_matching_user_text() {
+        let mut messages = vec![user_msg("u1", "/model claude-sonnet-5")];
+        fold_history_control_chips(&mut messages);
+        match &messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_removes_paired_synthetic_reply() {
+        let mut messages = vec![
+            user_msg("u1", "/model claude-sonnet-5"),
+            assistant_msg(
+                Some(crate::session_model::SYNTHETIC_MODEL),
+                "Set model to claude-sonnet-5",
+            ),
+            assistant_msg(Some("claude-sonnet-5"), "Hello!"),
+        ];
+        fold_history_control_chips(&mut messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "the synthetic confirmation must be folded away"
+        );
+        assert!(matches!(
+            messages[0].blocks.as_ref().unwrap()[0],
+            MessageBlock::ControlChip { .. }
+        ));
+        assert_eq!(messages[1].content, "Hello!");
+    }
+
+    #[test]
+    fn fold_history_control_chips_only_folds_synthetic_directly_after_a_chip() {
+        let mut messages = vec![
+            user_msg("u1", "hello"),
+            assistant_msg(
+                Some(crate::session_model::SYNTHETIC_MODEL),
+                "unrelated synthetic reply",
+            ),
+        ];
+        fold_history_control_chips(&mut messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "synthetic-fold only applies right after a chip"
+        );
+        match &messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::Text { content } => assert_eq!(content, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_leaves_help_command_unchipped() {
+        let mut messages = vec![user_msg("u1", "/help")];
+        fold_history_control_chips(&mut messages);
+        match &messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::Text { content } => assert_eq!(content, "/help"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fold_history_control_chips_preserves_retry_anchor_uuid() {
+        let mut messages = vec![user_msg("u1", "/effort high")];
+        fold_history_control_chips(&mut messages);
+        assert_eq!(messages[0].uuid.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn fold_history_control_chips_ignores_multi_block_user_messages() {
+        let mut messages = vec![ConversationMessage {
+            role: "user".to_string(),
+            content: "/model claude-sonnet-5".to_string(),
+            blocks: Some(vec![
+                MessageBlock::Text {
+                    content: "/model claude-sonnet-5".to_string(),
+                },
+                MessageBlock::Text {
+                    content: "extra".to_string(),
+                },
+            ]),
+            timestamp: None,
+            uuid: Some("u1".to_string()),
+            model: None,
+            usage: None,
+        }];
+        fold_history_control_chips(&mut messages);
+        assert!(matches!(
+            messages[0].blocks.as_ref().unwrap()[0],
+            MessageBlock::Text { .. }
+        ));
+    }
+
+    #[test]
+    fn fold_history_control_chips_classification_matches_parse_control_command_directly() {
+        let source = [
+            ("user", None, "/model claude-sonnet-5"),
+            (
+                "assistant",
+                Some(crate::session_model::SYNTHETIC_MODEL),
+                "Set model to claude-sonnet-5",
+            ),
+            ("user", None, "what is 2+2?"),
+            ("assistant", Some("claude-sonnet-5"), "4"),
+        ];
+
+        let mut history_side: Vec<ConversationMessage> = source
+            .iter()
+            .map(|(role, model, text)| {
+                if *role == "user" {
+                    user_msg("uuid", text)
+                } else {
+                    assistant_msg(*model, text)
+                }
+            })
+            .collect();
+        fold_history_control_chips(&mut history_side);
+
+        assert_eq!(
+            history_side.len(),
+            3,
+            "the paired synthetic confirmation must be folded away"
+        );
+
+        for (idx, (role, _model, text)) in source.iter().enumerate() {
+            if *role != "user" {
+                continue;
+            }
+            let live_path_is_chip = speedwave_runtime::slash::parse_control_command(text).is_some();
+            let history_side_msg = history_side
+                .iter()
+                .find(|m| m.role == "user" && m.content == *text);
+            let history_is_chip = history_side_msg.is_some_and(|m| {
+                matches!(
+                    m.blocks.as_deref(),
+                    Some([MessageBlock::ControlChip { .. }])
+                )
+            });
+            assert_eq!(
+                live_path_is_chip, history_is_chip,
+                "entry {idx} ('{text}'): live-path and history classification must agree"
+            );
+        }
+    }
 
     #[test]
     fn validate_session_id_accepts_valid_uuid() {
@@ -895,8 +1105,6 @@ mod tests {
         assert!(validate_session_id_impl("550e8400-e29b-41d4-a716-44665544000g").is_err());
     }
 
-    // ── Path resolution ────────────────────────────────────────────
-
     #[test]
     fn claude_dot_dir_has_correct_structure() {
         let data_dir = PathBuf::from("/home/test/.speedwave");
@@ -909,7 +1117,6 @@ mod tests {
 
     #[test]
     fn sessions_dir_resolves_dash_workspace() {
-        // When -workspace exists, sessions_dir_impl returns it directly
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp
             .path()
@@ -926,17 +1133,13 @@ mod tests {
 
     #[test]
     fn sessions_dir_works_with_data_dir_directly() {
-        // Verify paths are built from data_dir without parent()+rejoin
         let data_dir = PathBuf::from("/opt/custom-speedwave");
-        // sessions_dir_impl returns the expected path (dir may not exist on disk)
         let result = sessions_dir_impl(&data_dir, "proj");
         assert_eq!(
             result,
             PathBuf::from("/opt/custom-speedwave/claude-home/proj/.claude/projects/-workspace")
         );
     }
-
-    // ── resolve_workspace_dir ─────────────────────────────────────
 
     #[test]
     fn resolve_workspace_dir_prefers_dash_workspace() {
@@ -966,7 +1169,6 @@ mod tests {
         fs::create_dir_all(projects.join("-alpha")).unwrap();
         fs::create_dir_all(projects.join("-beta")).unwrap();
 
-        // Run twice — result must be identical (deterministic)
         let result1 = resolve_workspace_dir(&projects);
         let result2 = resolve_workspace_dir(&projects);
         assert_eq!(result1, result2);
@@ -997,11 +1199,9 @@ mod tests {
         let projects = tmp.path().join("projects");
         fs::create_dir_all(&projects).unwrap();
 
-        // Create a broken symlink — is_dir() returns false for it
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/nonexistent/target", projects.join("-broken")).unwrap();
-            // Create one valid dir so we can verify the symlink is skipped
             fs::create_dir_all(projects.join("-valid")).unwrap();
 
             let result = resolve_workspace_dir(&projects);
@@ -1018,22 +1218,17 @@ mod tests {
         let projects = tmp.path().join("projects");
         fs::create_dir_all(&projects).unwrap();
 
-        // Remove read permission — fs::read_dir will fail
         fs::set_permissions(&projects, fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = resolve_workspace_dir(&projects);
         assert_eq!(result, projects.join("-workspace"));
 
-        // Restore permissions for cleanup
         fs::set_permissions(&projects, fs::Permissions::from_mode(0o755)).unwrap();
     }
-
-    // ── Memory with auto-discovered dir ───────────────────────────
 
     #[test]
     fn get_project_memory_works_with_autodiscovered_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create a non-standard workspace dir (not -workspace)
         let custom_ws = tmp
             .path()
             .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
@@ -1049,12 +1244,9 @@ mod tests {
         assert_eq!(result, "# Auto-discovered memory");
     }
 
-    // ── Diagnostic: empty auto-discovered dir ─────────────────────
-
     #[test]
     fn list_conversations_returns_empty_when_autodiscovered_dir_has_no_sessions() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create a non-standard workspace dir with no .jsonl files
         let custom_ws = tmp
             .path()
             .join(speedwave_runtime::consts::CLAUDE_HOME_SUBDIR)
@@ -1067,8 +1259,6 @@ mod tests {
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
         assert!(result.is_empty());
     }
-
-    // ── JSONL parsing ──────────────────────────────────────────────
 
     #[test]
     fn parse_user_message_with_string_content() {
@@ -1148,7 +1338,6 @@ mod tests {
 
     #[test]
     fn parse_result_message_uuid_is_always_none() {
-        // Result lines must never expose a uuid.
         let line = r#"{"type":"result","is_error":false,"result":"summary"}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.uuid.is_none());
@@ -1162,28 +1351,20 @@ mod tests {
         let usage = msg.usage.expect("usage must be present");
         assert_eq!(usage.input_tokens, 12);
         assert_eq!(usage.output_tokens, 34);
-        // cache_read_input_tokens → cache_read_tokens
         assert_eq!(usage.cache_read_tokens, 56);
-        // cache_creation_input_tokens → cache_write_tokens
         assert_eq!(usage.cache_write_tokens, 78);
     }
 
     #[test]
     fn parse_assistant_message_sidechain_line_drops_usage() {
-        // Subagent lines must not carry usage — the frontend resume seed
-        // reads the last usage-bearing message as the context occupancy.
         let line = r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.usage.is_none());
-        // Non-usage metadata is unaffected.
         assert_eq!(msg.model.as_deref(), Some("claude-haiku-4-5-20251001"));
     }
 
     #[test]
     fn parse_assistant_message_parent_tool_use_id_line_also_drops_usage() {
-        // The on-disk transcript path shares `is_sidechain_event` with the live
-        // stream-json path — `parent_tool_use_id` alone (no `isSidechain`) must
-        // also drop usage, not just the transcript-native `isSidechain` marker.
         let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_task_1","message":{"role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}],"usage":{"input_tokens":9,"output_tokens":9,"cache_read_input_tokens":180000,"cache_creation_input_tokens":9}}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.usage.is_none());
@@ -1191,7 +1372,6 @@ mod tests {
 
     #[test]
     fn parse_assistant_message_usage_missing_fields_default_zero() {
-        // A `usage` object with only partial fields zero-fills the rest.
         let line = r#"{"type":"assistant","message":{"role":"assistant","model":"haiku-4.5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5}}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         let usage = msg.usage.expect("usage must be present");
@@ -1203,7 +1383,6 @@ mod tests {
 
     #[test]
     fn parse_assistant_message_without_usage_leaves_none() {
-        // No `usage` object — `usage` stays None (model still parsed when present).
         let line = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}]}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert_eq!(msg.model.as_deref(), Some("claude-opus-4-8"));
@@ -1212,7 +1391,6 @@ mod tests {
 
     #[test]
     fn parse_assistant_message_null_usage_is_none() {
-        // `usage: null` is not an object — None, not a zero-filled TurnUsage.
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":null}}"#;
         let msg = parse_jsonl_message(line).unwrap();
         assert!(msg.usage.is_none());
@@ -1263,8 +1441,6 @@ mod tests {
         assert!(parse_jsonl_message(line).is_none());
     }
 
-    // ── list_conversations ─────────────────────────────────────────
-
     #[test]
     fn list_conversations_returns_empty_for_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1303,8 +1479,6 @@ mod tests {
 
     #[test]
     fn list_conversations_sorts_by_last_activity_not_first_message() {
-        // A chat STARTED earlier but REPLIED-TO later must sort above a chat
-        // started later with no further activity — newest activity on top.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "acme");
 
@@ -1330,15 +1504,12 @@ mod tests {
 
         let result = list_conversations_impl(tmp.path(), "acme").unwrap();
         assert_eq!(result.len(), 2);
-        // id_started_early last activity (Jan 5) > id_started_late (Jan 3).
         assert_eq!(result[0].session_id, id_started_early);
         assert_eq!(result[1].session_id, id_started_late);
     }
 
     #[test]
     fn list_conversations_timestamp_skips_trailing_metadata_lines() {
-        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the report
-        // is the last real message before them, not None.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "acme");
         let id = "00000000-0000-0000-0000-00000000000d";
@@ -1361,8 +1532,6 @@ mod tests {
 
     #[test]
     fn list_conversations_timestamp_is_last_activity() {
-        // The reported timestamp is the latest message, not the first —
-        // the sidebar renders it as "last activity".
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "acme");
         let id = "00000000-0000-0000-0000-00000000000c";
@@ -1419,7 +1588,6 @@ mod tests {
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
         assert_eq!(result.len(), 1);
-        // message_count should be 2 (user + assistant), not 3 (result deduplicated)
         assert_eq!(result[0].message_count, 2);
     }
 
@@ -1428,7 +1596,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
 
-        // Write a non-UUID file
         fs::write(
             dir.join("not-a-uuid.jsonl"),
             r#"{"type":"user","message":{"role":"user","content":"test"}}"#,
@@ -1445,7 +1612,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // A session with only system messages — no parseable user/assistant
         write_session(&dir, id, &[r#"{"type":"system","message":"init"}"#]);
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
@@ -1465,7 +1631,7 @@ mod tests {
         write_session(&dir, id, &[&line]);
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
-        assert_eq!(result[0].preview.len(), 203); // 200 + "..."
+        assert_eq!(result[0].preview.len(), 203);
         assert!(result[0].preview.ends_with("..."));
     }
 
@@ -1493,14 +1659,12 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_respects_nested_is_meta_under_message() {
-        // `isMeta` nested under `message.*` must still be caught.
         let line = r#"{"type":"user","message":{"role":"user","isMeta":true,"content":"<local-command-caveat>x</local-command-caveat>"}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn parse_jsonl_message_does_not_drop_is_meta_on_non_user_types() {
-        // The `isMeta` filter is scoped to user entries; an assistant row with isMeta:true must still parse.
         let line = r#"{"type":"assistant","isMeta":true,"message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
         let msg = parse_jsonl_message(line).expect("assistant with isMeta should parse");
         assert_eq!(msg.role, "assistant");
@@ -1550,8 +1714,222 @@ mod tests {
     }
 
     #[test]
+    fn get_conversation_renders_control_chip_and_folds_synthetic_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/model claude-sonnet-5"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"what is 2+2?"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"4"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(
+            transcript.messages.len(),
+            3,
+            "the synthetic reply must be folded away"
+        );
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "claude-sonnet-5");
+            }
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+        assert_eq!(transcript.messages[1].content, "what is 2+2?");
+        assert_eq!(transcript.messages[2].content, "4");
+    }
+
+    #[test]
+    fn get_conversation_hand_typed_chip_gets_the_same_treatment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/effort high"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "effort");
+                assert_eq!(argument, "high");
+            }
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
+    #[test]
+    fn get_conversation_rebuilds_the_chip_from_claude_codes_synthetic_command_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>openai/gpt-4o-mini</command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"system","uuid":"s1","subtype":"local_command","content":"Set model to openai/gpt-4o-mini","timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"what is 2+2?"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"4"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 3);
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "model");
+                assert_eq!(argument, "openai/gpt-4o-mini");
+            }
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+        assert_eq!(transcript.messages[1].content, "what is 2+2?");
+        assert_eq!(transcript.messages[2].content, "4");
+    }
+
+    #[test]
+    fn get_conversation_rebuilds_an_effort_chip_from_a_text_block_array_entry_marked_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args>high</command-args>"}]},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        match &transcript.messages[0].blocks.as_ref().unwrap()[0] {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "effort");
+                assert_eq!(argument, "high");
+            }
+            other => panic!(
+                "expected ControlChip, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        assert_eq!(transcript.messages[0].uuid.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn get_conversation_drops_synthetic_command_entries_that_are_not_control_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-sonnet-5 extra</command-args>"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].content, "real question");
+    }
+
+    #[test]
+    fn get_conversation_keeps_a_typed_message_that_merely_mentions_command_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"Can you explain what <command-name>/model</command-name> and <command-args>sonnet</command-args> mean?"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+            ],
+        );
+
+        let transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(
+            transcript.messages[0].content,
+            "Can you explain what <command-name>/model</command-name> and <command-args>sonnet</command-args> mean?"
+        );
+        assert!(
+            !transcript.messages[0]
+                .blocks
+                .iter()
+                .flatten()
+                .any(|b| matches!(b, MessageBlock::ControlChip { .. })),
+            "a typed question must never be rebuilt into a control chip"
+        );
+    }
+
+    #[test]
+    fn list_conversations_preview_skips_a_synthetic_control_command_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-sonnet-5</command-args>"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"system","uuid":"s1","subtype":"local_command","content":"Set model to claude-sonnet-5","timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real answer"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].preview, "real question");
+        assert_eq!(result[0].message_count, 2);
+    }
+
+    #[test]
+    fn tag_body_requires_both_tags() {
+        assert_eq!(tag_body("<a>x</a>", "a"), Some("x"));
+        assert_eq!(tag_body("<a>x", "a"), None);
+        assert_eq!(tag_body("x</a>", "a"), None);
+        assert_eq!(
+            tag_body("<command-args></command-args>", "command-args"),
+            Some("")
+        );
+    }
+
+    #[test]
     fn list_conversations_skips_slash_command_markers() {
-        // Slash-command invocations carry no `isMeta` flag but are still synthetic.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1574,8 +1952,88 @@ mod tests {
     }
 
     #[test]
+    fn list_conversations_preview_falls_back_past_a_leading_control_chip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/model claude-sonnet-5"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real answer"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].preview, "real question",
+            "the chip and its synthetic reply must never be chosen as the preview"
+        );
+        assert_eq!(
+            result[0].message_count, 2,
+            "the chip/synthetic-reply pair must not count toward message_count"
+        );
+    }
+
+    #[test]
+    fn list_conversations_synthetic_model_exclusion_is_only_ever_adjacent_to_a_control_chip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"real question"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"real answer"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+                r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"/model claude-opus-4-7"},"timestamp":"2025-01-01T00:00:02Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-opus-4-7"}]},"timestamp":"2025-01-01T00:00:03Z"}"#,
+                r#"{"type":"user","uuid":"u3","message":{"role":"user","content":"/effort high"},"timestamp":"2025-01-01T00:00:04Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set effort to high"}]},"timestamp":"2025-01-01T00:00:05Z"}"#,
+                r#"{"type":"user","uuid":"u4","message":{"role":"user","content":"another real question"},"timestamp":"2025-01-01T00:00:06Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"another real answer"}]},"timestamp":"2025-01-01T00:00:07Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].message_count, 4,
+            "only the two chip exchanges are excluded; both real turns count"
+        );
+    }
+
+    #[test]
+    fn list_conversations_chip_only_session_is_dropped_like_any_other_empty_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/effort high"},"timestamp":"2025-01-01T00:00:00Z"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set effort to high"}]},"timestamp":"2025-01-01T00:00:01Z"}"#,
+            ],
+        );
+
+        let result = list_conversations_impl(tmp.path(), "proj").unwrap();
+        assert_eq!(
+            result.len(),
+            0,
+            "a chip-only session has zero real messages and is dropped, matching any other empty session"
+        );
+    }
+
+    #[test]
     fn list_conversations_drops_sdk_cli_boilerplate_session() {
-        // A session whose only user entry is the `Commands are in the form …` boilerplate must not appear.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1594,8 +2052,6 @@ mod tests {
 
     #[test]
     fn list_conversations_drops_bare_slash_session() {
-        // A junk session whose only content is a lone `/` (slash-menu trigger
-        // sent as a message) must not pollute the history list.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1614,8 +2070,6 @@ mod tests {
 
     #[test]
     fn list_conversations_drops_bare_slash_session_with_reply() {
-        // The common junk shape: a lone `/` plus Claude's "you typed /" reply.
-        // The user never sent anything real, so this must be dropped too.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1635,8 +2089,6 @@ mod tests {
 
     #[test]
     fn list_conversations_keeps_slash_session_with_real_message_past_head_scan() {
-        // Lone `/`, then >50 noise lines, then a real 2nd user message past the
-        // head-scan cap: the session must NOT be dropped.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1646,7 +2098,6 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":"/"},"timestamp":"2025-01-01T00:00:00Z"}"#
                 .to_string(),
         );
-        // 60 noise lines (assistant text + system) — past the 50-line head cap.
         for i in 0..60 {
             lines.push(format!(
                 r#"{{"type":"system","message":"step {i}","timestamp":"2025-01-01T00:00:01Z"}}"#
@@ -1669,8 +2120,6 @@ mod tests {
 
     #[test]
     fn list_conversations_keeps_session_where_slash_is_followed_by_real_message() {
-        // A lone `/` first, then a real second user message: `user_message_count`
-        // is 2, so the junk filter must NOT drop it — preventing history loss.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1695,8 +2144,6 @@ mod tests {
 
     #[test]
     fn last_message_timestamp_skips_trailing_metadata_lines() {
-        // Trailing `last-prompt`/`ai-title` lines carry no timestamp; the tail
-        // scan walks past them to the last real message's timestamp.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1718,8 +2165,6 @@ mod tests {
 
     #[test]
     fn last_message_timestamp_none_when_no_line_has_a_timestamp() {
-        // No timestamp anywhere in the tail → None; the list path then keeps the
-        // head-scanned value (the documented fallback).
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1730,8 +2175,6 @@ mod tests {
 
     #[test]
     fn last_message_timestamp_does_not_panic_on_single_huge_line() {
-        // One JSONL line larger than TAIL_READ_BYTES: the 64 KiB tail is a single
-        // partial fragment, `skip(1)` empties the scan — must return None, not panic.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1746,8 +2189,6 @@ mod tests {
 
     #[test]
     fn last_message_timestamp_reads_final_line_without_trailing_newline() {
-        // The last line has no trailing `\n`; `lines()` still yields it, so the
-        // timestamp is found.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1766,9 +2207,7 @@ mod tests {
     #[test]
     fn last_message_timestamp_none_for_unreadable_or_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        // Missing file → None (no panic).
         assert!(last_message_timestamp(&tmp.path().join("nope.jsonl")).is_none());
-        // Empty file → None.
         let empty = tmp.path().join("empty.jsonl");
         fs::write(&empty, "").unwrap();
         assert!(last_message_timestamp(&empty).is_none());
@@ -1776,8 +2215,6 @@ mod tests {
 
     #[test]
     fn last_message_timestamp_reads_only_the_tail_of_a_large_file() {
-        // A file larger than TAIL_READ_BYTES: the timestamp in the final line is
-        // still found even though earlier lines are never read.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1801,8 +2238,6 @@ mod tests {
 
     #[test]
     fn list_conversations_keeps_real_slash_command_session() {
-        // A real slash command (`/code-review`) with a reply is a genuine
-        // conversation — it must NOT be dropped.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -1823,7 +2258,6 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_drops_command_args_and_command_result_prefixes() {
-        // Sibling command tags must also be filtered, not only <command-name>.
         for tag in ["<command-args>", "<command-result>"] {
             let line = format!(
                 r#"{{"type":"user","message":{{"role":"user","content":"{tag}foo</X>"}}}}"#
@@ -1837,24 +2271,21 @@ mod tests {
 
     #[test]
     fn parse_jsonl_message_drops_boilerplate_with_trailing_punctuation() {
-        // Boilerplate with trailing punctuation/context is still filtered.
         let line = r#"{"type":"user","message":{"role":"user","content":"Commands are in the form `/command [args]`\n\nMore context."}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn parse_jsonl_message_drops_synthetic_tag_in_non_first_text_block() {
-        // Synthetic marker in a non-first text block is caught per-block.
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"preamble"},{"type":"text","text":"<command-name>/clear</command-name>"}]}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
 
     #[test]
     fn truncate_preview_is_utf8_safe() {
-        // 200 emoji (each 4 bytes) should not panic
         let emoji_msg = "\u{1F600}".repeat(300);
         let result = truncate_preview(&emoji_msg, 200);
-        assert_eq!(result.chars().count(), 203); // 200 emoji + 3 dots
+        assert_eq!(result.chars().count(), 203);
         assert!(result.ends_with("..."));
     }
 
@@ -1862,8 +2293,6 @@ mod tests {
     fn truncate_preview_short_string_unchanged() {
         assert_eq!(truncate_preview("hello", 200), "hello");
     }
-
-    // ── get_conversation ───────────────────────────────────────────
 
     #[test]
     fn get_conversation_returns_full_transcript() {
@@ -1889,8 +2318,6 @@ mod tests {
         assert_eq!(result.messages[1].content, "answer");
     }
 
-    /// INVARIANT: detokenization happens only on the copy returned to the webview;
-    /// the source JSONL on disk stays tokenized and unchanged.
     #[test]
     fn get_conversation_detokenizes_returned_copy_but_leaves_source_file_tokenized() {
         use speedwave_pii_engine::{compile_policy_v3, default_policy_json, scan_text, EngineKey};
@@ -1916,22 +2343,18 @@ mod tests {
             format!(r#"{{"type":"user","message":{{"role":"user","content":"{tokenized}"}}}}"#);
         write_session(&dir, id, &[&line]);
 
-        // history.rs's own read path: must yield the tokenized source, never a
-        // detokenized value — this is also what resume/compute_resume_snapshot reads.
         let mut transcript = get_conversation_impl(tmp.path(), "proj", id).unwrap();
         assert!(
             transcript.messages[0].content.contains("TOKEN_"),
             "history.rs must read the tokenized source as-is"
         );
 
-        // Detokenization happens only on this owned, in-memory copy.
         crate::pii_display::detokenize_transcript(
             &mut transcript,
             &crate::pii_display::DisplayPolicy::new(Some(key), Vec::new()),
         );
         assert_eq!(transcript.messages[0].content, "contact jan@example.com");
 
-        // The source file on disk must remain byte-for-byte tokenized.
         let raw = fs::read_to_string(dir.join(format!("{id}.jsonl"))).unwrap();
         assert!(
             raw.contains("TOKEN_"),
@@ -1979,8 +2402,6 @@ mod tests {
         assert_eq!(result.messages[0].content, "real msg");
     }
 
-    // ── get_project_memory ─────────────────────────────────────────
-
     #[test]
     fn get_project_memory_reads_memory_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2006,7 +2427,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
 
-        // A directory at the MEMORY.md path yields an I/O error that is NOT ErrorKind::NotFound.
         let memory_dir = dir.join("memory").join("MEMORY.md");
         fs::create_dir_all(&memory_dir).unwrap();
 
@@ -2022,14 +2442,11 @@ mod tests {
         );
     }
 
-    // ── Edge cases ─────────────────────────────────────────────────
-
     #[test]
     fn list_conversations_ignores_non_jsonl_files() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
 
-        // Write a .json file (not .jsonl)
         fs::write(dir.join("abcdef01-2345-6789-abcd-ef0123456789.json"), "{}").unwrap();
 
         let result = list_conversations_impl(tmp.path(), "proj").unwrap();
@@ -2049,8 +2466,6 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_jsonl_message(line).is_none());
     }
-
-    // ── Result message parsing (slash commands / history) ─────────
 
     #[test]
     fn parse_result_message_extracts_slash_command_output() {
@@ -2080,6 +2495,36 @@ mod tests {
     }
 
     #[test]
+    fn message_block_control_chip_serializes_with_type_tag() {
+        let block = MessageBlock::ControlChip {
+            command: "model".to_string(),
+            argument: "claude-sonnet-5".to_string(),
+        };
+        let encoded = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "control_chip",
+                "command": "model",
+                "argument": "claude-sonnet-5",
+            })
+        );
+    }
+
+    #[test]
+    fn message_block_control_chip_roundtrips() {
+        let line = r#"{"type":"control_chip","command":"effort","argument":"high"}"#;
+        let decoded: MessageBlock = serde_json::from_str(line).unwrap();
+        match decoded {
+            MessageBlock::ControlChip { command, argument } => {
+                assert_eq!(command, "effort");
+                assert_eq!(argument, "high");
+            }
+            other => panic!("expected ControlChip, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_result_message_skips_empty() {
         let line = r#"{"type":"result","is_error":false,"result":""}"#;
         assert!(parse_jsonl_message(line).is_none());
@@ -2094,7 +2539,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // JSONL with assistant message followed by result with same content
         write_session(
             &dir,
             id,
@@ -2106,7 +2550,6 @@ mod tests {
         );
 
         let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
-        // Should have 2 messages: user + assistant (result deduplicated)
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
@@ -2119,7 +2562,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // JSONL with only a result message (slash command — no assistant message)
         write_session(
             &dir,
             id,
@@ -2143,8 +2585,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Assistant message with text + tool_use → content = "I will read\n[Tool: Read]"
-        // Result has only the text portion → content = "I will read"
         write_session(
             &dir,
             id,
@@ -2156,14 +2596,11 @@ mod tests {
         );
 
         let result = get_conversation_impl(tmp.path(), "proj", id).unwrap();
-        // 2 messages: user + assistant (result deduplicated).
         assert_eq!(result.messages.len(), 2);
         assert_eq!(result.messages[0].role, "user");
         assert_eq!(result.messages[1].role, "assistant");
         assert_eq!(result.messages[1].content, "I will read\n[Tool: Read]");
     }
-
-    // ── compute_resume_snapshot ────────────────────────────────────
 
     #[test]
     fn compute_resume_snapshot_uses_latest_modelusage_for_tokens_and_cost() {
@@ -2171,7 +2608,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Two cumulative result lines; the latest is authoritative.
         write_session(
             &dir,
             id,
@@ -2183,7 +2619,6 @@ mod tests {
         );
 
         let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
-        // Latest cumulative `modelUsage` wins.
         assert_eq!(snap.input_tokens, 17);
         assert_eq!(snap.output_tokens, 8);
         assert_eq!(snap.cache_read_tokens, 50);
@@ -2198,7 +2633,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // No `modelUsage` anywhere; flat per-step `usage` must be summed.
         write_session(
             &dir,
             id,
@@ -2215,7 +2649,6 @@ mod tests {
         assert_eq!(snap.cache_read_tokens, 3);
         assert_eq!(snap.cache_write_tokens, 1);
         assert_eq!(snap.total_cost, Some(0.05));
-        // No `modelUsage` ever, so the system init model is the fallback.
         assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
     }
 
@@ -2225,8 +2658,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Real transcripts carry NO result/system lines — only per-call
-        // assistant usage. Sidechain and all-zero lines never win.
         write_session(
             &dir,
             id,
@@ -2248,9 +2679,6 @@ mod tests {
 
     #[test]
     fn compute_resume_snapshot_skips_sidechain_marked_via_parent_tool_use_id_only() {
-        // Same exclusion as `isSidechain`, but via the live-stream marker with
-        // no `isSidechain` field at all — proves the shared `is_sidechain_event`
-        // helper (not a transcript-local `isSidechain` check) drives this path.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -2294,7 +2722,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Transcript with no result/init lines must not error and reports a zero baseline.
         write_session(
             &dir,
             id,
@@ -2311,7 +2738,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Malformed lines must not poison the running totals.
         write_session(
             &dir,
             id,
@@ -2348,13 +2774,113 @@ mod tests {
     }
 
     #[test]
+    fn compute_resume_snapshot_chronological_model_wins_over_usage_dominant_old_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"model-a","usage":{"input_tokens":100,"output_tokens":900}}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"model-a","usage":{"input_tokens":100,"output_tokens":900}}}"#,
+                r#"{"type":"system","subtype":"init","model":"model-b"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"model-b","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("model-b"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_chronological_tracker_wins_over_usage_dominant_model_never_observed_chronologically(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"model-b":{"inputTokens":100,"outputTokens":900}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(
+            snap.model.as_deref(),
+            Some("model-a"),
+            "chronological tracker (init-observed model-a) must win over usage-dominant model-b, \
+             which was never chronologically observed"
+        );
+    }
+
+    #[test]
+    fn compute_resume_snapshot_synthetic_assistant_model_without_later_init_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>"}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("model-a"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_assistant_model_wins_when_no_init_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[r#"{"type":"assistant","message":{"role":"assistant","model":"claude-haiku-4-5"}}"#],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn compute_resume_snapshot_sidechain_assistant_model_does_not_override_main_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"model-a"}"#,
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","model":"claude-haiku-4-5-20251001"}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("model-a"));
+    }
+
+    #[test]
     fn compute_resume_snapshot_main_chain_assistant_model_supersedes_init() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Main-chain assistant model (parent_tool_use_id: null) supersedes init,
-        // mirroring the live parser's chronological last-write-wins semantics.
         write_session(
             &dir,
             id,
@@ -2375,8 +2901,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Sidechain assistant models (either marker) never move the conversation
-        // model, even when the result's modelUsage is dominated by that model.
         write_session(
             &dir,
             id,
@@ -2402,8 +2926,6 @@ mod tests {
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // Restart after a model switch appends a fresh init line later in the
-        // same transcript file — it must win over an earlier assistant model.
         write_session(
             &dir,
             id,
@@ -2417,11 +2939,8 @@ mod tests {
         let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
         assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
     }
-
     #[test]
     fn compute_resume_snapshot_picks_dominant_model_from_modelusage() {
-        // Fallback path only: no conversation model captured (no init/assistant
-        // model line) — pick the modelUsage entry with the most outputTokens.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456790";
@@ -2442,7 +2961,30 @@ mod tests {
         );
     }
 
-    // ── delete_conversation ────────────────────────────────────────
+    #[test]
+    fn compute_resume_snapshot_ignores_chip_exchange_when_a_real_turn_follows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"/model claude-sonnet-5"}}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to claude-sonnet-5"}]}}"#,
+                r#"{"type":"system","subtype":"init","model":"claude-sonnet-5"}"#,
+                r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","usage":{"input_tokens":5,"output_tokens":9,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-5"));
+        let cu = snap.context_usage.expect("context_usage must be present");
+        assert_eq!(cu.input_tokens, 5);
+        assert_eq!(cu.output_tokens, 9);
+    }
 
     #[test]
     fn delete_conversation_removes_existing_file() {
@@ -2497,5 +3039,164 @@ mod tests {
         delete_conversation_impl(tmp.path(), "proj", id_a).unwrap();
         assert!(!dir.join(format!("{id_a}.jsonl")).exists());
         assert!(dir.join(format!("{id_b}.jsonl")).exists());
+    }
+
+    #[test]
+    fn control_chip_tag_matches_ts() {
+        let json = serde_json::to_string(&MessageBlock::ControlChip {
+            command: "model".to_string(),
+            argument: "claude-sonnet-5".to_string(),
+        })
+        .unwrap();
+        assert!(
+            json.contains(r#""type":"control_chip""#),
+            "Rust MessageBlock::ControlChip must serialize with tag control_chip, got: {json}"
+        );
+
+        let ts = include_str!("../../src/src/app/services/chat-state.service.ts");
+        assert!(
+            ts.contains("'control_chip'"),
+            "TS normalizeHistoryBlocks must match the 'control_chip' history tag"
+        );
+        assert!(
+            ts.contains("type: 'chip'"),
+            "TS normalizeHistoryBlocks must map control_chip to the chip view-model (type: 'chip')"
+        );
+    }
+
+    #[test]
+    fn last_session_model_resolves_the_session_start_model_ignoring_a_later_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "s1",
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#,
+                r#"{"type":"assistant","message":{"model":"claude-fable-5"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("claude-opus-4-8".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_uses_the_first_assistant_model_when_no_init_is_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "s1",
+            &[
+                r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#,
+                r#"{"type":"assistant","message":{"model":"claude-sonnet-5"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("claude-opus-4-8".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_none_for_missing_dir_or_empty_transcripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(last_session_model_impl(tmp.path(), "proj", |_| true), None);
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(&dir, "s1", &[r#"{"type":"result"}"#]);
+        assert_eq!(last_session_model_impl(tmp.path(), "proj", |_| true), None);
+    }
+
+    fn set_session_mtime(dir: &Path, session_id: &str, secs_ago: u64) {
+        let path = dir.join(format!("{session_id}.jsonl"));
+        let f = fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago))
+            .unwrap();
+    }
+
+    #[test]
+    fn last_session_model_walks_past_a_model_less_newest_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "old-real",
+            &[r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#],
+        );
+        write_session(
+            &dir,
+            "new-garbage",
+            &[r#"{"type":"queue-operation","operation":"enqueue","content":"/"}"#],
+        );
+        set_session_mtime(&dir, "old-real", 60);
+        set_session_mtime(&dir, "new-garbage", 1);
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("claude-opus-4-8".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_walks_past_a_predicate_rejected_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "old-claude",
+            &[r#"{"type":"system","subtype":"init","model":"claude-sonnet-5"}"#],
+        );
+        write_session(
+            &dir,
+            "new-foreign",
+            &[r#"{"type":"assistant","message":{"model":"unsloth/qwen-x"}}"#],
+        );
+        set_session_mtime(&dir, "old-claude", 60);
+        set_session_mtime(&dir, "new-foreign", 1);
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |m| m.starts_with("claude-")),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("unsloth/qwen-x".to_string())
+        );
+    }
+
+    #[test]
+    fn last_session_model_scan_is_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "beyond-cap",
+            &[r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#],
+        );
+        set_session_mtime(&dir, "beyond-cap", 10_000);
+        for i in 0..LAST_SESSION_MODEL_SCAN_CAP {
+            let id = format!("garbage-{i}");
+            write_session(&dir, &id, &[r#"{"type":"result"}"#]);
+            set_session_mtime(&dir, &id, 100 + i as u64);
+        }
+        assert_eq!(last_session_model_impl(tmp.path(), "proj", |_| true), None);
+    }
+
+    #[test]
+    fn last_session_model_skips_the_synthetic_control_reply_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        write_session(
+            &dir,
+            "s1",
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+                r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+            ],
+        );
+        assert_eq!(
+            last_session_model_impl(tmp.path(), "proj", |_| true),
+            Some("claude-fable-5".to_string())
+        );
     }
 }

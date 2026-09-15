@@ -21,11 +21,15 @@ import {
 } from '@angular/cdk/overlay';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SlashMenuComponent } from '../slash/slash-menu.component';
-import { SlashService, isBareSlash, type SlashCommand } from '../slash/slash.service';
+import { SlashService, isBlankOrSlashOnly, type SlashCommand } from '../slash/slash.service';
 import { TooltipDirective } from '../../shared/tooltip.directive';
 import { AttachmentStripComponent, type AttachmentViewModel } from './attachment-strip.component';
 import { FileDropDirective } from './file-drop.directive';
 import { ResizeHandleDirective } from './resize-handle.directive';
+import {
+  ModelSelectorComponent,
+  type ModelSelection,
+} from './model-selector/model-selector.component';
 import {
   ImagePreprocessorService,
   ERROR_UNSUPPORTED_TYPE,
@@ -34,10 +38,8 @@ import {
 } from '../../services/image-preprocessor.service';
 import type { ChatAttachment } from '../../models/chat';
 
-/** Regex matching `/query` at the very start of input (optionally preceded by whitespace), capturing the query. */
 const SLASH_TRIGGER = /^(\s*)\/([^\s/]*)$/;
 
-/** Attachment between paste/drop and submit; `preprocessed === null` while pica runs. */
 interface AttachmentRecord {
   id: string;
   filename: string;
@@ -45,13 +47,10 @@ interface AttachmentRecord {
   preprocessed: PreprocessedImage | null;
 }
 
-/** Floor for a manually-resized composer (≈2 text rows), matching the autosize minimum. */
 const MIN_COMPOSER_HEIGHT_PX = 56;
 
-/** Manual-resize ceiling as a fraction of the viewport, so a tall field never hides the transcript. */
 const MAX_COMPOSER_HEIGHT_FRACTION = 0.6;
 
-/** Inline directive prepended to a user message when plan mode is active. */
 const PLAN_MODE_PREFIX =
   '[Plan mode] Produce a plan only — do NOT modify files, do NOT run tools that mutate state. Then ask me to confirm before acting.\n\n';
 
@@ -71,6 +70,7 @@ const PLAN_MODE_PREFIX =
     AttachmentStripComponent,
     FileDropDirective,
     ResizeHandleDirective,
+    ModelSelectorComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'relative block min-w-0' },
@@ -184,7 +184,6 @@ const PLAN_MODE_PREFIX =
       <div
         class="mono flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--line)] px-3 py-1.5 text-[11px] text-[var(--ink-mute)]"
       >
-        <!-- Plan / Act mode toggle. -->
         <button
           type="button"
           data-testid="composer-plan-toggle"
@@ -216,16 +215,6 @@ const PLAN_MODE_PREFIX =
         >
           /<span class="hidden sm:inline"> skill</span>
         </button>
-        @if (model()) {
-          <span class="mx-1 hidden text-[var(--line-strong)] md:inline">·</span>
-          <span
-            class="hidden text-[var(--teal)] md:inline"
-            data-testid="composer-model"
-            appTooltip="Active LLM model"
-            placement="top"
-            >{{ model() }}</span
-          >
-        }
         @if (contextLabel()) {
           <span
             class="hidden text-[var(--ink-mute)] lg:inline"
@@ -235,7 +224,15 @@ const PLAN_MODE_PREFIX =
             >{{ contextLabel() }}</span
           >
         }
-        <div class="ml-auto flex flex-shrink-0 items-center gap-2">
+        <div class="ml-auto flex flex-shrink-0 items-center gap-3">
+          <app-model-selector
+            [projectId]="projectId()"
+            [streaming]="streaming()"
+            [modelError]="modelError()"
+            [sessionModel]="model()"
+            (modelSelected)="modelSelected.emit($event)"
+            (effortSelected)="effortSelected.emit($event)"
+          />
           @if (streaming()) {
             <button
               type="button"
@@ -281,6 +278,7 @@ const PLAN_MODE_PREFIX =
       <app-slash-menu
         [open]="true"
         [query]="slashQuery()"
+        [projectId]="projectState.activeProject() ?? ''"
         (selected)="applySelection($event)"
         (closed)="closeSlash()"
       />
@@ -288,122 +286,92 @@ const PLAN_MODE_PREFIX =
   `,
 })
 export class ComposerComponent implements AfterViewInit {
-  /** Textarea DOM node used to read the caret position and insert text at the cursor. */
   @ViewChild('textarea', { static: true })
   private textareaRef!: ElementRef<HTMLTextAreaElement>;
 
-  /** Autosize directive on the textarea; toggled off while a manual height is in effect. */
   @ViewChild(CdkTextareaAutosize, { static: true })
   private autosize?: CdkTextareaAutosize;
 
-  /** Slash-menu overlay; repositioned on resize so it stays anchored to the textarea. */
   @ViewChild(CdkConnectedOverlay)
   private slashOverlay?: CdkConnectedOverlay;
 
-  /** Textarea height (px) captured when a resize gesture starts. */
   private resizeBaseHeight = 0;
 
-  /** Upper bound for the current resize gesture, computed from the viewport at gesture start. */
   private resizeMaxHeight = 0;
 
-  /** True while a manual height overrides autosize (from first gesture until reset). */
   private manualResizeActive = false;
 
-  /** CDK's inline max-height captured at manual-resize start, restored on return to autosize. */
   private savedMaxHeight = '';
 
-  /** Manual-resize floor exposed to the handle for `aria-valuemin`. */
   protected readonly minResizePx = MIN_COMPOSER_HEIGHT_PX;
 
-  /** Current manual height for `aria-valuenow`; null while autosize is in control. */
   readonly resizeValueNow = signal<number | null>(null);
 
-  /** Manual-resize ceiling for `aria-valuemax`, set when a gesture starts. */
   readonly resizeValueMax = signal<number>(0);
 
-  /** True to disable input and prevent submits, false to enable. */
   readonly disabled = input(false);
 
-  /** True when a turn is streaming (ADR-045); submits route to `queueRequested`. */
   readonly streaming = input(false);
 
-  /** Current queued message preview, when one is set (ADR-045). */
   readonly queuedText = input('');
 
-  /** Placeholder shown in the textarea when it is empty. */
   readonly placeholder = input('message speedwave...');
 
-  /** Active model id (e.g. "opus-4.7") — shown in teal in the toolbar when set. */
   readonly model = input('');
 
-  /** Context window hint (e.g. "128k") — shown next to the model on lg+. */
+  readonly projectId = input('');
+
+  readonly modelError = input('');
+
   readonly contextLabel = input('');
 
-  /** True when a meeting transcript rides along with the next submit. */
   readonly transcriptAttached = input(false);
 
-  /** Text to load into the field, replacing its content once ('' = nothing to load). */
   readonly draftText = input('');
 
-  /** `attachments` are pre-saved to `<project>/.speedwave/pastes/`. */
   readonly submitted = output<{
     payload: string;
     displayText: string;
     attachments: ChatAttachment[];
   }>();
 
-  /**
-   * ADR-045 — emits when the user submits while a turn is streaming.
-   * Parent should call `chat.queueMessage(text)`.
-   */
   readonly queueRequested = output<string>();
 
-  /** ADR-045 — emits when the user clicks the X on the queued preview. */
   readonly queueCancelled = output<void>();
 
-  /** Emits when the user unpins the attached transcript. */
   readonly transcriptDetached = output<void>();
 
-  /** Emits once `draftText` has been loaded into the field; the parent clears it. */
   readonly draftApplied = output<void>();
 
-  /** Emits when the user clicks the inline Stop button while streaming. */
   readonly stopRequested = output<void>();
 
-  /** Emits when the slash popover transitions open/closed (for parent UI coordination). */
+  readonly modelSelected = output<ModelSelection>();
+
+  readonly effortSelected = output<string>();
+
   readonly slashOpenChange = output<boolean>();
 
   readonly slashService = inject(SlashService);
-  private readonly projectState = inject(ProjectStateService);
+  protected readonly projectState = inject(ProjectStateService);
   private readonly preprocessor = inject(ImagePreprocessorService);
 
-  /** Reactive control holding the current textarea value. */
   readonly text = new FormControl<string>('', { nonNullable: true });
 
-  /** Whether the slash popover is open. */
   readonly slashOpen = signal<boolean>(false);
-  /** Active query used to filter the slash menu (text after `/`). */
   readonly slashQuery = signal<string>('');
 
-  /** Plan mode state; when true the next submit is prefixed with `PLAN_MODE_PREFIX`. */
   readonly planMode = signal<boolean>(false);
 
-  /** Pending image attachments; cleanup effect below revokes blob URLs on remove. */
   readonly attachments = signal<ReadonlyArray<AttachmentRecord>>([]);
 
-  /** Counter for generating stable attachment ids without crypto. */
   private attachmentSeq = 0;
 
-  /** Most recent user-facing error (e.g. preprocessing failure, capability reject). */
   readonly attachmentError = signal<string>('');
 
-  /** Latest aria-live announcement (e.g. "Image attached: screenshot.png"). */
   readonly attachmentAnnouncement = signal<string>('');
 
-  /** Bridges `FormControl.valueChanges` (RxJS) into the signal graph for OnPush. */
   readonly textValue = toSignal(this.text.valueChanges, { initialValue: '' });
 
-  /** CDK overlay positions for the slash menu (anchored to the textarea). */
   readonly slashOverlayPositions: ConnectedPosition[] = [
     {
       originX: 'start',
@@ -421,12 +389,16 @@ export class ComposerComponent implements AfterViewInit {
     },
   ];
 
-  /** Width binding used so the overlay matches the textarea width. */
-  readonly overlayWidth = computed<string>(() =>
-    this.textareaRef?.nativeElement ? `${this.textareaRef.nativeElement.offsetWidth}px` : 'auto'
-  );
+  /**
+   * Width binding so the overlay matches the textarea width. A plain method, not a `computed()` —
+   * it reads live DOM layout (`offsetWidth`), not a signal, and must re-run every CD cycle.
+   */
+  overlayWidth(): string {
+    return this.textareaRef?.nativeElement
+      ? `${this.textareaRef.nativeElement.offsetWidth}px`
+      : 'auto';
+  }
 
-  /** True when the user closed the slash menu while the trigger still matches, suppressing auto-reopen. */
   private slashSuppressedByUser = false;
 
   /**
@@ -438,7 +410,6 @@ export class ComposerComponent implements AfterViewInit {
       const id = this.projectState.activeProject();
       if (id) void this.slashService.refresh(id);
     });
-    // Enable/disable the FormControl when the `disabled` input changes.
     effect(() => {
       const value = this.disabled();
       if (value) this.text.disable({ emitEvent: false });
@@ -455,7 +426,6 @@ export class ComposerComponent implements AfterViewInit {
         for (const r of current) URL.revokeObjectURL(r.previewUrl);
       });
     });
-    // Load a parent-supplied draft; the emit clears the input, so edits survive later renders.
     effect(() => {
       const draft = this.draftText();
       if (!draft) return;
@@ -474,7 +444,6 @@ export class ComposerComponent implements AfterViewInit {
    * actions like "new conversation" that reset state and may steal focus.
    */
   focusInput(): void {
-    // New-conversation path: drop any manual height so the fresh composer starts auto-sized.
     this.restoreAutoSize();
     queueMicrotask(() => this.textareaRef?.nativeElement?.focus());
   }
@@ -507,11 +476,9 @@ export class ComposerComponent implements AfterViewInit {
     );
     if (!this.manualResizeActive) {
       this.manualResizeActive = true;
-      // Save CDK's row cap once, then hand height control to the manual gesture.
       this.savedMaxHeight = ta.style.maxHeight;
       if (this.autosize) this.autosize.enabled = false;
     }
-    // Drop the inline max-height (cdkAutosizeMaxRows) or the field can't grow past 8 rows.
     ta.style.maxHeight = 'none';
     ta.style.height = `${this.resizeBaseHeight}px`;
     this.resizeValueMax.set(this.resizeMaxHeight);
@@ -543,21 +510,15 @@ export class ComposerComponent implements AfterViewInit {
     if (this.slashOpen()) this.slashOverlay?.overlayRef?.updatePosition();
   }
 
-  /**
-   * Clears any manual height and hands sizing back to CDK autosize, re-applying the row
-   * cap that `onResizeStart` dropped. Shared by the reset handle, submit, and new-conversation.
-   */
   private restoreAutoSize(): void {
     if (!this.manualResizeActive) return;
     this.manualResizeActive = false;
     const ta = this.textareaRef?.nativeElement;
     if (!ta) return;
     ta.style.height = '';
-    // Restore the exact row cap captured at resize start (no CDK internals poked).
     ta.style.maxHeight = this.savedMaxHeight;
     this.resizeValueNow.set(null);
     this.resizeValueMax.set(0);
-    // enabled false→true makes the CDK setter reflow to fit content; no extra call needed.
     if (this.autosize) this.autosize.enabled = true;
   }
 
@@ -566,8 +527,7 @@ export class ComposerComponent implements AfterViewInit {
     if (this.disabled()) return false;
     if (this.anyAttachmentPreprocessing()) return false;
     const text = this.textValue();
-    // A lone `/` is the skill-menu trigger, not a message.
-    const hasText = text.trim().length > 0 && !isBareSlash(text);
+    const hasText = !isBlankOrSlashOnly(text);
     const hasAttachments = this.attachments().length > 0;
     if (!hasText && !hasAttachments) return false;
     return !(hasAttachments && this.streaming());
@@ -664,7 +624,6 @@ export class ComposerComponent implements AfterViewInit {
     this.attachmentError.set('');
   }
 
-  /** View-model used by the strip — strips composer-only state out. */
   readonly attachmentViewModels = computed<ReadonlyArray<AttachmentViewModel>>(() =>
     this.attachments().map((a) => ({
       id: a.id,
@@ -675,12 +634,10 @@ export class ComposerComponent implements AfterViewInit {
     }))
   );
 
-  /** True when at least one attachment is still being processed. */
   readonly anyAttachmentPreprocessing = computed<boolean>(() =>
     this.attachments().some((a) => a.preprocessed === null)
   );
 
-  /** Submit gating reason (used in tooltip / aria-disabled state). */
   readonly submitBlockedReason = computed<string>(() => {
     if (this.disabled()) return '';
     if (this.anyAttachmentPreprocessing()) return 'Preparing image…';
@@ -693,7 +650,6 @@ export class ComposerComponent implements AfterViewInit {
   private async ingest(files: File[]): Promise<void> {
     const images = files.filter((f) => f.type.startsWith('image/'));
     if (images.length === 0) {
-      // Non-image drop/paste is silently ignored.
       return;
     }
     const project = this.projectState.activeProject();
@@ -712,7 +668,6 @@ export class ComposerComponent implements AfterViewInit {
       ]);
       try {
         const out = await this.preprocessor.preprocess(file, modelClass, project);
-        // Preprocessor returns its own post-resample blob URL; drop the optimistic one.
         URL.revokeObjectURL(previewUrl);
         this.attachments.update((list) =>
           list.map((a) =>
@@ -737,14 +692,12 @@ export class ComposerComponent implements AfterViewInit {
     return 'sonnet';
   }
 
-  /** Snapshot of attachments that finished preprocessing. */
   private readyAttachments(): PreprocessedImage[] {
     return this.attachments()
       .map((a) => a.preprocessed)
       .filter((p): p is PreprocessedImage => p !== null);
   }
 
-  /** Same snapshot projected to `ChatAttachment` for the parent submit handler. */
   private readyChatAttachments(): ChatAttachment[] {
     return this.readyAttachments().map((p) => p.attachment);
   }
@@ -767,7 +720,6 @@ export class ComposerComponent implements AfterViewInit {
    */
   onSlashButtonClick(): void {
     if (this.disabled()) return;
-    // Explicit user request — clear any prior suppression.
     this.slashSuppressedByUser = false;
     const ta = this.textareaRef.nativeElement;
     const start = ta.selectionStart ?? ta.value.length;
@@ -846,7 +798,6 @@ export class ComposerComponent implements AfterViewInit {
     const prefix = el.value.slice(0, caret);
     const match = SLASH_TRIGGER.exec(prefix);
     if (match) {
-      // Honour user suppression — do not auto-reopen until the trigger clears.
       if (this.slashSuppressedByUser) {
         this.slashQuery.set(match[2] ?? '');
         return;
@@ -860,7 +811,6 @@ export class ComposerComponent implements AfterViewInit {
         }
       }
     } else {
-      // Trigger no longer matches — clear suppression and close the menu.
       this.slashSuppressedByUser = false;
       if (this.slashOpen()) {
         this.setSlashOpen(false);

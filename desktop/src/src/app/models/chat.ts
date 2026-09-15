@@ -5,7 +5,6 @@ export type StreamChunk =
   | { chunk_type: 'ToolStart'; data: { tool_id: string; tool_name: string } }
   | { chunk_type: 'ToolInputDelta'; data: { tool_id: string; partial_json: string } }
   | {
-      /** Complete tool input from the full assistant message; replaces the delta-assembled input_json. */
       chunk_type: 'ToolInputComplete';
       data: { tool_id: string; input_json: string };
     }
@@ -26,34 +25,28 @@ export type StreamChunk =
         usage?: UsageInfo;
         result_text?: string;
         context_window_size?: number;
-        /** UUID of the assistant message that just completed (ADR-046). */
         assistant_uuid?: string;
-        /** Per-turn token usage delta (since the last Result). */
         turn_usage?: TurnUsage;
-        /** Per-turn cost in USD — prefers CLI's authoritative total_cost_usd delta when available. */
         turn_cost?: number;
-        /** Model name for this turn, if known at emission time. */
         model?: string;
-        /** Usage of the most recent main-chain API call — the context-occupancy source. */
         context_usage?: TurnUsage;
       };
     }
   | { chunk_type: 'Error'; data: { content: string } }
   | { chunk_type: 'SystemInit'; data: { model: string; session_id?: string } }
   | {
+      chunk_type: 'ControlChip';
+      data: { command: string; argument: string; uuid?: string };
+    }
+  | {
       chunk_type: 'RateLimit';
       data: { status: string; utilization: number | null; resets_at: number | null };
     }
   | {
-      /** Commits a retry-anchor UUID onto the most recent user entry (ADR-046). */
       chunk_type: 'UserMessageCommit';
       data: { uuid: string };
     }
   | {
-      /**
-       * One-slot queued message (ADR-045) was drained server-side after the previous turn ended.
-       * Frontend clears `pendingQueue` on receipt — the queued payload is already in flight via stdin.
-       */
       chunk_type: 'QueueDrained';
       data: { session_id: string; text: string };
     };
@@ -102,7 +95,6 @@ export type ErrorBlockKind =
   | 'host_slept'
   | 'generic';
 
-/** Case-insensitive substrings of known Claude Code watchdog interruption texts. */
 const WATCHDOG_ERROR_NEEDLES: ReadonlyArray<{ needle: string; kind: ErrorBlockKind }> = [
   { needle: 'server error mid-response', kind: 'api_server_interrupted' },
   { needle: 'connection closed mid-response', kind: 'connection_interrupted' },
@@ -173,7 +165,7 @@ export type MessageBlock =
       description?: string;
       decided?: 'allow_once' | 'allow_always' | 'deny';
     }
-  /** Image placeholder; bytes live on disk (ADR-065). */
+  | { type: 'chip'; command: string; argument: string }
   | { type: 'image'; media_type: string; alt?: string };
 
 /**
@@ -240,22 +232,9 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   blocks: MessageBlock[];
   timestamp: number;
-  /**
-   * Retry-anchor UUID (ADR-046). User UUIDs commit immediately; assistant UUIDs stay `Pending` until
-   * the matching `Result` commits them. Absent for legacy transcripts and local-LLM turns lacking `message.id`.
-   */
   uuid?: string;
-  /** Status of the above UUID. Defaults to `Committed` when `uuid` is set. */
   uuid_status?: UuidStatus;
-  /**
-   * Per-turn metadata (assistant messages only — undefined for user messages).
-   * Populated from the `Result` chunk that terminated the turn.
-   */
   meta?: EntryMeta;
-  /**
-   * Epoch-ms timestamp of the most recent retry against this entry, set via `retry_last_turn`;
-   * surfaces as `· edited` in the metadata line of the assistant that follows.
-   */
   edited_at?: number;
 }
 
@@ -269,30 +248,15 @@ export interface RateLimitInfo {
 /** Session cost/usage stats */
 export interface SessionStats {
   session_id: string;
-  /** Project cost in USD from the proxy SSOT; `null` when unpriced (subscription) → "—". */
   total_cost: number | null;
-  /**
-   * Per-turn sums from flat result.usage (every API call added together) — feeds `in:`/`out:` counters,
-   * NEVER context occupancy: cache reads repeat per call, exceeding the window on tool-use turns.
-   */
   usage?: UsageInfo;
-  /**
-   * Usage of the most recent main-chain API call; `contextTokensFrom` of it
-   * is the context-window occupancy that drives the CTX meter.
-   */
   context_usage?: TurnUsage;
   model?: string;
   rate_limit?: RateLimitInfo;
-  /**
-   * Context window in tokens; `null` for local providers when discovery couldn't determine a value
-   * (ADR-041 "never guess"). UI hides the `used / max` ratio rather than fabricating a default.
-   */
   context_window_size: number | null;
-  /** Cumulative output tokens across all turns in the session. */
   total_output_tokens: number;
 }
 
-// ProjectList and ProjectEntry are defined in models/update.ts (SSOT)
 export type { ProjectList, ProjectEntry } from './update';
 
 /** A summary of a past conversation returned by list_conversations. */
@@ -315,18 +279,10 @@ export interface ConversationMessage {
   content: string;
   timestamp: string | null;
   blocks?: MessageBlock[];
-  /**
-   * Stable JSONL uuid that anchors the retry-last-turn flow (ADR-046); `undefined` for synthesized
-   * entries (e.g. `result` lines) — those never become a retry target.
-   */
   uuid?: string;
-  /** Per-message model id (assistant turns only); restores the resumed footer. */
   model?: string;
-  /** Per-message token usage (assistant turns only). */
   usage?: TurnUsage;
 }
-
-// Wire types — mirror `chat.rs::WireContentBlock` (ADR-065).
 
 /** Text segment of a wire user message. */
 export interface WireTextBlock {
@@ -341,7 +297,6 @@ export type WireContentBlock = WireTextBlock;
 export interface ChatAttachment {
   filename: string;
   mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
-  /** `/workspace/...` path Claude sees. */
   containerPath: string;
   hostPath: string;
 }

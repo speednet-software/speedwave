@@ -20,6 +20,14 @@ pub const BUNDLED_PLUGINS: &[&str] = &[
     "typescript-lsp",
 ];
 
+/// Effort levels Claude Code's `--effort` launch flag accepts, in slider order
+/// (`low` → `max`); `ultracode`/`auto` are not model effort levels.
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+const EFFORT_LEVELS_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
+
+const NO_EFFORT_LEVELS: &[&str] = &[];
+
 /// Per-model price list, USD per 1 million tokens. SSOT for the Desktop
 /// cost meter (`chat/pricing.ts` derives from this via `list_anthropic_models`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -38,8 +46,8 @@ pub struct ModelPricing {
 /// Settings → LLM Provider dropdown and the Desktop cost meter.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnthropicModelInfo {
-    /// Stable API alias (no snapshot date). Sent to Claude Code via
-    /// `ANTHROPIC_DEFAULT_MODEL` (a startup default a `/model` pick outranks).
+    /// Stable API alias (no snapshot date). Never compose-injected for Anthropic (SPEED-541);
+    /// the pin persists via the in-container `settings.json` `model` key (SPEED-539/ADR-088).
     pub id: &'static str,
     /// Display label shown in the dropdown ("Opus 5", "Sonnet 5", …).
     pub family: &'static str,
@@ -51,21 +59,66 @@ pub struct AnthropicModelInfo {
     pub premium: bool,
     /// Price of the base model id (e.g. `claude-sonnet-5`).
     pub pricing: ModelPricing,
-    /// Price of the `[1m]` 1M-context variant id (e.g. `claude-sonnet-5[1m]`),
     /// present only when `context_tokens >= 1_000_000`. `None` for sub-1M models.
     pub pricing_1m: Option<ModelPricing>,
+    /// Offered by the composer selector; legacy entries stay for pricing history.
+    pub selectable: bool,
+    /// Effort levels this model accepts, a subset of `EFFORT_LEVELS` in `low`→`max`
+    /// order; empty when unsupported (Haiku 4.5). Never deserialized from JSON.
+    #[serde(skip_deserializing)]
+    pub effort_levels: &'static [&'static str],
+    /// Default effort with no pin set; `None` exactly when `effort_levels` is
+    /// empty. `high` on every model that supports effort, except Opus 4.7 (`xhigh`).
+    pub default_effort: Option<&'static str>,
 }
 
-// Published per-MTok rates: platform.claude.com/docs/en/about-claude/pricing.
-// Claude 4.6+ bills the full 1M window at standard rates — [1m] reuses the base const.
+impl AnthropicModelInfo {
+    /// True when a priced `[1m]` alias exists (`pricing_1m.is_some()`) — the
+    /// SSOT for whether the composer should offer the `[1m]` option.
+    pub fn has_1m(&self) -> bool {
+        self.pricing_1m.is_some()
+    }
+}
+
+/// or its `[1m]` alias where `has_1m()`. Validation SSOT for `--model` overrides.
+pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
+    let base = id.strip_suffix("[1m]");
+    ANTHROPIC_MODELS.iter().any(|m| {
+        m.selectable
+            && match base {
+                Some(b) => m.id == b && m.has_1m(),
+                None => m.id == id,
+            }
+    })
+}
+
+/// Maps a Claude Code family alias (`opus|sonnet|haiku|fable`, optional `[1m]`) to the
+/// family's `latest` catalog id; anything else passes through verbatim (validity is separate).
+pub fn resolve_model_alias(value: &str) -> String {
+    let (word, suffix) = match value.strip_suffix("[1m]") {
+        Some(base) => (base, "[1m]"),
+        None => (value, ""),
+    };
+    let family_prefix = match word {
+        "opus" => "Opus",
+        "sonnet" => "Sonnet",
+        "haiku" => "Haiku",
+        "fable" => "Fable",
+        _ => return value.to_string(),
+    };
+    ANTHROPIC_MODELS
+        .iter()
+        .find(|m| m.family.starts_with(family_prefix) && m.latest)
+        .map(|m| format!("{}{suffix}", m.id))
+        .unwrap_or_else(|| value.to_string())
+}
+
 const FABLE_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
     cached_input: 1.0,
     cache_write: 12.5,
     output: 50.0,
 };
-// Fable 5.1 cache hits are 0.025x base input (every other model is 0.1x) — pricing
-// page footnote, "Prompt caching" section.
 const FABLE_5_1_PRICING: ModelPricing = ModelPricing {
     input: 10.0,
     cached_input: 0.25,
@@ -108,6 +161,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: FABLE_5_1_PRICING,
         pricing_1m: Some(FABLE_5_1_PRICING),
+        selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-opus-5",
@@ -117,6 +173,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-5",
@@ -126,6 +185,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: SONNET_5_PRICING,
         pricing_1m: Some(SONNET_5_PRICING),
+        selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-haiku-4-5",
@@ -135,6 +197,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: HAIKU_PRICING,
         pricing_1m: None,
+        selectable: true,
+        effort_levels: NO_EFFORT_LEVELS,
+        default_effort: None,
     },
     AnthropicModelInfo {
         id: "claude-fable-5",
@@ -144,6 +209,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: FABLE_PRICING,
         pricing_1m: Some(FABLE_PRICING),
+        selectable: true,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-8",
@@ -153,6 +221,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: false,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-7",
@@ -162,6 +233,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: false,
+        effort_levels: EFFORT_LEVELS,
+        default_effort: Some("xhigh"),
     },
     AnthropicModelInfo {
         id: "claude-opus-4-6",
@@ -171,6 +245,9 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: true,
         pricing: OPUS_PRICING,
         pricing_1m: Some(OPUS_PRICING),
+        selectable: false,
+        effort_levels: EFFORT_LEVELS_NO_XHIGH,
+        default_effort: Some("high"),
     },
     AnthropicModelInfo {
         id: "claude-sonnet-4-6",
@@ -180,21 +257,20 @@ pub const ANTHROPIC_MODELS: &[AnthropicModelInfo] = &[
         premium: false,
         pricing: SONNET_46_PRICING,
         pricing_1m: Some(SONNET_46_PRICING),
+        selectable: false,
+        effort_levels: EFFORT_LEVELS_NO_XHIGH,
+        default_effort: Some("high"),
     },
 ];
 
 /// Default Claude Code CLI flags applied to every session.
 pub const DEFAULT_FLAGS: &[&str] = &[
     "--dangerously-skip-permissions",
-    // Tells Claude Code where the MCP hub is (generated by entrypoint.sh)
     "--mcp-config",
     MCP_CONFIG_PATH,
-    // Only use servers from --mcp-config, ignore any .mcp.json in workspace
     "--strict-mcp-config",
     "--thinking-display",
     "summarized",
-    // Lock-file auto-connect to the IDE bridge (~/.claude/ide/); silent when no lock.
-    // Complements CLAUDE_CODE_AUTO_CONNECT_IDE (which only forces the terminal path).
     "--ide",
 ];
 
@@ -203,14 +279,9 @@ pub fn base_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert("CLAUDE_CODE_ENABLE_TELEMETRY".into(), "0".into());
     env.insert("DISABLE_AUTOUPDATER".into(), "1".into());
-    // Signal sandboxed env so --dangerously-skip-permissions is accepted regardless of UID.
     env.insert("IS_SANDBOX".into(), "1".into());
-    // Claude Code focus-view mode: emits smaller ANSI updates instead of full-frame redraws (issue #451).
     env.insert("CLAUDE_CODE_NO_FLICKER".into(), "1".into());
-    // Non-empty WAYLAND_DISPLAY routes Claude Code copies through the osc52-copy.sh shim (ADR-052).
     env.insert("WAYLAND_DISPLAY".into(), "speedwave-clipboard".into());
-    // Raise Claude Code's 300s remote-MCP idle abort (CC ≥2.1.187) above the longest
-    // hub→worker op; the CC↔hub HTTP connection is silent until the op finishes.
     env.insert(
         "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT".into(),
         MCP_TOOL_IDLE_TIMEOUT_MS.to_string(),
@@ -257,7 +328,6 @@ mod tests {
 
     #[test]
     fn claude_version_is_pinned_semver() {
-        // CLAUDE_VERSION must be a concrete semver — never "latest" or "stable".
         assert_ne!(CLAUDE_VERSION, "latest", "must not be 'latest'");
         assert_ne!(CLAUDE_VERSION, "stable", "must not be 'stable'");
         let re = regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+$").unwrap();
@@ -347,7 +417,6 @@ mod tests {
 
     #[test]
     fn base_env_sets_wayland_display_for_clipboard_probe() {
-        // Claude Code ≥2.1.161 gates the clipboard-tool probe on this var (ADR-052).
         let env = base_env();
         let val = env.get("WAYLAND_DISPLAY").map(|s| s.as_str());
         assert!(
@@ -386,8 +455,6 @@ mod tests {
 
     #[test]
     fn mcp_tool_idle_timeout_covers_worker_max() {
-        // SSOT-alignment: idle ceiling must stay >= STALE_CHUNK_TIMEOUT_MS in timeouts.ts.
-        // Env-raised BASE_MS/SHAREPOINT_SYNC_MS are invisible here — raise them manually.
         let src = include_str!("../../../mcp-servers/shared/src/timeouts.ts");
         let re = regex::Regex::new(r"STALE_CHUNK_TIMEOUT_MS:\s*([0-9*\s]+?),").unwrap();
         let expr = re
@@ -413,7 +480,6 @@ mod tests {
 
     #[test]
     fn mcp_config_path_points_to_claude_dir() {
-        // entrypoint.sh generates mcp-config.json at this path; keep it in sync with DEFAULT_FLAGS.
         assert_eq!(MCP_CONFIG_PATH, "/home/speedwave/.claude/mcp-config.json");
     }
 
@@ -424,14 +490,11 @@ mod tests {
 
     #[test]
     fn default_flags_include_ide_auto_connect() {
-        // Lock-file auto-connect path; safe default since Claude Code skips it
-        // silently when no ~/.claude/ide/ lock is present (CLI-only).
         assert!(DEFAULT_FLAGS.contains(&"--ide"));
     }
 
     #[test]
     fn default_flags_force_thinking_summarized() {
-        // Workaround for anthropics/claude-code#49268: pin --thinking-display to `summarized`.
         let pos = DEFAULT_FLAGS
             .iter()
             .position(|f| *f == "--thinking-display")
@@ -445,9 +508,7 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_appends_1m_suffix_for_million_token_models() {
-        // Workaround for anthropics/claude-code#34083 (1M models capped at 200k without `[1m]`).
         let env = anthropic_default_models_env();
-        // Cross-check every emitted var against SSOT.
         for (var, value) in &env {
             let alias = var
                 .strip_prefix("ANTHROPIC_DEFAULT_")
@@ -482,7 +543,6 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_covers_every_latest_family() {
-        // Every family with a `latest: true` entry in SSOT must produce a matching env var.
         let env = anthropic_default_models_env();
         for prefix in ["Opus", "Sonnet", "Haiku"] {
             let has_latest = ANTHROPIC_MODELS
@@ -500,8 +560,6 @@ mod tests {
 
     #[test]
     fn anthropic_default_models_env_omits_fable_alias() {
-        // Anthropic-branch pins skip Fable (`fable` alias resolves natively).
-        // Non-anthropic remapping injects FABLE separately — see compose/llm.rs.
         let env = anthropic_default_models_env();
         assert!(
             !env.keys().any(|k| k.contains("FABLE")),
@@ -511,8 +569,6 @@ mod tests {
 
     #[test]
     fn fable_5_1_is_the_latest_fable_entry() {
-        // CC 2.1.257+ made Fable 5.1 the default Fable model; the FABLE alias pin
-        // resolves to the first `latest: true` Fable, so 5.1 must lead the tier.
         let fable = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-fable-5-1")
@@ -526,9 +582,59 @@ mod tests {
     }
 
     #[test]
+    fn sonnet_5_1m_variant_shares_base_pricing() {
+        let sonnet = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-5")
+            .unwrap();
+        assert_eq!(sonnet.pricing_1m, Some(sonnet.pricing));
+    }
+
+    #[test]
+    fn sonnet_5_and_4_6_carry_their_catalog_rates() {
+        let s5 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-5")
+            .unwrap();
+        assert_eq!(s5.pricing.input, 2.0);
+        assert_eq!(s5.pricing.output, 10.0);
+        let s46 = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-sonnet-4-6")
+            .unwrap();
+        assert_eq!(s46.pricing.input, 3.0);
+        assert_eq!(s46.pricing.output, 15.0);
+    }
+
+    #[test]
+    fn legacy_entries_are_not_selectable() {
+        for id in [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+        ] {
+            let m = ANTHROPIC_MODELS.iter().find(|m| m.id == id).unwrap();
+            assert!(!m.selectable, "{id} must not be selectable");
+        }
+    }
+
+    #[test]
+    fn current_entries_are_selectable() {
+        for id in [
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+        ] {
+            let m = ANTHROPIC_MODELS.iter().find(|m| m.id == id).unwrap();
+            assert!(m.selectable, "{id} must be selectable");
+        }
+    }
+
+    #[test]
     fn fable_5_is_demoted_to_legacy() {
-        // Fable 5.1 replaces Fable 5 as the Latest Fable entry; Fable 5 keeps its
-        // pricing but must no longer be the alias-pin target.
         let fable_5 = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-fable-5")
@@ -539,8 +645,6 @@ mod tests {
 
     #[test]
     fn opus_5_is_the_latest_opus_entry() {
-        // The OPUS alias pin resolves to the first `latest: true` Opus, so a new
-        // Opus release must demote its predecessor rather than sit beside it.
         let opus_5 = ANTHROPIC_MODELS
             .iter()
             .find(|m| m.id == "claude-opus-5")
@@ -558,7 +662,6 @@ mod tests {
 
     #[test]
     fn at_most_one_latest_entry_per_family_tier() {
-        // Two `latest: true` entries in one tier make the alias pin order-dependent.
         for prefix in ["Fable", "Opus", "Sonnet", "Haiku"] {
             let latest: Vec<&str> = ANTHROPIC_MODELS
                 .iter()
@@ -574,14 +677,12 @@ mod tests {
 
     #[test]
     fn default_flags_include_mcp_config() {
-        // Claude Code must receive --mcp-config pointing to the generated config file.
         assert!(DEFAULT_FLAGS.contains(&"--mcp-config"));
         assert!(DEFAULT_FLAGS.contains(&MCP_CONFIG_PATH));
     }
 
     #[test]
     fn default_flags_mcp_config_before_strict() {
-        // --mcp-config must come before --strict-mcp-config.
         let mcp_pos = DEFAULT_FLAGS.iter().position(|f| *f == "--mcp-config");
         let strict_pos = DEFAULT_FLAGS
             .iter()
@@ -594,7 +695,6 @@ mod tests {
 
     #[test]
     fn default_flags_mcp_config_followed_by_path() {
-        // --mcp-config must be immediately followed by the path (it's a flag + value pair).
         let mcp_pos = DEFAULT_FLAGS
             .iter()
             .position(|f| *f == "--mcp-config")
@@ -607,8 +707,15 @@ mod tests {
     }
 
     #[test]
+    fn effort_levels_are_unique_and_run_from_low_to_max() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(EFFORT_LEVELS.iter().all(|l| seen.insert(*l)));
+        assert_eq!(EFFORT_LEVELS.first(), Some(&"low"));
+        assert_eq!(EFFORT_LEVELS.last(), Some(&"max"));
+    }
+
+    #[test]
     fn anthropic_models_list_is_non_empty_and_starts_with_latest() {
-        // The first entry is the topmost dropdown option, so it must be `latest = true`.
         assert!(!ANTHROPIC_MODELS.is_empty(), "model list must not be empty");
         assert!(
             ANTHROPIC_MODELS[0].latest,
@@ -618,7 +725,6 @@ mod tests {
 
     #[test]
     fn anthropic_model_ids_are_unique_and_well_formed() {
-        // Model ids must be unique and start with `claude-`.
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for m in ANTHROPIC_MODELS {
             assert!(seen.insert(m.id), "duplicate model id: {}", m.id);
@@ -632,7 +738,6 @@ mod tests {
                 "family label must not be empty for {}",
                 m.id
             );
-            // Smallest plausible context window is 200k (Haiku); catch accidental zeros/typos.
             assert!(
                 m.context_tokens >= 1_000,
                 "context_tokens looks too small for {}: {}",
@@ -644,7 +749,6 @@ mod tests {
 
     #[test]
     fn anthropic_models_have_at_least_one_latest_entry() {
-        // At least one `latest: true` entry must exist for the "Latest" optgroup.
         assert!(
             ANTHROPIC_MODELS.iter().any(|m| m.latest),
             "at least one Latest entry required so the dropdown opens with a current option"
@@ -653,7 +757,6 @@ mod tests {
 
     #[test]
     fn anthropic_models_premium_flag_matches_family() {
-        // Premium tiers are Opus + Fable; Sonnet/Haiku are the everyday tier.
         for m in ANTHROPIC_MODELS {
             let expected = m.family.starts_with("Opus") || m.family.starts_with("Fable");
             assert_eq!(
@@ -670,7 +773,6 @@ mod tests {
 
     #[test]
     fn anthropic_models_latest_entries_precede_legacy() {
-        // Frontend renders the slice as-is into two optgroups; legacy before latest breaks the boundary.
         let mut seen_legacy = false;
         for m in ANTHROPIC_MODELS {
             if !m.latest {
@@ -687,7 +789,6 @@ mod tests {
 
     #[test]
     fn every_model_has_well_formed_pricing() {
-        // Cache-read must be cheaper than input, cache-write dearer, for every entry and its 1M variant.
         fn check(label: &str, p: &ModelPricing) {
             assert!(p.input > 0.0, "{label}: input rate must be positive");
             assert!(p.output > 0.0, "{label}: output rate must be positive");
@@ -710,7 +811,6 @@ mod tests {
 
     #[test]
     fn one_m_pricing_present_iff_million_token_context() {
-        // `pricing_1m` must be present iff the model has a 1M-token context.
         for m in ANTHROPIC_MODELS {
             let is_million = m.context_tokens >= 1_000_000;
             assert_eq!(
@@ -720,6 +820,228 @@ mod tests {
                 m.id,
                 m.context_tokens
             );
+        }
+    }
+
+    #[test]
+    fn has_1m_mirrors_pricing_1m_presence() {
+        let fable = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-fable-5-1")
+            .expect("claude-fable-5-1 must be in the catalog");
+        assert_eq!(fable.context_tokens, 1_000_000);
+        assert!(
+            fable.has_1m(),
+            "claude-fable-5-1 must report has_1m() == true"
+        );
+
+        let haiku = ANTHROPIC_MODELS
+            .iter()
+            .find(|m| m.id == "claude-haiku-4-5")
+            .expect("claude-haiku-4-5 must be in the catalog");
+        assert_eq!(haiku.context_tokens, 200_000);
+        assert!(
+            !haiku.has_1m(),
+            "an unpriced 200k model must report has_1m() == false"
+        );
+
+        for m in ANTHROPIC_MODELS {
+            assert_eq!(
+                m.has_1m(),
+                m.pricing_1m.is_some(),
+                "{}: has_1m() must mirror pricing_1m.is_some()",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn is_selectable_anthropic_model_id_accepts_every_selector_shape() {
+        for m in ANTHROPIC_MODELS.iter().filter(|m| m.selectable) {
+            assert!(is_selectable_anthropic_model_id(m.id), "{} must pass", m.id);
+            assert_eq!(
+                is_selectable_anthropic_model_id(&format!("{}[1m]", m.id)),
+                m.has_1m(),
+                "{}[1m] must pass exactly when has_1m()",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn is_selectable_anthropic_model_id_rejects_foreign_and_legacy_shapes() {
+        assert!(!is_selectable_anthropic_model_id(""));
+        assert!(!is_selectable_anthropic_model_id("gpt-4o-mini"));
+        assert!(!is_selectable_anthropic_model_id("unsloth/Qwen3.6-35B-A3B"));
+        assert!(!is_selectable_anthropic_model_id("claude-fable-5[2m]"));
+        assert!(!is_selectable_anthropic_model_id("[1m]"));
+        for m in ANTHROPIC_MODELS.iter().filter(|m| !m.selectable) {
+            assert!(
+                !is_selectable_anthropic_model_id(m.id),
+                "legacy {} must be rejected",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_model_alias_maps_each_documented_alias_to_its_latest_entry() {
+        assert_eq!(resolve_model_alias("opus"), "claude-opus-5");
+        assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-5");
+        assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_model_alias("fable"), "claude-fable-5-1");
+    }
+
+    #[test]
+    fn resolve_model_alias_preserves_the_1m_suffix() {
+        assert_eq!(resolve_model_alias("opus[1m]"), "claude-opus-5[1m]");
+        assert_eq!(resolve_model_alias("sonnet[1m]"), "claude-sonnet-5[1m]");
+        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
+        assert_eq!(resolve_model_alias("haiku[1m]"), "claude-haiku-4-5[1m]");
+    }
+
+    #[test]
+    fn resolve_model_alias_matches_the_documented_fable_rewrite_demo() {
+        assert_eq!(resolve_model_alias("fable[1m]"), "claude-fable-5-1[1m]");
+    }
+
+    #[test]
+    fn resolve_model_alias_passes_a_full_catalog_id_through_unchanged() {
+        assert_eq!(resolve_model_alias("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(
+            resolve_model_alias("claude-fable-5[1m]"),
+            "claude-fable-5[1m]"
+        );
+        assert_eq!(resolve_model_alias("claude-opus-4-8"), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn resolve_model_alias_passes_an_unknown_value_through_verbatim() {
+        assert_eq!(resolve_model_alias(""), "");
+        assert_eq!(resolve_model_alias("gpt-4o-mini"), "gpt-4o-mini");
+        assert_eq!(resolve_model_alias("best"), "best");
+        assert_eq!(resolve_model_alias("opusplan"), "opusplan");
+        assert_eq!(resolve_model_alias("öéü"), "öéü");
+    }
+
+    #[test]
+    fn resolve_model_alias_haiku_1m_resolves_even_though_haiku_has_no_1m_price() {
+        let resolved = resolve_model_alias("haiku[1m]");
+        assert_eq!(resolved, "claude-haiku-4-5[1m]");
+        assert!(!is_selectable_anthropic_model_id(&resolved));
+    }
+
+    #[test]
+    fn resolve_model_alias_fable_1m_is_selectable_because_latest_fable_has_a_1m_price() {
+        let resolved = resolve_model_alias("fable[1m]");
+        assert!(is_selectable_anthropic_model_id(&resolved));
+    }
+
+    #[test]
+    fn anthropic_models_effort_levels_are_subsets_of_effort_levels_in_order() {
+        for m in ANTHROPIC_MODELS {
+            let mut last_idx: Option<usize> = None;
+            for level in m.effort_levels {
+                let idx = EFFORT_LEVELS
+                    .iter()
+                    .position(|l| l == level)
+                    .unwrap_or_else(|| {
+                        panic!("{}: effort level '{level}' is not in EFFORT_LEVELS", m.id)
+                    });
+                if let Some(last) = last_idx {
+                    assert!(
+                        idx > last,
+                        "{}: effort_levels must preserve EFFORT_LEVELS order, got {:?}",
+                        m.id,
+                        m.effort_levels
+                    );
+                }
+                last_idx = Some(idx);
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_models_effort_table_matches_docs() {
+        let full_five: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+        let four_no_xhigh: &[&str] = &["low", "medium", "high", "max"];
+        let find = |id: &str| {
+            ANTHROPIC_MODELS
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from catalog"))
+        };
+        for id in [
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            assert_eq!(
+                find(id).effort_levels,
+                full_five,
+                "{id} must support the full low..max effort range"
+            );
+        }
+        for id in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            assert_eq!(
+                find(id).effort_levels,
+                four_no_xhigh,
+                "{id} must support every level except xhigh"
+            );
+        }
+        assert_eq!(
+            find("claude-haiku-4-5").effort_levels,
+            &[] as &[&str],
+            "claude-haiku-4-5 must not support effort"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_default_effort_is_high_except_opus_4_7() {
+        for m in ANTHROPIC_MODELS {
+            if m.effort_levels.is_empty() {
+                continue;
+            }
+            let expected = if m.id == "claude-opus-4-7" {
+                "xhigh"
+            } else {
+                "high"
+            };
+            assert_eq!(
+                m.default_effort,
+                Some(expected),
+                "{}: unexpected default effort",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_models_default_effort_none_iff_effort_levels_empty() {
+        for m in ANTHROPIC_MODELS {
+            assert_eq!(
+                m.default_effort.is_none(),
+                m.effort_levels.is_empty(),
+                "{}: default_effort must be None exactly when effort_levels is empty",
+                m.id
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_models_default_effort_is_a_supported_level() {
+        for m in ANTHROPIC_MODELS {
+            if let Some(default) = m.default_effort {
+                assert!(
+                    m.effort_levels.contains(&default),
+                    "{}: default_effort {default} must be one of its own effort_levels {:?}",
+                    m.id,
+                    m.effort_levels
+                );
+            }
         }
     }
 }

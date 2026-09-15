@@ -19,6 +19,7 @@ class SlashServiceStub {
   readonly discovering = signal(false);
   readonly source = signal<string | null>(null);
   readonly error = signal<string | null>(null);
+  readonly unavailable = signal(false);
   readonly isLoadingEmpty = signal(false);
   refresh = vi.fn(async () => undefined);
   filter(_query: string): readonly unknown[] {
@@ -64,7 +65,6 @@ describe('ComposerComponent', () => {
     return el;
   }
 
-  // ── happy path ──────────────────────────────────────────────────────────
   describe('happy path — submit', () => {
     it('emits submitted(value) and resets form when Enter is pressed without Shift', () => {
       const emitted: string[] = [];
@@ -104,7 +104,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── Shift+Enter inserts newline ─────────────────────────────────────────
   describe('Shift+Enter', () => {
     it('does NOT submit when Shift+Enter is pressed', () => {
       const emitted: string[] = [];
@@ -122,7 +121,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── edge cases ──────────────────────────────────────────────────────────
   describe('edge cases', () => {
     it('does not emit when submitting empty text', () => {
       const emitted: string[] = [];
@@ -192,8 +190,6 @@ describe('ComposerComponent', () => {
     });
 
     it('CAN submit a lone `/` when an image attachment is present (ADR-065)', () => {
-      // The lone-`/` guard only suppresses a *text-only* send; with a ready
-      // attachment the image is the real payload, so submit is allowed.
       component.text.setValue('/');
       component.attachments.set([
         {
@@ -219,7 +215,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── disabled state ──────────────────────────────────────────────────────
   describe('disabled state', () => {
     it('prevents submission via Enter when disabled', () => {
       const emitted: string[] = [];
@@ -265,7 +260,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── slash menu trigger ──────────────────────────────────────────────────
   describe('slash menu trigger', () => {
     function dispatchInputAt(value: string, caretPos: number): void {
       const ta = textarea();
@@ -304,7 +298,6 @@ describe('ComposerComponent', () => {
       const events: boolean[] = [];
       component.slashOpenChange.subscribe((e) => events.push(e));
       slashButton().click();
-      // queueMicrotask defers the caret update; await it for the popover state to settle.
       await Promise.resolve();
       fixture.detectChanges();
       expect(component.text.value).toBe('/');
@@ -323,7 +316,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── ARIA ────────────────────────────────────────────────────────────────
   describe('ARIA', () => {
     it('textarea has aria-label "Compose message"', () => {
       expect(textarea().getAttribute('aria-label')).toBe('Compose message');
@@ -334,7 +326,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── placeholder input ───────────────────────────────────────────────────
   describe('placeholder', () => {
     it('uses default placeholder when none provided', () => {
       expect(textarea().getAttribute('placeholder')).toBe('message speedwave...');
@@ -353,7 +344,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── ADR-045 — queued message UX ─────────────────────────────────────────
   describe('queued message (ADR-045)', () => {
     function queuedRow(): HTMLElement | null {
       return rootEl.querySelector<HTMLElement>('[data-testid="composer-queued"]');
@@ -411,8 +401,6 @@ describe('ComposerComponent', () => {
       component.queueRequested.subscribe((v) => queued.push(v));
       component.text.setValue('next turn');
       fixture.detectChanges();
-      // While streaming the send button is replaced by a stop button —
-      // submission goes through the textarea Enter handler instead.
       component.submit();
       expect(submitted).toEqual([]);
       expect(queued).toEqual(['next turn']);
@@ -439,14 +427,11 @@ describe('ComposerComponent', () => {
       const queued: string[] = [];
       component.submitted.subscribe((v) => submitted.push(v.payload));
       component.queueRequested.subscribe((v) => queued.push(v));
-      // Cannot setValue when control is disabled — guard with try.
       component.text.enable({ emitEvent: false });
       component.text.setValue('blocked');
       component.text.disable({ emitEvent: false });
       fixture.detectChanges();
-      // canSubmit returns false because disabled() is true.
       expect(component.canSubmit()).toBe(false);
-      // submit() called directly is also a no-op when canSubmit() is false.
       component.submit();
       expect(submitted).toEqual([]);
       expect(queued).toEqual([]);
@@ -504,7 +489,67 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── manual resize ─────────────────────────────────────────────
+  describe('model selector', () => {
+    it('renders app-model-selector instead of the old read-only model span', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector).toBeTruthy();
+    });
+
+    it('forwards streaming() to the model selector', () => {
+      fixture.componentRef.setInput('streaming', true);
+      fixture.detectChanges();
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      expect(selector.componentInstance.streaming()).toBe(true);
+    });
+
+    it('re-emits the model selector modelSelected event unchanged for the parent to handle', () => {
+      const selector = fixture.debugElement.query(By.css('app-model-selector'));
+      const emissions: unknown[] = [];
+      fixture.componentInstance.modelSelected.subscribe((sel) => emissions.push(sel));
+
+      selector.triggerEventHandler('modelSelected', {
+        catalogId: 'claude-sonnet-5',
+        wireId: 'claude-sonnet-5',
+        providerId: 'anthropic',
+        kind: 'anthropic_oauth',
+      });
+
+      expect(emissions).toEqual([
+        {
+          catalogId: 'claude-sonnet-5',
+          wireId: 'claude-sonnet-5',
+          providerId: 'anthropic',
+          kind: 'anthropic_oauth',
+        },
+      ]);
+    });
+  });
+
+  describe('overlayWidth', () => {
+    it('reflects the textarea width read at call time, not a cached first read', () => {
+      const el = textarea();
+      Object.defineProperty(el, 'offsetWidth', { value: 300, configurable: true });
+      expect(component.overlayWidth()).toBe('300px');
+
+      Object.defineProperty(el, 'offsetWidth', { value: 500, configurable: true });
+      expect(component.overlayWidth()).toBe('500px');
+    });
+  });
+
+  describe('contextLabel', () => {
+    it('does not render the context span when contextLabel is empty (default)', () => {
+      const span = rootEl.querySelector('[data-testid="composer-context"]');
+      expect(span).toBeNull();
+    });
+
+    it('renders the bound contextLabel text', () => {
+      fixture.componentRef.setInput('contextLabel', '200k');
+      fixture.detectChanges();
+      const span = rootEl.querySelector('[data-testid="composer-context"]');
+      expect(span?.textContent?.trim()).toBe('200k');
+    });
+  });
+
   describe('manual resize', () => {
     function autosize(): CdkTextareaAutosize {
       return fixture.debugElement
@@ -545,7 +590,6 @@ describe('ComposerComponent', () => {
 
     it('lifts the CDK row cap so the drag can exceed 8 rows', () => {
       component.onResizeStart();
-      // Inline max-height (cdkAutosizeMaxRows) must be dropped or the field can't grow past 8 rows.
       expect(textarea().style.maxHeight).toBe('none');
       component.onResizeBy(100000);
       const ceiling = Math.round(window.innerHeight * 0.6);
@@ -586,7 +630,6 @@ describe('ComposerComponent', () => {
 
     it('tracks aria value: base on start, target on drag, null after reset', () => {
       component.onResizeStart();
-      // jsdom has no layout, so the captured base height is 0.
       expect(component.resizeValueNow()).toBe(0);
       component.onResizeBy(300);
       const target = Math.min(Math.round(window.innerHeight * 0.6), Math.max(56, 300));
@@ -598,7 +641,6 @@ describe('ComposerComponent', () => {
     });
 
     it('renders the full aria value set only while resizing', () => {
-      // Auto mode: no partial value set on the separator.
       expect(handle().hasAttribute('aria-valuenow')).toBe(false);
       expect(handle().hasAttribute('aria-valuemin')).toBe(false);
       expect(handle().hasAttribute('aria-valuemax')).toBe(false);
@@ -619,11 +661,9 @@ describe('ComposerComponent', () => {
       expect(() => component.onResizeEnd()).not.toThrow();
     });
 
-    // ── end-to-end wiring through the directive ──────────────────────────────
     it('ArrowUp on the handle grows the textarea and disables autosize', () => {
       handle().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
       expect(autosize().enabled).toBe(false);
-      // base 0 + 24px step, clamped up to the 56px floor.
       expect(textarea().style.height).toBe('56px');
     });
 
@@ -643,7 +683,6 @@ describe('ComposerComponent', () => {
     });
   });
 
-  // ── meeting transcript staged for the next message ──────────────────
   describe('staged transcript', () => {
     function transcriptRow(): HTMLElement | null {
       return rootEl.querySelector<HTMLElement>('[data-testid="composer-transcript"]');

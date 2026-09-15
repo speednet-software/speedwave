@@ -1,5 +1,3 @@
-// Project-management Tauri commands: list/switch, config mutations, event payloads.
-
 use crate::chat::{ChatSession, SharedChatSession};
 use crate::reconcile;
 use crate::types::{check_project, ProjectEntry, ProjectList};
@@ -23,7 +21,6 @@ pub(crate) fn list_projects() -> Result<ProjectList, String> {
     })
 }
 
-/// Switches the active project in-memory. Extracted for testability.
 fn apply_switch_project(
     user_config: &mut config::SpeedwaveUserConfig,
     name: &str,
@@ -35,12 +32,9 @@ fn apply_switch_project(
     Ok(())
 }
 
-/// Serialises project transitions — concurrent switches race each other's
-/// config commits, teardowns and rollbacks (double-click, add during switch).
 pub(crate) static PROJECT_TRANSITION_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
-/// Error returned when `PROJECT_TRANSITION_LOCK` is busy (switch, add, or remove).
 pub(crate) const PROJECT_TRANSITION_BUSY_ERR: &str =
     "Another project operation is already in progress";
 
@@ -58,7 +52,6 @@ pub(crate) async fn switch_project(
         return Err(PROJECT_TRANSITION_BUSY_ERR.to_string());
     };
 
-    // Commit config first to keep the lock brief; rollback restores `previous` on failure.
     let previous = config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let prev = user_config.active_project.clone();
@@ -74,7 +67,6 @@ pub(crate) async fn switch_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: wait for images → start new → teardown in background
     let prev_clone = previous.clone();
     let new_clone = name.clone();
     use tauri::Manager;
@@ -90,27 +82,20 @@ pub(crate) async fn switch_project(
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
             check_project(proj)?;
-            // No provider is a valid state ("choose a provider" screen) —
-            // skip starting containers rather than let render_compose bail.
             if containers_cmd::project_llm_is_unconfigured(proj)? {
                 log::info!(
                     "switch_project: '{proj}' has no LLM provider — skipping container start"
                 );
                 return Ok(());
             }
-            // Lazy build for the destination project (ADR-057).
             if let Err(sanitized) = integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            // Eager-start host workers before compose render so WORKER_*_URLs are live.
             crate::ensure_oauth_running(&oauth_arc, proj);
-            // Previous project is stopped in the background after success, not here.
-            // Wrap render → validate → up in one transaction (ADR-066).
             use crate::types::IntoAnyhow;
             rt.transaction(proj, |rt| -> anyhow::Result<()> {
                 containers_cmd::render_and_save_compose(proj).into_anyhow()?;
                 speedwave_runtime::runtime::compose_validate_with_retry(rt, proj)?;
-                // Idempotent up, not force-recreate: nerdctl ≥ 2.2.0 config-hash convergence (ADR-068).
                 rt.compose_up(proj)?;
                 Ok(())
             })
@@ -132,7 +117,6 @@ pub(crate) async fn switch_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    // Rebind chat session (spawn_blocking: rebind_chat acquires Mutex and calls session.start)
     let rebind_name = name.clone();
     let rebind_app = app.clone();
     let rebind_state = chat_state.inner().clone();
@@ -142,7 +126,6 @@ pub(crate) async fn switch_project(
             .map_err(|e| e.to_string())?;
 
     if let Err(e) = rebind_result {
-        // Tear down the new project and its host workers, then rebind chat to previous.
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &name);
         let mut cleanup_parts: Vec<String> = Vec::new();
 
@@ -183,7 +166,6 @@ pub(crate) async fn switch_project(
         return Err(full_error);
     }
 
-    // Switch succeeded: stop the previous project and retire its host workers in the background.
     if let Some(prev) = pending_teardown {
         reconcile::teardown_oauth_for_project(&oauth_for_teardown, &prev);
         spawn_background_teardown(prev);
@@ -210,13 +192,10 @@ pub(crate) fn rebind_chat(
     session.start(app.clone(), None).map_err(|e| e.to_string())
 }
 
-/// Parses a CloudStorage TCC error `"CloudStorage TCC required: {stable_id}|{dir}"`
-/// into `(stable_id, dir)`, or `None`. Tolerates appended suffix text after the dir.
 fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
     let body = error.strip_prefix(speedwave_runtime::cloudstorage::CLOUDSTORAGE_TCC_PREFIX)?;
     let pipe_idx = body.find('|')?;
     let (stable_id, rest) = body.split_at(pipe_idx);
-    // rest starts with '|'
     let dir = rest[1..]
         .split_once(". ")
         .map(|(d, _)| d)
@@ -224,8 +203,6 @@ fn parse_cloudstorage_tcc_error(error: &str) -> Option<(&str, &str)> {
     Some((stable_id, dir))
 }
 
-/// Builds the JSON payload for the `project_switch_failed` Tauri event. Emits structured
-/// CloudStorage TCC fields if the error is prefix-encoded, else generic `project` + `error`.
 pub(crate) fn compute_project_switch_failure_payload(
     previous: Option<&str>,
     full_error: &str,
@@ -280,8 +257,6 @@ pub(crate) fn rollback_and_emit_failed(
     full_error
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -302,6 +277,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
                 ProjectUserEntry {
                     name: "beta".to_string(),
@@ -310,6 +286,7 @@ mod tests {
                     integrations: None,
                     plugin_settings: None,
                     policy: None,
+                    effort_pin: None,
                 },
             ],
             active_project: Some("alpha".to_string()),
@@ -319,8 +296,6 @@ mod tests {
         }
     }
 
-    /// Structural: project switch must use idempotent `compose_up`, not
-    /// `compose_up_recreate` (nerdctl ≥ 2.2.0 config-hash convergence, ADR-068).
     #[test]
     fn switch_uses_idempotent_compose_up() {
         let source = include_str!("project_cmd.rs");
@@ -328,7 +303,6 @@ mod tests {
             .split("pub(crate) async fn switch_project(")
             .nth(1)
             .expect("switch_project must exist");
-        // Stop at the test module so we only inspect the production body.
         let body = switch_fn.split("\nmod tests").next().unwrap_or(switch_fn);
         assert!(
             body.contains("rt.compose_up(proj)"),
@@ -340,8 +314,6 @@ mod tests {
         );
     }
 
-    /// Structural: switch_project must check for a missing LLM provider before render, else
-    /// render_compose bails and teardown_only runs against a stale compose.yml.
     #[test]
     fn switch_checks_no_provider_before_render() {
         let source = include_str!("project_cmd.rs");
@@ -362,8 +334,6 @@ mod tests {
         );
     }
 
-    /// Structural: host workers must eager-start BEFORE compose render, else rendered WORKER_*_URLs
-    /// are dead and the watchdog force-recreates every container, killing the fresh chat session.
     #[test]
     fn switch_eager_starts_host_workers_before_render() {
         let source = include_str!("project_cmd.rs");
@@ -387,14 +357,11 @@ mod tests {
     #[tokio::test]
     async fn concurrent_switch_is_rejected_while_lock_held() {
         let guard = PROJECT_TRANSITION_LOCK.lock().await;
-        // A second transition must fail fast instead of racing the first.
         assert!(PROJECT_TRANSITION_LOCK.try_lock().is_err());
         drop(guard);
         assert!(PROJECT_TRANSITION_LOCK.try_lock().is_ok());
     }
 
-    /// Structural: previous project's host workers are retired only AFTER the
-    /// switch fully succeeds — a failed switch must leave them functional.
     #[test]
     fn switch_retires_previous_host_workers_only_after_success() {
         let source = include_str!("project_cmd.rs");
@@ -406,7 +373,6 @@ mod tests {
         let success_marker = body
             .find("pending_teardown {")
             .expect("success-path teardown block must exist");
-        // The PREVIOUS project's workers retire only in the success block...
         let prev_oauth = body
             .rfind("teardown_oauth_for_project")
             .expect("oauth teardown must exist");
@@ -414,7 +380,6 @@ mod tests {
             prev_oauth > success_marker,
             "previous-project worker teardown must live in the success path"
         );
-        // ...while the rebind-failure block retires the DESTINATION's workers.
         let rebind_fail = body
             .find("rebind_result {")
             .expect("rebind-failure block must exist");
@@ -424,8 +389,6 @@ mod tests {
             "rebind failure must retire the destination's host workers"
         );
     }
-
-    // -- apply_switch_project tests --
 
     #[test]
     fn switch_project_happy_path() {
@@ -489,6 +452,7 @@ mod tests {
                 integrations: None,
                 plugin_settings: None,
                 policy: None,
+                effort_pin: None,
             }],
             active_project: None,
             selected_ide: None,
@@ -507,8 +471,6 @@ mod tests {
         let result = apply_switch_project(&mut cfg, "anything");
         assert!(result.is_err());
     }
-
-    // -- compute_project_switch_failure_payload tests --
 
     #[test]
     fn payload_for_generic_error_omits_cloudstorage_fields() {
