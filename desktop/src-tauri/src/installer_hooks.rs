@@ -10,6 +10,8 @@ mod tests {
     const SWEEP_WXS: &str = include_str!("../windows/sweep.wxs");
     const FIREWALL_WXS: &str = include_str!("../windows/firewall.wxs");
     const RUN_HIDDEN_VBS: &str = include_str!("../windows/run-hidden.vbs");
+    const INSTALLER_PS1_SOURCES: [(&str, &str); 2] =
+        [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)];
 
     // ── Hook shape ──────────────────────────────────────────────────────
 
@@ -114,12 +116,26 @@ mod tests {
     #[test]
     fn ps1_sources_have_utf8_bom() {
         // Windows PowerShell 5.1 reads a BOM-less .ps1 in the system ANSI code page.
-        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+        for (name, ps1) in INSTALLER_PS1_SOURCES {
             assert!(
                 ps1.starts_with('\u{feff}'),
                 "{name} must be UTF-8 with BOM (PowerShell 5.1 misreads a BOM-less .ps1)"
             );
+            assert!(
+                !ps1.starts_with("\u{feff}\u{feff}"),
+                "{name} has a doubled BOM; the generator strips only one"
+            );
         }
+    }
+
+    #[test]
+    fn installer_hooks_nsh_embeds_no_bom() {
+        // FileWrite converts to the ANSI code page: an embedded U+FEFF would corrupt
+        // the first line of the materialized script.
+        assert!(
+            !HOOKS.contains('\u{feff}'),
+            "installer-hooks.nsh must not embed a BOM (generate-installer-nsh.sh strips it)"
+        );
     }
 
     #[test]
@@ -347,7 +363,7 @@ mod tests {
     #[test]
     fn materialized_ps1_scripts_contain_no_backtick() {
         // Backtick is the NSIS FileWrite delimiter with no escape; it truncates the string.
-        for (name, ps1) in [("sweep.ps1", SWEEP_PS1), ("firewall.ps1", FIREWALL_PS1)] {
+        for (name, ps1) in INSTALLER_PS1_SOURCES {
             assert!(
                 !ps1.contains('`'),
                 "{name} contains a backtick — breaks NSIS FileWrite (use splatting)"

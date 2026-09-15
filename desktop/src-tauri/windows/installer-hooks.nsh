@@ -412,7 +412,7 @@ Var SpeedwaveDataDirOverride
 ; POST-INSTALL: create Hyper-V firewall rule for the WSL VM so the host
 ; bridge (bound on the WSL adapter IP, not 127.0.0.1) is reachable from
 ; containers without surfacing a per-binary WDF prompt to the user.
-; See CLAUDE.md SSOT row for windows/firewall.ps1.
+; See .claude/rules/alignments.md (installer/sweep/firewall pipeline) and host-workers.md.
 !macro NSIS_HOOK_POSTINSTALL
   !insertmacro SPEEDWAVE_MATERIALIZE_FIREWALL
   !insertmacro SPEEDWAVE_MATERIALIZE_RUN_HIDDEN

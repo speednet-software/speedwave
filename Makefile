@@ -753,7 +753,8 @@ test-desktop-build: build-angular build-mcp
 test-desktop-config:
 	@$(REQUIRE_BATS)
 	bats _tests/desktop/updater-config.bats _tests/desktop/version-consistency.bats \
-	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats
+	  _tests/desktop/backmerge-alignment.bats _tests/desktop/e2e-rig-deps.bats \
+	  _tests/desktop/ps1-utf8-bom.bats
 	@echo "✅ Desktop config tests passed"
 
 # Release gate — uses gh shim, CI-only. NOT in `make test` to prevent shim
