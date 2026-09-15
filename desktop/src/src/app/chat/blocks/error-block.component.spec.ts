@@ -41,6 +41,10 @@ describe('ErrorBlockComponent', () => {
     'network',
     'session_exited',
     'broken_pipe',
+    'api_server_interrupted',
+    'connection_interrupted',
+    'response_stalled',
+    'host_slept',
     'generic',
   ];
   for (const kind of redKinds) {
@@ -90,6 +94,10 @@ describe('ErrorBlockComponent', () => {
       session_starting: 'session starting',
       auth_required: 'auth required',
       stopped_by_user: '■ stopped by user',
+      api_server_interrupted: '⚠ api_interrupted',
+      connection_interrupted: '⚠ connection_interrupted',
+      response_stalled: '⚠ response_stalled',
+      host_slept: '⚠ host_slept',
       generic: '⚠ error',
     };
     for (const [kind, expected] of Object.entries(map) as Array<[ErrorBlockKind, string]>) {
@@ -163,5 +171,51 @@ describe('ErrorBlockComponent', () => {
     expect(el().querySelector('[data-testid="error-block"]')?.getAttribute('data-kind')).toBe(
       'auth_required'
     );
+  });
+
+  describe('watchdog explanation line', () => {
+    const explained: Array<[ErrorBlockKind, string]> = [
+      [
+        'api_server_interrupted',
+        'The API server interrupted the response mid-stream (an API-side error, not a Speedwave failure). The content above may be incomplete. Retry the message.',
+      ],
+      [
+        'connection_interrupted',
+        'The connection to the API dropped mid-response (network, VPN, or the server closed the connection). The content above may be incomplete. Retry the message.',
+      ],
+      [
+        'response_stalled',
+        'The API stopped sending the response and Claude Code stopped waiting for it. The content above may be incomplete. Retry the message.',
+      ],
+      [
+        'host_slept',
+        'The computer went to sleep mid-response and the stream was interrupted. The content above may be incomplete. Retry the message.',
+      ],
+    ];
+
+    for (const [kind, text] of explained) {
+      it(`happy: ${kind} renders its explanation as a second line under the content`, () => {
+        setInputs('API Error: something mid-response.', kind);
+        const explanation = el().querySelector('[data-testid="error-explanation"]');
+        expect(explanation?.textContent?.trim()).toBe(text);
+      });
+    }
+
+    it('edge: generic renders no explanation element', () => {
+      setInputs('Something went wrong', 'generic');
+      expect(el().querySelector('[data-testid="error-explanation"]')).toBeNull();
+    });
+
+    it('edge: an existing kind with no configured explanation renders no explanation element', () => {
+      setInputs('boom', 'rate_limit');
+      expect(el().querySelector('[data-testid="error-explanation"]')).toBeNull();
+    });
+
+    it('component: explanation() signal mirrors the rendered element, and is undefined for generic', () => {
+      setInputs('boom', 'host_slept');
+      expect(component.explanation()).toBe(explained.find(([k]) => k === 'host_slept')?.[1]);
+      setInputs('boom', 'generic');
+      expect(component.explanation()).toBeUndefined();
+    });
   });
 });

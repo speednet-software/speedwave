@@ -24,6 +24,7 @@ import {
   chatInputFromText,
   chatInputToBlocks,
   contextTokensFrom,
+  watchdogErrorKind,
   type ChatInput,
   type ChatMessage,
   type MessageBlock,
@@ -945,7 +946,15 @@ export class ChatStateService {
           mapContextOverflowError(chunk.data.content) ??
           mapNotLoggedInError(chunk.data.content) ??
           chunk.data.content;
-        this._currentBlocks = [...this._currentBlocks, { type: 'error', content: errContent }];
+        const watchdogKind = watchdogErrorKind(errContent);
+        this._currentBlocks = [
+          ...this._currentBlocks,
+          {
+            type: 'error',
+            content: errContent,
+            ...(watchdogKind !== undefined ? { kind: watchdogKind } : {}),
+          },
+        ];
         this._messages = [
           ...this._messages,
           { role: 'assistant', blocks: [...this._currentBlocks], timestamp: Date.now() },
@@ -1787,9 +1796,15 @@ export function stateBlocksToMessageBlocks(blocks: readonly MessageBlockState[])
           },
         });
         break;
-      case 'error':
-        out.push({ type: 'error', content: b.content });
+      case 'error': {
+        const watchdogKind = watchdogErrorKind(b.content);
+        out.push({
+          type: 'error',
+          content: b.content,
+          ...(watchdogKind !== undefined ? { kind: watchdogKind } : {}),
+        });
         break;
+      }
       case 'image':
         out.push({ type: 'image', media_type: b.media_type, alt: b.alt ?? undefined });
         break;
