@@ -700,8 +700,8 @@ pub struct ResumeSnapshot {
     pub context_usage: Option<crate::chat::TurnUsage>,
 }
 
-/// Compute the cumulative session snapshot from a JSONL transcript: prefers the
-/// latest `modelUsage`, falls back to summed flat `usage` / last `system init`.
+/// Compute the cumulative session snapshot from a JSONL transcript: usage/cost
+/// prefer the latest `modelUsage`; `model` is the conversation model, `modelUsage` a fallback.
 pub fn compute_resume_snapshot(project: &str, session_id: &str) -> anyhow::Result<ResumeSnapshot> {
     compute_resume_snapshot_impl(consts::data_dir(), project, session_id)
 }
@@ -726,7 +726,7 @@ fn compute_resume_snapshot_impl(
     let mut latest_cumulative: Option<ResumeSnapshot> = None;
     let mut latest_cost: Option<f64> = None;
     let mut latest_modelusage_model: Option<String> = None;
-    let mut latest_init_model: Option<String> = None;
+    let mut latest_conversation_model: Option<String> = None;
     let mut last_context_usage: Option<crate::chat::TurnUsage> = None;
 
     for line in reader.lines().take(MAX_TRANSCRIPT_LINES) {
@@ -789,7 +789,7 @@ fn compute_resume_snapshot_impl(
                         if any_field {
                             latest_cumulative = Some(cumulative);
                         }
-                        // Pick the model with the most output tokens (the main response model).
+                        // Fallback only: the top-outputTokens entry may be a subagent model.
                         if let Some((top_model, _)) = model_usage.iter().max_by_key(|(_, stats)| {
                             stats
                                 .get("outputTokens")
@@ -805,7 +805,7 @@ fn compute_resume_snapshot_impl(
                 if parsed["subtype"].as_str() == Some("init") {
                     if let Some(model) = parsed["model"].as_str() {
                         if !model.is_empty() {
-                            latest_init_model = Some(model.to_string());
+                            latest_conversation_model = Some(model.to_string());
                         }
                     }
                 }
@@ -820,6 +820,11 @@ fn compute_resume_snapshot_impl(
                             last_context_usage = Some(u);
                         }
                     }
+                    if let Some(m) = parsed["message"]["model"].as_str() {
+                        if !m.is_empty() {
+                            latest_conversation_model = Some(m.to_string());
+                        }
+                    }
                 }
             }
             _ => {}
@@ -828,7 +833,7 @@ fn compute_resume_snapshot_impl(
 
     let mut snap = latest_cumulative.unwrap_or(summed);
     snap.total_cost = latest_cost;
-    snap.model = latest_modelusage_model.or(latest_init_model);
+    snap.model = latest_conversation_model.or(latest_modelusage_model);
     snap.context_usage = last_context_usage;
     Ok(snap)
 }
@@ -2343,17 +2348,19 @@ mod tests {
     }
 
     #[test]
-    fn compute_resume_snapshot_prefers_modelusage_model_over_init() {
+    fn compute_resume_snapshot_main_chain_assistant_model_supersedes_init() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456789";
 
-        // On a mid-session model switch, the seed reflects the latest `modelUsage` model.
+        // Main-chain assistant model (parent_tool_use_id: null) supersedes init,
+        // mirroring the live parser's chronological last-write-wins semantics.
         write_session(
             &dir,
             id,
             &[
                 r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_1","model":"claude-sonnet-4-7","role":"assistant"}}"#,
                 r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"claude-sonnet-4-7":{"inputTokens":1,"outputTokens":1}}}"#,
             ],
         );
@@ -2363,8 +2370,58 @@ mod tests {
     }
 
     #[test]
+    fn compute_resume_snapshot_ignores_sidechain_assistant_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Sidechain assistant models (either marker) never move the conversation
+        // model, even when the result's modelUsage is dominated by that model.
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
+                r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_1","model":"claude-haiku-4-5","role":"assistant"}}"#,
+                r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"msg_2","model":"claude-haiku-4-5","role":"assistant"}}"#,
+                r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":5000},"claude-fable-5":{"inputTokens":100,"outputTokens":100}}}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(
+            snap.model.as_deref(),
+            Some("claude-fable-5"),
+            "a sidechain assistant model must never move the conversation model"
+        );
+    }
+
+    #[test]
+    fn compute_resume_snapshot_later_init_supersedes_earlier_assistant_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = setup_sessions_dir(tmp.path(), "proj");
+        let id = "abcdef01-2345-6789-abcd-ef0123456789";
+
+        // Restart after a model switch appends a fresh init line later in the
+        // same transcript file — it must win over an earlier assistant model.
+        write_session(
+            &dir,
+            id,
+            &[
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
+                r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_1","model":"claude-opus-4-7","role":"assistant"}}"#,
+                r#"{"type":"system","subtype":"init","model":"claude-sonnet-4-7"}"#,
+            ],
+        );
+
+        let snap = compute_resume_snapshot_impl(tmp.path(), "proj", id).unwrap();
+        assert_eq!(snap.model.as_deref(), Some("claude-sonnet-4-7"));
+    }
+
+    #[test]
     fn compute_resume_snapshot_picks_dominant_model_from_modelusage() {
-        // From a multi-entry modelUsage map, picks the highest `outputTokens`.
+        // Fallback path only: no conversation model captured (no init/assistant
+        // model line) — pick the modelUsage entry with the most outputTokens.
         let tmp = tempfile::tempdir().unwrap();
         let dir = setup_sessions_dir(tmp.path(), "proj");
         let id = "abcdef01-2345-6789-abcd-ef0123456790";
@@ -2373,7 +2430,6 @@ mod tests {
             &dir,
             id,
             &[
-                r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
                 r#"{"type":"result","session_id":"s","is_error":false,"result":"ok","total_cost_usd":0.10,"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500}}}"#,
             ],
         );

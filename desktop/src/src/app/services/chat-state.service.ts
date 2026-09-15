@@ -1430,7 +1430,7 @@ export class ChatStateService {
   /**
    * Context-window fallback: live → SSOT → persisted → previous → Anthropic default; local
    * stays `null`.
-   * @param liveValue - Authoritative value carried by the stream (highest priority).
+   * @param liveValue - The conversation model's window as resolved by the Rust parser (highest priority).
    * @param model - Resolved model id used for the SSOT lookup.
    */
   private resolveContextWindow(
