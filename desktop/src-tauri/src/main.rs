@@ -911,6 +911,18 @@ fn main() {
                 // whisper.cpp debug builds (-DWHISPER_DEBUG) log decoded tokens per decode step:
                 // meeting speech must never reach the log file / diagnostics ZIP (security.md).
                 .level_for("whisper_rs", log::LevelFilter::Info)
+                // The PII NER detector (ADR-088) runs on burn: wgpu, naga and CubeCL trace
+                // every kernel dispatch and buffer write, thousands of lines per forward pass.
+                .level_for("wgpu_core", log::LevelFilter::Warn)
+                .level_for("wgpu_hal", log::LevelFilter::Warn)
+                .level_for("wgpu", log::LevelFilter::Warn)
+                .level_for("naga", log::LevelFilter::Warn)
+                .level_for("cubecl", log::LevelFilter::Warn)
+                .level_for("cubecl_runtime", log::LevelFilter::Warn)
+                .level_for("cubecl_wgpu", log::LevelFilter::Warn)
+                .level_for("burn_fusion", log::LevelFilter::Warn)
+                .level_for("burn_wgpu", log::LevelFilter::Warn)
+                .level_for("tokenizers", log::LevelFilter::Warn)
                 .max_file_size(50_000_000)
                 .rotation_strategy(RotationStrategy::KeepSome(10))
                 .format(move |callback, message, record| {
