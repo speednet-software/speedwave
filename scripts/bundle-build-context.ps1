@@ -1,4 +1,4 @@
-# PowerShell equivalent of bundle-build-context.sh; run from repo root. LOCAL Windows dev builds
+﻿# PowerShell equivalent of bundle-build-context.sh; run from repo root. LOCAL Windows dev builds
 # only — CI (windows-latest) runs bundle-build-context.sh via Git Bash instead.
 
 $ErrorActionPreference = 'Stop'
@@ -7,6 +7,13 @@ $ErrorActionPreference = 'Stop'
 # so concurrent test + dev runs do not race on the same files (mirrors the .sh).
 $dest = if ($env:BUNDLE_DEST) { $env:BUNDLE_DEST } else { 'desktop\src-tauri' }
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
+# The mcp-servers tree the bundle is staged from (mirrors the .sh); a scratch copy keeps a
+# test rebuild off the real tree a concurrent run reads.
+$mcpServersDir = if ($env:BUNDLE_MCP_SERVERS_DIR) { $env:BUNDLE_MCP_SERVERS_DIR } else { 'mcp-servers' }
+if (-not (Test-Path -Path $mcpServersDir -PathType Container)) {
+    [Console]::Error.WriteLine("ERROR: mcp-servers tree not found at $mcpServersDir (BUNDLE_MCP_SERVERS_DIR).")
+    exit 1
+}
 
 # Serialize concurrent runs on DEST (mirrors the .sh mkdir-mutex): non-atomic body can bake a
 # 0-byte package.json into a worker image otherwise; a lock whose holder PID is dead is reclaimed.
@@ -92,7 +99,7 @@ Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-
 # rules.yaml (mirrors the .sh): pii-engine's policy.rs include_str!s it repo-root-relative
 # (`../../../mcp-servers/policies/rules.yaml`) — Containerfile.proxy COPYs it alongside.
 New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
-Copy-Item mcp-servers\policies\rules.yaml "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
+Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
 
 # Host build outputs are never image content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS
 # (alignment test-enforced). Recursion stops at a match, mirroring the .sh `find -prune`.
@@ -120,49 +127,50 @@ Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -F
     }
 
 New-Item -ItemType Directory -Path "$dest\build-context\mcp-servers" -Force | Out-Null
-Copy-Item mcp-servers\tsconfig.base.json "$dest\build-context\mcp-servers\"
+Copy-Item "$mcpServersDir\tsconfig.base.json" "$dest\build-context\mcp-servers\"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
 $services = @('shared','policies','hub','slack','sharepoint','redmine','gitlab','github','atlassian','office','playwright','context7')
 
 foreach ($svc in $services) {
+    $svcSrc = "$mcpServersDir\$svc"
     $svcDest = "$dest\build-context\mcp-servers\$svc"
     New-Item -ItemType Directory -Path $svcDest -Force | Out-Null
-    Copy-Item "mcp-servers\$svc\package.json" "$svcDest\"
-    if (Test-Path "mcp-servers\$svc\package-lock.json") {
-        Copy-Item "mcp-servers\$svc\package-lock.json" "$svcDest\"
+    Copy-Item "$svcSrc\package.json" "$svcDest\"
+    if (Test-Path "$svcSrc\package-lock.json") {
+        Copy-Item "$svcSrc\package-lock.json" "$svcDest\"
     }
     # Some services (e.g. playwright) wrap an upstream npm package and have no src/.
-    if (Test-Path "mcp-servers\$svc\src") {
-        Copy-Item -Recurse "mcp-servers\$svc\src" "$svcDest\src"
+    if (Test-Path "$svcSrc\src") {
+        Copy-Item -Recurse "$svcSrc\src" "$svcDest\src"
     }
-    if (Test-Path "mcp-servers\$svc\tsconfig.json") {
-        Copy-Item "mcp-servers\$svc\tsconfig.json" "$svcDest\"
+    if (Test-Path "$svcSrc\tsconfig.json") {
+        Copy-Item "$svcSrc\tsconfig.json" "$svcDest\"
     }
     # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
-    if (Test-Path "mcp-servers\$svc\templates") {
-        Copy-Item -Recurse "mcp-servers\$svc\templates" "$svcDest\templates"
+    if (Test-Path "$svcSrc\templates") {
+        Copy-Item -Recurse "$svcSrc\templates" "$svcDest\templates"
     }
-    # policies: wasm-pkg was just built fresh above — stage it as a real artifact, never a
-    # placeholder (the hub Containerfile's COPY policies/wasm-pkg expects real content).
+    # policies: wasm-pkg is built into the real tree ($wasmPkgDir, not $mcpServersDir) just above;
+    # stage that real artifact, never a placeholder (the hub Containerfile COPYs policies/wasm-pkg).
     if ($svc -eq 'policies') {
         New-Item -ItemType Directory -Path "$svcDest\wasm-pkg" -Force | Out-Null
-        Copy-Item -Recurse "mcp-servers\$svc\wasm-pkg\*" "$svcDest\wasm-pkg\" -Force
+        Copy-Item -Recurse "$wasmPkgDir\*" "$svcDest\wasm-pkg\" -Force
     }
     # office ships Python support-scripts + a pinned requirements.txt that its Dockerfile COPYs.
     # Exclude test_*.py — pytest isn't in the runtime image and they're dead weight there.
-    if (Test-Path "mcp-servers\$svc\scripts") {
+    if (Test-Path "$svcSrc\scripts") {
         New-Item -ItemType Directory -Path "$svcDest\scripts" -Force | Out-Null
-        Get-ChildItem -Path "mcp-servers\$svc\scripts" -File | Where-Object { $_.Name -notlike 'test_*.py' } |
+        Get-ChildItem -Path "$svcSrc\scripts" -File | Where-Object { $_.Name -notlike 'test_*.py' } |
             ForEach-Object { Copy-Item $_.FullName "$svcDest\scripts\" }
     }
-    if (Test-Path "mcp-servers\$svc\requirements.txt") {
-        Copy-Item "mcp-servers\$svc\requirements.txt" "$svcDest\"
+    if (Test-Path "$svcSrc\requirements.txt") {
+        Copy-Item "$svcSrc\requirements.txt" "$svcDest\"
     }
     foreach ($f in @('Dockerfile','Containerfile')) {
-        if (Test-Path "mcp-servers\$svc\$f") {
-            Copy-Item "mcp-servers\$svc\$f" "$svcDest\"
+        if (Test-Path "$svcSrc\$f") {
+            Copy-Item "$svcSrc\$f" "$svcDest\"
         }
     }
 }
@@ -174,14 +182,17 @@ foreach ($svc in $services) {
 function Stage-Host-Worker {
     param([string]$worker, [string]$bundle)
     New-Item -ItemType Directory -Path "$dest\$bundle\$worker","$dest\$bundle\shared" -Force | Out-Null
-    Copy-Item -Recurse "mcp-servers\$worker\dist" "$dest\$bundle\$worker\dist"
-    Copy-Item -Recurse "mcp-servers\shared\dist" "$dest\$bundle\shared\dist"
+    Copy-Item -Recurse "$mcpServersDir\$worker\dist" "$dest\$bundle\$worker\dist"
+    Copy-Item -Recurse "$mcpServersDir\shared\dist" "$dest\$bundle\shared\dist"
     # Install production deps only — standalone lockfile, then deterministic npm ci.
-    Copy-Item "mcp-servers\shared\package.json" "$dest\$bundle\shared\"
+    Copy-Item "$mcpServersDir\shared\package.json" "$dest\$bundle\shared\"
     Push-Location "$dest\$bundle\shared"
     npm pkg delete devDependencies
+    if ($LASTEXITCODE -ne 0) { throw "npm pkg delete devDependencies failed in $dest\$bundle\shared" }
     npm install --package-lock-only --ignore-scripts
+    if ($LASTEXITCODE -ne 0) { throw "npm install --package-lock-only failed in $dest\$bundle\shared" }
     npm ci --omit=dev --ignore-scripts
+    if ($LASTEXITCODE -ne 0) { throw "npm ci --omit=dev failed in $dest\$bundle\shared" }
     Pop-Location
     New-Item -ItemType Directory -Path "$dest\$bundle\$worker\node_modules\@speedwave" -Force | Out-Null
     Copy-Item -Recurse "$dest\$bundle\shared" "$dest\$bundle\$worker\node_modules\@speedwave\mcp-shared"

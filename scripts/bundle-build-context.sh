@@ -9,6 +9,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # `make test`/`make dev` don't race (_tests/desktop/bundle-build-context.bats).
 DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 mkdir -p "$DEST"
+# The mcp-servers tree the bundle is staged from and --ci rebuilds; the bats --ci test points
+# it at a scratch copy so npm ci + dist rebuilds never touch the tree a concurrent run reads.
+MCP_SERVERS_DIR="${BUNDLE_MCP_SERVERS_DIR:-$REPO_ROOT/mcp-servers}"
+if [ ! -d "$MCP_SERVERS_DIR" ]; then
+  echo "ERROR: mcp-servers tree not found at $MCP_SERVERS_DIR (BUNDLE_MCP_SERVERS_DIR)." >&2
+  exit 1
+fi
 
 LOCK_DIR="$DEST/.bundle.lock"
 # mcp-servers/policies/wasm-pkg is a single shared source-tree location (not under $DEST) —
@@ -76,7 +83,7 @@ cp -r "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-
 # rules.yaml: pii-engine's policy.rs include_str!s it repo-root-relative
 # (`../../../mcp-servers/policies/rules.yaml`) — Containerfile.proxy COPYs it alongside.
 mkdir -p "$DEST/build-context/containers/mcp-servers/policies"
-cp "$REPO_ROOT/mcp-servers/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"
+cp "$MCP_SERVERS_DIR/policies/rules.yaml" "$DEST/build-context/containers/mcp-servers/policies/"
 
 # Host build outputs (e.g. a dirty containers/proxy/target) are never image
 # content — prune bundle.rs::HOST_BUILD_OUTPUT_DIRS (alignment test-enforced).
@@ -90,14 +97,14 @@ find "$DEST/build-context/containers" -type f -name '*.sh' -print0 |
 find "$DEST/build-context/containers" -type f -name '*.sh.bak' -delete
 
 mkdir -p "$DEST/build-context/mcp-servers"
-cp "$REPO_ROOT/mcp-servers/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
+cp "$MCP_SERVERS_DIR/tsconfig.base.json" "$DEST/build-context/mcp-servers/"
 
 # os is intentionally excluded — it runs on the host and is bundled separately as mcp-os/
 # playwright has no own src/ — the image installs @playwright/mcp from npm at build time.
 MCP_SERVICES="shared policies hub slack sharepoint redmine gitlab github atlassian office playwright context7"
 
 for svc in $MCP_SERVICES; do
-  svc_src="$REPO_ROOT/mcp-servers/$svc"
+  svc_src="$MCP_SERVERS_DIR/$svc"
   svc_dest="$DEST/build-context/mcp-servers/$svc"
   mkdir -p "$svc_dest"
   cp "$svc_src/package.json" "$svc_dest/"
@@ -107,10 +114,10 @@ for svc in $MCP_SERVICES; do
   [ -f "$svc_src/tsconfig.json" ] && cp "$svc_src/tsconfig.json" "$svc_dest/"
   # policies: template YAMLs the hub Containerfile COPYs and reads at runtime.
   [ -d "$svc_src/templates" ] && cp -r "$svc_src/templates" "$svc_dest/"
-  # policies: wasm-pkg was just built fresh above — stage it as a real artifact, never a
-  # placeholder (the hub Containerfile's COPY policies/wasm-pkg expects real content).
+  # policies: wasm-pkg is built into the real tree ($WASM_PKG_DIR, not $MCP_SERVERS_DIR) just above;
+  # stage that real artifact, never a placeholder (the hub Containerfile COPYs policies/wasm-pkg).
   if [ "$svc" = "policies" ]; then
-    cp -r "$svc_src/wasm-pkg" "$svc_dest/wasm-pkg"
+    cp -r "$WASM_PKG_DIR" "$svc_dest/wasm-pkg"
   fi
   # office: exclude test_*.py — not in runtime image; must match bundle-build-context.ps1.
   if [ -d "$svc_src/scripts" ]; then
@@ -127,7 +134,7 @@ done
 
 if [[ "${1:-}" == "--ci" ]]; then
   # CI mode: build from clean checkout (no pre-built dist/) and install production-only deps
-  (cd "$REPO_ROOT/mcp-servers" && npm ci \
+  (cd "$MCP_SERVERS_DIR" && npm ci \
     && npm run build --workspace=shared \
     && npm run build --workspace=os \
     && npm run build --workspace=oauth)
@@ -138,11 +145,11 @@ fi
 stage_host_worker() {
   local worker="$1" bundle="$2"
   mkdir -p "$DEST/$bundle/$worker" "$DEST/$bundle/shared"
-  cp -r "$REPO_ROOT/mcp-servers/$worker/dist" "$DEST/$bundle/$worker/"
-  cp -r "$REPO_ROOT/mcp-servers/shared/dist" "$DEST/$bundle/shared/"
+  cp -r "$MCP_SERVERS_DIR/$worker/dist" "$DEST/$bundle/$worker/"
+  cp -r "$MCP_SERVERS_DIR/shared/dist" "$DEST/$bundle/shared/"
   # Production deps only; the workspace package-lock.json has workspace-relative entries
   # that don't resolve in isolation, hence standalone lockfile then deterministic npm ci.
-  cp "$REPO_ROOT/mcp-servers/shared/package.json" "$DEST/$bundle/shared/"
+  cp "$MCP_SERVERS_DIR/shared/package.json" "$DEST/$bundle/shared/"
   (cd "$DEST/$bundle/shared" && npm pkg delete devDependencies && npm install --package-lock-only --ignore-scripts && npm ci --omit=dev --ignore-scripts)
   mkdir -p "$DEST/$bundle/$worker/node_modules/@speedwave"
   cp -r "$DEST/$bundle/shared" "$DEST/$bundle/$worker/node_modules/@speedwave/mcp-shared"

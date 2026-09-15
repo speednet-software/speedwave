@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
-# Tests for scripts/bundle-build-context.sh (expected dir structure); bundle-build-context.ps1
-# mirrors this, exercised only in Windows E2E VMs. Prerequisite: `make build-mcp` for os/shared dist dirs.
+# Tests for scripts/bundle-build-context.sh (expected dir structure); bundle-build-context.ps1 mirrors
+# this, exercised only in Windows E2E VMs. Prerequisite: `make build-mcp` for the os/shared/oauth dist dirs.
 
 SCRIPT="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.sh"
+REAL_MCP_SERVERS="$BATS_TEST_DIRNAME/../../mcp-servers"
 
 # Per-test temp DEST (script honours $BUNDLE_DEST). Retry rm to survive EDR open fds.
 rm_with_retry() {
@@ -13,6 +14,29 @@ rm_with_retry() {
         sleep 0.2
     done
     rm -rf "$target"
+}
+
+# stage_mcp_servers_copy <dir>: copies the tracked mcp-servers/ files (nothing untracked or gitignored,
+# so no node_modules/dist) into <dir> for --ci runs off the real tree; a failed or empty plant aborts.
+stage_mcp_servers_copy() {
+    local dir="$1" f files=()
+    git -C "$REAL_MCP_SERVERS" ls-files -z --cached -- . > "$dir.list"
+    while IFS= read -r -d '' f; do
+        if [ -e "$REAL_MCP_SERVERS/$f" ]; then files+=("$f"); fi
+    done < "$dir.list"
+    [ "${#files[@]}" -gt 0 ]
+    printf '%s\0' "${files[@]}" > "$dir.list"
+    tar -C "$REAL_MCP_SERVERS" -cf "$dir.tar" --null -T "$dir.list"
+    mkdir -p "$dir"
+    tar -xf "$dir.tar" -C "$dir"
+}
+
+# tree_fingerprint <dir>...: one cksum line per file in path order, so two snapshots compare as strings.
+tree_fingerprint() {
+    local d
+    for d in "$@"; do
+        (cd "$d" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 cksum)
+    done
 }
 
 setup() {
@@ -263,20 +287,18 @@ EOF
 }
 
 @test "bundle script references only existing source files" {
-    # Extract all cp source paths from the script and verify they exist.
-    REPO_ROOT="$BATS_TEST_DIRNAME/../.."
-
-    # Collect non-variable literal paths used as cp sources (skip $DEST targets)
+    # Every literal cp source ($REPO_ROOT/… or $MCP_SERVERS_DIR/… without loop variables) must
+    # exist in the checkout; a typo there only surfaces as a failed bundle otherwise.
+    local repo_root="$BATS_TEST_DIRNAME/../.."
+    local checked=0 src resolved
     while IFS= read -r src; do
-        # Resolve $REPO_ROOT prefix
-        resolved="${src/\$REPO_ROOT/$REPO_ROOT}"
-        resolved="${resolved/\"\$REPO_ROOT\"/$REPO_ROOT}"
-        # Skip paths with unresolved variables (loop vars like $svc_src)
+        resolved="${src//\$REPO_ROOT/$repo_root}"
+        resolved="${resolved//\$MCP_SERVERS_DIR/$repo_root/mcp-servers}"
         [[ "$resolved" == *'$'* ]] && continue
-        # Strip quotes
-        resolved="${resolved//\"/}"
+        checked=$((checked + 1))
         [ -e "$resolved" ] || { echo "Source path does not exist: $src (resolved: $resolved)"; return 1; }
-    done < <(grep -E '^\s+cp ' "$SCRIPT" | grep -v '\$DEST' | grep -oE '"?\$REPO_ROOT/[^"[:space:]]+"?' | sort -u)
+    done < <(grep -E '^\s*cp ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR)/[^"]+"' | tr -d '"' | sort -u)
+    [ "$checked" -gt 0 ]
 }
 
 @test "mcp-os/shared standalone lockfile resolves without workspace context" {
@@ -400,8 +422,10 @@ EOF
     local p1=$!
     "$SCRIPT" &
     local p2=$!
-    wait "$p1"; local r1=$?
-    wait "$p2"; local r2=$?
+    # Reap both before asserting, so teardown never races a live writer.
+    local r1=0 r2=0
+    wait "$p1" || r1=$?
+    wait "$p2" || r2=$?
     [ "$r1" -eq 0 ]
     [ "$r2" -eq 0 ]
     [ ! -d "$DEST/.bundle.lock" ]
@@ -410,26 +434,69 @@ EOF
     node -e "JSON.parse(require('fs').readFileSync('$pkg','utf8'))"
 }
 
-@test "bundle script --ci works without pre-built dist directories" {
-    REPO_ROOT="$BATS_TEST_DIRNAME/../.."
-    # Simulate a clean checkout by temporarily renaming dist directories
-    local os_dist="$REPO_ROOT/mcp-servers/os/dist"
-    local shared_dist="$REPO_ROOT/mcp-servers/shared/dist"
-    local os_bak="${os_dist}.bats-bak"
-    local shared_bak="${shared_dist}.bats-bak"
+@test "bundle script fails fast when BUNDLE_MCP_SERVERS_DIR points at a missing tree" {
+    # A wasm-pack stub leaves a sentinel if the wasm build starts; the knob check must come first.
+    local stub_dir="$DEST/stub-bin"
+    mkdir -p "$stub_dir"
+    printf '#!/usr/bin/env bash\ntouch "%s/wasm-pack-ran"\nexit 1\n' "$DEST" > "$stub_dir/wasm-pack"
+    chmod +x "$stub_dir/wasm-pack"
 
-    # Back up existing dist dirs (if they exist)
-    [ -d "$os_dist" ] && mv "$os_dist" "$os_bak"
-    [ -d "$shared_dist" ] && mv "$shared_dist" "$shared_bak"
+    PATH="$stub_dir:$PATH" BUNDLE_MCP_SERVERS_DIR="$DEST/no-such-mcp-servers" run "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"BUNDLE_MCP_SERVERS_DIR"* ]]
+    [ ! -e "$DEST/wasm-pack-ran" ]
+    [ ! -d "$DEST/mcp-os" ]
+    [ ! -d "$DEST/.bundle.lock" ]
+}
 
-    # Run --ci mode (npm ci + npm run build should recreate dist/)
-    run "$SCRIPT" --ci
-
-    # Restore backups regardless of outcome
-    [ -d "$os_bak" ] && { rm -rf "$os_dist"; mv "$os_bak" "$os_dist"; }
-    [ -d "$shared_bak" ] && { rm -rf "$shared_dist"; mv "$shared_bak" "$shared_dist"; }
-
+@test "bundle-build-context.ps1 checks LASTEXITCODE after every npm call" {
+    # Windows PowerShell 5.1 never turns a native non-zero exit into an error and no suite runs the
+    # .ps1, so an unchecked npm failure would ship a broken host-worker bundle silently.
+    local ps1="$BATS_TEST_DIRNAME/../../scripts/bundle-build-context.ps1"
+    [ "$(grep -cE '^[[:space:]]*npm ' "$ps1")" -gt 0 ]
+    run awk '/^[[:space:]]*npm / { call = $0; if ((getline following) <= 0 || following !~ /\$LASTEXITCODE -ne 0/) print call }' "$ps1"
     [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "bundle script --ci builds a clean scratch copy and leaves a concurrent run on the real tree intact" {
+    # The plain run stages the real dist dirs while --ci rebuilds the copy; the two share only the
+    # wasm-build lock, so any --ci write into the real tree (npm ci, tsc) surfaces here.
+    local d ws workspaces=(os shared oauth) dist_dirs=()
+    for ws in "${workspaces[@]}"; do dist_dirs+=("$REAL_MCP_SERVERS/$ws/dist"); done
+    for d in "${dist_dirs[@]}"; do [ -d "$d" ]; done
+    [ -d "$REAL_MCP_SERVERS/node_modules" ]
+    local copy="$DEST/mcp-servers-src"
+    stage_mcp_servers_copy "$copy"
+    [ -f "$copy/package-lock.json" ]
+    [ ! -d "$copy/node_modules" ]
+    for ws in "${workspaces[@]}"; do [ ! -d "$copy/$ws/dist" ]; done
+    local before
+    before="$(tree_fingerprint "${dist_dirs[@]}")"
+    [ -n "$before" ]
+    local marker="$DEST/started"
+    touch "$marker"
+    # Its own DEST (own .bundle.lock), reaped with $DEST by teardown.
+    local plain_dest="$DEST/plain-dest"
+
+    BUNDLE_MCP_SERVERS_DIR="$copy" "$SCRIPT" --ci &
+    local p_ci=$!
+    BUNDLE_DEST="$plain_dest" "$SCRIPT" &
+    local p_plain=$!
+    # Reap both before asserting, so teardown never races a live writer.
+    local r_ci=0 r_plain=0
+    wait "$p_ci" || r_ci=$?
+    wait "$p_plain" || r_plain=$?
+    [ "$r_ci" -eq 0 ]
+    [ "$r_plain" -eq 0 ]
+    # No real dist file was rewritten and dist content matches; npm ci recreates node_modules, so an
+    # unchanged directory mtime proves it was never reinstalled (files inside it are not compared).
+    [ -z "$(find "${dist_dirs[@]}" -type f -newer "$marker")" ]
+    [ "$(tree_fingerprint "${dist_dirs[@]}")" = "$before" ]
+    [ -z "$(find "$REAL_MCP_SERVERS/node_modules" -maxdepth 0 -newer "$marker")" ]
+    # npm ci + the workspace builds landed in the copy, and the --ci bundle was staged from there.
+    [ -d "$copy/node_modules" ]
+    for ws in "${workspaces[@]}"; do [ -d "$copy/$ws/dist" ]; done
     [ -d "$DEST/mcp-os/os/dist" ]
     [ -d "$DEST/mcp-os/shared/dist" ]
     [ -f "$DEST/mcp-os/shared/package.json" ]
