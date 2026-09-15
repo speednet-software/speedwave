@@ -23,7 +23,7 @@ _makefile_test_rust_cargo_line() {
 _workflow_runtime_windows_cargo_lines() {
     awk '
         /^  runtime-windows:/ { in_job=1; next }
-        in_job && /^  [a-z][a-zA-Z-]*:[[:space:]]*$/ { exit }
+        in_job && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ { exit }
         in_job && /^[[:space:]]*run: cargo test/ {
             sub(/^[[:space:]]*run:[[:space:]]*/, "")
             print
