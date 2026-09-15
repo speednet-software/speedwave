@@ -70,7 +70,6 @@ const COMMON_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "mcp-os/os/node_modules/@speedwave/mcp-shared",
         kind: BundledAssetKind::Directory,
     },
-    // `oauth` worker (ADR-060): host process like `mcp-os`, not in `build::IMAGES`.
     BundledAssetSpec {
         path: "oauth/oauth/dist/index.js",
         kind: BundledAssetKind::File,
@@ -159,8 +158,6 @@ const WINDOWS_BUNDLED_ASSETS: &[BundledAssetSpec] = &[
         path: "cli/speedwave.exe",
         kind: BundledAssetKind::File,
     },
-    // The Vulkan loader must sit next to the exe: the whisper Vulkan backend is a load-time
-    // import and ggml touches it on every whisper init (ADR-085). Same path staged + installed.
     BundledAssetSpec {
         path: "vulkan-1.dll",
         kind: BundledAssetKind::File,
@@ -184,7 +181,6 @@ pub struct BundleManifest {
 }
 
 impl BundleManifest {
-    /// Build-input hash for image `name`; errors on names outside the catalogue.
     pub(crate) fn image_hash(&self, name: &str) -> anyhow::Result<&str> {
         self.image_hashes
             .get(name)
@@ -277,7 +273,6 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     if manifest_path.exists() {
         let data = std::fs::read_to_string(&manifest_path)?;
         let manifest: BundleManifest = serde_json::from_str(&data)?;
-        // Pre-ADR-072 manifest (no per-image hashes) — regenerate from the tree.
         if !manifest.image_hashes.is_empty() {
             return Ok(manifest);
         }
@@ -288,17 +283,16 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
         crate::defaults::CLAUDE_VERSION,
         build_root,
     )
-    .map_err(|e| {
-        // An older Desktop's tree lacks new image inputs — name the real remedy.
-        match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
+    .map_err(
+        |e| match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
             Some(v) => anyhow::anyhow!(
                 "installed Desktop resources are v{v} but this binary is v{}: {e}. \
                  Update Speedwave Desktop, then run `speedwave update`.",
                 env!("CARGO_PKG_VERSION")
             ),
             None => e,
-        }
-    })
+        },
+    )
 }
 
 /// App version stamped in the on-disk manifest; `None` when absent/unreadable.
@@ -319,7 +313,6 @@ pub fn generate_bundle_manifest(
     claude_version: &str,
     build_root: &Path,
 ) -> anyhow::Result<BundleManifest> {
-    // Each distinct input is hashed once (mcp-servers/shared feeds every worker).
     let mut component_cache: std::collections::HashMap<&str, String> =
         std::collections::HashMap::new();
     let mut image_hashes = std::collections::BTreeMap::new();
@@ -368,8 +361,6 @@ pub fn generate_bundle_manifest(
     })
 }
 
-/// Pure hash of one image's build inputs: name + per-input component hashes +
-/// effective build args. 16-char hex, used as the image tag suffix.
 pub(crate) fn image_content_hash(
     name: &str,
     build_args: &[(&str, &str)],
@@ -395,8 +386,6 @@ pub(crate) fn image_content_hash(
     hash
 }
 
-/// Reconcile id: app_version + sorted per-image hashes + resources hash.
-/// app_version deliberately included — rationale in ADR-072.
 fn reconcile_id(
     app_version: &str,
     image_hashes: &std::collections::BTreeMap<String, String>,
@@ -508,8 +497,6 @@ pub fn find_bundled_asset(relative_path: &str) -> Option<PathBuf> {
     find_bundled_asset_in(&roots, relative_path)
 }
 
-/// Candidate resources roots in priority order; pure core of [`find_bundled_asset`].
-/// The exe parent covers a binary living one level inside the resources root.
 fn bundled_resource_roots(
     env_root: Option<PathBuf>,
     exe_dir: Option<PathBuf>,
@@ -528,7 +515,6 @@ fn bundled_resource_roots(
     roots
 }
 
-/// Reads the Desktop-written resources marker under `data_dir`; absolute only.
 fn resources_marker_dir(data_dir: &Path) -> Option<PathBuf> {
     let marker = data_dir.join(consts::RESOURCES_MARKER);
     let content = std::fs::read_to_string(marker).ok()?;
@@ -536,7 +522,6 @@ fn resources_marker_dir(data_dir: &Path) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// First root that actually contains `relative_path`.
 fn find_bundled_asset_in(roots: &[PathBuf], relative_path: &str) -> Option<PathBuf> {
     roots
         .iter()
@@ -664,8 +649,6 @@ fn validate_bundled_asset(
     Ok(())
 }
 
-/// A hash input is repo-root-relative; in the bundled build-context the bundle scripts stage
-/// vendored sources under `containers/`, so a missing direct path falls back to that layout.
 fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf> {
     let direct = build_root.join(input);
     if direct.exists() {
@@ -682,7 +665,6 @@ fn resolve_hash_input(build_root: &Path, input: &str) -> anyhow::Result<PathBuf>
     );
 }
 
-/// Test-only seam: `build.rs`'s catalog tests assert every declared input resolves.
 #[cfg(test)]
 pub(crate) fn resolve_hash_input_for_test(
     build_root: &Path,
@@ -709,7 +691,7 @@ fn digest_paths(paths: &[(&str, &Path)]) -> anyhow::Result<String> {
 
 /// Host build-output dir names that are never image content — skipped from digests here, never copied
 /// by bundle-build-context.{sh,ps1}, ignored via `containers/.dockerignore` (test-enforced).
-pub(crate) const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
+pub const HOST_BUILD_OUTPUT_DIRS: &[&str] = &["node_modules", "target", "dist"];
 
 fn collect_directory_entries(
     dir: &Path,
@@ -719,7 +701,6 @@ fn collect_directory_entries(
     if !dir.exists() {
         anyhow::bail!("Missing path for bundle digest: {}", dir.display());
     }
-    // Reject symlinks: the copier dereferences them, changing content without changing the hash.
     if dir.is_symlink() {
         anyhow::bail!(
             "symlink not allowed in image hash inputs: {}",
@@ -745,7 +726,6 @@ fn collect_directory_entries(
         {
             continue;
         }
-        // Reject symlinks: the copier dereferences them, changing content without changing the hash.
         if child.is_symlink() {
             anyhow::bail!(
                 "symlink not allowed in image hash inputs: {}",
@@ -777,7 +757,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
-            // fsync each file — staging→target rename must not outlive the data (torn-write).
             let file = std::fs::File::open(&dst_path)
                 .map_err(|e| anyhow::anyhow!("open {} for fsync: {e}", dst_path.display()))?;
             crate::fs_perms::fsync_file_durable(&file)
@@ -824,8 +803,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Missing path for bundle digest"), "{err}");
-        // Separator-insensitive: the message mixes native joins with the
-        // POSIX-relative input on Windows.
         let norm = err.replace('\\', "/");
         let direct = tmp.path().join("crates/pii-engine");
         let vendored = tmp.path().join("containers/crates/pii-engine");
@@ -865,7 +842,6 @@ mod tests {
         assert!(err.contains("symlink not allowed"), "got: {err}");
     }
 
-    /// Non-comment lines between a script line equal to `header` and the next line that is exactly `}`.
     fn script_block_body<'a>(script: &'a str, header: &str) -> Vec<&'a str> {
         script
             .lines()
@@ -874,6 +850,42 @@ mod tests {
             .take_while(|l| l.trim_end() != "}")
             .filter(|l| !l.trim_start().starts_with('#'))
             .collect()
+    }
+
+    fn copy_sources(script: &str, call: &str, prefix: &str) -> Vec<String> {
+        let mut sources: Vec<String> = script
+            .lines()
+            .filter_map(|l| l.strip_prefix(call))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|src| {
+                let src = src.trim_matches('"');
+                src.strip_prefix(prefix).unwrap_or(src).replace('\\', "/")
+            })
+            .collect();
+        sources.sort();
+        sources
+    }
+
+    #[test]
+    fn script_block_body_skips_comments_and_stops_at_closing_brace() {
+        let script =
+            "copy_source_tree() {\n  # find -prune\n  tar\n}\nfind . -name target -prune\n";
+        assert_eq!(script_block_body(script, "copy_source_tree() {"), ["  tar"]);
+        assert!(script_block_body(script, "missing() {").is_empty());
+    }
+
+    #[test]
+    fn copy_sources_normalizes_both_script_dialects() {
+        let sh = "copy_source_tree \"$REPO_ROOT/crates/pii-engine\" \"$DEST/x\"\n  copy_source_tree nested\n";
+        let ps1 = "Copy-SourceTree crates\\pii-engine \"$dest\\x\"\n";
+        assert_eq!(
+            copy_sources(sh, "copy_source_tree ", "$REPO_ROOT/"),
+            ["crates/pii-engine"]
+        );
+        assert_eq!(
+            copy_sources(ps1, "Copy-SourceTree ", ""),
+            ["crates/pii-engine"]
+        );
     }
 
     #[test]
@@ -891,14 +903,6 @@ mod tests {
         let dockerignore = std::fs::read_to_string(repo_root.join("containers/.dockerignore"))
             .expect("containers/.dockerignore should exist");
 
-        // The names are parsed from inside each copy helper: pruning after a full copy would still
-        // read target/ trees that a parallel cargo run rewrites mid-copy.
-        let decoy = "copy_source_tree() {\n  # find -prune\n  tar\n}\nfind . -name target -prune\n";
-        assert_eq!(
-            script_block_body(decoy, "copy_source_tree() {"),
-            ["  tar"],
-            "a commented prune or one after the helper must not satisfy the guard"
-        );
         let sh_body = script_block_body(&sh, "copy_source_tree() {");
         let sh_prunes: Vec<&str> = sh_body
             .iter()
@@ -910,7 +914,12 @@ mod tests {
             1,
             "copy_source_tree() in bundle-build-context.sh must hold exactly one find -prune line: {sh_body:?}"
         );
-        // `find . -type d \( -name target -o -name dist -o -name node_modules \) -prune -o -print0`
+        assert!(
+            !sh_body.iter().any(|l| l
+                .split_whitespace()
+                .any(|t| t == "rm" || t == "-exec" || t == "-delete")),
+            "copy_source_tree() in bundle-build-context.sh must skip build outputs, never remove them: {sh_body:?}"
+        );
         let sh_tokens: Vec<&str> = sh_prunes[0].split_whitespace().collect();
         let mut sh_names: Vec<&str> = sh_tokens
             .windows(2)
@@ -923,14 +932,19 @@ mod tests {
         let ps1_skips: Vec<&str> = ps1_body
             .iter()
             .copied()
-            .filter(|l| l.contains(" -in "))
+            .filter(|l| l.contains(" -cin "))
             .collect();
         assert_eq!(
             ps1_skips.len(),
             1,
-            "Copy-SourceTree in bundle-build-context.ps1 must hold exactly one -in skip line: {ps1_body:?}"
+            "Copy-SourceTree in bundle-build-context.ps1 must hold exactly one case-sensitive -cin skip line: {ps1_body:?}"
         );
-        // `if ($item.Name -in 'target', 'dist', 'node_modules') { continue }`
+        assert!(
+            !ps1_body
+                .iter()
+                .any(|l| l.contains("Remove-Item") || l.contains("-Recurse")),
+            "Copy-SourceTree in bundle-build-context.ps1 must skip build outputs, never copy recursively or remove: {ps1_body:?}"
+        );
         let mut ps1_names: Vec<&str> = ps1_skips[0].split('\'').skip(1).step_by(2).collect();
         ps1_names.sort_unstable();
 
@@ -945,19 +959,12 @@ mod tests {
             ps1_names, expected,
             "bundle-build-context.ps1 Copy-SourceTree exclusion must match HOST_BUILD_OUTPUT_DIRS"
         );
-        // Top-level calls only (the .ps1 recursion is indented): both scripts stage the same trees.
-        let sh_calls = sh
-            .lines()
-            .filter(|l| l.starts_with("copy_source_tree "))
-            .count();
-        let ps1_calls = ps1
-            .lines()
-            .filter(|l| l.starts_with("Copy-SourceTree "))
-            .count();
+        let sh_sources = copy_sources(&sh, "copy_source_tree ", "$REPO_ROOT/");
+        let ps1_sources = copy_sources(&ps1, "Copy-SourceTree ", "");
         assert!(
-            sh_calls > 0 && sh_calls == ps1_calls,
-            "both bundle scripts must stage the same trees through their excluding copy \
-             (sh copy_source_tree calls: {sh_calls}, ps1 Copy-SourceTree calls: {ps1_calls})"
+            !sh_sources.is_empty() && sh_sources == ps1_sources,
+            "both bundle scripts must stage the same trees through their excluding copy: \
+             sh {sh_sources:?}, ps1 {ps1_sources:?}"
         );
         for name in HOST_BUILD_OUTPUT_DIRS {
             assert!(
@@ -990,7 +997,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn collect_directory_entries_skips_node_modules_with_bin_symlink() {
-        // node_modules/.bin/<tool> symlinks must be skipped, not bailed on.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
         std::fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
@@ -1012,7 +1018,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn collect_directory_entries_skips_nested_node_modules() {
-        // The skip applies at every recursion depth, not just the top level.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("hub");
         let nested = dir.join("packages/pkg/node_modules/.bin");
@@ -1030,8 +1035,6 @@ mod tests {
 
     #[test]
     fn collect_directory_entries_skips_target_and_dist_directories() {
-        // target/ is .dockerignore'd, dist/ is rebuilt in-image (never a context
-        // COPY source) — both are host build outputs racing parallel test lanes.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("proxy");
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1054,7 +1057,6 @@ mod tests {
 
     #[test]
     fn collect_directory_entries_keeps_files_named_target_or_dist() {
-        // The skip is directory-gated: plain FILES with these names are content.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("svc");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1069,8 +1071,6 @@ mod tests {
 
     #[test]
     fn target_and_dist_changes_do_not_alter_manifest_hash() {
-        // Parallel `cargo test` (containers/proxy/target) and tsc rebuilds
-        // (mcp-servers/*/dist) must not perturb or race the image hashes.
         let tmp = tempfile::tempdir().unwrap();
         write_build_tree(tmp.path());
         let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
@@ -1090,7 +1090,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn node_modules_changes_do_not_alter_manifest_hash() {
-        // node_modules is not image content; adding it must not change any image hash (ADR-072).
         let tmp = tempfile::tempdir().unwrap();
         write_build_tree(tmp.path());
         let before = generate_bundle_manifest("1.0.0", "2.0.0", tmp.path()).unwrap();
@@ -1128,14 +1127,11 @@ mod tests {
         .unwrap();
     }
 
-    /// Materializes every `hash_inputs` path of every catalogue image so
-    /// `generate_bundle_manifest` can digest a synthetic build root.
     fn write_build_tree(root: &Path) {
         write_resource_tree(root);
         for img in build::IMAGES {
             for input in img.hash_inputs {
                 let path = root.join(input);
-                // Inputs with an extension are files; the rest are directories.
                 if Path::new(input).extension().is_some() {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).unwrap();
@@ -1154,7 +1150,6 @@ mod tests {
         }
     }
 
-    /// Image names whose hash differs between two manifests.
     fn changed_images(a: &BundleManifest, b: &BundleManifest) -> Vec<String> {
         a.image_hashes
             .iter()
@@ -1190,14 +1185,12 @@ mod tests {
         )
         .unwrap();
 
-        // Real directory copy (matches production bundle-build-context.sh behavior)
         let mcp_shared_dest = root.join("mcp-os/os/node_modules/@speedwave/mcp-shared");
         std::fs::create_dir_all(mcp_shared_dest.join("dist")).unwrap();
         std::fs::write(mcp_shared_dest.join("dist/index.js"), "export {};").unwrap();
         std::fs::write(mcp_shared_dest.join("package.json"), "{}").unwrap();
         std::fs::write(mcp_shared_dest.join("package-lock.json"), "{}").unwrap();
 
-        // oauth worker — staged the same way as mcp-os (ADR-060).
         std::fs::create_dir_all(root.join("oauth/oauth/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/dist")).unwrap();
         std::fs::create_dir_all(root.join("oauth/shared/node_modules/pkg")).unwrap();
@@ -1437,7 +1430,6 @@ mod tests {
     fn legacy_state_file_parses_preserving_existing_fields() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("bundle-state.json");
-        // Pre-ADR-072 shape: no applied_image_hashes field.
         std::fs::write(
             &path,
             r#"{
@@ -1462,7 +1454,6 @@ mod tests {
 
     #[test]
     fn new_state_file_readable_by_legacy_shape() {
-        // Old releases deserialize the new file (serde ignores unknown fields).
         #[derive(Deserialize)]
         struct LegacyBundleState {
             applied_bundle_id: Option<String>,
@@ -1491,7 +1482,6 @@ mod tests {
     fn legacy_manifest_json_is_regenerated() {
         let temp = tempfile::tempdir().unwrap();
         write_build_tree(temp.path());
-        // Pre-ADR-072 manifest: no image_hashes field.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{
@@ -1511,12 +1501,9 @@ mod tests {
         assert_ne!(manifest.bundle_id, "legacy0123456789");
     }
 
-    /// Regeneration over an OLDER Desktop's incomplete tree must name the
-    /// real remedy (update the Desktop app), not a bare digest error.
     #[test]
     fn stale_resources_regeneration_error_names_desktop_update() {
         let temp = tempfile::tempdir().unwrap();
-        // Legacy manifest + no build tree: digesting the new catalogue fails.
         std::fs::write(
             temp.path().join(BUNDLE_MANIFEST_FILE),
             r#"{"app_version": "0.1.0", "bundle_id": "legacy0123456789", "claude_resources_hash": "cafebabe"}"#,
@@ -1531,8 +1518,6 @@ mod tests {
         assert!(msg.contains("v0.1.0"), "error must name the stale version");
     }
 
-    /// Same failure with a matching app_version keeps the raw error (a real
-    /// corruption, not a version skew).
     #[test]
     fn same_version_regeneration_error_stays_raw() {
         let temp = tempfile::tempdir().unwrap();
@@ -1656,8 +1641,6 @@ mod tests {
             .any(|asset| asset.path == "mcp-os/os/dist/index.js"));
     }
 
-    /// Drift guard: every signed macOS Mach-O (sign-bundled-binaries.sh SIGN_TARGETS /
-    /// tauri.macos.conf.json bundle.resources) must be a bundled asset, else it ships unverified.
     #[test]
     fn required_bundled_assets_for_macos_include_audio_capture_cli() {
         let assets = required_bundled_assets("macos").unwrap();
@@ -1789,7 +1772,6 @@ mod tests {
             "WINDOWS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
              the const literal and the SSOT drifted"
         );
-        // The Tauri Windows resource map must carry the same bundle path.
         let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.windows.conf.json");
         assert!(
             tauri_cfg.contains(&expected),
@@ -1799,8 +1781,6 @@ mod tests {
 
     #[test]
     fn windows_vulkan_loader_path_is_aligned_across_bundle_config_and_scripts() {
-        // The literal `vulkan-1.dll` recurs in the asset list, the Tauri resource map, and the
-        // stage/verify/install scripts — no SSOT const carries it, so pin the copies together.
         let expected = "vulkan-1.dll";
         let assets = required_bundled_assets("windows").expect("windows assets");
         assert!(
@@ -1850,7 +1830,6 @@ mod tests {
             "MACOS_BUNDLED_ASSETS must contain {expected} (matches cli_binary_filename); \
              the const literal and the SSOT drifted"
         );
-        // The Tauri macOS resource map must carry the same bundle path.
         let tauri_cfg = include_str!("../../../desktop/src-tauri/tauri.macos.conf.json");
         assert!(
             tauri_cfg.contains(&expected),
