@@ -22,7 +22,7 @@
 
 All of these are equally forbidden: `--no-verify`, `HUSKY=0` or any hook-disabling env var, repointing/renaming/deleting `.husky/` or `.git/hooks/`, `core.hooksPath` tricks. If a hook fails, fix the underlying issue; if you cannot, stop and ask the user. Zero exceptions.
 
-Editing a committed hook body (`.husky/*`) in a reviewed PR is NOT a bypass — it passes the same PR + CI + branch-protection gates. But removed coverage must move to a required CI check, never be dropped: this is why pre-push runs only `make check-fmt` while the full suite is the required CI gate.
+Editing a committed hook body (`.husky/*`) in a reviewed PR is NOT a bypass — it passes the same PR + CI + branch-protection gates. But removed coverage must move to a `test.yml` job behind the required `ci-gate` check, never be dropped: this is why pre-push runs only `make check-fmt` while the full suite is the required CI gate.
 
 Caution: the pre-commit stash/pop (lint-staged) can drop uncommitted work when committing repeatedly — commit generated/edited files promptly rather than accumulating a dirty tree across multiple commits.
 
@@ -30,4 +30,4 @@ Caution: the pre-commit stash/pop (lint-staged) can drop uncommitted work when c
 
 Forbidden: `gh pr merge --admin`, disabling or weakening protection rules, marking failing checks as expected. If CI fails — fix it, even when the failure is pre-existing or unrelated to your PR. If you cannot, stop and ask the user. Zero exceptions.
 
-CI (`.github/workflows/test.yml`, on every PR to `dev`/`main` across macOS + Windows) is the real test gate: the required checks — not a local `make test` — are what block a merge. Never mark them not-required or route around them.
+CI (`.github/workflows/test.yml`, on every PR to `dev`/`main` across macOS + Windows) is the real test gate: the required checks — not a local `make test` — are what block a merge. The `dev`/`main` ruleset and the classic `main` branch protection must both require `ci-gate` (the `test.yml` job that aggregates every other job of that file; mechanism and guard in alignments.md, `_tests/ci/ci-gate.bats`) and `validate` (`pr-title.yml`); the classic `main` protection must additionally require `check-pr-title` (`merge-strategy-check.yml`), which never reports on PRs to `dev` and so cannot join the shared ruleset. `ci-gate` cannot reach checks produced by other workflows (`pr-title.yml`, `merge-strategy-check.yml`, `desktop-build.yml`): each of those is required, or not, by the ruleset explicitly, and a path-filtered workflow needs a same-name no-op job before it can be required. A new `test.yml` job is gated by adding it to `ci-gate.needs`; the required-check lists never change for a new job. Never mark these checks not-required or route around them.
