@@ -177,10 +177,35 @@ fn format_resp_log(
     )
 }
 
-/// Terminal status for a forwarded request: failure on an upstream ≥400 or a
-/// byte stream that errored mid-flight, success otherwise.
-fn resolve_request_status(status_code: u16, stream_errored: bool) -> RequestStatus {
-    if status_code >= 400 || stream_errored {
+/// Cap on an in-band error field before logging — a crafted upstream `error` frame
+/// must not be able to flood the proxy log.
+const MAX_LOGGED_ERROR_MESSAGE: usize = 200;
+
+/// Strips control characters (so a crafted value can't forge extra log lines) and caps
+/// `s` at `max` bytes (rounded down to a char boundary), appending `…` when truncated.
+fn bound_for_log(s: &str, max: usize) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if cleaned.len() <= max {
+        return cleaned;
+    }
+    let mut end = max;
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &cleaned[..end])
+}
+
+/// Terminal status for a forwarded request: failure on an upstream ≥400, an aborted byte
+/// stream, or an in-band SSE `error` frame; success otherwise.
+fn resolve_request_status(
+    status_code: u16,
+    stream_errored: bool,
+    in_band_error: bool,
+) -> RequestStatus {
+    if status_code >= 400 || stream_errored || in_band_error {
         RequestStatus::Failure
     } else {
         RequestStatus::Success
@@ -389,6 +414,7 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
                     }
                 }
                 Err(e) => {
+                    log::warn!("upstream byte stream failed mid-response: {e}");
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     stream_errored = true;
                     break;
@@ -410,7 +436,15 @@ pub async fn messages(State(cfg): State<Arc<Config>>, headers: HeaderMap, body: 
         }
 
         let latency_ms = start.elapsed().as_millis() as u64;
-        let req_status = resolve_request_status(status_code, stream_errored);
+        if let Some(err) = &acc.in_band_error {
+            log::warn!(
+                "in-band SSE error from upstream: type='{}' message='{}'",
+                bound_for_log(&err.kind, MAX_LOGGED_ERROR_MESSAGE),
+                bound_for_log(&err.message, MAX_LOGGED_ERROR_MESSAGE)
+            );
+        }
+        let req_status =
+            resolve_request_status(status_code, stream_errored, acc.in_band_error.is_some());
         let (in_tok, out_tok) = if acc.saw_usage {
             (Some(acc.prompt_tokens), Some(acc.completion_tokens))
         } else {
@@ -758,12 +792,63 @@ mod tests {
 
     #[test]
     fn request_status_failure_on_4xx_5xx_or_abort() {
-        assert_eq!(resolve_request_status(200, false), RequestStatus::Success);
-        assert_eq!(resolve_request_status(200, true), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(401, false), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(429, false), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(500, false), RequestStatus::Failure);
-        assert_eq!(resolve_request_status(503, true), RequestStatus::Failure);
+        assert_eq!(
+            resolve_request_status(200, false, false),
+            RequestStatus::Success
+        );
+        assert_eq!(
+            resolve_request_status(200, true, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(401, false, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(429, false, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(500, false, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(503, true, false),
+            RequestStatus::Failure
+        );
+        assert_eq!(
+            resolve_request_status(200, false, true),
+            RequestStatus::Failure,
+            "an in-band error must fail the request even on a clean 200 stream"
+        );
+    }
+
+    #[test]
+    fn bound_for_log_keeps_short_messages_unchanged() {
+        assert_eq!(bound_for_log("short message", 200), "short message");
+    }
+
+    #[test]
+    fn bound_for_log_caps_long_messages_with_ellipsis() {
+        let long = "x".repeat(500);
+        let out = bound_for_log(&long, 200);
+        assert_eq!(out, format!("{}…", "x".repeat(200)));
+    }
+
+    #[test]
+    fn bound_for_log_never_splits_a_utf8_char_boundary() {
+        // 100 three-byte chars = 300 bytes; 200 is not a multiple of 3, so the cap lands
+        // mid-character and the boundary-adjust loop must back off to the char before it.
+        let s = "€".repeat(100);
+        let out = bound_for_log(&s, 200);
+        assert_eq!(out, format!("{}…", "€".repeat(66)));
+    }
+
+    #[test]
+    fn bound_for_log_strips_control_characters_to_prevent_log_forging() {
+        let out = bound_for_log("line one\nfake WARN\r\ninjected", 200);
+        assert_eq!(out, "line one fake WARN  injected");
+        assert!(!out.chars().any(|c| c.is_control()));
     }
 
     #[test]
