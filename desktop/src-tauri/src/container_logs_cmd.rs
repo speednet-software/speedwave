@@ -687,6 +687,8 @@ mod tests {
         }
         // compose-yml (non-displayable) must never appear in /logs.
         assert!(!merged.contains("compose-yml |"), "merged: {merged}");
+        // proxy-usage (non-displayable) must never appear in /logs.
+        assert!(!merged.contains("proxy-usage |"), "merged: {merged}");
     }
 
     #[test]

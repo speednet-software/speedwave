@@ -89,6 +89,10 @@ fn audit_hub_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
     Some(crate::audit::audit_dir_in(data_dir, project).join(consts::AUDIT_HUB_FILE))
 }
 
+fn proxy_usage_path(data_dir: &Path, project: &str) -> Option<PathBuf> {
+    Some(crate::usage::usage_file_in(data_dir, project))
+}
+
 /// The SSOT list. Adding a source = one row here; both consumers pick it up.
 pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
     DiagnosticSource {
@@ -154,11 +158,18 @@ pub const DIAGNOSTIC_SOURCES: &[DiagnosticSource] = &[
         platforms: Platforms::All,
         kind: SourceKind::File(audit_hub_path),
     },
+    DiagnosticSource {
+        key: "proxy-usage",
+        zip_entry: "proxy/usage.jsonl",
+        displayable: false,
+        platforms: Platforms::All,
+        kind: SourceKind::File(proxy_usage_path),
+    },
 ];
 
 /// Explicit allow-list of ZIP-only keys. A new non-`displayable` source must be
 /// added here too, or `nondisplayable_sources_match_zip_only_allowlist` fails.
-pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml"];
+pub const ZIP_ONLY_KEYS: &[&str] = &["compose-yml", "proxy-usage"];
 
 /// Resolves a `SourceKind::File` source's path by key, gated to the current platform. `None` for
 /// unknown keys, unavailable platforms, or non-File kinds.
@@ -223,6 +234,15 @@ mod tests {
     }
 
     #[test]
+    fn proxy_usage_source_resolves_via_usage_file_in() {
+        let data_dir = Path::new("/fake/.speedwave");
+        assert_eq!(
+            resolve_file_path("proxy-usage", data_dir, "proj"),
+            Some(crate::usage::usage_file_in(data_dir, "proj"))
+        );
+    }
+
+    #[test]
     fn entrypoint_source_is_registered_and_displayable() {
         let s = DIAGNOSTIC_SOURCES
             .iter()
@@ -258,6 +278,6 @@ mod tests {
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
         assert!(entry("audit-proxy").ends_with(consts::AUDIT_PROXY_FILE));
         assert!(entry("audit-hub").ends_with(consts::AUDIT_HUB_FILE));
-        // `lima`/`compose-yml` filenames aren't Speedwave consts, nothing to drift against.
+        // `lima`/`compose-yml`/`proxy-usage` filenames aren't Speedwave consts, nothing to drift against.
     }
 }

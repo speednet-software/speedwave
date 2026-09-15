@@ -17,6 +17,8 @@ pub(crate) struct DiagnosticsInput {
     pub claude_session_log: Option<std::path::PathBuf>,
     /// Path to the container entrypoint's startup diagnostics log.
     pub entrypoint_log: Option<std::path::PathBuf>,
+    /// Path to the proxy's usage JSONL (ZIP-only; not shown in `/logs`).
+    pub proxy_usage_log: Option<std::path::PathBuf>,
 }
 
 /// Writes one ZIP entry; content always passes through `log_sanitizer::sanitize()` first
@@ -86,6 +88,7 @@ pub(crate) fn build_diagnostics_zip(
         (&input.claude_session_log, "claude"),
         (&input.compose_path, "compose-yml"),
         (&input.entrypoint_log, "entrypoint"),
+        (&input.proxy_usage_log, "proxy-usage"),
     ];
     for (maybe_path, key) in single_files {
         if let Some(path) = maybe_path {
@@ -168,6 +171,7 @@ pub(crate) async fn export_diagnostics(project: String) -> Result<String, String
             compose_path: resolve("compose-yml"),
             claude_session_log: resolve("claude"),
             entrypoint_log: resolve("entrypoint"),
+            proxy_usage_log: resolve("proxy-usage"),
         };
 
         build_diagnostics_zip(&zip_path, &input)?;
@@ -263,6 +267,15 @@ mod tests {
         )
         .unwrap();
 
+        // Create a fake proxy usage.jsonl
+        let usage_path = tmp.path().join("usage.jsonl");
+        std::fs::write(
+            &usage_path,
+            r#"{"ts":"2026-09-14T14:07:28.000+02:00","model":"claude-fable-5","status":"failure","prompt_tokens":2,"completion_tokens":2,"latency_ms":26770}"#,
+        )
+        .unwrap();
+        assert!(usage_path.exists(), "usage.jsonl plant must land on disk");
+
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
             serial_log: None,
@@ -271,6 +284,7 @@ mod tests {
             compose_path: Some(compose_path),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: Some(usage_path),
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -291,6 +305,15 @@ mod tests {
         assert!(
             names.contains(&"containers/compose.yml".to_string()),
             "ZIP should contain compose.yml: {names:?}"
+        );
+        assert!(
+            names.contains(&"proxy/usage.jsonl".to_string()),
+            "ZIP should contain proxy usage.jsonl: {names:?}"
+        );
+        let usage_content = read_zip_entry(&zip_path, "proxy/usage.jsonl").unwrap();
+        assert!(
+            usage_content.contains("\"status\":\"failure\""),
+            "usage.jsonl entry should carry the failure status: {usage_content}"
         );
         assert!(
             names.contains(&"system-info.txt".to_string()),
@@ -340,6 +363,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -385,6 +409,7 @@ mod tests {
             compose_path: Some(compose_path),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -426,6 +451,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -457,6 +483,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -485,6 +512,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -513,6 +541,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -547,6 +576,7 @@ mod tests {
             compose_path: None,
             claude_session_log: Some(session_log),
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
 
         build_diagnostics_zip(&zip_path, &input).unwrap();
@@ -580,6 +610,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: Some(log),
+            proxy_usage_log: None,
         };
         build_diagnostics_zip(&out, &input).unwrap();
 
@@ -616,6 +647,7 @@ mod tests {
             "password=hunter2hunter2",
             "Bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "xoxp-another-secret-token-value",
+            "Bearer sk-ant-api03-usagejsonlleaktoken0000",
         ];
         let input = DiagnosticsInput {
             log_dir: Some(log_dir),
@@ -626,6 +658,7 @@ mod tests {
             // Carries the Bearer token (secrets[4]).
             claude_session_log: Some(mk("claude.log", secrets[4])),
             entrypoint_log: Some(mk("entrypoint.log", secrets[5])),
+            proxy_usage_log: Some(mk("usage.jsonl", secrets[6])),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -664,6 +697,7 @@ mod tests {
             compose_path: Some(unreadable),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
@@ -700,6 +734,45 @@ mod tests {
         );
     }
 
+    /// Placeholder contract for the proxy usage-log source, mirroring the other
+    /// single-file sources.
+    #[test]
+    fn diagnostics_zip_proxy_usage_records_placeholder_when_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("diag-usage-unavailable.zip");
+
+        // A directory is rejected by read_regular_file_no_follow on every platform.
+        let unreadable = tmp.path().join("usage.jsonl");
+        std::fs::create_dir(&unreadable).unwrap();
+
+        let input = DiagnosticsInput {
+            log_dir: None,
+            serial_log: None,
+            container_logs: None,
+            mcp_os_log: None,
+            compose_path: None,
+            claude_session_log: None,
+            entrypoint_log: None,
+            proxy_usage_log: Some(unreadable),
+        };
+        build_diagnostics_zip(&zip_path, &input).unwrap();
+
+        let names = zip_entry_names(&zip_path);
+        assert!(
+            names.contains(&"proxy/usage.jsonl.unavailable.txt".to_string()),
+            "unreadable source must leave a placeholder entry: {names:?}"
+        );
+        assert!(
+            !names.contains(&"proxy/usage.jsonl".to_string()),
+            "no regular entry for the unreadable source: {names:?}"
+        );
+        let placeholder = read_zip_entry(&zip_path, "proxy/usage.jsonl.unavailable.txt").unwrap();
+        assert!(
+            placeholder.starts_with("unavailable: "),
+            "placeholder must carry the reason: {placeholder}"
+        );
+    }
+
     /// A missing source stays absent: no entry AND no placeholder.
     #[test]
     fn diagnostics_zip_missing_source_leaves_no_placeholder() {
@@ -713,6 +786,7 @@ mod tests {
             compose_path: None,
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: Some(tmp.path().join("nope.jsonl")),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
         let names = zip_entry_names(&zip_path);
@@ -740,6 +814,7 @@ mod tests {
             compose_path: Some(unreadable),
             claude_session_log: None,
             entrypoint_log: None,
+            proxy_usage_log: None,
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
         let placeholder =
@@ -773,6 +848,7 @@ mod tests {
             compose_path: Some(mk("compose.yml")),
             claude_session_log: Some(mk("claude.log")),
             entrypoint_log: Some(mk("entrypoint.log")),
+            proxy_usage_log: Some(mk("usage.jsonl")),
         };
         build_diagnostics_zip(&zip_path, &input).unwrap();
 
