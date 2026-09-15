@@ -305,8 +305,8 @@ describe('tool-registry', () => {
       expect(stats.services.redmine).toBe(23);
       expect(stats.services.gitlab).toBe(46);
       expect(stats.services.sharepoint).toBe(5);
-      expect(stats.services.os).toBe(25);
-      expect(stats.total).toBe(103);
+      expect(stats.services.os).toBe(26);
+      expect(stats.total).toBe(104);
     });
   });
 

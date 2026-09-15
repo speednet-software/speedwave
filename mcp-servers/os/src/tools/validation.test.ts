@@ -879,9 +879,56 @@ describe('validation', () => {
       expect(result.valid).toBe(true);
     });
 
-    it('returns valid when date field is null', () => {
+    it('fails with INVALID_TYPE when a date field is null and not declared nullable', () => {
       const result = validateDateFields({ start: null }, ['start']);
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_TYPE');
+        expect(result.error.error?.message).toContain('null is not accepted');
+      }
+    });
+
+    it('returns valid when a nullable date field is null', () => {
+      const result = validateDateFields({ start: null }, ['start'], ['start']);
       expect(result.valid).toBe(true);
+    });
+
+    it('validateAll passes the nullable list through to date validation', () => {
+      expect(validateAll({ due: null }, { dates: ['due'], nullable: ['due'] }).valid).toBe(true);
+      const rejected = validateAll({ due: null }, { dates: ['due'] });
+      expect(rejected.valid).toBe(false);
+      if (!rejected.valid) expect(rejected.error.error?.code).toBe('INVALID_TYPE');
+    });
+
+    it('validateAll integers spec rejects a fractional value and keeps the range check', () => {
+      const fractional = validateAll({ priority: 5.5 }, { integers: [['priority', 0, 9]] });
+      expect(fractional.valid).toBe(false);
+      if (!fractional.valid) {
+        expect(fractional.error.error?.code).toBe('INVALID_TYPE');
+        expect(fractional.error.error?.message).toContain('whole number');
+      }
+      const outOfRange = validateAll({ priority: 10 }, { integers: [['priority', 0, 9]] });
+      expect(outOfRange.valid).toBe(false);
+      if (!outOfRange.valid) expect(outOfRange.error.error?.code).toBe('OUT_OF_RANGE');
+      expect(validateAll({ priority: 5 }, { integers: [['priority', 0, 9]] }).valid).toBe(true);
+      expect(validateAll({}, { integers: [['priority', 0, 9]] }).valid).toBe(true);
+    });
+
+    it('stringArrays forbidden characters produce a teaching INVALID_CHARACTERS error', () => {
+      const forbidden = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
+      const result = validateAll(
+        { tags: ['ok', 'bad]#'] },
+        { stringArrays: [['tags', 50, 100, forbidden]] }
+      );
+      expect(result.valid).toBe(false);
+      if (!result.valid) {
+        expect(result.error.error?.code).toBe('INVALID_CHARACTERS');
+        expect(result.error.error?.message).toContain('Invalid tags[1]');
+        expect(result.error.error?.message).toContain('Remove [, ], or # characters from tags[1].');
+      }
+      expect(
+        validateAll({ tags: ['ok'] }, { stringArrays: [['tags', 50, 100, forbidden]] }).valid
+      ).toBe(true);
     });
 
     it('fails with INVALID_DATE when value is not an ISO8601 string', () => {
