@@ -341,6 +341,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn manifest_drives_role_auth_schemes() {
         let (bridge, _tmp) = start_bridge();
         let port = bridge.port();
@@ -358,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn manifest_drives_relay_between_two_roles() {
         let (bridge, _tmp) = start_bridge();
         let port = bridge.port();
@@ -386,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn compose_info_returns_port_and_token() {
         let (bridge, _tmp) = start_bridge();
         let info = bridge.compose_info();
@@ -394,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn credentials_for_local_ui_uses_loopback() {
         let (bridge, _tmp) = start_bridge();
         let creds = bridge.credentials_for_local_ui();
@@ -402,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn lock_file_uses_display_name_from_manifest() {
         let (bridge, _tmp) = start_bridge();
         let body: serde_json::Value =

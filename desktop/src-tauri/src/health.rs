@@ -1244,6 +1244,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_mcp_os_alive_false_when_pid_alive_port_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
@@ -1257,6 +1258,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_mcp_os_alive_true_when_pid_alive_port_open() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();

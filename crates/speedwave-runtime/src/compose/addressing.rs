@@ -221,54 +221,49 @@ fn current_computer() -> std::sync::Arc<dyn HostAddressingComputer> {
     default
 }
 
-/// Test seam: inject a fixture computer. Pair with `#[serial_test::serial(host_addressing)]`.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_host_addressing_computer_for_test(computer: std::sync::Arc<dyn HostAddressingComputer>) {
+fn install_computer(computer: Option<std::sync::Arc<dyn HostAddressingComputer>>) {
     // Recover from poison rather than silently skipping the install — a prior test panic
     // must not leave the next test running against the wrong (real) computer.
     *COMPUTER
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(computer);
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = computer;
     invalidate_host_addressing_cache();
 }
 
-/// Test seam: restore the platform default computer.
+/// RAII pin from the `pin_*` helpers: restores the platform default on drop (panic-safe).
+/// Pair with `#[serial_test::serial(host_addressing)]`.
 #[cfg(any(test, feature = "test-support"))]
-pub fn reset_host_addressing_computer_for_test() {
-    *COMPUTER
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    invalidate_host_addressing_cache();
-}
-
-/// RAII pin from `pin_direct_addressing`/`pin_mirrored_addressing`: restores the platform
-/// default on drop (panic-safe). Pair with `#[serial_test::serial(host_addressing)]`.
-#[cfg(any(test, feature = "test-support"))]
+#[must_use = "dropping the guard immediately restores the default computer"]
 pub struct AddressingGuard(());
 
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for AddressingGuard {
     fn drop(&mut self) {
-        reset_host_addressing_computer_for_test();
+        install_computer(None);
     }
+}
+
+/// Pins `computer` (e.g. a failing fixture) as the addressing strategy until the guard drops.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_addressing_computer(computer: impl HostAddressingComputer + 'static) -> AddressingGuard {
+    install_computer(Some(std::sync::Arc::new(computer)));
+    AddressingGuard(())
 }
 
 /// Pins Direct (non-mirrored) addressing with the given gateway; bind stays loopback.
 #[cfg(any(test, feature = "test-support"))]
 pub fn pin_direct_addressing(gateway_ip: &str) -> AddressingGuard {
-    set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(
-        HostAddressing::direct(gateway_ip, "127.0.0.1"),
-    )));
-    AddressingGuard(())
+    pin_addressing_computer(FixedComputer(HostAddressing::direct(
+        gateway_ip,
+        "127.0.0.1",
+    )))
 }
 
 /// Pins WSL2 mirrored-relay addressing (ADR-080) — container-facing ports translate.
 #[cfg(any(test, feature = "test-support"))]
 pub fn pin_mirrored_addressing() -> AddressingGuard {
-    set_host_addressing_computer_for_test(std::sync::Arc::new(FixedComputer(
-        HostAddressing::mirrored_relay(),
-    )));
-    AddressingGuard(())
+    pin_addressing_computer(FixedComputer(HostAddressing::mirrored_relay()))
 }
 
 mod host_addressing_impls {
@@ -541,34 +536,55 @@ mod resolver_tests {
     #[serial_test::serial(host_addressing)]
     fn host_addressing_caches_after_first_call() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+        let _counting = pin_addressing_computer(CountingComputer {
             addr: sample_addr(),
             calls: std::sync::Arc::clone(&calls),
-        }));
+        });
 
         let a = host_addressing().unwrap();
         let b = host_addressing().unwrap();
         assert_eq!(a, b);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-        reset_host_addressing_computer_for_test();
     }
 
     #[test]
     #[serial_test::serial(host_addressing)]
     fn host_addressing_recomputes_after_invalidation() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+        let _counting = pin_addressing_computer(CountingComputer {
             addr: sample_addr(),
             calls: std::sync::Arc::clone(&calls),
-        }));
+        });
 
         host_addressing().unwrap();
         invalidate_host_addressing_cache();
         host_addressing().unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
-        reset_host_addressing_computer_for_test();
+    #[test]
+    #[serial_test::serial(host_addressing)]
+    fn pinned_computer_is_restored_on_drop_and_when_the_pinned_scope_panics() {
+        let default = HostAddressing::direct(crate::consts::LIMA_VZ_HOST_IP, "127.0.0.1");
+        assert_eq!(host_addressing().unwrap(), default);
+
+        let pinned = pin_addressing_computer(FailingComputer("wsl probe failed".into()));
+        assert!(host_addressing().is_err());
+        drop(pinned);
+        assert_eq!(host_addressing().unwrap(), default);
+
+        let failed_while_pinned = std::sync::atomic::AtomicBool::new(false);
+        let unwound = std::panic::catch_unwind(|| {
+            let _failing = pin_addressing_computer(FailingComputer("wsl probe failed".into()));
+            failed_while_pinned.store(
+                host_addressing().is_err(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            std::panic::resume_unwind(Box::new("assertion failed while pinned"));
+        });
+        assert!(unwound.is_err());
+        assert!(failed_while_pinned.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(host_addressing().unwrap(), default);
     }
 
     #[test]
@@ -602,7 +618,7 @@ mod resolver_tests {
         assert_eq!(mirror_relay_port(60123), None);
 
         // Detection failure disables the relay (None; warned once per failure streak).
-        set_host_addressing_computer_for_test(std::sync::Arc::new(FailingComputer("boom".into())));
+        let _failing = pin_addressing_computer(FailingComputer("boom".into()));
         assert_eq!(mirror_relay_port(60123), None);
     }
 
@@ -671,10 +687,10 @@ mod resolver_tests {
     #[serial_test::serial(host_addressing)]
     fn host_addressing_concurrent_callers_share_one_computation() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        set_host_addressing_computer_for_test(std::sync::Arc::new(CountingComputer {
+        let _counting = pin_addressing_computer(CountingComputer {
             addr: sample_addr(),
             calls: std::sync::Arc::clone(&calls),
-        }));
+        });
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let handles: Vec<_> = (0..4)
@@ -694,7 +710,5 @@ mod resolver_tests {
             (1..=4).contains(&n),
             "computer called {n} times — expected 1..=4 (one wins; losers see cached or recompute under race)"
         );
-
-        reset_host_addressing_computer_for_test();
     }
 }
