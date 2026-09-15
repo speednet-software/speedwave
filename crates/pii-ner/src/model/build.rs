@@ -416,9 +416,9 @@ mod tests {
         let mut longer = padded(&[0, 4, 5, 6, 2]);
         longer[5] = 7;
         longer[6] = 8;
-        let (ids_b, mask_b) = inputs(&[longer]);
-        let a = m.forward(ids_a, mask_a).into_data();
-        let b = m.forward(ids_b, mask_b).into_data();
+        let (ids_b, _) = inputs(&[longer]);
+        let a = m.forward(ids_a, mask_a.clone()).into_data();
+        let b = m.forward(ids_b, mask_a).into_data();
         let a: Vec<f32> = a.iter::<f32>().collect();
         let b: Vec<f32> = b.iter::<f32>().collect();
         for (x, y) in a.iter().zip(&b).take(5 * 5) {
