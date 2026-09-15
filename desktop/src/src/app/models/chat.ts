@@ -4,6 +4,11 @@ export type StreamChunk =
   | { chunk_type: 'Thinking'; data: { content: string } }
   | { chunk_type: 'ToolStart'; data: { tool_id: string; tool_name: string } }
   | { chunk_type: 'ToolInputDelta'; data: { tool_id: string; partial_json: string } }
+  | {
+      /** Complete tool input from the full assistant message; replaces the delta-assembled input_json. */
+      chunk_type: 'ToolInputComplete';
+      data: { tool_id: string; input_json: string };
+    }
   | { chunk_type: 'ToolResult'; data: { tool_id: string; content: string; is_error: boolean } }
   | {
       chunk_type: 'AskUserQuestion';

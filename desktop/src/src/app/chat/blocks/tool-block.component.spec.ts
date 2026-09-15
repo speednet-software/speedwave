@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ToolBlockComponent } from './tool-block.component';
 import { ToolNormalizerService } from '../../services/tool-normalizer.service';
+import { LoggerService } from '../../services/logger.service';
 import type { ToolUseBlock } from '../../models/chat';
+
+function makeMockLogger() {
+  return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+}
 
 describe('ToolBlockComponent', () => {
   let component: ToolBlockComponent;
@@ -44,10 +49,13 @@ describe('ToolBlockComponent', () => {
     } as ToolUseBlock;
   }
 
+  let mockLogger: ReturnType<typeof makeMockLogger>;
+
   beforeEach(async () => {
+    mockLogger = makeMockLogger();
     await TestBed.configureTestingModule({
       imports: [ToolBlockComponent],
-      providers: [ToolNormalizerService],
+      providers: [ToolNormalizerService, { provide: LoggerService, useValue: mockLogger }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(ToolBlockComponent);
@@ -538,22 +546,29 @@ describe('ToolBlockComponent', () => {
       expect(first).not.toBe(second);
     });
 
-    it('does not warn on partial input_json while the tool is running', () => {
+    it('normalizes partial input_json as generic while the tool is running', () => {
       const normalizer = TestBed.inject(ToolNormalizerService);
       const spy = vi.spyOn(normalizer, 'normalize');
 
       setTool(makeTool({ status: 'running', input_json: '{"command":"ls -' }));
       expect(component.normalized()).toEqual({ kind: 'generic', raw_json: '{"command":"ls -' });
-      expect(spy).toHaveBeenCalledWith('Read', '{"command":"ls -', false);
+      expect(spy).toHaveBeenCalledWith('Read', '{"command":"ls -');
+      expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
-    it('flags the input as complete once the tool is done', () => {
-      const normalizer = TestBed.inject(ToolNormalizerService);
-      const spy = vi.spyOn(normalizer, 'normalize');
-
-      setTool(makeTool({ status: 'done', input_json: '{"file_path":"/a.ts"}' }));
-      component.normalized();
-      expect(spy).toHaveBeenCalledWith('Read', '{"file_path":"/a.ts"}', true);
+    it('re-setting an unparseable done block with fresh objects never logs', () => {
+      // Every chat-state mutation rebuilds the block objects; the log must not scale with it.
+      const tool = makeTool({
+        status: 'done',
+        tool_name: 'SendMessage',
+        input_json: '{"to": "ab97"',
+      });
+      for (let i = 0; i < 25; i += 1) {
+        setTool({ ...tool });
+        expect(component.normalized()).toEqual({ kind: 'generic', raw_json: '{"to": "ab97"' });
+      }
+      expect(mockLogger.warn).not.toHaveBeenCalled();
+      expect(mockLogger.error).not.toHaveBeenCalled();
     });
   });
 

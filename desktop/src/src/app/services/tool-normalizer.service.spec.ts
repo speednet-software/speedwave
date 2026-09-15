@@ -94,12 +94,11 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'generic', raw_json: json });
   });
 
-  it('returns generic for invalid JSON and logs a warning via LoggerService', () => {
+  it('returns generic for invalid JSON without logging', () => {
     const result = service.normalize('Bash', 'not json');
     expect(result).toEqual({ kind: 'generic', raw_json: 'not json' });
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to parse tool input for "Bash": not json')
-    );
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+    expect(mockLogger.error).not.toHaveBeenCalled();
   });
 
   it('returns generic for empty string', () => {
@@ -107,23 +106,21 @@ describe('ToolNormalizerService', () => {
     expect(result).toEqual({ kind: 'generic', raw_json: '' });
   });
 
-  it('does not warn on partial JSON while input is still streaming', () => {
+  it('returns generic for a partial JSON prefix without logging', () => {
     const partial = '{"command":"ls -';
-    const result = service.normalize('Bash', partial, false);
+    const result = service.normalize('Bash', partial);
     expect(result).toEqual({ kind: 'generic', raw_json: partial });
     expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
-  it('still normalizes valid JSON while input is still streaming', () => {
-    const result = service.normalize('Bash', '{"command":"ls"}', false);
-    expect(result).toEqual({ kind: 'bash', command: 'ls' });
+  it('normalizes the same unparseable input repeatedly without logging', () => {
+    for (let i = 0; i < 10; i += 1) {
+      expect(service.normalize('Bash', '{"command":')).toEqual({
+        kind: 'generic',
+        raw_json: '{"command":',
+      });
+    }
     expect(mockLogger.warn).not.toHaveBeenCalled();
-  });
-
-  it('warns on invalid JSON once input is complete', () => {
-    const result = service.normalize('Bash', '{"command":', true);
-    expect(result).toEqual({ kind: 'generic', raw_json: '{"command":' });
-    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
   });
 
   it('handles missing fields with defaults', () => {

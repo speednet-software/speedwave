@@ -232,11 +232,7 @@ export class ToolBlockComponent {
 
   /** Returns the normalized tool input — recomputes only when input_json changes. */
   readonly normalized = computed<NormalizedToolInput>(() =>
-    this.normalizer.normalize(
-      this.tool().tool_name,
-      this.tool().input_json,
-      this.tool().status !== 'running'
-    )
+    this.normalizer.normalize(this.tool().tool_name, this.tool().input_json)
   );
 
   /** Whether this tool's body is currently hidden. */

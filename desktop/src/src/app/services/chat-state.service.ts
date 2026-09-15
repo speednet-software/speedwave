@@ -808,9 +808,37 @@ export class ChatStateService {
         );
         break;
 
-      case 'ToolResult':
-        this._currentBlocks = completeToolBlock(this._currentBlocks, chunk.data);
+      case 'ToolInputComplete': {
+        const streamed = findToolBlock(this._currentBlocks, chunk.data.tool_id);
+        if (streamed && isIncompleteStreamedInput(streamed.input_json, chunk.data.input_json)) {
+          this.log.warn(
+            `Tool input for "${streamed.tool_name}" (${streamed.tool_id}) was incomplete after ` +
+              `streaming (${streamed.input_json.length} chars); replaced with the complete input ` +
+              `from the assistant message (${chunk.data.input_json.length} chars)`
+          );
+        }
+        this._currentBlocks = replaceToolInput(
+          this._currentBlocks,
+          chunk.data.tool_id,
+          chunk.data.input_json
+        );
         break;
+      }
+
+      case 'ToolResult': {
+        this._currentBlocks = completeToolBlock(this._currentBlocks, chunk.data);
+        // Logged once here, at the done/error transition — never from a render-time computed.
+        const finished = findToolBlock(this._currentBlocks, chunk.data.tool_id);
+        const parseError = finished ? jsonParseError(finished.input_json) : null;
+        if (finished && parseError !== null) {
+          this.log.warn(
+            `Failed to parse tool input for "${finished.tool_name}" (${finished.tool_id}, ` +
+              `${finished.input_json.length} chars): ${previewForLog(finished.input_json)} ` +
+              `(${parseError})`
+          );
+        }
+        break;
+      }
 
       case 'AskUserQuestion': {
         const askBlock: AskUserQuestionBlock = {
@@ -1528,6 +1556,49 @@ function updateToolInput(blocks: MessageBlock[], toolId: string, delta: string):
     if (b.type !== 'tool_use' || b.tool.tool_id !== toolId) return b;
     return { ...b, tool: { ...b.tool, input_json: b.tool.input_json + delta } };
   });
+}
+
+function replaceToolInput(
+  blocks: MessageBlock[],
+  toolId: string,
+  inputJson: string
+): MessageBlock[] {
+  return blocks.map((b) => {
+    if (b.type !== 'tool_use' || b.tool.tool_id !== toolId) return b;
+    return { ...b, tool: { ...b.tool, input_json: inputJson } };
+  });
+}
+
+function findToolBlock(blocks: readonly MessageBlock[], toolId: string): ToolUseBlock | undefined {
+  for (const b of blocks) {
+    if (b.type === 'tool_use' && b.tool.tool_id === toolId) return b.tool;
+  }
+  return undefined;
+}
+
+// `JSON.parse` failure text for `input`, or null when it parses.
+function jsonParseError(input: string): string | null {
+  try {
+    JSON.parse(input);
+    return null;
+  } catch (err) {
+    return String(err);
+  }
+}
+
+// By the time the full assistant message arrives every delta has been applied, so an
+// unparseable stream means lost deltas — except an empty stream completed to `{}` (no-arg tool).
+function isIncompleteStreamedInput(streamed: string, complete: string): boolean {
+  if (streamed === '' && complete === '{}') return false;
+  return jsonParseError(streamed) !== null;
+}
+
+/** Longest tool-input excerpt echoed into a parse-failure log line. */
+const TOOL_INPUT_LOG_PREVIEW_CHARS = 200;
+
+function previewForLog(input: string): string {
+  if (input.length <= TOOL_INPUT_LOG_PREVIEW_CHARS) return input;
+  return `${input.slice(0, TOOL_INPUT_LOG_PREVIEW_CHARS)}…`;
 }
 
 /**
