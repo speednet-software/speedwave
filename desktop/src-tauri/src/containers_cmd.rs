@@ -1,6 +1,3 @@
-// Container lifecycle and setup wizard Tauri commands — thin
-// #[tauri::command] wrappers over setup_wizard / speedwave_runtime.
-
 use speedwave_runtime::config;
 
 use crate::reconcile::{SharedIdeBridge, SharedMcpOs, SharedOauth};
@@ -11,15 +8,9 @@ use crate::types::{
     TelemetryConfigResponse, TelemetryConfigUpdate, TelemetryLocks,
 };
 
-/// Max bytes for the local-LLM `api_key` token file; larger is almost
-/// certainly a paste error or hostile input.
 const MAX_API_KEY_BYTES: usize = 64 * 1024;
-/// Max bytes for the `custom_headers` blob (multi-line `Name: Value`) —
-/// realistic header counts without enabling arbitrary blob storage.
 const MAX_CUSTOM_HEADERS_BYTES: usize = 16 * 1024;
 
-/// Disallowed header names (case-insensitive): Speedwave-managed
-/// (`Authorization` ← `api_key`) or hop-by-hop/transport headers.
 const FORBIDDEN_HEADER_NAMES: &[&str] = &[
     "authorization",
     "cookie",
@@ -28,8 +19,6 @@ const FORBIDDEN_HEADER_NAMES: &[&str] = &[
     "transfer-encoding",
 ];
 
-/// Validates and normalises an `api_key`. Empty after `Bearer ` strip is an
-/// explicit error; clearing the key is a separate `Delete` path.
 pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if value.len() > MAX_API_KEY_BYTES {
         return Err(format!("api_key exceeds {} byte limit", MAX_API_KEY_BYTES));
@@ -41,7 +30,6 @@ pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Ok(String::new());
     }
-    // Reject a bare `Bearer` (no token) with an actionable error.
     if trimmed.eq_ignore_ascii_case("bearer") {
         return Err("api_key must not be empty after stripping the 'Bearer ' prefix".to_string());
     }
@@ -49,8 +37,6 @@ pub(crate) fn validate_api_key(value: &str) -> Result<String, String> {
         .ok_or_else(|| "api_key must not be empty after stripping the 'Bearer ' prefix".to_string())
 }
 
-/// Validates and normalises a `custom_headers` blob. Returns the original
-/// string if every line parses; otherwise the first error.
 pub(crate) fn validate_custom_headers(value: &str) -> Result<String, String> {
     use reqwest::header::{HeaderName, HeaderValue};
 
@@ -72,8 +58,6 @@ pub(crate) fn validate_custom_headers(value: &str) -> Result<String, String> {
             .split_once(':')
             .ok_or_else(|| format!("line {}: header must be `Name: Value`", idx + 1))?;
         let name = name.trim();
-        // RFC 7230 token validation — `HeaderName::from_bytes` enforces the
-        // full token charset (alphanumeric + `!#$%&'*+-.^_`|~`).
         HeaderName::from_bytes(name.as_bytes())
             .map_err(|e| format!("line {}: invalid header name '{}': {e}", idx + 1, name))?;
         if FORBIDDEN_HEADER_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
@@ -93,41 +77,27 @@ pub(crate) fn validate_custom_headers(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-/// Max wait for container images to become ready before failing; the
-/// frontend shows a rebuild overlay meanwhile (UX in project-state.service.ts).
 const RECONCILE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Blocks until container images are ready (reconcile complete) or timeout.
-/// Called before any operation that starts containers.
 pub(crate) fn ensure_images_ready() -> Result<(), String> {
     crate::reconcile::wait_for_images_ready(RECONCILE_WAIT_TIMEOUT)
 }
 
-/// Re-enters the startup bundle reconcile after a failure (error-banner Retry).
-/// Returns whether a re-entry started: false when the gate is not `Failed`, or
-/// when the CAS lost to a reconcile still in flight / winding down.
 #[tauri::command]
 pub(crate) fn retry_bundle_reconcile(app_handle: tauri::AppHandle) -> bool {
     crate::reconcile::retry_bundle_reconcile_if_failed(&app_handle)
 }
 
-// Project switch transaction helpers
-// ---------------------------------------------------------------------------
-
-/// Result of the container-switching transaction.
 pub(crate) enum SwitchResult {
-    /// New project is up. `teardown` is the previous project the caller must
-    /// stop via `spawn_background_teardown` (None when nothing to stop).
-    Succeeded { teardown: Option<String> },
-    /// Primary error + optional cleanup error. Caller handles config rollback + UI.
+    Succeeded {
+        teardown: Option<String>,
+    },
     Failed {
         error: String,
         cleanup_error: Option<String>,
     },
 }
 
-/// Tears down new project without restoring anything.
-/// The previous project is never stopped before the switch succeeds.
 pub(crate) fn teardown_only(
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -138,7 +108,6 @@ pub(crate) fn teardown_only(
     })
 }
 
-/// In-flight background teardowns by project name.
 static PENDING_TEARDOWNS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::thread::JoinHandle<()>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -152,8 +121,6 @@ fn pending_teardowns_lock(
     }
 }
 
-/// Stops the previous project on a background thread (best-effort).
-/// A failure only leaves idle containers; the next compose op converges them.
 pub(crate) fn spawn_background_teardown(prev: String) {
     spawn_background_teardown_with(prev, |p| {
         let rt = speedwave_runtime::runtime::detect_runtime();
@@ -161,14 +128,10 @@ pub(crate) fn spawn_background_teardown(prev: String) {
     });
 }
 
-/// On-disk teardown intents — lets the NEXT launch converge projects whose
-/// background teardown a crash interrupted (never CLI-run projects).
-/// Tests inject a tempdir; production callers pass `consts::data_dir()`.
 fn teardown_intents_path_in(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("pending-teardowns")
 }
 
-/// Tests inject a tempdir; production callers pass `consts::data_dir()`.
 fn record_teardown_intent_in(data_dir: &std::path::Path, project: &str) {
     let _guard = pending_teardowns_lock();
     let path = teardown_intents_path_in(data_dir);
@@ -185,7 +148,6 @@ fn record_teardown_intent_in(data_dir: &std::path::Path, project: &str) {
     }
 }
 
-/// Tests inject a tempdir; production callers pass `consts::data_dir()`.
 fn clear_teardown_intent_in(data_dir: &std::path::Path, project: &str) {
     let _guard = pending_teardowns_lock();
     let path = teardown_intents_path_in(data_dir);
@@ -203,18 +165,12 @@ fn clear_teardown_intent_in(data_dir: &std::path::Path, project: &str) {
     }
 }
 
-/// A `write-*` atomic-write tempfile older than this was orphaned by a crash
-/// between tempfile creation and rename, never an in-flight write.
 const STALE_ATOMIC_WRITE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// Projects whose background teardown a previous process never finished. Also
-/// sweeps orphaned atomic-write tempfiles left in the data dir by a crash
-/// between tempfile creation and rename — no other path cleans those up.
 pub(crate) fn crashed_teardown_intents() -> Vec<String> {
     crashed_teardown_intents_in(speedwave_runtime::consts::data_dir())
 }
 
-/// Env-free core of [`crashed_teardown_intents`]: tests inject a tempdir.
 fn crashed_teardown_intents_in(data_dir: &std::path::Path) -> Vec<String> {
     speedwave_runtime::fs_perms::sweep_stale_atomic_write_temp_files(
         data_dir,
@@ -233,7 +189,6 @@ fn spawn_background_teardown_with(
     spawn_background_teardown_with_in(speedwave_runtime::consts::data_dir().clone(), prev, down);
 }
 
-/// Env-free core of [`spawn_background_teardown_with`]: tests inject a tempdir.
 fn spawn_background_teardown_with_in(
     data_dir: std::path::PathBuf,
     prev: String,
@@ -253,13 +208,10 @@ fn spawn_background_teardown_with_in(
     });
     let replaced = pending_teardowns_lock().insert(prev, handle);
     if let Some(old) = replaced {
-        // The replaced teardown may still be running: joining it under the registry
-        // lock would block every other teardown call for a whole `compose down`.
         let _ = old.join();
     }
 }
 
-/// Joins every in-flight background teardown — callers: exit path and factory reset.
 pub(crate) fn drain_pending_teardowns() {
     let handles: Vec<(String, std::thread::JoinHandle<()>)> =
         pending_teardowns_lock().drain().collect();
@@ -269,8 +221,6 @@ pub(crate) fn drain_pending_teardowns() {
     }
 }
 
-/// Joins a pending background teardown of `project` before it is started
-/// again — otherwise the teardown could kill the freshly started containers.
 pub(crate) fn wait_for_pending_teardown(project: &str) {
     let handle = pending_teardowns_lock().remove(project);
     if let Some(h) = handle {
@@ -279,15 +229,12 @@ pub(crate) fn wait_for_pending_teardown(project: &str) {
     }
 }
 
-/// Core sync logic: ensure_ready → start new project FIRST → hand previous
-/// back for background teardown. A failed start leaves previous untouched.
 pub(crate) fn switch_project_core(
     previous: &Option<String>,
     new_project: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
     recreate_fn: &dyn Fn(&str, &speedwave_runtime::runtime::LockedRuntime) -> Result<(), String>,
 ) -> SwitchResult {
-    // 1. Ensure runtime is ready
     if let Err(e) = rt.ensure_ready() {
         return SwitchResult::Failed {
             error: format!("Runtime not ready: {e}"),
@@ -295,11 +242,8 @@ pub(crate) fn switch_project_core(
         };
     }
 
-    // 2. A still-running teardown of the destination must finish first.
     wait_for_pending_teardown(new_project);
 
-    // 3. Start new first — previous keeps serving until the caller's
-    //    background teardown after a fully successful switch.
     if let Err(e) = recreate_fn(new_project, rt) {
         return SwitchResult::Failed {
             error: e,
@@ -315,17 +259,11 @@ pub(crate) fn switch_project_core(
     }
 }
 
-// Compose helpers — resolve config, render, security check, save
-// ---------------------------------------------------------------------------
-
-/// True when `project` has no resolvable LLM provider (SSOT:
-/// `LlmConfig::is_unconfigured`) — callers must skip starting containers.
 pub(crate) fn project_llm_is_unconfigured(project: &str) -> Result<bool, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     project_llm_is_unconfigured_in(&user_config, project)
 }
 
-/// Testable variant of [`project_llm_is_unconfigured`] taking an explicit config.
 fn project_llm_is_unconfigured_in(
     user_config: &config::SpeedwaveUserConfig,
     project: &str,
@@ -340,8 +278,6 @@ fn project_llm_is_unconfigured_in(
     Ok(resolved.llm.is_unconfigured())
 }
 
-/// Renders a project's compose.yml and saves it after security check. Caller
-/// MUST pre-build images — passes `None` to render_compose (ADR-066).
 pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     let project_dir = user_config
@@ -350,7 +286,6 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
         .ok_or_else(|| format!("project '{}' not found", project))?;
 
     let project_path = std::path::Path::new(&project_dir);
-    // Defense-in-depth: pre-flight CloudStorage TCC check before any compose render.
     speedwave_runtime::cloudstorage::check_project_readable_or_err(project_path)?;
     let (resolved, integrations) =
         config::resolve_project_config(project_path, &user_config, project);
@@ -373,7 +308,6 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
         speedwave_runtime::compose::SecurityExpectedPaths::compute(project, &project_dir)
             .map_err(|e| e.to_string())?
             .with_telemetry_locked(resolved.telemetry.any_locked);
-    // OS prerequisite check
     let prereq_violations = speedwave_runtime::os_prereqs::check_os_prereqs();
     if !prereq_violations.is_empty() {
         return Err(format!(
@@ -403,7 +337,6 @@ pub(crate) fn render_and_save_compose(project: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Formats security violations into a human-readable multi-line string.
 pub(crate) fn format_security_violations(
     violations: &[speedwave_runtime::compose::SecurityViolation],
 ) -> String {
@@ -414,8 +347,6 @@ pub(crate) fn format_security_violations(
         .join("\n")
 }
 
-/// Runs OS prerequisite checks. Returns Ok(()) if all pass, or Err with
-/// violation details. Used by the frontend before attempting container start.
 #[tauri::command]
 pub async fn run_system_check() -> Result<(), String> {
     let (violations, warnings) = tokio::task::spawn_blocking(|| {
@@ -440,9 +371,6 @@ pub async fn run_system_check() -> Result<(), String> {
             .join("\n\n"))
     }
 }
-
-// Setup wizard commands
-// ---------------------------------------------------------------------------
 
 #[tauri::command]
 pub async fn check_runtime() -> Result<String, String> {
@@ -506,8 +434,6 @@ pub async fn link_cli() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Adds a project and boots it (containers + chat); same lifecycle as
-/// `switch_project`. On failure it stays registered but inactive (retryable).
 #[tauri::command]
 pub async fn add_project(
     name: String,
@@ -520,13 +446,11 @@ pub async fn add_project(
     let Ok(_transition_guard) = crate::project_cmd::PROJECT_TRANSITION_LOCK.try_lock() else {
         return Err(crate::project_cmd::PROJECT_TRANSITION_BUSY_ERR.to_string());
     };
-    // Start subsystems on-demand (e.g. after factory reset / fresh install)
     crate::ensure_mcp_os_running(&mcp_os, &app);
     crate::ensure_ide_bridge_running(&ide_bridge, &app);
     use tauri::Manager;
     let oauth_arc = app.state::<SharedOauth>().inner().clone();
 
-    // Pre-flight: detect CloudStorage TCC denial before adding project.
     {
         let dir_clone = dir.clone();
         let preflight_result = tokio::task::spawn_blocking(move || {
@@ -539,14 +463,12 @@ pub async fn add_project(
         preflight_result?;
     }
 
-    // Capture previous active project BEFORE runtime sets new one
     let previous = config::with_config_lock(|| {
         let cfg = config::load_user_config()?;
         Ok(cfg.active_project.clone())
     })
     .map_err(|e| e.to_string())?;
 
-    // Register project (sets active_project internally)
     tokio::task::spawn_blocking({
         let name = name.clone();
         let dir = dir.clone();
@@ -567,7 +489,6 @@ pub async fn add_project(
         serde_json::json!({ "project": name }),
     );
 
-    // Container transaction: wait for images → stop previous → start new
     let prev_clone = previous.clone();
     let new_clone = name.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
@@ -579,21 +500,14 @@ pub async fn add_project(
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {
-            // start_containers calls ensure_ready internally (noop — VM already up)
             check_project(proj)?;
-            // Lazy build for the new project (ADR-057) — repo-enabled
-            // integrations need their images before pull_policy:never up.
             if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(rt, proj) {
                 return Err(format!("Image build failed: {sanitized}"));
             }
-            // No provider is a valid state ("choose a provider" screen) —
-            // skip starting containers rather than let render_compose bail.
             if project_llm_is_unconfigured(proj)? {
                 log::info!("'{proj}' has no LLM provider — skipping container start");
                 return Ok(());
             }
-            // Eager-start host workers before compose render — live WORKER_*_URLs
-            // prevent the first-message container recreate.
             crate::ensure_oauth_running(&oauth_arc, proj);
             log::info!("starting containers for project={proj}");
             setup_wizard::start_containers(proj).map_err(|e| {
@@ -617,13 +531,10 @@ pub async fn add_project(
         SwitchResult::Succeeded { teardown } => teardown,
     };
 
-    // Rebind chat session
     if let Err(e) = crate::rebind_chat(&name, &app, &chat_state) {
-        // Containers running but chat failed — transient, still emit succeeded
         log::warn!("rebind_chat failed after adding project: {e}");
     }
 
-    // Previous project is stopped in the background.
     if let Some(prev) = pending_teardown {
         spawn_background_teardown(prev);
     }
@@ -635,19 +546,13 @@ pub async fn add_project(
     Ok(())
 }
 
-/// Core: check_fn → ensure_ready → compose_down → remove_fn. Extracted for tests; every
-/// failure before the wipe leaves the project registered so the user can retry.
 pub(crate) fn remove_project_core(
     name: &str,
     rt: &speedwave_runtime::runtime::LockedRuntime,
     check_fn: &dyn Fn(&str) -> Result<(), String>,
     remove_fn: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), String> {
-    // Reject the active or unknown project before paying for a VM boot and a teardown;
-    // `remove_fn` re-checks under the config lock right before the wipe.
     check_fn(name)?;
-    // Unregistering deletes the rendered compose.yml, after which nothing can reap the
-    // containers: a stopped engine (Lima VM after app exit) is started, never skipped.
     rt.ensure_ready().map_err(|e| {
         log::error!("ensure_ready before removing '{name}' failed: {e:#}");
         format!(
@@ -666,8 +571,6 @@ pub(crate) fn remove_project_core(
     remove_fn(name)
 }
 
-/// Tears down a project's containers and unregisters it. Holds the transition lock
-/// like `switch_project`, so a concurrent switch cannot restart what this stops.
 #[tauri::command]
 pub async fn remove_project(name: String) -> Result<(), String> {
     let Ok(_transition_guard) = crate::project_cmd::PROJECT_TRANSITION_LOCK.try_lock() else {
@@ -690,9 +593,6 @@ pub async fn remove_project(name: String) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?
 }
-
-// Container lifecycle commands
-// ---------------------------------------------------------------------------
 
 #[tauri::command]
 pub async fn is_setup_complete() -> Result<bool, String> {
@@ -727,10 +627,7 @@ pub async fn start_containers(
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
-        // Eager-start host workers before compose render — live WORKER_*_URLs
-        // prevent the first-message container recreate.
         crate::ensure_oauth_running(&oauth_arc, &project);
-        // Pre-flight: detect CloudStorage TCC denial before attempting container start.
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
                 speedwave_runtime::cloudstorage::check_project_readable_or_err(
@@ -747,14 +644,10 @@ pub async fn start_containers(
     .await
     .map_err(|e| e.to_string())??;
 
-    // `start_containers` is the last step that flips `is_setup_complete()`;
-    // rebuild the tray so setup-gated items (ADR-058 beta toggle) appear.
     crate::tray::refresh_tray_menu(&app);
     Ok(())
 }
 
-/// Wizard step 4 for a project with no LLM provider yet — marks the step
-/// done without starting containers. See `setup_wizard::defer_container_start`.
 #[tauri::command]
 pub async fn defer_container_start(project: String, app: tauri::AppHandle) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -777,14 +670,10 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
         check_project(&project)?;
         log::info!("checking whether containers are running for project={project}");
         let rt = speedwave_runtime::runtime::detect_runtime();
-        // Intentional double check: is_available() gives a clean "no
-        // containers" signal where compose_ps() would Err (confusing UX).
         if !rt.is_available() {
             log::warn!("runtime not available");
             return Ok(false);
         }
-        // A deferred-start project (no LLM provider yet) has no compose.yml
-        // at all — compose_ps would Err rather than report "not running".
         if !speedwave_runtime::runtime::project_has_compose_file(&project) {
             log::info!("no compose.yml yet for '{project}'");
             return Ok(false);
@@ -800,11 +689,7 @@ pub async fn check_containers_running(project: String) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Re-render compose and recreate running containers so the hub re-discovers a
-/// host worker. Best-effort (oauth respawn + per-project watchdog).
 pub(crate) fn recreate_project_containers_if_running(project: &str) {
-    // Only the ACTIVE project may be resurrected — else a compose_ps TOCTOU
-    // revives a project the user already switched away from mid-teardown.
     let active = speedwave_runtime::config::load_user_config()
         .ok()
         .and_then(|c| c.active_project);
@@ -812,8 +697,6 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
         log::debug!("'{project}' is not the active project — skipping recreate");
         return;
     }
-    // Bundle reconcile may be rebuilding images. compose_up_recreate against a
-    // missing image tag emits "image not available" to the user. Wait first.
     if let Err(e) = ensure_images_ready() {
         log::warn!("images not ready for '{project}' — skipping recreate: {e}");
         return;
@@ -834,7 +717,6 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
         log::debug!("'{project}' not running — skipping recreate");
         return;
     }
-    // Build OUTSIDE the compose lock (ADR-066).
     if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, project) {
         log::warn!("pre-build failed for '{project}' — skipping recreate: {sanitized}");
         return;
@@ -856,14 +738,11 @@ pub(crate) fn recreate_project_containers_if_running(project: &str) {
     }
 }
 
-/// Recreate a project's containers with freshly generated compose (on switch,
-/// to match `ENABLED_SERVICES`). Skips image rebuild + snapshot/rollback.
 #[tauri::command]
 pub async fn recreate_project_containers(project: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         ensure_images_ready()?;
         check_project(&project)?;
-        // Pre-flight: detect CloudStorage TCC denial before container recreate.
         if let Ok(cfg) = speedwave_runtime::config::load_user_config() {
             if let Some(p) = cfg.find_project(&project) {
                 speedwave_runtime::cloudstorage::check_project_readable_or_err(
@@ -875,7 +754,6 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
         let rt = speedwave_runtime::runtime::detect_runtime();
         rt.ensure_ready().map_err(|e| e.to_string())?;
 
-        // Lazy build (ADR-057).
         if let Err(sanitized) = crate::integrations_cmd::ensure_project_images_built(&rt, &project)
         {
             log::error!("image build failed: {sanitized}");
@@ -899,9 +777,6 @@ pub async fn recreate_project_containers(project: String) -> Result<(), String> 
     .map_err(|e| e.to_string())?
 }
 
-// Settings / reset commands
-// ---------------------------------------------------------------------------
-
 #[tauri::command]
 pub async fn factory_reset(
     app: tauri::AppHandle,
@@ -910,13 +785,10 @@ pub async fn factory_reset(
     oauth: tauri::State<'_, SharedOauth>,
     clipboard: tauri::State<'_, crate::clipboard_bridge::SharedClipboardBridge>,
 ) -> Result<(), String> {
-    // 1. Stop mcp-os watchdog
     crate::WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // 1b. Stop the oauth watchdog too, so it cannot respawn workers mid-wipe.
     crate::OAUTH_WATCHDOG_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // 2. Stop IDE Bridge
     if let Ok(mut guard) = ide_bridge.lock() {
         if let Some(mut bridge) = guard.take() {
             if let Err(e) = bridge.stop() {
@@ -925,8 +797,6 @@ pub async fn factory_reset(
         }
     }
 
-    // 3. Stop mcp-os (kill child, join drain threads, release log handles);
-    //    explicit stop + cleanup_files keeps parity with run_exit_cleanup.
     if let Ok(mut guard) = mcp_os.lock() {
         if let Some(mut proc) = guard.take() {
             if let Err(e) = proc.stop() {
@@ -936,8 +806,6 @@ pub async fn factory_reset(
         }
     }
 
-    // 3b. Stop per-project oauth workers — they hold token-file handles under the
-    // data dir and the exit path already stops them (parity).
     if let Ok(mut map) = oauth.lock() {
         for (project, mut proc) in map.drain() {
             if let Err(e) = proc.stop() {
@@ -947,16 +815,11 @@ pub async fn factory_reset(
         }
     }
 
-    // 3c. Stop the clipboard-bridge watcher — Windows cannot delete a watched
-    // directory (os error 5), which made wipe_data_dir fail under claude-home.
     if let Ok(mut guard) = clipboard.lock() {
         drop(guard.take());
     }
 
-    // 4. Wipe (compose_down, VM delete, CLI removal, remove_dir_all)
     let result = tokio::task::spawn_blocking(|| {
-        // 3d. Join in-flight background teardowns so the wipe does not race them,
-        // bounded — a hung compose_down must not wedge the reset (thread keeps draining).
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             drain_pending_teardowns();
@@ -974,8 +837,6 @@ pub async fn factory_reset(
     .await
     .map_err(|e| e.to_string())?;
 
-    // 5. Always restart: success → clean wizard start (data dir gone);
-    //    failure → recover subsystems (data dir may partially exist).
     if let Err(ref e) = result {
         log::error!("factory reset wipe failed ({e}), restarting to recover");
     }
@@ -990,8 +851,6 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
         .and_then(|p| p.claude.as_ref())
         .and_then(|c| c.llm.clone())
         .unwrap_or_default();
-    // `has_api_key` is the key file's existence (SSOT), not the persisted flag —
-    // re-derive it before the frontend reads it.
     if let Some(active) = user_config.active_project.as_deref() {
         llm.sync_has_api_key_from_disk_in(speedwave_runtime::consts::data_dir().as_path(), active);
     }
@@ -1000,8 +859,6 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
         .as_deref()
         .and_then(speedwave_runtime::compose::default_base_url);
 
-    // Non-destructive: warn if a stored base_url now fails the SSRF policy,
-    // but still return it for display — the Save path rejects it (ADR-041).
     if let Some(ref url) = llm.base_url {
         let normalized = speedwave_runtime::compose::strip_trailing_v1(url);
         if let Err(e) = crate::llm_cmd::validate_llm_base_url(&normalized) {
@@ -1015,20 +872,14 @@ pub fn get_llm_config() -> Result<LlmConfigResponse, String> {
     })
 }
 
-/// Frontend mirror in `models/llm.ts::ActiveProviderSummary`; keep both in sync.
 #[derive(serde::Serialize, Debug)]
 pub struct ActiveProviderSummary {
     pub provider_id: String,
     pub kind: config::LlmProviderKind,
     pub model: Option<String>,
-    /// Local providers only (`kind == Local`); the composer's local discovery
-    /// probe needs it and must never call `discover_llm_models` with the bare
-    /// `provider_id` as a URL.
     pub base_url: Option<String>,
 }
 
-/// Pure logic over an already-loaded config - unit-testable without touching
-/// `consts::data_dir()` (process-wide `OnceLock`), same split as `apply_llm_config`.
 fn active_provider_summary_from(
     user_config: &config::SpeedwaveUserConfig,
     project: &str,
@@ -1052,31 +903,22 @@ fn active_provider_summary_from(
     })
 }
 
-/// The active provider+model+base_url, for the composer badge/combobox to
-/// normalize the observed wire id and drive per-provider discovery, without
-/// duplicating `effective_active_model`.
 #[tauri::command]
 pub fn get_active_provider_summary(project: String) -> Result<ActiveProviderSummary, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
     active_provider_summary_from(&user_config, &project)
 }
 
-/// Backend-authoritative default base URL for a provider (so the frontend
-/// duplicates no URL strings). `None` for unknown providers, e.g. anthropic.
 #[tauri::command]
 pub fn get_default_base_url(provider: String) -> Result<Option<String>, String> {
     Ok(speedwave_runtime::compose::default_base_url(&provider))
 }
 
-/// SSOT OpenRouter auto-default model id (ADR-088 section 8), surfaced to the
-/// Settings connection-test success line — the frontend never hard-codes this string.
 #[tauri::command]
 pub fn get_openrouter_default_model() -> &'static str {
     speedwave_runtime::consts::OPENROUTER_DEFAULT_MODEL
 }
 
-/// SSOT Anthropic model list for Settings → LLM Provider; bumping a model
-/// edits one const in `defaults.rs`. Adds the derived `has_1m` field.
 #[tauri::command]
 pub fn list_anthropic_models() -> Vec<AnthropicModelWire> {
     speedwave_runtime::defaults::ANTHROPIC_MODELS
@@ -1088,8 +930,6 @@ pub fn list_anthropic_models() -> Vec<AnthropicModelWire> {
         .collect()
 }
 
-/// Builds the frontend telemetry response. Never copies the headers value (only
-/// `has_headers`); locks derived per-field so no `OTEL_*` string reaches the UI.
 fn build_telemetry_response(
     resolved: &config::ResolvedTelemetry,
     has_headers: bool,
@@ -1132,10 +972,6 @@ fn build_telemetry_response(
     }
 }
 
-/// Applies each set field unless MDM locked it; returns the names of any locked
-/// fields the update tried to actually change (caller rejects the write when
-/// non-empty). A locked field submitted with its current resolved value is a
-/// no-op, never a rejection — it lets the frontend resend unlocked fields.
 fn apply_telemetry_update_with(
     user: &mut config::TelemetryConfig,
     update: TelemetryConfigUpdate,
@@ -1163,7 +999,6 @@ fn apply_telemetry_update_with(
         update.enabled == Some(resolved.enabled),
         user.enabled = update.enabled
     );
-    // endpoint tri-state: Some(None) clears, Some(Some) sets.
     if let Some(e) = update.endpoint {
         set_field!(
             "endpoint",
@@ -1194,7 +1029,6 @@ fn apply_telemetry_update_with(
         update.export_logs == Some(resolved.export_logs),
         user.export_logs = update.export_logs
     );
-    // Headers tri-state: Some(None) clears, Some(Some) sets.
     if let Some(h) = update.headers {
         set_field!(
             "headers",
@@ -1204,7 +1038,6 @@ fn apply_telemetry_update_with(
             user.headers = h
         );
     }
-    // resource_attributes tri-state: Some(None) clears, Some(Some) sets.
     if let Some(ra) = update.resource_attributes {
         set_field!(
             "resource_attributes",
@@ -1249,7 +1082,6 @@ fn apply_telemetry_update_with(
         update.log_raw_api_bodies == Some(resolved.log_raw_api_bodies),
         user.log_raw_api_bodies = update.log_raw_api_bodies
     );
-    // Interval tri-state: Some(None) clears, Some(Some) sets.
     if let Some(v) = update.metric_export_interval_ms {
         set_field!(
             "metric_export_interval_ms",
@@ -1271,8 +1103,6 @@ fn apply_telemetry_update_with(
     rejected
 }
 
-/// True when either layer sets a non-empty headers value. Symmetric across
-/// user and MDM sources — an empty-string policy must never read as "configured".
 fn compute_has_headers(
     user: Option<&config::TelemetryConfig>,
     managed: Option<&speedwave_runtime::config::ManagedTelemetryConfig>,
@@ -1284,8 +1114,6 @@ fn compute_has_headers(
             .is_some_and(non_empty)
 }
 
-/// Returns the effective telemetry the container will use (user + MDM merge),
-/// so the Settings UI shows exactly what reaches Claude Code.
 #[tauri::command]
 pub fn get_telemetry_config() -> Result<TelemetryConfigResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -1298,16 +1126,12 @@ pub fn get_telemetry_config() -> Result<TelemetryConfigResponse, String> {
     Ok(build_telemetry_response(&resolved, has_headers))
 }
 
-/// Persists user telemetry fields to the user config. Rejects (does not persist)
-/// a write that targets an MDM-locked field; a fail-closed MDM policy also rejects.
 #[tauri::command]
 pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), String> {
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let managed =
             speedwave_runtime::managed_config::load_managed_config()?.and_then(|m| m.telemetry);
-        // Propagate a resolve error instead of masking it as "nothing locked",
-        // which would let a user overwrite fields MDM meant to lock.
         let resolved = config::resolve_telemetry(user_config.telemetry.as_ref(), managed.as_ref())?;
         let mut telemetry = user_config.telemetry.take().unwrap_or_default();
         let rejected = apply_telemetry_update_with(&mut telemetry, update, &resolved);
@@ -1317,8 +1141,6 @@ pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), Stri
                 rejected.join(", ")
             );
         }
-        // Validate the post-update state through the same SSOT the renderer uses,
-        // so an invalid save is rejected here instead of bricking the next render.
         config::resolve_telemetry(Some(&telemetry), managed.as_ref())?;
         user_config.telemetry = Some(telemetry);
         config::save_user_config(&user_config)?;
@@ -1327,32 +1149,22 @@ pub fn update_telemetry_config(update: TelemetryConfigUpdate) -> Result<(), Stri
     .map_err(|e| e.to_string())
 }
 
-/// Probes whether an OTLP endpoint is reachable from the host (best-effort;
-/// warns instead of letting Claude Code hang on an unreachable collector).
 #[tauri::command]
 pub async fn probe_otlp_endpoint(endpoint: String) -> Result<bool, String> {
-    // Validate before dialing so this is not an SSRF reachability oracle; on-prem
-    // and loopback collectors are legitimate, so allow loopback.
     let validated = crate::url_validation::validate_collector_url(
         &endpoint,
         crate::url_validation::PrivatePolicy::AllowLoopback,
     )?;
     let client = crate::http_util::build_hardened_client(None)?;
-    // A HEAD to the base endpoint; any HTTP response means reachable. A collector
-    // may 404/405 the path — that still proves the host/port is up.
     match client.head(validated).send().await {
         Ok(_) => Ok(true),
         Err(e) => {
-            // UI verdict stays boolean; the reason (DNS/TLS/refused/timeout) is only
-            // useful in diagnostics, so surface it at debug rather than discard it.
             log::debug!("OTLP collector unreachable: {e}");
             Ok(false)
         }
     }
 }
 
-/// Builds the frontend PII policy response: the resolved multi-policy union
-/// plus every raw custom policy definition, so the Settings form round-trips.
 fn build_security_policy_response(
     resolved: &speedwave_runtime::pii_policy::ResolvedPiiPolicy,
     raw: Option<&config::PiiPolicyUserConfig>,
@@ -1379,8 +1191,6 @@ fn build_security_policy_response(
     }
 }
 
-/// Returns the active project's PII policy: the resolved multi-policy union
-/// plus every raw custom policy definition so the Settings form round-trips exactly.
 #[tauri::command]
 pub fn get_security_policy() -> Result<SecurityPolicyResponse, String> {
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -1395,7 +1205,6 @@ pub fn get_security_policy() -> Result<SecurityPolicyResponse, String> {
     Ok(build_security_policy_response(&resolved, policy.as_ref()))
 }
 
-/// Lists every built-in PII policy template for the Settings checklist.
 #[tauri::command]
 pub fn list_security_policy_templates() -> Result<Vec<SecurityPolicyTemplateInfo>, String> {
     let templates =
@@ -1411,8 +1220,6 @@ pub fn list_security_policy_templates() -> Result<Vec<SecurityPolicyTemplateInfo
         .collect())
 }
 
-/// Lists every built-in PII rule (id + display name) from the library, for the
-/// Settings category checklist — the dynamic replacement for a fixed category enum.
 #[tauri::command]
 pub fn list_pii_rules() -> Result<Vec<PiiRuleInfo>, String> {
     let library = speedwave_runtime::pii_policy::rule_library().map_err(|e| e.to_string())?;
@@ -1425,8 +1232,6 @@ pub fn list_pii_rules() -> Result<Vec<PiiRuleInfo>, String> {
         .collect())
 }
 
-/// Derives a lowercase-kebab policy id from a user-entered name, matching
-/// `^[a-z][a-z0-9-]{1,63}$` (same "derive on every save" contract as patterns).
 fn derive_custom_policy_id(name: &str) -> Result<String, String> {
     let mut id = String::new();
     let mut prev_sep = true;
@@ -1457,9 +1262,6 @@ fn derive_custom_policy_id(name: &str) -> Result<String, String> {
     Ok(id)
 }
 
-/// Derives an uppercase-snake rule id from a user-entered display name, matching
-/// the rule id shape `^[A-Z][A-Z0-9_]{0,63}$` (same "derive on every save"
-/// contract as [`derive_custom_policy_id`], mirrored in the opposite case).
 fn derive_own_rule_id(name: &str) -> Result<String, String> {
     let mut id = String::new();
     let mut prev_sep = true;
@@ -1490,8 +1292,6 @@ fn derive_own_rule_id(name: &str) -> Result<String, String> {
     Ok(id)
 }
 
-/// Validates a `SecurityPolicyUpdate` and builds the `PiiPolicyUserConfig` to
-/// persist; all cross-field checks delegate to `pii_policy` (the WP4 SSOT).
 fn build_pii_policy_user_config(
     update: &SecurityPolicyUpdate,
 ) -> anyhow::Result<config::PiiPolicyUserConfig> {
@@ -1540,8 +1340,6 @@ fn build_pii_policy_user_config(
     Ok(cfg)
 }
 
-/// Persists the active project's PII policy selection; runs inside the config
-/// lock so a concurrent write cannot interleave.
 #[tauri::command]
 pub fn update_security_policy(update: SecurityPolicyUpdate) -> Result<(), String> {
     config::with_config_lock(|| {
@@ -1561,8 +1359,6 @@ pub fn update_security_policy(update: SecurityPolicyUpdate) -> Result<(), String
     .map_err(|e| e.to_string())
 }
 
-/// Applies LLM config to the active project in-memory; enforces the local-
-/// provider-needs-model invariant for callers bypassing `update_llm_config`.
 fn apply_llm_config(
     user_config: &mut config::SpeedwaveUserConfig,
     update: config::LlmConfig,
@@ -1599,9 +1395,6 @@ fn apply_llm_config(
     Ok(())
 }
 
-/// Narrow write-through for the composer's model selector (ADR-073 §4.3.2):
-/// mutates exactly one provider entry's `model`, never the full LLM config.
-/// Rejects Anthropic entries (session-only via wire `/model`, never persisted).
 fn apply_set_provider_model(
     user_config: &mut config::SpeedwaveUserConfig,
     project_id: &str,
@@ -1643,10 +1436,6 @@ fn apply_set_provider_model(
     Ok(())
 }
 
-/// Sets exactly one provider's model in place (composer write-through,
-/// ADR-073 §4.3.2) under the standard config lock - never the full-form
-/// `update_llm_config`. Rapid successive calls serialize through the lock;
-/// the later call's write is what persists.
 #[tauri::command]
 pub fn set_provider_model(
     project_id: String,
@@ -1661,10 +1450,6 @@ pub fn set_provider_model(
     )
 }
 
-/// `data_dir`-parameterized variant of [`set_provider_model`]; use in tests
-/// and any caller that must not depend on the process-wide `data_dir()`
-/// OnceLock. Reads and mutates the stored config entirely UNDER the config
-/// lock (never a pre-lock snapshot), mirroring `update_llm_config_in`.
 fn set_provider_model_in(
     data_dir: &std::path::Path,
     project_id: String,
@@ -1689,15 +1474,11 @@ fn set_provider_model_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
-/// Auto-defaults a `Local` provider's model via the discovery probe (mockable
-/// in tests); the production impl reuses `discover_llm_models_with_fallback`.
 #[async_trait::async_trait]
 pub(crate) trait ModelAutoDefaultProbe: Send + Sync {
     async fn first_local_model(&self, entry_id: &str, base_url: &str) -> Result<String, String>;
 }
 
-/// Production probe: prefers the save payload's transient credentials (a fresh
-/// entry's key is not yet in the token store), else discovery's stored fallback.
 struct LiveModelAutoDefaultProbe<'a> {
     active_project: Option<&'a str>,
     transient_api_key: Option<&'a str>,
@@ -1724,7 +1505,6 @@ impl ModelAutoDefaultProbe for LiveModelAutoDefaultProbe<'_> {
     }
 }
 
-/// The save payload's non-empty transient value of a `double_option` field.
 fn transient_credential(field: &Option<Option<String>>) -> Option<&str> {
     field
         .as_ref()
@@ -1733,9 +1513,6 @@ fn transient_credential(field: &Option<Option<String>>) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// A settings save carries the full provider list but the UI never writes a
-/// user-chosen model (Task 18); an incoming entry with no model inherits the
-/// stored entry's model by id, so a plain resave can never erase it.
 fn preserve_stored_entry_models(
     incoming: &mut [speedwave_runtime::config::LlmProviderEntry],
     stored: &[speedwave_runtime::config::LlmProviderEntry],
@@ -1753,12 +1530,6 @@ fn preserve_stored_entry_models(
     }
 }
 
-/// Applies decision 7 (spec `2026-07-16-chat-slash-commands-design.md` §4.5):
-/// an OpenRouter entry saved with no model gets the verified default; a Local
-/// entry saved with no model gets the first probed model. Runs BEFORE
-/// `validate_provider_entries`/`validate_active_selection` so the
-/// model-required invariant never trips for a fresh save. Explicit models
-/// are never touched.
 async fn apply_model_auto_defaults(
     providers: &mut [speedwave_runtime::config::LlmProviderEntry],
     probe: &dyn ModelAutoDefaultProbe,
@@ -1795,43 +1566,23 @@ async fn apply_model_auto_defaults(
     Ok(())
 }
 
-/// Applies an `LlmConfigUpdate` (Settings Save) to the active project.
-/// Crash-recovery contract documented in ADR-040 §"Rollback".
 #[tauri::command]
 pub async fn update_llm_config(update: LlmConfigUpdate) -> Result<(), String> {
     update_llm_config_in(speedwave_runtime::consts::data_dir(), update).await
 }
 
-/// `data_dir`-parameterized variant of [`update_llm_config`]; use in tests and
-/// any caller that must not depend on the process-wide `data_dir()` OnceLock.
 async fn update_llm_config_in(
     data_dir: &std::path::Path,
     mut update: LlmConfigUpdate,
 ) -> Result<(), String> {
     let config_path = data_dir.join("config.json");
-    // Canonicalize loopback hosts before validation so the persisted base_url
-    // is the one the proxy container can reach.
     if config::is_local_provider(update.provider.as_deref()) {
         if let Some(url) = update.base_url.as_deref() {
             update.base_url = Some(speedwave_runtime::compose::canonicalize_local_base_url(url));
         }
     }
-    // Probe-derived auto-default model values, keyed by provider id. The
-    // probe is network-bound and must run outside the config lock, so it is
-    // computed here against a pre-lock snapshot and used ONLY as a fallback
-    // value inside the lock (below) — never spliced into the persisted
-    // config directly. The actual persist-time reconciliation re-runs
-    // `preserve_stored_entry_models` against the freshly reloaded on-disk
-    // state under the lock, so a concurrent save's model change cannot be
-    // reverted by a save that read a stale snapshot.
     let mut auto_default_candidates: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    // Pre-flight-validation view: a clone with stored/auto-defaulted models
-    // filled in, so `validate_provider_entries`/`validate_active_selection`
-    // (which require a model on non-Anthropic entries) accept a plain resave
-    // that carries no model. This clone is validation-only; `update.providers`
-    // itself stays the caller's raw payload (URL-canonicalized) and is what
-    // the in-lock closure reconciles and persists.
     let mut validation_providers = update.providers.clone();
     if let Some(ref mut providers) = update.providers {
         canonicalize_provider_base_urls(providers);
@@ -1846,10 +1597,6 @@ async fn update_llm_config_in(
             .and_then(|c| c.llm.as_ref())
             .map(|llm| llm.providers.as_slice())
             .unwrap_or(&[]);
-        // The settings component never carries a model control (Task 18); an
-        // incoming entry with no model must inherit the stored one by id
-        // BEFORE auto-default runs, or a plain resave triggers a live
-        // discovery probe (or worse, clobbers a working model with `None`).
         preserve_stored_entry_models(providers, stored_providers);
         let active_project = loaded.and_then(|c| c.active_project);
         let probe = LiveModelAutoDefaultProbe {
@@ -1873,10 +1620,6 @@ async fn update_llm_config_in(
         update.api_key.is_some(),
         update.custom_headers.is_some(),
     );
-    // v2 saves (Task 18) never carry a flat `model` for a provider whose model
-    // already lives in `providers[]` (preserved above, in `validation_providers`);
-    // only fall back to the legacy flat-field check when no v2 entry resolves
-    // a model for it.
     let local_model_in_providers = update
         .provider
         .as_deref()
@@ -1923,10 +1666,6 @@ async fn update_llm_config_in(
         );
     }
 
-    // v2 provider list (ADR-073): validate ids, base URLs and the active
-    // selection before anything is persisted. Uses the stored/auto-defaulted
-    // view so a plain resave (no model in the payload) still validates; the
-    // in-lock closure below re-derives the actually-persisted models.
     if let Some(ref providers) = validation_providers {
         validate_provider_entries(providers)?;
         if let Some(ref active) = update.active {
@@ -1934,7 +1673,6 @@ async fn update_llm_config_in(
         }
     }
 
-    // Validate credentials *before* touching the filesystem.
     let api_key_action =
         resolve_credential_action(update.api_key.as_ref(), validate_api_key, "api_key")?;
     let custom_headers_action = resolve_credential_action(
@@ -1950,8 +1688,6 @@ async fn update_llm_config_in(
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active project"))?;
 
-        // Mutate credential files before `save_user_config` so a crash leaves
-        // an orphan file (flag=false, ignored) not a flag → missing file.
         let mut new_has_api_key = lookup_has_flag(&user_config, &active, |c| c.has_api_key);
         let mut new_has_custom_headers =
             lookup_has_flag(&user_config, &active, |c| c.has_custom_headers);
@@ -1979,11 +1715,6 @@ async fn update_llm_config_in(
             has_custom_headers: new_has_custom_headers,
             ..Default::default()
         };
-        // v2 fields (ADR-073): the UI sends the full provider set; preserve
-        // the stored one when absent so a legacy-shaped save cannot wipe it.
-        // Reconciled against the on-disk state read UNDER THIS LOCK (never the
-        // pre-lock snapshot above) so a concurrent save's model change cannot
-        // be silently reverted by a save that started before it landed.
         let stored = user_config
             .active_project_entry()
             .and_then(|p| p.claude.as_ref())
@@ -2005,8 +1736,6 @@ async fn update_llm_config_in(
         };
         merged.active = update.active.clone().or(stored.active);
         merged.proxy_enabled = update.proxy_enabled.or(stored.proxy_enabled);
-        // The active pointer must not desync from the entry after the merge:
-        // a resend with no active.model inherits the (now-preserved) entry model.
         if let Some(ref mut active) = merged.active {
             if active.model.is_none() {
                 if let Some(entry) = merged.providers.iter().find(|p| p.id == active.provider_id) {
@@ -2014,12 +1743,9 @@ async fn update_llm_config_in(
                 }
             }
         }
-        // Anthropic entries never carry a stored model (spec 4.5): clear it
-        // on every save, regardless of what the caller sent.
         merged.clear_active_anthropic_model();
         if !merged.providers.is_empty() {
             merged.schema_version = Some(config::LLM_SCHEMA_VERSION);
-            // Keep the legacy flat fields coherent for the downgrade story.
             config::sync_llm_legacy_fields(&mut merged);
         }
         apply_llm_config(&mut user_config, merged)?;
@@ -2033,13 +1759,10 @@ async fn update_llm_config_in(
     .map_err(|e| e.to_string())
 }
 
-/// Single message for the model-required error (one wording everywhere).
 fn model_required_error(provider_id: &str) -> String {
     format!("provider '{provider_id}' requires a model name")
 }
 
-/// Validates the active selection against the provider list before save (R5):
-/// it must exist, no flag-collision, and the active-entry model invariant.
 fn validate_active_selection(
     providers: &[speedwave_runtime::config::LlmProviderEntry],
     active: &speedwave_runtime::config::LlmActive,
@@ -2057,8 +1780,6 @@ fn validate_active_selection(
         }
     }
     if active_entry.kind.is_anthropic() {
-        // Reject if EITHER pointer or entry model is foreign — render derives
-        // from the entry, so checking only `active.model` would miss it.
         let foreign = [active.model.as_deref(), active_entry.model.as_deref()]
             .into_iter()
             .flatten()
@@ -2071,8 +1792,6 @@ fn validate_active_selection(
             ));
         }
     } else {
-        // Render uses effective_active_model (entry wins), so the entry must
-        // carry a model — an active.model-only value would be ignored at render.
         let entry_has = active_entry
             .model
             .as_deref()
@@ -2085,8 +1804,6 @@ fn validate_active_selection(
     Ok(())
 }
 
-/// Rewrites local entries' loopback base_url to the gateway alias, since only
-/// that alias is reachable from inside the proxy container.
 fn canonicalize_provider_base_urls(providers: &mut [speedwave_runtime::config::LlmProviderEntry]) {
     use speedwave_runtime::config::LlmProviderKind;
     for entry in providers {
@@ -2098,8 +1815,6 @@ fn canonicalize_provider_base_urls(providers: &mut [speedwave_runtime::config::L
     }
 }
 
-/// Validates a v2 provider list before save (ADR-073): slug ids, no
-/// duplicates, SSRF-clean base URLs where the kind requires one.
 fn validate_provider_entries(
     providers: &[speedwave_runtime::config::LlmProviderEntry],
 ) -> Result<(), String> {
@@ -2135,8 +1850,6 @@ fn validate_provider_entries(
                     entry.id
                 ));
             }
-            // Provenance: no foreign model under ANY anthropic entry, not just
-            // the active one (the active-only check lives in validate_active_selection).
             if entry.kind.is_anthropic()
                 && speedwave_runtime::config::is_foreign_anthropic_model(model.trim())
             {
@@ -2150,8 +1863,6 @@ fn validate_provider_entries(
     Ok(())
 }
 
-/// Writes/removes one provider's API key in `tokens/<project>/llm/` — never
-/// config.json; updates the entry's `has_api_key` in the same lock (ADR-073).
 #[tauri::command]
 pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<(), String> {
     log::info!(
@@ -2197,8 +1908,6 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
             if let Some(entry) = llm.providers.iter_mut().find(|p| p.id == provider_id) {
                 entry.has_api_key = has_key;
             } else {
-                // update_llm_config normally rewrites providers wholesale; a
-                // direct caller leaves has_api_key stuck false — surface that.
                 log::warn!("provider '{provider_id}' not in config — has_api_key not updated");
             }
         }
@@ -2208,8 +1917,6 @@ pub fn set_llm_provider_key(provider_id: String, key: Option<String>) -> Result<
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
-/// Clears the active LLM provider (logout → no provider). `update_llm_config`
-/// can't: it merges `active.or(stored.active)`, treating None as "unchanged".
 #[tauri::command]
 pub fn clear_active_llm_provider() -> Result<(), String> {
     log::info!("clearing active LLM provider");
@@ -2231,8 +1938,6 @@ pub fn clear_active_llm_provider() -> Result<(), String> {
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
-/// Re-renders compose and recreates ONLY the proxy service (ADR-073 hot
-/// reload); claude keeps running. Full restart when the claude env changes.
 #[tauri::command]
 pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
     check_project(&project)?;
@@ -2242,14 +1947,10 @@ pub async fn restart_llm_proxy(project: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Three possible outcomes of a tri-state credential field.
 #[derive(Debug, Clone)]
 enum CredentialAction {
-    /// Field omitted in the request — preserve current on-disk state.
     Keep,
-    /// Field explicit `null` or empty — remove on-disk file.
     Delete,
-    /// Field non-empty — write (validated) value.
     Write(String),
 }
 
@@ -2298,7 +1999,6 @@ fn apply_credential_action(
         CredentialAction::Delete => {
             let path =
                 speedwave_runtime::compose::tokens_path_in(data_dir, project, "local-llm", file)?;
-            // One syscall, no TOCTOU — `NotFound` is the expected idempotent case.
             match std::fs::remove_file(&path) {
                 Ok(()) => log::info!("removed LLM token file {}", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2323,8 +2023,6 @@ fn apply_credential_action(
     }
 }
 
-/// Mirrors the local card's `api_key` into the proxy-read `llm/` namespace
-/// (only `api_key`; non-fatal — failure keeps the proxy on the previous key).
 fn mirror_local_key_to_llm_namespace(
     data_dir: &std::path::Path,
     project: &str,
@@ -2347,9 +2045,6 @@ fn mirror_local_key_to_llm_namespace(
     Ok(())
 }
 
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -2361,8 +2056,6 @@ mod tests {
     use crate::types::{CustomPolicyDtoInput, SecurityPolicyCustomPatternInput};
     use config::{ClaudeOverrides, LlmConfig, ProjectUserEntry, SpeedwaveUserConfig};
 
-    /// Structural: every `start_containers` error string crossing IPC goes through
-    /// the one condensing+sanitizing helper (the chain carries nerdctl argv echoes).
     #[test]
     fn start_container_errors_route_through_the_owning_helper() {
         let source = include_str!("containers_cmd.rs");
@@ -2381,8 +2074,6 @@ mod tests {
         }
     }
 
-    /// `has_1m` on the wire derives from `pricing_1m.is_some()`; claude-fable-5 runs at
-    /// the 1M window on the Anthropic API (ADR-088 "Anthropic model catalog facts").
     #[test]
     fn list_anthropic_models_carries_has_1m_from_pricing() {
         let models = list_anthropic_models();
@@ -2454,8 +2145,6 @@ mod tests {
         }
     }
 
-    /// Test helper: builds a `LlmConfig` (`context_tokens` always `None`)
-    /// for the lower-level `apply_llm_config`.
     fn llm(provider: &str, model: Option<&str>, base_url: Option<&str>) -> LlmConfig {
         LlmConfig {
             provider: Some(provider.to_string()),
@@ -2465,8 +2154,6 @@ mod tests {
         }
     }
 
-    /// Test helper: returns the `LlmConfigUpdate` Tauri DTO for callers that
-    /// exercise the full `update_llm_config` save path.
     fn llm_update(provider: &str, model: Option<&str>, base_url: Option<&str>) -> LlmConfigUpdate {
         LlmConfigUpdate {
             provider: Some(provider.to_string()),
@@ -2476,9 +2163,6 @@ mod tests {
         }
     }
 
-    /// Isolated `config.json` seeded with an active project, for tests that
-    /// exercise `update_llm_config_in`'s real write path without ever
-    /// touching the process-wide `data_dir()` OnceLock.
     fn seeded_config_tempdir() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         config::save_user_config_to(
@@ -2489,12 +2173,9 @@ mod tests {
         tmp
     }
 
-    // -- apply_llm_config tests --
-
     #[test]
     fn apply_llm_config_happy_path_no_existing_claude() {
         let mut cfg = make_config_with_active_project();
-        // alpha has no claude config yet
         assert!(cfg.find_project("alpha").unwrap().claude.is_none());
 
         let result = apply_llm_config(
@@ -2514,7 +2195,6 @@ mod tests {
     fn apply_llm_config_happy_path_existing_claude_overrides() {
         let mut cfg = make_config_with_active_project();
         cfg.active_project = Some("beta".to_string());
-        // beta already has claude.llm set
 
         let result = apply_llm_config(&mut cfg, llm("ollama", Some("llama3.3"), None));
         assert!(result.is_ok());
@@ -2570,8 +2250,6 @@ mod tests {
             telemetry: None,
         };
 
-        // Use a non-local provider so the new local-provider+model guard
-        // doesn't short-circuit before the No-active-project check runs.
         let result = apply_llm_config(&mut cfg, llm("anthropic", None, None));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -2599,8 +2277,6 @@ mod tests {
             telemetry: None,
         };
 
-        // Anthropic skips the local-provider+model guard so the project-not-
-        // -found check is what surfaces.
         let result = apply_llm_config(&mut cfg, llm("anthropic", None, None));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -2653,8 +2329,6 @@ mod tests {
 
     #[test]
     fn apply_llm_config_rejects_local_provider_without_model() {
-        // Safety net for internal callers that build a `LlmConfig` directly
-        // (the Tauri command checks earlier).
         let mut cfg = make_config_with_active_project();
         for provider in config::LOCAL_PROVIDERS {
             let err = apply_llm_config(&mut cfg, llm(provider, None, None)).unwrap_err();
@@ -2690,11 +2364,9 @@ mod tests {
     #[test]
     fn apply_llm_config_does_not_affect_other_projects() {
         let mut cfg = make_config_with_active_project();
-        // active_project is "alpha"
 
         apply_llm_config(&mut cfg, llm("ollama", Some("llama3.3"), None)).unwrap();
 
-        // beta should be unchanged
         let beta = cfg.find_project("beta").unwrap();
         let beta_llm = beta.claude.as_ref().unwrap().llm.as_ref().unwrap();
         assert_eq!(beta_llm.provider.as_deref(), Some("anthropic"));
@@ -2703,16 +2375,12 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_rejects_local_provider_without_model() {
-        // Local providers need a model; reject at save time. Iterate the SSOT
-        // const so a future local backend is covered automatically.
         assert!(
             !config::LOCAL_PROVIDERS.is_empty(),
             "LOCAL_PROVIDERS must list at least one provider — this test \
              iterates it"
         );
         for provider in config::LOCAL_PROVIDERS {
-            // Empty string also counts as "no model" — matches the frontend
-            // guard in llm-provider.component.ts.
             for model in [None, Some(String::new())] {
                 let result = update_llm_config(llm_update(
                     provider,
@@ -2735,11 +2403,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_accepts_anthropic_without_model() {
-        // Anthropic isn't local — the model-required guard must not fire.
         let tmp = seeded_config_tempdir();
         let result = update_llm_config_in(tmp.path(), llm_update("anthropic", None, None)).await;
-        // May fail for project-config reasons; we only require the error is
-        // NOT the model-required one.
         if let Err(err) = result {
             assert!(
                 !err.contains("requires a model name"),
@@ -2751,9 +2416,6 @@ mod tests {
 
     #[test]
     fn settings_save_preserves_existing_entry_models() {
-        // Pure merge-step check (mirrors update_llm_config's preserve step,
-        // without touching disk): a settings resave carrying `model: None`
-        // must inherit the stored model by id, never clobber it.
         let stored = [speedwave_runtime::config::LlmProviderEntry {
             id: "local".to_string(),
             kind: speedwave_runtime::config::LlmProviderKind::Local,
@@ -2783,8 +2445,6 @@ mod tests {
         );
     }
 
-    /// Seeds a `config.json` whose active project already has a v2 `local`
-    /// provider entry with `model` set, for the concurrent-save race test.
     fn seeded_config_tempdir_with_local_model(model: &str) -> tempfile::TempDir {
         let mut cfg = make_config_with_active_project();
         let project = cfg.find_project_mut("alpha").unwrap();
@@ -2814,24 +2474,8 @@ mod tests {
         tmp
     }
 
-    // `with_config_lock_in` and the pre-lock config read are blocking OS
-    // calls; a multi-thread runtime is required so the spawned save and this
-    // test's own timing/lock-manipulation steps can run concurrently instead
-    // of deadlocking a single-threaded executor.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_llm_config_in_reconciles_models_under_the_lock_not_a_pre_lock_snapshot() {
-        // Regression for the race: two concurrent Settings saves each read the
-        // stored provider list for model-preservation BEFORE acquiring the
-        // config lock. If that pre-lock snapshot is what gets persisted, the
-        // second save to actually reach the lock clobbers a model change the
-        // first save just landed, using data that predates it.
-        //
-        // Reproduced deterministically by holding `config.lock` externally
-        // while `update_llm_config_in`'s pre-lock read happens (seeing the
-        // OLD model), then rewriting the on-disk config to the NEW model
-        // (simulating the concurrent save's write) before releasing the lock.
-        // A correct implementation reconciles against the on-disk state read
-        // UNDER the lock and must persist the NEW model, never the OLD one.
         let tmp = seeded_config_tempdir_with_local_model("llama-old");
         let data_dir = tmp.path().to_path_buf();
         let config_path = data_dir.join("config.json");
@@ -2840,8 +2484,6 @@ mod tests {
         let lock_file = std::fs::File::create(&lock_path).expect("create lock file");
         fs2::FileExt::lock_exclusive(&lock_file).expect("acquire external lock");
 
-        // A plain resave: the settings UI never sends a model, so the saved
-        // entry must inherit whatever is stored AT SAVE TIME.
         let update = LlmConfigUpdate {
             providers: Some(vec![speedwave_runtime::config::LlmProviderEntry {
                 id: "local".to_string(),
@@ -2863,12 +2505,8 @@ mod tests {
         let handle =
             tokio::spawn(async move { update_llm_config_in(&call_data_dir, update).await });
 
-        // Give the spawned call time to complete its pre-lock read (sees
-        // "llama-old") and then block on `lock_exclusive`.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // Simulate the concurrent save that landed while the call above was
-        // blocked: the on-disk model is now "llama-new".
         let mut cfg = config::load_user_config_from(&config_path).expect("reload seeded config");
         {
             let project = cfg.find_project_mut("alpha").unwrap();
@@ -2907,9 +2545,6 @@ mod tests {
 
     #[test]
     fn update_llm_config_merge_clears_anthropic_model() {
-        // Pure merge-step check (mirrors update_llm_config's construction of
-        // `merged`, without touching disk): an anthropic-kind active entry
-        // must never carry a stored model after the merge.
         let stored = config::LlmConfig {
             schema_version: Some(config::LLM_SCHEMA_VERSION),
             providers: vec![config::LlmProviderEntry {
@@ -2952,9 +2587,6 @@ mod tests {
 
     #[test]
     fn update_llm_config_source_calls_clear_active_anthropic_model() {
-        // Structural: the merge step in update_llm_config must call the
-        // clearing helper before persisting - a call-site drift check since
-        // the full save path touches real user config on disk in tests.
         let source = include_str!("containers_cmd.rs");
         let site = source
             .find("apply_llm_config(&mut user_config, merged)?;")
@@ -2969,8 +2601,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_rejects_model_with_flag_prefix() {
-        // Regression: a `--`-prefixed model name could be parsed as another
-        // CLI flag in the Claude Code invocation.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("--dangerously-skip-permissions"),
@@ -2996,8 +2626,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── v2 provider list validation (ADR-073) ────────────────────────────
-
     fn v2_entry(
         id: &str,
         kind: speedwave_runtime::config::LlmProviderKind,
@@ -3013,8 +2641,6 @@ mod tests {
             has_custom_headers: false,
         }
     }
-
-    // ── set_provider_model (narrow write-through, ADR-073 §4.3.2) ──────
 
     fn cfg_with_providers(
         active_provider_id: &str,
@@ -3106,10 +2732,6 @@ mod tests {
 
     #[test]
     fn apply_set_provider_model_rejects_anthropic_provider_regardless_of_model_shape() {
-        // Verifies anthropic-kind rejection: the entry.kind.is_anthropic() early
-        // return rejects ANY model value for an anthropic-kind entry, including a
-        // foreign-provider-shaped id - there is no separate foreign-model-shape
-        // guard on this path (that check lives only in validate_active_selection).
         use speedwave_runtime::config::LlmProviderKind as K;
         let mut cfg = cfg_with_providers(
             "anthropic",
@@ -3190,9 +2812,6 @@ mod tests {
 
     #[test]
     fn set_provider_model_command_delegates_to_data_dir_variant() {
-        // Structural: the #[tauri::command] wrapper must be thin and call the
-        // data_dir-injectable variant with the process-wide SSOT, mirroring
-        // update_llm_config / update_llm_config_in.
         let src = include_str!("containers_cmd.rs");
         let start = src
             .find("pub fn set_provider_model(")
@@ -3211,9 +2830,6 @@ mod tests {
 
     #[test]
     fn set_provider_model_in_uses_lock_and_saves() {
-        // Structural: the data_dir-parameterized variant must go through the
-        // same lock/save path as every other config writer, reconciling and
-        // syncing legacy fields UNDER the lock.
         let src = include_str!("containers_cmd.rs");
         let start = src
             .find("fn set_provider_model_in(")
@@ -3236,9 +2852,6 @@ mod tests {
 
     #[test]
     fn set_provider_model_in_persists_to_injected_data_dir_only() {
-        // Defect 8: set_provider_model must be data_dir-injectable, never
-        // resolving the process-wide data_dir() OnceLock directly, so tests
-        // (and any future caller) can never write prod ~/.speedwave.
         let tmp = seeded_config_tempdir_with_local_model("llama-old");
         let data_dir = tmp.path().to_path_buf();
 
@@ -3275,9 +2888,6 @@ mod tests {
 
     #[test]
     fn set_provider_model_in_syncs_legacy_flat_fields() {
-        // Defect 8b: for a legacy direct-path user (proxy_enabled=false), the
-        // flat llm.model/llm.provider fields read by apply_llm_config_legacy_in
-        // must reflect the newly-picked model, not go stale.
         let tmp = seeded_config_tempdir_with_local_model("llama-old");
         let data_dir = tmp.path().to_path_buf();
         {
@@ -3331,9 +2941,6 @@ mod tests {
 
     #[test]
     fn apply_set_provider_model_whitespace_only_model_is_rejected_like_empty() {
-        // Defect 16: a whitespace-only model must be treated as "no model",
-        // consistent with LlmConfig::effective_active_model's trim+non-empty
-        // filter — not accepted as a valid pick by an ad-hoc hand-scan.
         use speedwave_runtime::config::LlmProviderKind as K;
         let mut cfg = cfg_with_providers(
             "local",
@@ -3346,11 +2953,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_in_whitespace_only_provider_model_still_requires_model() {
-        // Defect 16: the local_model_in_providers hand-scan in
-        // update_llm_config_in must trim before checking non-emptiness, same
-        // as effective_active_model - a whitespace-only model sent in the v2
-        // providers[] payload must NOT be treated as "has a model" and must
-        // not bypass the model-required guard for a local provider save.
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_dir = tmp.path().to_path_buf();
         config::save_user_config_to(
@@ -3383,8 +2985,6 @@ mod tests {
             .expect_err("a whitespace-only model must not satisfy the model-required guard");
         assert!(err.contains("requires a model name"), "got: {err}");
     }
-
-    // ── get_active_provider_summary (composer badge/combobox) ──────────
 
     #[test]
     fn active_provider_summary_reflects_effective_active_model() {
@@ -3431,7 +3031,6 @@ mod tests {
     #[test]
     fn active_provider_summary_none_when_unconfigured() {
         let cfg = make_config_with_active_project();
-        // alpha has no claude config at all, so no active provider.
 
         let err = active_provider_summary_from(&cfg, "alpha").unwrap_err();
         assert!(err.contains("no active provider"), "got: {err}");
@@ -3450,13 +3049,9 @@ mod tests {
         use speedwave_runtime::config::LlmProviderKind as K;
         let alias = speedwave_runtime::consts::HOST_GATEWAY_ALIAS;
         let mut providers = vec![
-            // Local loopback → rewritten to the gateway alias.
             v2_entry("local", K::Local, Some("http://127.0.0.1:1234")),
-            // Local localhost → rewritten.
             v2_entry("local2", K::Local, Some("http://localhost:11434")),
-            // Local non-loopback (real LAN box) → untouched.
             v2_entry("remote", K::Local, Some("http://192.168.5.10:1234")),
-            // Non-local kinds → never touched, even with a base_url present.
             v2_entry("anthropic", K::AnthropicOauth, None),
             v2_entry("openrouter", K::OpenRouter, None),
         ];
@@ -3530,17 +3125,14 @@ mod tests {
     #[test]
     fn validate_provider_entries_rejects_missing_or_ssrf_url() {
         use speedwave_runtime::config::LlmProviderKind as K;
-        // Local without a URL.
         let err = validate_provider_entries(&[v2_entry("local", K::Local, None)]).unwrap_err();
         assert!(err.contains("requires a base URL"), "got: {err}");
-        // Metadata endpoint must fail the shared SSRF validator.
         assert!(validate_provider_entries(&[v2_entry(
             "local",
             K::Local,
             Some("http://169.254.169.254")
         )])
         .is_err());
-        // Credentials embedded in the URL.
         assert!(validate_provider_entries(&[v2_entry(
             "remote",
             K::Local,
@@ -3549,10 +3141,6 @@ mod tests {
         .is_err());
     }
 
-    // ── auto-default model at provider save (Task 11) ────────────────────
-
-    /// Test double for the local-model probe: returns a fixed result or error
-    /// without any network/VM access.
     struct FakeProbe(Result<Vec<&'static str>, &'static str>);
 
     #[async_trait::async_trait]
@@ -3585,9 +3173,6 @@ mod tests {
 
     #[tokio::test]
     async fn live_probe_forwards_the_transient_api_key_a_fresh_save_carries() {
-        // Field regression: a keyed local server 401s the save-time auto-default
-        // probe unless the just-typed key is forwarded (it is not yet stored).
-        // Two servers, one mock each — no reliance on mockito match ordering.
         let mut keyed = mockito::Server::new_async().await;
         let _authed = keyed
             .mock("GET", "/v1/models")
@@ -3684,7 +3269,6 @@ mod tests {
             v2_entry("local", K::Local, Some("http://host.docker.internal:11434"));
         local_entry.model = Some("llama-3.1-8b".to_string());
         let mut providers = vec![or_entry, local_entry];
-        // A probe that would fail/return something else if it were (wrongly) called.
         let probe = FakeProbe(Err("must not be called"));
         apply_model_auto_defaults(&mut providers, &probe)
             .await
@@ -3717,8 +3301,6 @@ mod tests {
 
     #[test]
     fn clear_active_llm_provider_sets_active_none_via_lock_and_save() {
-        // Structural: the command must clear active (not merge-preserve it like
-        // update_llm_config) and persist through the standard lock/save path.
         let src = include_str!("containers_cmd.rs");
         let start = src
             .find("pub fn clear_active_llm_provider(")
@@ -3735,8 +3317,6 @@ mod tests {
     #[tokio::test]
     async fn update_llm_config_rejects_invalid_v2_entries_before_any_io() {
         use speedwave_runtime::config::LlmProviderKind as K;
-        // Validation fires before the config lock / fs — even with no active
-        // project the slug error must surface, not a project error.
         let err = update_llm_config(LlmConfigUpdate {
             providers: Some(vec![v2_entry("UPPER", K::OpenRouter, None)]),
             ..Default::default()
@@ -3773,8 +3353,6 @@ mod tests {
 
     #[test]
     fn validate_active_selection_nonanthropic_requires_entry_model_not_active_only() {
-        // CR#6: render uses effective_active_model (entry wins). active.model set
-        // but entry.model empty would be ignored at render → reject at save.
         use speedwave_runtime::config::LlmProviderKind as K;
         let providers = vec![v2_entry("openrouter", K::OpenRouter, None)];
         let err =
@@ -3786,8 +3364,6 @@ mod tests {
     #[test]
     fn validate_active_selection_inactive_partial_rows_not_forced() {
         use speedwave_runtime::config::LlmProviderKind as K;
-        // Active anthropic (no model = account default, ok); the INACTIVE OR row
-        // with no model must NOT trip the model-required check.
         let providers = vec![
             v2_entry("anthropic", K::AnthropicOauth, None),
             v2_entry("openrouter", K::OpenRouter, None),
@@ -3812,14 +3388,11 @@ mod tests {
             validate_active_selection(&providers, &active("openrouter", Some("z-ai/glm-5.2")))
                 .is_ok()
         );
-        // Dangling active id.
         assert!(validate_active_selection(&providers, &active("ghost", None)).is_err());
     }
 
     #[tokio::test]
     async fn update_llm_config_rejects_zero_context_tokens() {
-        // Persisted `context_tokens = 0` divides-by-zero in the chat footer;
-        // reject at the boundary so it never reaches the frontend.
         let result = update_llm_config(LlmConfigUpdate {
             provider: Some("ollama".to_string()),
             model: Some("llama3.3".to_string()),
@@ -3839,16 +3412,12 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_accepts_model_with_dash_in_middle() {
-        // Common model names contain dashes (e.g. `llama-3.3`, `qwen-coder`).
-        // The guard only rejects leading dashes.
         let tmp = seeded_config_tempdir();
         let result = update_llm_config_in(
             tmp.path(),
             llm_update("ollama", Some("llama-3.3"), Some("http://localhost:11434")),
         )
         .await;
-        // The save itself may fail for project-config reasons in the test env,
-        // but the model-name check must not be the reason.
         if let Err(e) = result {
             assert!(
                 !e.to_lowercase().contains("flag collision"),
@@ -3859,8 +3428,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_rejects_invalid_base_url() {
-        // Non-empty model so the model-required guard doesn't short-circuit
-        // before URL validation — this exercises scheme rejection.
         let result = update_llm_config(llm_update(
             "ollama",
             Some("placeholder-model"),
@@ -3869,8 +3436,6 @@ mod tests {
         .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        // Either the new SSRF guard (scheme denylist) or the runtime syntactic
-        // validator rejects this; both mention the allowed schemes.
         assert!(
             err.to_lowercase().contains("http"),
             "Error must reference the allowed http(s) scheme, got: {err}"
@@ -3879,8 +3444,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_accepts_v1_suffix() {
-        // Regression: a `…/v1` URL must be accepted (render strips the suffix
-        // before validating); the error, if any, must NOT be the path rejection.
         let tmp = seeded_config_tempdir();
         let result = update_llm_config_in(
             tmp.path(),
@@ -3899,11 +3462,6 @@ mod tests {
         }
     }
 
-    // Save-path SSRF coverage (ADR-041): the `validate_llm_base_url` guard
-    // runs at the command boundary, before any config file is touched.
-
-    /// Helper for SSRF URL tests; passes a placeholder model so the
-    /// model-required guard doesn't short-circuit before URL validation.
     async fn url_rejection_err(url: &str) -> String {
         update_llm_config(llm_update("ollama", Some("placeholder-model"), Some(url)))
             .await
@@ -3948,8 +3506,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_accepts_loopback_via_validation() {
-        // `update_llm_config` may fail later (no active project) — we just need
-        // the error (if any) NOT to be a URL rejection.
         let tmp = seeded_config_tempdir();
         let result = update_llm_config_in(
             tmp.path(),
@@ -3988,7 +3544,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_llm_config_accepts_public_domain_via_validation() {
-        // Per ADR-041: user-written URL == user's threat model (align with Redmine).
         let tmp = seeded_config_tempdir();
         let result = update_llm_config_in(
             tmp.path(),
@@ -4002,8 +3557,6 @@ mod tests {
             );
         }
     }
-
-    // -- get_default_base_url tests --
 
     #[test]
     fn get_default_base_url_returns_ollama_url() {
@@ -4046,11 +3599,8 @@ mod tests {
         );
     }
 
-    // -- project_llm_is_unconfigured_in tests --
-
     #[test]
     fn project_llm_is_unconfigured_in_true_for_fresh_project() {
-        // alpha has no claude override at all — the fresh, first-class no-provider state.
         let cfg = make_config_with_active_project();
         let result = project_llm_is_unconfigured_in(&cfg, "alpha");
         assert_eq!(result, Ok(true));
@@ -4058,8 +3608,6 @@ mod tests {
 
     #[test]
     fn project_llm_is_unconfigured_in_false_for_configured_provider() {
-        // beta has an unmigrated legacy `provider: anthropic` — resolve_project_config
-        // runs it through migrate_llm, so it resolves to a usable active provider.
         let cfg = make_config_with_active_project();
         let result = project_llm_is_unconfigured_in(&cfg, "beta");
         assert_eq!(result, Ok(false));
@@ -4073,11 +3621,7 @@ mod tests {
         assert!(result.unwrap_err().contains("not found"));
     }
 
-    // -- MockRuntime for switch/teardown tests --
-
     use speedwave_runtime::runtime::mock_runtime::MockRuntimeBuilder;
-
-    // -- teardown_only tests --
 
     #[test]
     fn teardown_only_ok() {
@@ -4101,8 +3645,6 @@ mod tests {
         );
     }
 
-    // -- switch_project_core tests --
-
     fn ok_recreate(
         _proj: &str,
         _rt: &speedwave_runtime::runtime::LockedRuntime,
@@ -4122,7 +3664,6 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &ok_recreate);
-        // Previous is handed back for background teardown, never downed here.
         match result {
             SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
             SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
@@ -4130,8 +3671,6 @@ mod tests {
         assert!(handles.down_projects().is_empty());
     }
 
-    /// Behavioral: the switch closure brings the destination up via idempotent
-    /// `compose_up`, NOT `compose_up_recreate` (the ADR-072 perf decision).
     #[test]
     fn switch_core_brings_destination_up_without_recreate() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
@@ -4178,7 +3717,6 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("same".to_string());
         let result = switch_project_core(&prev, "same", &rt, &ok_recreate);
-        // No teardown when prev == new
         match result {
             SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
             SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
@@ -4203,7 +3741,6 @@ mod tests {
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // No compose calls when ensure_ready fails
         assert!(handles.down_projects().is_empty());
         assert!(handles.up_projects().is_empty());
     }
@@ -4219,13 +3756,10 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("recreate failed"), "got: {error}");
-                // teardown_only(new) succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // Failed start tears down only the partial new project — previous
-        // was never stopped, so no restore is needed or performed.
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
     }
@@ -4248,7 +3782,6 @@ mod tests {
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // Previous untouched even when the cleanup itself fails.
         assert!(handles.up_projects().is_empty());
     }
 
@@ -4262,7 +3795,6 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("recreate failed"), "got: {error}");
-                // teardown_only succeeded → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
@@ -4284,7 +3816,6 @@ mod tests {
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(new) for teardown only — previous untouched
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
     }
@@ -4301,15 +3832,10 @@ mod tests {
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(new) for teardown only
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
     }
 
-    // -- background teardown registry tests --
-
-    // Serialized via `serial(teardown_intents)`: these share the on-disk
-    // intents file; parallel runs race the .tmp create/remove vs assert.
     #[test]
     #[serial_test::serial(teardown_intents)]
     fn background_teardown_runs_down_and_wait_joins_it() {
@@ -4323,7 +3849,6 @@ mod tests {
             done_clone.store(true, Ordering::SeqCst);
             Ok(())
         });
-        // State transition: wait joins the in-flight teardown before returning.
         wait_for_pending_teardown("bg-test-proj");
         assert!(done.load(Ordering::SeqCst));
         assert!(!pending_teardowns_lock().contains_key("bg-test-proj"));
@@ -4335,7 +3860,6 @@ mod tests {
         spawn_background_teardown_with("bg-fail-proj".to_string(), |_p| {
             Err("compose down failed".to_string())
         });
-        // Error path: failed teardown is logged, wait still joins cleanly.
         wait_for_pending_teardown("bg-fail-proj");
         assert!(!pending_teardowns_lock().contains_key("bg-fail-proj"));
     }
@@ -4347,7 +3871,6 @@ mod tests {
         let project = format!("intent-ok-{}", std::process::id());
         spawn_background_teardown_with_in(data_dir.clone(), project.clone(), |_p| Ok(()));
         wait_for_pending_teardown(&project);
-        // Success path: intent must not survive the completed teardown.
         assert!(!crashed_teardown_intents_in(&data_dir).contains(&project));
     }
 
@@ -4360,7 +3883,6 @@ mod tests {
             Err("down failed".to_string())
         });
         wait_for_pending_teardown(&project);
-        // Failure path: the intent stays so the next launch converges it.
         assert!(crashed_teardown_intents_in(&data_dir).contains(&project));
         clear_teardown_intent_in(&data_dir, &project);
         assert!(!crashed_teardown_intents_in(&data_dir).contains(&project));
@@ -4380,7 +3902,6 @@ mod tests {
         let path = teardown_intents_path_in(&data_dir);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.lines().any(|l| l == project));
-        // No leftover tempfile from the write-then-rename.
         let stray = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .filter_map(Result::ok)
@@ -4422,8 +3943,6 @@ mod tests {
         let data_dir = tmp.path().to_path_buf();
         let project = format!("bg-live-dup-{}", std::process::id());
 
-        // The teardown being replaced parks, then takes the registry lock itself: a
-        // replacing insert that joined it under that lock would deadlock, not return.
         let (started_tx, started_rx) = mpsc::channel();
         let (go_tx, go_rx) = mpsc::channel::<()>();
         spawn_background_teardown_with_in(data_dir.clone(), project.clone(), move |_p| {
@@ -4457,8 +3976,6 @@ mod tests {
         );
     }
 
-    /// Structural: the build script must gate the build-context hash root on
-    /// COMPLETENESS of declared hash inputs — CI stubs create the dirs only.
     #[test]
     fn build_script_requires_complete_context_for_hash_root() {
         let source = include_str!("../build.rs");
@@ -4469,8 +3986,6 @@ mod tests {
         );
     }
 
-    /// Structural: add_project's closure must lazy-build project images before
-    /// start_containers — repo-enabled integrations would otherwise fail up.
     #[test]
     fn add_project_builds_missing_images_before_start() {
         let source = include_str!("containers_cmd.rs");
@@ -4490,7 +4005,6 @@ mod tests {
         );
     }
 
-    /// Compose file check must precede compose_ps (else nerdctl fatally errors).
     #[test]
     fn check_containers_running_checks_compose_file_before_compose_ps() {
         let source = include_str!("containers_cmd.rs");
@@ -4510,8 +4024,6 @@ mod tests {
         );
     }
 
-    /// Structural: add_project must check for a missing LLM provider BEFORE start_containers, else
-    /// render_compose bails and teardown_only targets a never-written compose.yml.
     #[test]
     fn add_project_checks_no_provider_before_start() {
         let source = include_str!("containers_cmd.rs");
@@ -4531,17 +4043,10 @@ mod tests {
         );
     }
 
-    // -- add_project flow tests: switch_project_core with a closure that calls
-    //    check_project + start_containers (previous handed back for teardown) --
-
-    /// Simulates the add_project closure: check_project (always ok in tests)
-    /// + start_containers (delegates to compose_up to simulate container start).
     fn add_project_recreate(
         proj: &str,
         rt: &speedwave_runtime::runtime::LockedRuntime,
     ) -> Result<(), String> {
-        // In production: check_project(proj)? + start_containers(proj)
-        // start_containers calls ensure_ready (noop) + render + compose_up
         rt.compose_up(proj).map_err(|e| e.to_string())
     }
 
@@ -4581,7 +4086,6 @@ mod tests {
         let (rt, handles) = MockRuntimeBuilder::new().build();
         let prev = Some("prev".to_string());
         let result = switch_project_core(&prev, "new", &rt, &add_project_recreate);
-        // ensure_ready → up(new); previous handed back for background teardown
         match result {
             SwitchResult::Succeeded { teardown } => assert_eq!(teardown.as_deref(), Some("prev")),
             SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
@@ -4601,12 +4105,10 @@ mod tests {
                 ref cleanup_error,
             } => {
                 assert!(error.contains("start_containers failed"), "got: {error}");
-                // teardown_only(new) ok → no cleanup_error
                 assert!(cleanup_error.is_none(), "got: {cleanup_error:?}");
             }
             SwitchResult::Succeeded { .. } => panic!("expected Failed"),
         }
-        // down(new) for teardown only; previous keeps running — no restore
         assert_eq!(handles.down_projects(), vec!["new"]);
         assert!(handles.up_projects().is_empty());
     }
@@ -4619,13 +4121,10 @@ mod tests {
             SwitchResult::Succeeded { teardown } => assert!(teardown.is_none()),
             SwitchResult::Failed { error, .. } => panic!("expected Succeeded, got: {error}"),
         }
-        // No previous → no down, only up(new)
         assert!(handles.down_projects().is_empty());
         assert_eq!(handles.up_projects(), vec!["new"]);
     }
 
-    /// A closure that skips to `Ok(())` for a no-provider project must
-    /// succeed with no compose_up/compose_down calls at all.
     #[test]
     fn add_project_skips_start_when_no_provider_configured() {
         let (rt, handles) = MockRuntimeBuilder::new().build();
@@ -4654,7 +4153,6 @@ mod tests {
 
     #[test]
     fn ensure_images_ready_passes_through_when_ready() {
-        // IMAGES_READY defaults to Ready — ensure_images_ready should return Ok
         let result = ensure_images_ready();
         assert!(result.is_ok());
     }
@@ -4665,7 +4163,6 @@ mod tests {
         let fn_start = source
             .find("pub async fn run_system_check()")
             .expect("run_system_check function must exist");
-        // Find the next function boundary (next `pub async fn` or `pub fn` or end of file)
         let fn_body = &source[fn_start..];
         assert!(
             fn_body.contains("check_os_warnings"),
@@ -4673,8 +4170,6 @@ mod tests {
         );
     }
 
-    /// Structural: `start_containers()` flips `is_setup_complete()` last, so it
-    /// must `refresh_tray_menu` to surface the ADR-058 beta toggle.
     #[test]
     fn start_containers_refreshes_tray_after_setup_completes() {
         let source = include_str!("containers_cmd.rs");
@@ -4694,8 +4189,6 @@ mod tests {
         );
     }
 
-    /// Structural: `create_project()` must NOT `refresh_tray_menu` — it runs
-    /// before `is_setup_complete()`, so the rebuild would drop the beta toggle.
     #[test]
     fn create_project_does_not_refresh_tray_prematurely() {
         let source = include_str!("containers_cmd.rs");
@@ -4716,8 +4209,6 @@ mod tests {
         );
     }
 
-    /// Structural test: host workers must eager-start before the compose
-    /// render, or the first chat message recreates containers mid-session.
     #[test]
     fn start_containers_eager_starts_host_workers_before_compose() {
         for cmd in [
@@ -4745,9 +4236,6 @@ mod tests {
         }
     }
 
-    // Local-LLM credential validators
-    // ─────────────────────────────────────────────────────────────────────
-
     #[test]
     fn validate_api_key_accepts_normal_value() {
         let r = super::validate_api_key("sk-test-abcdef0123").unwrap();
@@ -4756,7 +4244,6 @@ mod tests {
 
     #[test]
     fn validate_api_key_strips_bearer_prefix() {
-        // Common paste-from-curl mistake.
         let r = super::validate_api_key("Bearer sk-test").unwrap();
         assert_eq!(r, "sk-test", "leading 'Bearer ' must be stripped");
     }
@@ -4783,21 +4270,17 @@ mod tests {
 
     #[test]
     fn validate_api_key_rejects_bearer_prefix_with_no_token() {
-        // Pasting just "Bearer " (forgot to copy the token) must surface an
-        // actionable error, not silently turn into a Delete action.
         let err = super::validate_api_key("Bearer ").unwrap_err();
         assert!(
             err.contains("'Bearer '"),
             "error must mention the Bearer prefix: {err}"
         );
-        // Case-insensitive variant + extra whitespace must also error.
         assert!(super::validate_api_key("bearer  ").is_err());
         assert!(super::validate_api_key("BEARER  \t").is_err());
     }
 
     #[test]
     fn validate_api_key_empty_input_returns_empty_string() {
-        // Empty input is the explicit "clear the key" signal — accepted.
         assert_eq!(super::validate_api_key("").unwrap(), "");
         assert_eq!(super::validate_api_key("   ").unwrap(), "");
     }
@@ -4847,8 +4330,6 @@ mod tests {
 
     #[test]
     fn validate_custom_headers_rejects_carriage_return() {
-        // CRLF injection defense — must not let an attacker terminate the
-        // header and inject a body.
         assert!(super::validate_custom_headers("X-Foo: bar\r\nX-Evil: yes").is_err());
     }
 
@@ -4865,7 +4346,6 @@ mod tests {
 
     #[test]
     fn validate_custom_headers_rejects_invalid_name_chars() {
-        // RFC 7230 token excludes whitespace, colon, and CTL chars.
         assert!(super::validate_custom_headers("X Foo: bar").is_err());
         assert!(super::validate_custom_headers("X(Foo): bar").is_err());
         assert!(super::validate_custom_headers("X@Foo: bar").is_err());
@@ -4873,8 +4353,6 @@ mod tests {
 
     #[test]
     fn validate_custom_headers_accepts_full_rfc7230_token_chars() {
-        // Underscore and dot are valid RFC 7230 token chars (accepted by
-        // HeaderName::from_bytes); the old hand-rolled allow-list rejected them.
         super::validate_custom_headers("X_Trace_Id: abc").unwrap();
         super::validate_custom_headers("X.Trace-Id: abc").unwrap();
         super::validate_custom_headers("X-Custom!Header: abc").unwrap();
@@ -4885,8 +4363,6 @@ mod tests {
         let oversize = format!("X-A: {}", "x".repeat(16 * 1024));
         assert!(super::validate_custom_headers(&oversize).is_err());
     }
-
-    // -- remove_project_core tests --
 
     use std::cell::RefCell;
 
@@ -4910,8 +4386,6 @@ mod tests {
 
     #[test]
     fn remove_project_core_starts_a_stopped_engine_before_teardown() {
-        // The mock reports the VM as unavailable (stopped): the teardown still runs,
-        // through a boot, and only then is the project unregistered.
         let (rt, handles) = MockRuntimeBuilder::new().with_is_available(false).build();
         let removed = RefCell::new(Vec::<String>::new());
         let result = remove_project_core("alpha", &rt, &ok_check, &|n| {
@@ -4926,8 +4400,6 @@ mod tests {
 
     #[test]
     fn remove_project_core_unready_engine_keeps_the_project() {
-        // A missing or wedged VM is a failed boot, never a silent skip: a probe failure
-        // must not read as "nothing to reap" and wipe the config.
         let (rt, handles) = MockRuntimeBuilder::new()
             .with_ensure_ready_error(
                 "Lima VM 'speedwave' not found. Run Speedwave.app setup wizard to create it.",
@@ -5005,8 +4477,6 @@ mod tests {
 
     #[test]
     fn recreate_guard_checks_active_project_before_anything_else() {
-        // The watchdog can fire for a project the user switched away from;
-        // without this first-line guard it resurrects the torn-down project.
         let source = include_str!("containers_cmd.rs");
         let fn_body = extract_fn_body_braced(
             source,
@@ -5026,8 +4496,6 @@ mod tests {
 
     #[test]
     fn recreate_project_containers_if_running_waits_for_image_readiness() {
-        // Race guard: this helper can fire mid-rebuild (oauth respawn /
-        // watchdog); without the gate nerdctl emits image-not-available.
         let source = include_str!("containers_cmd.rs");
         let fn_body = extract_fn_body_braced(
             source,
@@ -5046,8 +4514,6 @@ mod tests {
         );
     }
 
-    /// Returns the body of a function by signature: locates the signature,
-    /// then walks brace depth from the next `{` to its matching `}`.
     fn extract_fn_body_braced<'a>(source: &'a str, fn_signature: &str) -> &'a str {
         let sig_pos = source
             .find(fn_signature)
@@ -5071,14 +4537,11 @@ mod tests {
         panic!("closing brace not found for {fn_signature}")
     }
 
-    // ── telemetry command helpers ───────────────────────────────────────────
-
     #[test]
     fn apply_update_rejects_locked_field_and_leaves_it_unchanged() {
         use speedwave_runtime::config::{
             resolve_telemetry, ManagedTelemetryConfig, TelemetryConfig,
         };
-        // MDM locks `endpoint`; user tries to change endpoint (locked) + resource_attributes (free).
         let managed = ManagedTelemetryConfig {
             endpoint: Some("https://corp:4318".into()),
             ..Default::default()
@@ -5111,9 +4574,6 @@ mod tests {
         use speedwave_runtime::config::{
             resolve_telemetry, ManagedTelemetryConfig, TelemetryConfig,
         };
-        // MDM locks the master switch (enabled=true); endpoint stays free. A save
-        // that resends the resolved `enabled` value plus a real endpoint edit must
-        // succeed in full — the unchanged locked field is a no-op, not a rejection.
         let managed = ManagedTelemetryConfig {
             enabled: Some(true),
             ..Default::default()
@@ -5160,7 +4620,6 @@ mod tests {
         use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
         let resolved = resolve_telemetry(None, None).unwrap();
 
-        // Some(None) clears a previously-saved interval back to the exporter default.
         let mut user = TelemetryConfig {
             metric_export_interval_ms: Some(5000),
             ..Default::default()
@@ -5175,7 +4634,6 @@ mod tests {
             "Some(None) must clear"
         );
 
-        // Some(Some(v)) sets it.
         let update = TelemetryConfigUpdate {
             metric_export_interval_ms: Some(Some(9000)),
             ..Default::default()
@@ -5183,7 +4641,6 @@ mod tests {
         apply_telemetry_update_with(&mut user, update, &resolved);
         assert_eq!(user.metric_export_interval_ms, Some(9000));
 
-        // Omitted (None) leaves it untouched.
         let update = TelemetryConfigUpdate::default();
         apply_telemetry_update_with(&mut user, update, &resolved);
         assert_eq!(user.metric_export_interval_ms, Some(9000), "omit must keep");
@@ -5191,8 +4648,6 @@ mod tests {
 
     #[test]
     fn resolve_failure_is_not_masked_as_unlocked() {
-        // MDM enabled=true with no endpoint is a fail-closed resolve error the
-        // update path must propagate, never mask as all-unlocked.
         use speedwave_runtime::config::{resolve_telemetry, ManagedTelemetryConfig};
         let managed = ManagedTelemetryConfig {
             enabled: Some(true),
@@ -5206,8 +4661,6 @@ mod tests {
 
     #[test]
     fn save_time_validation_rejects_enabled_without_valid_endpoint() {
-        // The A1 guard: the post-update state is re-resolved before persisting,
-        // so enabling telemetry without a valid endpoint is rejected at save time.
         use speedwave_runtime::config::{resolve_telemetry, TelemetryConfig};
         let resolved = resolve_telemetry(None, None).unwrap();
 
@@ -5317,8 +4770,6 @@ mod tests {
 
     #[test]
     fn factory_reset_stops_clipboard_and_drains_teardowns_before_wipe() {
-        // Ordering guard (same pattern as main.rs ExitRequested guard): the watcher
-        // stop, oauth stop, and the teardown drain must precede the wipe inside factory_reset.
         let src = include_str!("containers_cmd.rs");
         let body = &src[src
             .find("pub async fn factory_reset")
@@ -5340,10 +4791,6 @@ mod tests {
         );
     }
 
-    // ── security policy command helpers ─────────────────────────────────────
-
-    /// Every library rule id tokenized on, no logging — the v3 replacement for
-    /// the old fixed-enum `PiiCategoryFlags::ALL_ON` fixture.
     fn all_categories_on(
     ) -> std::collections::HashMap<String, speedwave_runtime::pii_policy::RuleFlags> {
         speedwave_runtime::pii_policy::rule_library()

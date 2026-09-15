@@ -37,7 +37,6 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
       class="absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded border border-[var(--line-strong)] bg-[var(--bg-1)] shadow-[0_16px_40px_rgba(0,0,0,0.5)] focus:outline-none"
       (keydown.escape)="onEscape($event)"
     >
-      <!-- Header: leading slash, query input, match count, close. -->
       <div class="flex items-center gap-2 border-b border-[var(--line)] px-3 py-2">
         <span class="mono text-[12px] text-[var(--accent)]" aria-hidden="true">/</span>
         <input
@@ -68,7 +67,6 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
         </button>
       </div>
 
-      <!-- Body: grouped list, status states. -->
       <div class="max-h-72 overflow-y-auto py-1">
         @if (service.unavailable() && filtered().length === 0) {
           <div
@@ -172,7 +170,6 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
         }
       </div>
 
-      <!-- Footer: keybind hints. -->
       <div
         class="mono flex items-center gap-4 border-t border-[var(--line)] px-3 py-1.5 text-[10px] text-[var(--ink-mute)]"
       >
@@ -185,21 +182,15 @@ import { TooltipDirective } from '../../shared/tooltip.directive';
   `,
 })
 export class SlashMenuComponent {
-  /** Current filter query (the text after `/` in the composer). Two-way bindable. */
   readonly query = model('');
-  /** Whether the popover is visible. Two-way bindable. */
   readonly open = model(false);
-  /** Project id used to retry discovery when the backend reports unavailable. */
   readonly projectId = input('');
 
-  /** Fires when the user picks a command (Enter or click). */
   readonly selected = output<SlashCommand>();
-  /** Fires when the user dismisses the popover (Escape). */
   readonly closed = output<void>();
 
   readonly service = inject(SlashService);
 
-  /** Index of the highlighted entry inside `filtered()`. Reset whenever the query changes. */
   protected readonly activeIndex = signal(0);
 
   /** Resets the highlighted index whenever the query changes. */
@@ -210,7 +201,6 @@ export class SlashMenuComponent {
     });
   }
 
-  /** Commands filtered by query (startsWith ranked above substring); agents excluded. */
   readonly filtered = computed<readonly SlashCommand[]>(() => {
     const q = this.query().trim().toLowerCase();
     const all = this.service.commands().filter((c) => c.kind !== 'Agent');
@@ -232,7 +222,6 @@ export class SlashMenuComponent {
     return [...starts, ...contains];
   });
 
-  /** Buckets the filtered list into skills, commands, and plugin groups; preserves flat index. */
   readonly groups = computed<readonly SlashGroup[]>(() => {
     const list = this.filtered();
     const skills: GroupEntry[] = [];
@@ -356,13 +345,11 @@ export class SlashMenuComponent {
   }
 }
 
-/** One entry inside a slash-menu group, carrying the position in `filtered()`. */
 interface GroupEntry {
   cmd: SlashCommand;
   flatIndex: number;
 }
 
-/** A rendered group: kebab key, mono uppercase label, and member entries. */
 interface SlashGroup {
   key: string;
   label: string;

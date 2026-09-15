@@ -69,12 +69,9 @@ describe('ChatComponent', () => {
     projectState = TestBed.inject(ProjectStateService);
     uiState = TestBed.inject(UiStateService);
 
-    // Reset service state between tests
     chatState._setState({ messages: [], currentBlocks: [], sessionStats: null });
     chatState.isStreaming = false;
   });
-
-  // ── resumeConversation: transcript-loading flag ────────────────────────────
 
   describe('resumeConversation loading flag', () => {
     it('sets loadingTranscript true during fetch and false after it resolves', async () => {
@@ -93,12 +90,10 @@ describe('ChatComponent', () => {
 
       const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
       await Promise.resolve();
-      // Mid-flight: loader is showing.
       expect(chatState.loadingTranscriptFromState()).toBe(true);
 
       releaseGetConversation!();
       await resumePromise;
-      // Settled: loader is hidden.
       expect(chatState.loadingTranscriptFromState()).toBe(false);
     });
 
@@ -116,8 +111,6 @@ describe('ChatComponent', () => {
 
     it('marks startingSession during resume so a racing send does not start a competing chat', async () => {
       projectState.activeProject.set('test');
-      // Wrap the real disposer so we can assert when the start-in-progress flag
-      // is released (the disposer replaces the old endStartingSession method).
       const dispose = vi.fn();
       const begin = vi.spyOn(chatState, 'beginStartingSession').mockReturnValue(dispose);
 
@@ -134,18 +127,14 @@ describe('ChatComponent', () => {
 
       const resumePromise = component.resumeConversation('11111111-1111-1111-1111-111111111111');
       await Promise.resolve();
-      // Mid-flight: the start-in-progress flag is set, not yet cleared.
       expect(begin).toHaveBeenCalledTimes(1);
       expect(dispose).not.toHaveBeenCalled();
 
       releaseGetConversation!();
       await resumePromise;
-      // Settled: disposer released so later sends can start a session normally.
       expect(dispose).toHaveBeenCalledTimes(1);
     });
   });
-
-  // ── Composition — shell sub-components ─────────────────────────────────────
 
   describe('shell composition', () => {
     it('renders app-chat-header and app-chat-message-list once project is ready', async () => {
@@ -170,8 +159,6 @@ describe('ChatComponent', () => {
       const link = view.querySelector('a');
       expect(link).toBeTruthy();
       expect(link.getAttribute('href')).toBe('/settings');
-      // Header (with project pill) stays available so the user can switch away;
-      // the composer is still gone since there is no conversation.
       expect(fixture.nativeElement.querySelector('app-chat-header')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-project-pill')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-composer')).toBeNull();
@@ -191,8 +178,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'Text' ──────────────────────────────────────────────
-
   describe('handleStreamChunk Text', () => {
     it('accumulates text in currentBlocks and sets isStreaming to true', () => {
       chatState.handleStreamChunk({ chunk_type: 'Text', data: { content: 'Hello ' } });
@@ -207,8 +192,6 @@ describe('ChatComponent', () => {
       expect(chatState.currentBlocks[0]).toEqual({ type: 'text', content: 'Hello world!' });
     });
   });
-
-  // ── handleStreamChunk: 'Result' ────────────────────────────────────────────
 
   describe('handleStreamChunk Result', () => {
     it('saves accumulated currentBlocks as assistant message and stops streaming', () => {
@@ -244,8 +227,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'Error' ─────────────────────────────────────────────
-
   describe('handleStreamChunk Error', () => {
     it('adds error block, finalizes message, and stops streaming', () => {
       chatState.isStreaming = true;
@@ -267,8 +248,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'ToolStart' ─────────────────────────────────────────
-
   describe('handleStreamChunk ToolStart', () => {
     it('adds tool_use block to currentBlocks', () => {
       chatState.handleStreamChunk({
@@ -286,8 +265,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── handleStreamChunk: 'Thinking' ──────────────────────────────────────────
-
   describe('handleStreamChunk Thinking', () => {
     it('creates thinking block', () => {
       chatState.handleStreamChunk({ chunk_type: 'Thinking', data: { content: 'hmm...' } });
@@ -301,11 +278,8 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── sendMessage guards ─────────────────────────────────────────────────────
-
   describe('sendMessage guards', () => {
     it('does not send when input text is empty', async () => {
-      // ComposerComponent emits already-trimmed text; empty payload = empty composer state.
       await component.sendMessage({ payload: '', displayText: '' });
 
       expect(chatState.messages).toHaveLength(0);
@@ -319,8 +293,6 @@ describe('ChatComponent', () => {
       expect(chatState.messages).toHaveLength(0);
     });
   });
-
-  // ── sendMessage success ────────────────────────────────────────────────────
 
   describe('sendMessage success', () => {
     it('adds user message and sets isStreaming', async () => {
@@ -356,10 +328,7 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── staged meeting transcript ────────────────────────────────────────────
-
   describe('staged meeting transcript', () => {
-    /** Stages a transcript against the current chat, the way the transcript pane does. */
     async function stage(): Promise<TranscriptionService> {
       const transcription = TestBed.inject(TranscriptionService);
       const prior = mockTauri.invokeHandler;
@@ -436,7 +405,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── composer integration ─────────────────────────────────────────────────
   describe('composer integration', () => {
     it('mounts app-composer when a live session is active', async () => {
       projectState.status.set('ready');
@@ -477,8 +445,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── onQuestionAnswered ──────────────────────────────────────────────────
-
   describe('onQuestionAnswered', () => {
     it('calls submitAnswer with the correct tool ID, slot index, and value', async () => {
       chatState.handleStreamChunk({
@@ -508,8 +474,6 @@ describe('ChatComponent', () => {
       expect(answerSpy).toHaveBeenCalledWith('test-tool', 0, 'answer1');
     });
   });
-
-  // ── loadConversations ───────────────────────────────────────────────────────
 
   describe('loadConversations', () => {
     it('calls backend with active project and sets conversations', async () => {
@@ -570,13 +534,10 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── resume decider lifecycle (ngOnInit / ngOnDestroy) ──────────────────────
-
   describe('resume decider lifecycle', () => {
     it('ngOnInit registers a resume decider function on the service', async () => {
       const setSpy = vi.spyOn(chatState, 'setResumeDecider');
       await component.ngOnInit();
-      // A mounted component opts into the overflow prompt via a callback.
       const last = setSpy.mock.calls[setSpy.mock.calls.length - 1]?.[0];
       expect(typeof last).toBe('function');
     });
@@ -588,8 +549,6 @@ describe('ChatComponent', () => {
       expect(setSpy).toHaveBeenCalledWith(null);
     });
   });
-
-  // ── resumeConversation ──────────────────────────────────────────────────────
 
   describe('resumeConversation', () => {
     it('calls resume_conversation and closes the sidebar', async () => {
@@ -633,7 +592,6 @@ describe('ChatComponent', () => {
 
       await component.resumeConversation('11111111-1111-1111-1111-111111111111');
 
-      // Optimistic accent cleared on failure → drawer doesn't show it as active.
       expect(component.currentViewSessionId).toBeNull();
     });
 
@@ -652,8 +610,6 @@ describe('ChatComponent', () => {
       retrySpy.mockRestore();
     });
   });
-
-  // ── deleteConversation ──────────────────────────────────────────────────────
 
   describe('deleteConversation', () => {
     it('calls delete_conversation and removes the row locally', async () => {
@@ -729,7 +685,6 @@ describe('ChatComponent', () => {
 
     it('clears the durable restart-resume id when deleting that session even if it is not the viewed one', async () => {
       projectState.activeProject.set('test');
-      // Durable id points at an older session; the live view shows a different one.
       chatState.seedSessionId('s-old');
       chatState._setState({
         sessionStats: {
@@ -748,15 +703,11 @@ describe('ChatComponent', () => {
 
       await component.deleteConversation('s-old');
 
-      // The durable id is cleared so a later restart cannot resume a deleted session…
       expect(chatState.lastKnownSessionId).toBeNull();
-      // …while the viewed session keeps running (no live-chat reset).
       expect(resetSpy).not.toHaveBeenCalled();
       expect(component.conversations).toEqual([]);
     });
   });
-
-  // ── newConversation ─────────────────────────────────────────────────────────
 
   describe('newConversation', () => {
     it('resets all state and re-initialises', async () => {
@@ -777,8 +728,6 @@ describe('ChatComponent', () => {
       expect(component.showMemory).toBe(false);
     });
   });
-
-  // ── toggleHistory / toggleMemory ────────────────────────────────────────────
 
   describe('toggleHistory', () => {
     it('toggles showHistory boolean', async () => {
@@ -903,8 +852,6 @@ describe('ChatComponent', () => {
       expect(component.memoryError).toBe('');
     });
   });
-
-  // ── onLinkClick — external links open in system browser ───────────────────
 
   describe('onLinkClick', () => {
     it('opens https links via open_url and prevents default', () => {
@@ -1039,8 +986,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── project_switch_succeeded event ──────────────────────────────────────────
-
   describe('project_switch_succeeded event', () => {
     it('reloads conversations when history panel is open', async () => {
       projectState.activeProject.set('test');
@@ -1115,8 +1060,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── state persistence ─────────────────────────────────────────────────────
-
   describe('state persistence', () => {
     it('ChatStateService is a singleton — state survives component recreation', () => {
       chatState._setState({
@@ -1139,8 +1082,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── Auth-expired redirect ───────────────────────────────────────────────
-
   describe('auth-expired redirect', () => {
     it('navigates to /settings when projectState becomes auth_required', async () => {
       const router = TestBed.inject(Router);
@@ -1150,7 +1091,6 @@ describe('ChatComponent', () => {
       await component.ngOnInit();
       fixture.detectChanges();
 
-      // Simulate auth expiry via notifyChange
       projectState.status.set('auth_required');
       projectState['notifyChange']();
 
@@ -1161,7 +1101,6 @@ describe('ChatComponent', () => {
 
   describe('Stop button and ESC handler', () => {
     it('shows Stop button when streaming, hides it when idle', () => {
-      // Send button lives in <app-composer>; chat.component owns only the Stop button.
       projectState.status.set('ready');
       chatState.isStreaming = false;
       fixture.detectChanges();
@@ -1179,7 +1118,6 @@ describe('ChatComponent', () => {
       projectState.status.set('ready');
       const spy = vi.spyOn(chatState, 'stopConversation').mockResolvedValue();
       chatState.isStreaming = true;
-      // isStreamingFromState() refreshes only after notifyChange rebuilds the tree.
       chatState['notifyChange']();
       fixture.detectChanges();
       fixture.nativeElement.querySelector('[data-testid="chat-stop"]').click();
@@ -1217,7 +1155,6 @@ describe('ChatComponent', () => {
           },
         ],
       });
-      // currentBlocksFromState() sees the block only after notifyChange rebuilds the tree.
       chatState['notifyChange']();
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
       expect(spy).not.toHaveBeenCalled();
@@ -1255,8 +1192,6 @@ describe('ChatComponent', () => {
     });
   });
 
-  // ── context-overflow dialog ─────────────────────────────────────────────────
-
   describe('context-overflow dialog', () => {
     it('promptResumeOrFresh opens the dialog and resolves "resume" on confirm', async () => {
       const choice = component.promptResumeOrFresh();
@@ -1274,8 +1209,6 @@ describe('ChatComponent', () => {
     });
 
     it('renders the confirm dialog HTML while open and hides it when closed', async () => {
-      // The overlay renders into a CDK Dialog container on document.body, not
-      // into fixture.nativeElement — query the document.
       projectState.status.set('ready');
       await component.ngOnInit();
       component.promptResumeOrFresh();
@@ -1297,18 +1230,14 @@ describe('ChatComponent', () => {
       const first = component.promptResumeOrFresh();
       const second = component.promptResumeOrFresh();
 
-      // Re-entrancy: the superseded prompt settles (fresh) instead of leaking.
       await expect(first).resolves.toBe('fresh');
       expect(component.contextOverflowOpen()).toBe(true);
 
-      // Only the latest prompt is still user-controlled.
       component.onContextOverflowResume();
       await expect(second).resolves.toBe('resume');
       expect(component.contextOverflowOpen()).toBe(false);
     });
   });
-
-  // ── isLastAssistant: O(1) cached lookup ────────────────────────────────────
 
   describe('isLastAssistant', () => {
     it('returns false when there are no messages', () => {

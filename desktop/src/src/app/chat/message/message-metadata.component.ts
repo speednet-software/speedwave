@@ -51,7 +51,6 @@ export class MessageMetadataComponent {
     const fromCatalog = this.models.familyLabelFor(raw);
     if (fromCatalog) return raw.endsWith('[1m]') ? `${fromCatalog} [1m]` : fromCatalog;
     const stripped = raw.replace(/^claude-/, '');
-    // Collapse repeated `[1m]` suffixes.
     const dedup = stripped.replace(/(\[1m\])+$/, '[1m]');
     return dedup.replace(/-(\d+)-(\d+)(\[1m\])?$/, '-$1.$2$3');
   });
@@ -80,7 +79,6 @@ export class MessageMetadataComponent {
     return cache;
   }
 
-  /** Meta cost when it is a finite number (subscription/null → null). */
   private finiteMetaCost(): number | null {
     const cost = this.entry().meta?.cost;
     return typeof cost === 'number' && Number.isFinite(cost) ? cost : null;

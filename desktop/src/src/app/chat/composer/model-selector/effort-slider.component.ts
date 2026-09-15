@@ -67,23 +67,16 @@ export function capitalizeLevel(level: string): string {
   `,
 })
 export class EffortSliderComponent {
-  /** Stops offered, `low`→`max` order, already restricted to the active model. */
   readonly stops = input.required<string[]>();
-  /** Level the handle sits on: the pin (clamped to a supported stop) or, unpinned, the catalog default. */
   readonly activeLevel = input.required<string>();
-  /** False when there is no pin: the header reads "Default" and the handle is dimmed. */
   readonly pinned = input(false);
-  /** Fired once per commit: a stop click, a drag release, or Enter after an arrow move. */
   readonly levelSelected = output<string>();
 
-  /** Tentative index during an in-progress arrow-key move or drag, before it commits. */
   private readonly pending = signal<number | null>(null);
   private dragging = false;
 
   /** Resets any tentative move when the slider's inputs change out from under it. */
   constructor() {
-    // An external change (resync, popover reopened on another model) discards a tentative arrow
-    // move or drag that belonged to the previous state, so a later release commits nothing.
     effect(() => {
       this.stops();
       this.activeLevel();
@@ -108,19 +101,11 @@ export class EffortSliderComponent {
     return capitalizeLevel(level ?? this.activeLevel());
   });
 
-  /**
-   * Handle/stop horizontal position as a percentage of the track width.
-   * @param index - Stop index into `stops()`.
-   */
   protected stopPercent(index: number): number {
     const last = this.stops().length - 1;
     return last <= 0 ? 0 : (index / last) * 100;
   }
 
-  /**
-   * Commits `stops()[index]` immediately and clears any tentative position.
-   * @param index - Stop index into `stops()` to commit.
-   */
   protected applyIndex(index: number): void {
     const level = this.stops()[index];
     if (!level) return;
@@ -128,10 +113,6 @@ export class EffortSliderComponent {
     this.levelSelected.emit(level);
   }
 
-  /**
-   * Arrows move the tentative stop by one; Enter commits it.
-   * @param event - Native keydown event on the slider handle.
-   */
   protected onKeydown(event: KeyboardEvent): void {
     const max = this.stops().length - 1;
     if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
@@ -146,21 +127,12 @@ export class EffortSliderComponent {
     }
   }
 
-  /**
-   * Captures the pointer on the handle so drag moves outside it still track.
-   * @param event - Native pointerdown event on the handle.
-   */
   protected onHandlePointerDown(event: PointerEvent): void {
     event.preventDefault();
     this.dragging = true;
     (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
   }
 
-  /**
-   * Updates the tentative stop from the pointer's ratio across the track; does not commit.
-   * @param event - Native pointermove event (pointer-captured, so it fires even off-handle).
-   * @param track - The track element, via the `#track` template reference.
-   */
   protected onHandlePointerMove(event: PointerEvent, track: HTMLElement): void {
     if (!this.dragging) return;
     const rect = track.getBoundingClientRect();
@@ -170,16 +142,11 @@ export class EffortSliderComponent {
     this.pending.set(idx);
   }
 
-  /** A cancelled gesture (e.g. a touch drag turned into a scroll) ends the drag without committing. */
   protected onHandlePointerCancel(): void {
     this.dragging = false;
     this.pending.set(null);
   }
 
-  /**
-   * Release commits the tentative stop reached by the drag.
-   * @param event - Native pointerup event on the handle.
-   */
   protected onHandlePointerUp(event: PointerEvent): void {
     if (!this.dragging) return;
     this.dragging = false;

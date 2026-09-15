@@ -12,103 +12,80 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Events emitted to the Angular frontend over the `"chat_stream"` event.
-/// Tagged enum: serde serializes as `{"chunk_type":"Text","data":{...}}`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "chunk_type", content = "data")]
 pub enum StreamChunk {
-    /// Text content delta from the assistant.
-    Text { content: String },
-    /// Thinking content delta (extended thinking / interleaved thinking).
-    Thinking { content: String },
-    /// Tool use started — includes tool_id and tool_name.
-    ToolStart { tool_id: String, tool_name: String },
-    /// Partial JSON input for a tool (streamed incrementally).
+    Text {
+        content: String,
+    },
+    Thinking {
+        content: String,
+    },
+    ToolStart {
+        tool_id: String,
+        tool_name: String,
+    },
     ToolInputDelta {
         tool_id: String,
         partial_json: String,
     },
-    /// Tool result from a user message (tool execution output).
     ToolResult {
         tool_id: String,
         content: String,
         is_error: bool,
     },
-    /// Final result — conversation turn complete.
     Result {
         session_id: String,
-        /// Total session cost in USD — estimated from token counts at API pricing.
         total_cost: Option<f64>,
-        /// Boxed to keep this variant under clippy's large-variant gap;
-        /// serde treats `Option<Box<T>>` exactly like `Option<T>`.
         usage: Option<Box<UsageInfo>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         result_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_window_size: Option<u64>,
-        /// UUID of the just-completed assistant message (ADR-046); `None` for
-        /// error turns and local-LLM paths that omit `message.id`.
         #[serde(skip_serializing_if = "Option::is_none")]
         assistant_uuid: Option<String>,
-        /// Per-turn usage delta since the previous turn (`current - previous`
-        /// for cumulative `usage`; the per-step `usage` otherwise).
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_usage: Option<TurnUsage>,
-        /// Per-turn cost in USD, delta of `total_cost_usd` between turns. `None`
-        /// hides the segment until `reconcileFooterCost` fills it from the proxy SSOT.
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_cost: Option<f64>,
-        /// The conversation model — from `SystemInit`/the latest main-chain
-        /// `message.model`, never a subagent model from `modelUsage`.
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        /// Usage of the most recent main-chain API call — the only valid
-        /// context-occupancy source (per-turn `usage` sums cache reads per call).
         #[serde(skip_serializing_if = "Option::is_none")]
         context_usage: Option<TurnUsage>,
     },
-    /// Interactive question(s) from Claude (AskUserQuestion tool).
-    /// Up to 4 questions per the Agent SDK contract.
     AskUserQuestion {
         tool_id: String,
         questions: Vec<AskUserQuestionItem>,
-        /// Always `0` on first emit. The frontend reducer advances this as
-        /// answers come in.
         current_index: usize,
     },
-    /// Error from the Claude subprocess.
-    Error { content: String },
-    /// Session init metadata — model + session id from the system init message.
-    /// `session_id` lets the frontend queue/retry during the FIRST turn (ADR-045).
+    Error {
+        content: String,
+    },
     SystemInit {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
-    /// Rate limit event — utilization and reset info.
     RateLimit {
         status: String,
         utilization: Option<f64>,
         resets_at: Option<u64>,
     },
-    /// Commits a UUID onto the most recent user entry (ADR-046) on the first
-    /// text-bearing user message (not a tool_result wrapper).
-    UserMessageCommit { uuid: String },
-    /// A `/model <id>` or `/effort <level>` command, rendered as a chip
-    /// instead of a plain user bubble. `uuid` is `None` at emission (no wire echo).
+    UserMessageCommit {
+        uuid: String,
+    },
     ControlChip {
         command: String,
         argument: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
-    /// One-slot queued message (ADR-045) drained at turn end; frontend clears
-    /// `state.pending_queue` since the message is already in flight via stdin.
-    QueueDrained { session_id: String, text: String },
+    QueueDrained {
+        session_id: String,
+        text: String,
+    },
 }
 
-/// Redacts secrets in a chunk's free-text fields. Structural fields (tool ids,
-/// model, session ids) and `partial_json` are left untouched.
 pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     use speedwave_runtime::log_sanitizer::sanitize;
     match chunk {
@@ -162,7 +139,6 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
             mut questions,
             current_index,
         } => {
-            // Model-authored free text — redact question/header/option strings.
             for q in &mut questions {
                 q.question = sanitize(&q.question);
                 q.header = sanitize(&q.header);
@@ -181,8 +157,6 @@ pub(crate) fn sanitize_chunk(chunk: StreamChunk) -> StreamChunk {
     }
 }
 
-/// Detokenizes a chunk's free-text fields for display (same fields as `sanitize_chunk`).
-/// Runs before `sanitize_chunk` so redaction sees the real display text, not a token placeholder.
 fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
     if policy.is_noop() {
         return chunk;
@@ -257,8 +231,6 @@ fn detokenize_chunk(chunk: StreamChunk, policy: &DisplayPolicy) -> StreamChunk {
     }
 }
 
-/// The ONE way to emit a `chat_stream` event: detokenizes for display, then sanitizes
-/// so no site leaks a secret. Enforced by `chat_stream_emits_go_through_helper`.
 fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, policy: &DisplayPolicy) {
     let chunk = detokenize_chunk(chunk, policy);
     if let Err(e) = app_handle.emit("chat_stream", sanitize_chunk(chunk)) {
@@ -266,21 +238,14 @@ fn emit_sanitized_chunk(app_handle: &tauri::AppHandle, chunk: StreamChunk, polic
     }
 }
 
-/// Token usage information from the result message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UsageInfo {
-    /// Number of input tokens consumed.
     pub input_tokens: u64,
-    /// Number of output tokens generated.
     pub output_tokens: u64,
-    /// Number of tokens read from cache.
     pub cache_read_tokens: Option<u64>,
-    /// Number of tokens written to cache.
     pub cache_write_tokens: Option<u64>,
 }
 
-/// Per-turn token usage. All cache fields are required (missing values are
-/// normalized to 0), so the frontend can render without `??` guards.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TurnUsage {
     pub input_tokens: u64,
@@ -290,8 +255,6 @@ pub struct TurnUsage {
 }
 
 impl TurnUsage {
-    /// Create a `TurnUsage` from a `UsageInfo`, normalizing missing cache
-    /// fields to 0.
     pub fn from_usage_info(usage: &UsageInfo) -> Self {
         Self {
             input_tokens: usage.input_tokens,
@@ -301,8 +264,6 @@ impl TurnUsage {
         }
     }
 
-    /// Per-turn delta between a cumulative snapshot and a previous snapshot.
-    /// Saturating subtraction clamps reset/resume regressions to zero.
     pub fn delta(current: &Self, previous: &Self) -> Self {
         Self {
             input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
@@ -317,28 +278,17 @@ impl TurnUsage {
     }
 }
 
-/// JSONL `usage` field names (Anthropic schema) — SSOT for the result reader,
-/// `history.rs` transcript parsing, and the resume-snapshot summing.
 pub(crate) const USAGE_INPUT_TOKENS: &str = "input_tokens";
 pub(crate) const USAGE_OUTPUT_TOKENS: &str = "output_tokens";
 pub(crate) const USAGE_CACHE_READ_TOKENS: &str = "cache_read_input_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS: &str = "cache_creation_input_tokens";
-/// Legacy flat cache names some CLI builds emit in `result.usage`.
 pub(crate) const USAGE_CACHE_READ_TOKENS_LEGACY: &str = "cache_read_tokens";
 pub(crate) const USAGE_CACHE_WRITE_TOKENS_LEGACY: &str = "cache_write_tokens";
 
-/// True when a parsed `assistant` line is a sidechain (subagent) call —
-/// checked via BOTH the live stream-json marker (`parent_tool_use_id`) and
-/// the on-disk transcript marker (`isSidechain`), since either can appear
-/// depending on source (live CLI stream vs resumed JSONL transcript).
-/// SSOT for both `capture_context_usage` (chat.rs) and the resume-snapshot
-/// / assistant-message readers (history.rs) — never re-check one field alone.
 pub(crate) fn is_sidechain_event(parsed: &serde_json::Value) -> bool {
     !parsed["parent_tool_use_id"].is_null() || parsed["isSidechain"].as_bool() == Some(true)
 }
 
-/// Reads a JSONL `usage` object into a `TurnUsage`, zero-filling missing or
-/// malformed fields. `None` when `usage` is not a JSON object.
 pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsage> {
     let obj = usage.as_object()?;
     let read = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -350,15 +300,11 @@ pub(crate) fn turn_usage_from_jsonl(usage: &serde_json::Value) -> Option<TurnUsa
     })
 }
 
-/// Tool name constant for the AskUserQuestion tool.
 const ASK_USER_TOOL_NAME: &str = "AskUserQuestion";
 
-// Stream-json protocol literals (claude-agent-sdk-python types.py).
 const MSG_TYPE_CONTROL_REQUEST: &str = "control_request";
 const CTRL_SUBTYPE_INTERRUPT: &str = "interrupt";
 
-/// Parsed control_request from Claude stdout.
-/// Also used as the pending request storage — keyed by `tool_use_id` in the HashMap.
 #[derive(Debug, Clone)]
 pub struct ControlRequest {
     pub request_id: String,
@@ -367,23 +313,14 @@ pub struct ControlRequest {
     pub tool_use_id: String,
 }
 
-/// Per-`AskUserQuestion` slot state held while the user answers each question.
-/// Consumed once every slot in `answers` is `Some`.
 #[derive(Debug, Clone)]
 pub struct PartialAnswers {
-    /// Original control_request — reconstructs the wire payload (`request_id`
-    /// + full `input`).
     pub request: ControlRequest,
-    /// Parsed questions list (after truncation to `MAX_ASK_USER_QUESTIONS`).
     pub questions: Vec<AskUserQuestionItem>,
-    /// One slot per question (`None` until answered); length always equals
-    /// `questions.len()` — enforced by `PartialAnswers::new`.
     pub answers: Vec<Option<String>>,
 }
 
 impl PartialAnswers {
-    /// Create a `PartialAnswers` with one `None` slot per question, upholding
-    /// the `answers.len() == questions.len()` invariant.
     pub fn new(request: ControlRequest, questions: Vec<AskUserQuestionItem>) -> Self {
         let answers = vec![None; questions.len()];
         Self {
@@ -396,8 +333,6 @@ impl PartialAnswers {
 
 type PendingRequests = Arc<Mutex<HashMap<String, PartialAnswers>>>;
 
-/// Result of `fill_slot`. `Completed` carries the `PartialAnswers` so the
-/// caller builds the wire response without re-locking the pending map.
 #[derive(Debug)]
 enum FillOutcome {
     Pending,
@@ -421,65 +356,37 @@ fn validate_slot(
     Ok(())
 }
 
-/// Maximum size, in bytes, of a user-supplied chat message string.
 pub const MAX_MESSAGE_LEN: usize = 1_000_000;
 
-/// Maximum size, in bytes, of a single per-slot answer to an `AskUserQuestion`.
-/// Sized so 4 maximal slots stay under `MAX_ASK_USER_WIRE_BYTES` once encoded.
 pub const MAX_ASK_USER_ANSWER_LEN: usize = 12 * 1024;
 
-/// Structured log entry returned by StreamParser for session logging.
 pub struct LogEntry {
     pub prefix: &'static str,
     pub message: String,
 }
 
-/// Adapts a legacy `(Option<StreamChunk>, Option<LogEntry>)` tuple into the
-/// `(Vec<StreamChunk>, Option<LogEntry>)` shape returned by `parse_line`.
 fn option_to_vec(
     (chunk, log): (Option<StreamChunk>, Option<LogEntry>),
 ) -> (Vec<StreamChunk>, Option<LogEntry>) {
     (chunk.map(|c| vec![c]).unwrap_or_default(), log)
 }
 
-/// Stateful parser that tracks active content blocks across stream events.
-/// Maintains index→(tool_id, tool_name) map built from content_block_start events.
 pub struct StreamParser {
-    /// Maps content block index to (tool_use_id, tool_name).
     active_blocks: HashMap<u64, (String, String)>,
-    /// Accumulated input_json per tool_id (built from ToolInputDelta chunks).
     tool_input: HashMap<String, String>,
-    /// Provisional assistant UUID (ADR-046), committed onto `Result` and
-    /// `take`n there so an error turn can't reuse a stale id.
     pending_assistant_uuid: Option<String>,
-    /// UUIDs already emitted via `UserMessageCommit`, guarding against
-    /// duplicate commits when a user message is re-emitted in the same turn.
     committed_user_uuids: std::collections::HashSet<String>,
-    /// Snapshot of cumulative session usage at the start of the current turn.
-    /// Per-turn usage = current - previous.
     previous_session_usage: TurnUsage,
-    /// Usage of the most recent main-chain API call (sidechains excluded);
-    /// carried onto `Result` as the context-occupancy source.
     last_context_usage: Option<TurnUsage>,
-    /// Cumulative session cost in USD from the previous `Result`. Per-turn
-    /// cost = current total - previous total, when both are authoritative.
     previous_session_cost: Option<f64>,
-    /// Chronological last-observed model (init or real assistant turn wins
-    /// over cumulative-usage dominance — survives a mid-session /model switch).
     model_tracker: crate::session_model::SessionModelTracker,
-    /// Unhandled top-level stream-json `type` values, each logged once per
-    /// session. Bounded by `MAX_TRACKED_UNKNOWN_TYPES`.
     seen_unknown_types: std::collections::HashSet<String>,
-    /// True once the non-anthropic soft-impose `/model` message has been
-    /// injected for this session - never re-sent, even on a later SystemInit.
     soft_impose_done: bool,
 }
 
-/// Cap on distinct unknown types tracked for once-per-type logging.
 const MAX_TRACKED_UNKNOWN_TYPES: usize = 32;
 
 impl StreamParser {
-    /// Create a new parser with empty state.
     pub fn new() -> Self {
         Self {
             active_blocks: HashMap::new(),
@@ -495,8 +402,6 @@ impl StreamParser {
         }
     }
 
-    /// Seeds the cumulative usage snapshot so the next `Result` subtracts
-    /// against the supplied baseline (called on resume).
     pub fn restore_session_snapshot(
         &mut self,
         usage: TurnUsage,
@@ -512,15 +417,11 @@ impl StreamParser {
         self.last_context_usage = context_usage;
     }
 
-    /// Current cumulative usage snapshot. Tests use this to assert that the
-    /// snapshot advances after each turn.
     #[cfg(test)]
     pub fn previous_session_usage(&self) -> TurnUsage {
         self.previous_session_usage
     }
 
-    /// Parse a pre-parsed JSON value. Mutates internal state for block tracking.
-    /// Returns (chunks for frontend in emission order, optional log entry).
     pub fn parse_line(
         &mut self,
         parsed: &serde_json::Value,
@@ -540,7 +441,6 @@ impl StreamParser {
             "system" => option_to_vec(self.parse_system_message(parsed)),
             "rate_limit_event" => option_to_vec(Self::parse_rate_limit_event(parsed)),
             other => {
-                // Unknown types are dropped; logged once per type.
                 let label = if other.is_empty() { "<none>" } else { other };
                 if self.seen_unknown_types.len() < MAX_TRACKED_UNKNOWN_TYPES
                     && self.seen_unknown_types.insert(label.to_string())
@@ -561,8 +461,6 @@ impl StreamParser {
         }
     }
 
-    /// Capture `message.id` into `pending_assistant_uuid` for the next `Result`
-    /// chunk; missing/empty ids are silently ignored.
     fn capture_assistant_uuid(&mut self, parsed: &serde_json::Value) {
         if let Some(id) = parsed["message"]["id"].as_str() {
             if !id.is_empty() {
@@ -571,9 +469,6 @@ impl StreamParser {
         }
     }
 
-    /// Feed `message.model` into the session model tracker (chronological
-    /// last-observed wins). Sidechain (subagent) calls are excluded — they
-    /// commonly run a different, cheaper model than the main chain.
     fn capture_assistant_model(&mut self, parsed: &serde_json::Value) {
         if is_sidechain_event(parsed) {
             return;
@@ -583,8 +478,6 @@ impl StreamParser {
         }
     }
 
-    /// Track `message.usage` of main-chain assistant events (last one wins).
-    /// Sidechain (subagent) calls and all-zero usage never move the meter.
     fn capture_context_usage(&mut self, parsed: &serde_json::Value) {
         if is_sidechain_event(parsed) {
             return;
@@ -596,16 +489,11 @@ impl StreamParser {
         }
     }
 
-    /// Reset per-message block state (e.g. on `message_stop`). Does NOT reset
-    /// the session-wide usage snapshot — only `new_session()` does.
     pub fn reset(&mut self) {
         self.active_blocks.clear();
         self.tool_input.clear();
-        // pending_assistant_uuid NOT cleared (message_stop can precede the
-        // result; parse_result .take()s it); committed_user_uuids persists too.
     }
 
-    /// Reset all state for a fresh session (no snapshot restore).
     #[cfg(test)]
     pub fn new_session(&mut self) {
         self.reset();
@@ -617,7 +505,6 @@ impl StreamParser {
         self.seen_unknown_types.clear();
     }
 
-    /// Check if a parsed JSON value is a control_request. Returns parsed data if so.
     pub fn try_parse_control_request(parsed: &serde_json::Value) -> Option<ControlRequest> {
         if parsed["type"].as_str() != Some("control_request") {
             return None;
@@ -635,8 +522,6 @@ impl StreamParser {
         })
     }
 
-    /// Parse one question entry; `None` if unusable (no `question` text).
-    /// Malformed `options` entries are filtered out individually.
     fn parse_ask_user_question(v: &serde_json::Value) -> Option<AskUserQuestionItem> {
         let question = v["question"].as_str().unwrap_or("").to_string();
         let header = v["header"].as_str().unwrap_or("").to_string();
@@ -653,7 +538,6 @@ impl StreamParser {
                     .collect()
             })
             .unwrap_or_default();
-        // Drop entries without question text; logged at count level only.
         if question.trim().is_empty() {
             log::warn!(
                 "dropping AskUserQuestion entry with empty question text \
@@ -671,8 +555,6 @@ impl StreamParser {
         })
     }
 
-    /// Parse the questions list (SDK `{ "questions": [...] }` array or a single
-    /// object); truncates to `MAX_ASK_USER_QUESTIONS`; empty `Vec` if none usable.
     pub fn parse_ask_user_questions(req: &ControlRequest) -> Vec<AskUserQuestionItem> {
         let parsed = &req.input;
 
@@ -701,7 +583,6 @@ impl StreamParser {
             .collect()
     }
 
-    /// Build AskUserQuestion chunk from a control_request's input (test-only).
     #[cfg(test)]
     pub fn emit_ask_user_from_control_request(req: &ControlRequest) -> Option<StreamChunk> {
         let questions = Self::parse_ask_user_questions(req);
@@ -754,7 +635,6 @@ impl StreamParser {
                             message: format!("start: {} ({})", name, id),
                         });
                         self.active_blocks.insert(index, (id.clone(), name.clone()));
-                        // Suppress ToolStart for AskUserQuestion (control_request path).
                         if name == ASK_USER_TOOL_NAME {
                             (None, log_entry)
                         } else {
@@ -773,7 +653,6 @@ impl StreamParser {
                         }),
                         None,
                     ),
-                    // "text" — text deltas will arrive via content_block_delta
                     _ => (None, None),
                 }
             }
@@ -820,12 +699,10 @@ impl StreamParser {
                             Some(t) => t,
                             None => return (None, None),
                         };
-                        // Accumulate input JSON for AskUserQuestion detection on block stop
                         self.tool_input
                             .entry(tool_id.clone())
                             .or_default()
                             .push_str(partial);
-                        // Suppress ToolInputDelta for AskUserQuestion — frontend doesn't need partial JSON
                         if tool_name == ASK_USER_TOOL_NAME {
                             (None, None)
                         } else {
@@ -838,7 +715,6 @@ impl StreamParser {
                             )
                         }
                     }
-                    // signature_delta — integrity, not rendered
                     _ => (None, None),
                 }
             }
@@ -850,7 +726,6 @@ impl StreamParser {
                             prefix: "TOOL",
                             message: format!("stop: {} ({})", tool_name, tool_id),
                         });
-                        // AskUserQuestion uses control_request; just clean up input.
                         self.tool_input.remove(&tool_id);
                         return (None, log_entry);
                     }
@@ -888,7 +763,6 @@ impl StreamParser {
             }
         }
 
-        // Commit a UUID once per session, only for a text-bearing user prompt.
         if has_text && !has_tool_result {
             if let Some(id) = message["id"].as_str() {
                 if !id.is_empty() && !self.committed_user_uuids.contains(id) {
@@ -906,7 +780,6 @@ impl StreamParser {
             }
         }
 
-        // One user line can carry several tool_result blocks; each emits a chunk.
         let mut chunks = Vec::new();
         let mut log_lines = Vec::new();
         for block in blocks {
@@ -923,7 +796,6 @@ impl StreamParser {
             };
             let is_error = block["is_error"].as_bool().unwrap_or(false);
 
-            // content can be a string or an array of content blocks
             let result_content = if let Some(s) = block["content"].as_str() {
                 s.to_string()
             } else if let Some(arr) = block["content"].as_array() {
@@ -959,8 +831,6 @@ impl StreamParser {
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        // Consume the pending uuid up-front so an error turn (which short-circuits
-        // below) doesn't leak it onto the next turn.
         let assistant_uuid = self.pending_assistant_uuid.take();
 
         let is_error = parsed["is_error"].as_bool().unwrap_or(false);
@@ -968,7 +838,6 @@ impl StreamParser {
         if is_error {
             let result_text = parsed["result"].as_str().unwrap_or("");
             let error_text = if result_text.trim().is_empty() {
-                // `is_error=true` with empty `result`: placeholder chunk + DEBUG log.
                 log::warn!(
                     "result message has is_error=true but empty result text; \
                      returning placeholder error chunk"
@@ -998,38 +867,28 @@ impl StreamParser {
             log::warn!("result message missing 'session_id'");
         }
 
-        // Cost: prefer total_cost_usd (real CLI), fall back to total_cost (legacy)
         let total_cost = parsed["total_cost_usd"]
             .as_f64()
             .or_else(|| parsed["total_cost"].as_f64());
 
-        // modelUsage: cumulative per-model stats (includes subagent models).
         let model_usage = parsed["modelUsage"].as_object();
 
-        // The chronological conversation model always wins; the dominant-outputTokens key
-        // is only a fallback for when the tracker has observed no model yet.
         let model = self
             .model_tracker
             .resolve()
             .map(str::to_string)
             .or_else(|| dominant_model_by_output_tokens(model_usage));
-        // Seed the tracker only from that fallback, so a later usage-only turn can
-        // never revert a chronologically observed model.
         if self.model_tracker.resolve().is_none() {
             if let Some(m) = model.as_deref() {
                 self.model_tracker.observe_assistant(m);
             }
         }
 
-        // contextWindow of the conversation model; `None` when that model has
-        // no modelUsage entry (e.g. only subagents on other models ran).
         let context_window_size = model
             .as_deref()
             .and_then(|m| model_usage.and_then(|mu| mu.get(m)))
             .and_then(|stats| stats["contextWindow"].as_u64());
 
-        // Option-preserving reader (absent cache fields stay `None` for the UI);
-        // field names shared with `turn_usage_from_jsonl` (the zero-filling SSOT).
         let usage = if parsed["usage"].is_object() {
             let u = &parsed["usage"];
             Some(Box::new(UsageInfo {
@@ -1046,20 +905,17 @@ impl StreamParser {
             None
         };
 
-        // Per-turn usage: see `compute_turn_usage_from_result`.
         let turn_usage = compute_turn_usage_from_result(
             parsed,
             usage.as_deref(),
             &mut self.previous_session_usage,
         );
 
-        // Per-turn cost = `total_cost_usd` delta vs snapshot, or `total_cost` on turn 1.
         let turn_cost = match (total_cost, self.previous_session_cost) {
             (Some(current), Some(prev)) if current >= prev => Some(current - prev),
             (Some(current), None) => Some(current),
             _ => None,
         };
-        // Update the cumulative cost snapshot for the next turn.
         if let Some(t) = total_cost {
             self.previous_session_cost = Some(t);
         }
@@ -1091,15 +947,12 @@ impl StreamParser {
         )
     }
 
-    /// Parse a rate_limit_event from Claude Code.
-    /// Extracts status, utilization percentage, and reset timestamp.
     fn parse_rate_limit_event(
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
         let info = &parsed["rate_limit_info"];
         let status = info["status"].as_str().unwrap_or("unknown").to_string();
         let utilization = info["utilization"].as_f64();
-        // Read the reset timestamp as both `resetsAt` and `resets_at`.
         let resets_at = info["resetsAt"]
             .as_u64()
             .or_else(|| info["resets_at"].as_u64());
@@ -1123,8 +976,6 @@ impl StreamParser {
         )
     }
 
-    /// Patterns that indicate a system message should be surfaced to the
-    /// user as an error (rate limits, billing, context limits).
     const ACTIONABLE_PATTERNS: &'static [&'static str] = &[
         "hit your limit",
         "rate limit",
@@ -1135,14 +986,10 @@ impl StreamParser {
         "Error:",
     ];
 
-    /// Parse system messages, surfacing rate-limit and other actionable ones
-    /// as errors so the frontend can display them.
     fn parse_system_message(
         &mut self,
         parsed: &serde_json::Value,
     ) -> (Option<StreamChunk>, Option<LogEntry>) {
-        // ── Extract model + session id from system init message ──
-        // Check BEFORE the message.is_empty() early return (init may lack `message`).
         if parsed["subtype"].as_str() == Some("init") {
             let session_id = parsed["session_id"]
                 .as_str()
@@ -1150,7 +997,6 @@ impl StreamParser {
                 .map(String::from);
             if let Some(model) = parsed["model"].as_str() {
                 if !model.is_empty() {
-                    // Cache the model for subsequent result chunks.
                     self.model_tracker.observe_init(model);
                     let log_entry = Some(LogEntry {
                         prefix: "SYSTEM",
@@ -1165,7 +1011,6 @@ impl StreamParser {
                     );
                 }
             }
-            // Model missing/empty — still surface the session id (ADR-045 first-turn queue).
             if session_id.is_some() {
                 return (
                     Some(StreamChunk::SystemInit {
@@ -1180,7 +1025,6 @@ impl StreamParser {
             }
         }
 
-        // System messages carry text in either `message` or `content`
         let message = parsed["message"]
             .as_str()
             .or_else(|| parsed["content"].as_str())
@@ -1207,14 +1051,11 @@ impl StreamParser {
                 log_entry,
             )
         } else {
-            // Log but don't surface non-actionable system messages
             (None, log_entry)
         }
     }
 }
 
-/// Per-turn usage from a `result`, advancing the snapshot in place. Source:
-/// flat `usage` (accumulated) or `modelUsage` (delta); `None` if absent.
 fn compute_turn_usage_from_result(
     parsed: &serde_json::Value,
     flat: Option<&UsageInfo>,
@@ -1232,15 +1073,12 @@ fn compute_turn_usage_from_result(
             .saturating_add(delta.cache_write_tokens);
         return Some(delta);
     }
-    // Fallback: only `modelUsage` is present — delta against the snapshot.
     let cumulative = extract_cumulative_usage(parsed)?;
     let delta = TurnUsage::delta(&cumulative, snapshot);
     *snapshot = cumulative;
     Some(delta)
 }
 
-/// Sum `modelUsage` across models into one cumulative snapshot; `None` when
-/// no `modelUsage` object or its values lack usage fields.
 fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     let model_usage = parsed["modelUsage"].as_object()?;
     if model_usage.is_empty() {
@@ -1268,8 +1106,6 @@ fn extract_cumulative_usage(parsed: &serde_json::Value) -> Option<TurnUsage> {
     }
 }
 
-/// Fallback model pick used only when no conversation model is known yet:
-/// the `modelUsage` entry with the most `outputTokens`.
 fn dominant_model_by_output_tokens(
     model_usage: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
@@ -1280,11 +1116,8 @@ fn dominant_model_by_output_tokens(
     })
 }
 
-/// 1 MiB cap on serialized user-message JSON — wire is text-only after
-/// ADR-065; images go through `<project>/.speedwave/pastes/` + `@…` refs.
 pub const MAX_WIRE_BYTES: usize = 1024 * 1024;
 
-/// Text-only wire content block (ADR-065). `@/workspace/...` refs are inlined as text.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireContentBlock {
@@ -1295,8 +1128,6 @@ pub fn text_only(text: impl Into<String>) -> Vec<WireContentBlock> {
     vec![WireContentBlock::Text { text: text.into() }]
 }
 
-/// True when the blocks carry nothing but whitespace or a lone `/` (the
-/// slash-menu trigger, not a message — sending it spawns a junk session).
 pub fn is_blank_or_slash_only(blocks: &[WireContentBlock]) -> bool {
     let joined: String = blocks
         .iter()
@@ -1305,7 +1136,6 @@ pub fn is_blank_or_slash_only(blocks: &[WireContentBlock]) -> bool {
     joined.trim().is_empty() || speedwave_runtime::slash::is_bare_slash(&joined)
 }
 
-/// Stream-json user envelope: `{"type":"user","message":{"role":"user","content":[...]}}`.
 pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     serde_json::json!({
         "type": "user",
@@ -1316,9 +1146,6 @@ pub fn build_user_message(blocks: &[WireContentBlock]) -> serde_json::Value {
     })
 }
 
-/// Computes the `/model <wire_id>` command to soft-impose at session start,
-/// or `None` when the observed model already matches (or the provider is
-/// Anthropic, which never soft-imposes - session-only switches there).
 fn soft_impose_message(
     kind: speedwave_runtime::config::LlmProviderKind,
     entry_id: &str,
@@ -1331,27 +1158,18 @@ fn soft_impose_message(
     let model = entry_model?;
     let expected = speedwave_runtime::model_id::wire_model_id(kind, entry_id, model);
     let observed = speedwave_runtime::model_id::normalize_observed(observed_model, entry_id);
-    // `expected` is re-normalized too: `wire_model_id` leaves an already
-    // `entry_id/`-prefixed catalog id unchanged, so it isn't always freshly prefixed.
     if observed == speedwave_runtime::model_id::normalize_observed(&expected, entry_id) {
         return None;
     }
     Some(format!("/model {expected}"))
 }
 
-/// Active provider's routing identity, captured once at spawn (before the
-/// reader thread starts) so soft-impose never re-reads config mid-session.
 struct SoftImposeConfig {
     kind: speedwave_runtime::config::LlmProviderKind,
     entry_id: String,
     entry_model: Option<String>,
 }
 
-/// Injects the soft-impose `/model` command via `write` when `init_line`'s
-/// observed model mismatches `cfg`, at most once per `parser` (session).
-/// `write` receives the exact same JSON-wrapped stdin line `send_message`
-/// serializes (`build_user_message`) - never a bare text command, since the
-/// wire protocol requires every stdin line to be a stream-json envelope.
 fn maybe_soft_impose(
     parser: &mut StreamParser,
     cfg: &SoftImposeConfig,
@@ -1378,7 +1196,6 @@ fn maybe_soft_impose(
     log::debug!("soft-imposing model at spawn: {cmd}");
 }
 
-/// Auto-approve response for non-AskUserQuestion tools.
 pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Value {
     serde_json::json!({
         "type": "control_response",
@@ -1393,8 +1210,6 @@ pub fn build_auto_approve_response(request: &ControlRequest) -> serde_json::Valu
     })
 }
 
-/// AskUserQuestion response: full answers map (question text → chosen label)
-/// with `questions` preserved in `updatedInput`; fails closed on duplicate text.
 fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<serde_json::Value> {
     let mut updated_input = partial.request.input.clone();
     let mut answers = serde_json::Map::with_capacity(partial.questions.len());
@@ -1432,8 +1247,6 @@ fn build_ask_user_response_multi(partial: &PartialAnswers) -> anyhow::Result<ser
     }))
 }
 
-/// Validate a `--resume-session-at` UUID: non-empty bounded `[A-Za-z0-9_-]`
-/// (API `msg_...` + UUID v4); rejects shell metacharacters/whitespace/traversal.
 pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     if uuid.is_empty() {
         anyhow::bail!("retry uuid must not be empty");
@@ -1441,7 +1254,6 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     if uuid.len() > 128 {
         anyhow::bail!("retry uuid too long (max 128 chars)");
     }
-    // Allow [A-Za-z0-9_-] only.
     for ch in uuid.chars() {
         if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
             anyhow::bail!("retry uuid contains invalid character: {ch:?}");
@@ -1450,8 +1262,6 @@ pub fn validate_retry_uuid(uuid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `Some` only when the project config carries an effort pin; `None` omits
-/// `--effort` so Claude Code applies the model's own default (SPEED-538).
 fn launch_effort_level(
     user_config: &config::SpeedwaveUserConfig,
     project_name: &str,
@@ -1462,8 +1272,6 @@ fn launch_effort_level(
         .filter(|l| speedwave_runtime::defaults::EFFORT_LEVELS.contains(&l.as_str()))
 }
 
-/// Build Claude Code's stream-json argv: `env SPW_SESSION_INSTANCE_ID=<id>` for
-/// reap, plus `--resume`/`--resume-session-at` from the resume args (ADR-046).
 pub fn build_claude_args(
     instance_id: &str,
     resume_session_id: Option<&str>,
@@ -1501,19 +1309,14 @@ pub fn build_claude_args(
     args
 }
 
-/// Build the container name for a project's Claude container.
 pub fn claude_container_name(project: &str) -> String {
     claude_container_name_with_prefix(consts::compose_prefix(), project)
 }
 
-/// Parameterised by `prefix` so unit tests avoid the `consts::compose_prefix()`
-/// `OnceLock`, which resolves the process-global `data_dir()` basename.
 fn claude_container_name_with_prefix(prefix: &str, project: &str) -> String {
     format!("{prefix}_{project}_claude")
 }
 
-/// Container + marker-scoped kill argv for a reap exec. Pure (testable without
-/// a runtime); [`ChatSession::reap_instance`] runs it.
 fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
     (
         claude_container_name(project),
@@ -1521,7 +1324,6 @@ fn reap_exec_plan(project: &str, id: &str) -> (String, Vec<String>) {
     )
 }
 
-/// Build the stream-json `control_request` payload for an interrupt.
 fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
     serde_json::json!({
         "type": MSG_TYPE_CONTROL_REQUEST,
@@ -1530,42 +1332,30 @@ fn build_interrupt_payload(request_id: &str) -> serde_json::Value {
     })
 }
 
-/// Monotonic interrupt request_id (Claude requires uniqueness; we never
-/// correlate the response, so a counter is enough — no UUID dependency).
 fn next_interrupt_request_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     format!("req_interrupt_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Write a control_request payload + flush. Extracted so tests can assert
-/// the exact bytes against an in-memory writer.
 fn write_interrupt<W: Write>(w: &mut W, payload: &serde_json::Value) -> anyhow::Result<()> {
     writeln!(w, "{}", payload)?;
     w.flush()?;
     Ok(())
 }
 
-/// Manages a Claude Code subprocess in the container (via `container_exec`);
-/// a background thread parses stdout and emits Tauri events directly.
 pub struct ChatSession {
     child: Option<Child>,
     project_name: String,
     shared_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     pending_requests: PendingRequests,
     drain_handles: Vec<std::thread::JoinHandle<()>>,
-    /// Set to `Some` only after a successful spawn — guards `stop()` log entry.
     session_log_path: Option<std::path::PathBuf>,
-    /// Env marker of the spawned in-container process; lets `stop()` reap
-    /// exactly this one, not other CLI/UI sessions sharing the container.
     instance_id: Option<String>,
-    /// Set by `stop()` so the reader thread stays silent on a deliberate EOF
-    /// instead of reporting a crash. Reset on each fresh spawn.
     stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatSession {
-    /// Create a new session for the given project.
     pub fn new(project_name: &str) -> Self {
         Self {
             child: None,
@@ -1579,14 +1369,10 @@ impl ChatSession {
         }
     }
 
-    /// Read-only owning project name — the retry command reconstructs an empty
-    /// `ChatSession` from it after stopping the old one.
     pub fn project_name(&self) -> &str {
         &self.project_name
     }
 
-    /// Build the argv + container name for a spawn; `resume_session_id` adds
-    /// `--resume`, `resume_at_uuid` adds `--resume-session-at` (ADR-046).
     pub fn prepare_args(
         project_name: &str,
         user_config: &config::SpeedwaveUserConfig,
@@ -1606,8 +1392,6 @@ impl ChatSession {
         let resolved = config::resolve_claude_config(&project_dir, user_config, project_name);
 
         let mut flags = resolved.flags.clone();
-        // A pin also releases CC's premium launch-effort hold for this session;
-        // without a pin no flag is sent and the model default applies (SPEED-538).
         if let Some(level) = launch_effort_level(user_config, project_name) {
             flags.push("--effort".to_string());
             flags.push(level);
@@ -1616,15 +1400,12 @@ impl ChatSession {
         let args = build_claude_args(instance_id, resume_session_id, resume_at_uuid, &flags);
         let container = claude_container_name(project_name);
 
-        // SPEED-545 e2e observation only (never a production log of the full command line).
         #[cfg(feature = "e2e")]
         crate::e2e_support::record_spawn_args(&args);
 
         Ok((args, container))
     }
 
-    /// Start Claude Code in stream-json mode, spawning a stdout reader thread
-    /// that emits `chat_stream`. Precondition: container health already verified.
     pub fn start(
         &mut self,
         app_handle: AppHandle,
@@ -1633,8 +1414,6 @@ impl ChatSession {
         self.start_with_retry(app_handle, resume_session_id, None)
     }
 
-    /// Start (or resume+retry) a session. `resume_at_uuid` rewinds to that
-    /// user-message UUID (ADR-046) and MUST pair with `resume_session_id`.
     pub fn start_with_retry(
         &mut self,
         app_handle: AppHandle,
@@ -1642,8 +1421,6 @@ impl ChatSession {
         resume_at_uuid: Option<&str>,
     ) -> anyhow::Result<()> {
         let rt = runtime::detect_runtime();
-        // Idempotent no-op once a project has a pin (SPEED-538); must run
-        // before prepare_args reads the pin for this spawn.
         crate::pin_cmd::ensure_effort_pin_migrated_in(
             speedwave_runtime::consts::data_dir(),
             &self.project_name,
@@ -1651,7 +1428,6 @@ impl ChatSession {
         .map_err(|e| anyhow::anyhow!(e))?;
         let user_config = config::load_user_config()?;
 
-        // Reap a prior leaked process for this session before spawning a new one.
         self.reap_instance();
 
         let instance_id = speedwave_runtime::session::new_instance_id();
@@ -1663,8 +1439,6 @@ impl ChatSession {
             resume_at_uuid,
         )?;
 
-        // Active provider's routing identity for soft-impose, captured once
-        // here (before the reader thread starts) - never re-read mid-session.
         let soft_impose_cfg = {
             let project_dir =
                 std::path::PathBuf::from(&user_config.require_project(&self.project_name)?.dir);
@@ -1695,8 +1469,6 @@ impl ChatSession {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        // Record the marker only after a confirmed spawn (no id for a missing
-        // process); fresh spawn means this reader must report real EOFs.
         self.instance_id = Some(instance_id);
         self.stopping
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1713,7 +1485,6 @@ impl ChatSession {
         let shared_stdin = Arc::new(Mutex::new(stdin));
         self.shared_stdin = Some(shared_stdin.clone());
 
-        // Best-effort session log init — errors here do NOT kill the session
         let session_log_path = {
             let path = consts::claude_session_log_path(&self.project_name);
             if let Some(parent) = path.parent() {
@@ -1726,8 +1497,6 @@ impl ChatSession {
         };
         self.session_log_path = session_log_path.clone();
 
-        // Spawn stderr reader to log errors (avoids pipe buffer deadlock);
-        // each reader opens its own O_APPEND handle to the session log.
         let stderr_log_path = session_log_path.clone();
         if let Some(stderr) = child.stderr.take() {
             let h = std::thread::spawn(move || {
@@ -1760,13 +1529,9 @@ impl ChatSession {
         let stdout_log_path = session_log_path;
         let stopping_for_reader = self.stopping.clone();
 
-        // Loaded once per turn/session (never per-chunk); `None` when the project has
-        // no PII policy/key, making every detokenize call downstream a no-op.
         let display_policy =
             crate::pii_display::load_display_policy(consts::data_dir(), &self.project_name);
 
-        // On resume: seed cumulative session state from the transcript so the
-        // first turn reports a real delta. Non-fatal — log and use a zero baseline.
         let resume_seed = resume_session_id.and_then(|id| {
             match history::compute_resume_snapshot(&self.project_name, id) {
                 Ok(s) => Some(s),
@@ -1777,7 +1542,6 @@ impl ChatSession {
             }
         });
 
-        // Background thread: parse Claude's stream-json and emit Tauri events
         let h = std::thread::spawn(move || {
             let mut parser = StreamParser::new();
             if let Some(seed) = resume_seed {
@@ -1808,7 +1572,6 @@ impl ChatSession {
                     }
                 };
 
-                // Parse JSON once; non-JSON lines are collated by `http_collator`.
                 let parsed = match serde_json::from_str::<serde_json::Value>(&line) {
                     Ok(v) => v,
                     Err(_) => {
@@ -1825,7 +1588,6 @@ impl ChatSession {
 
                 let msg_type = parsed["type"].as_str().unwrap_or("");
 
-                // 1. Check for control_request
                 if let Some(ctrl) = StreamParser::try_parse_control_request(&parsed) {
                     speedwave_runtime::log_file::write_log_line(
                         &mut log_file,
@@ -1872,7 +1634,6 @@ impl ChatSession {
                             &display_policy,
                         );
                     } else {
-                        // Auto-approve non-AskUserQuestion tools
                         let response = build_auto_approve_response(&ctrl);
                         match stdin_for_reader.lock() {
                             Ok(mut stdin) => {
@@ -1923,7 +1684,6 @@ impl ChatSession {
                     continue;
                 }
 
-                // Undecodable control_request: surface the likely stall, no wire response.
                 if msg_type == "control_request" {
                     log::warn!(
                         "unrecognized control_request shape; not auto-responding (turn may stall)"
@@ -1936,7 +1696,6 @@ impl ChatSession {
                     continue;
                 }
 
-                // 2. Normal stream events
                 let (chunks, log_entry) = parser.parse_line(&parsed);
                 if let Some(entry) = log_entry {
                     speedwave_runtime::log_file::write_log_line(
@@ -1944,7 +1703,6 @@ impl ChatSession {
                         entry.prefix,
                         &entry.message,
                     );
-                    // On stream-protocol markers, flush pending debug response fragments.
                     if matches!(entry.prefix, "RESULT" | "SYSTEM" | "SESSION" | "RATE_LIMIT") {
                         for merged in http_collator.flush_all_pending_responses() {
                             speedwave_runtime::log_file::write_log_line(
@@ -1955,17 +1713,13 @@ impl ChatSession {
                         }
                     }
                 }
-                // Track terminal events to emit a fallback error on unexpected EOF.
                 let is_terminal = chunks
                     .iter()
                     .any(|c| matches!(c, StreamChunk::Result { .. } | StreamChunk::Error { .. }));
-                // Capture session_id from a Result chunk before the emit loop consumes `chunks`.
                 let result_session_id = chunks.iter().find_map(|c| match c {
                     StreamChunk::Result { session_id, .. } => Some(session_id.clone()),
                     _ => None,
                 });
-                // Soft-impose a non-anthropic model mismatch right after the
-                // first SystemInit; a plain stdin write, never a chunk.
                 if chunks
                     .iter()
                     .any(|c| matches!(c, StreamChunk::SystemInit { .. }))
@@ -1987,13 +1741,11 @@ impl ChatSession {
                 }
                 if is_terminal || msg_type == "system" {
                     got_result = true;
-                    // Clear per-turn state (interrupts emit Result with no message_stop).
                     parser.reset();
                 }
                 for chunk in chunks {
                     emit_sanitized_chunk(&app_handle, chunk, &display_policy);
                 }
-                // ADR-045 drain: after Result chunks emit, write any queued message to stdin.
                 if let Some(session_id) = result_session_id {
                     drain_queued_message(
                         &app_handle,
@@ -2008,8 +1760,6 @@ impl ChatSession {
                 speedwave_runtime::log_file::write_log_line(&mut log_file, "STDOUT", &entry);
             }
 
-            // EOF without a result: surface a crash — but not when `stop()` tore
-            // this session down deliberately (that EOF is ours, not a crash).
             let stopping = stopping_for_reader.load(std::sync::atomic::Ordering::SeqCst);
             if !got_result && !stopping {
                 log::warn!("stdout reader stream ended without result");
@@ -2027,8 +1777,6 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Send a user message to Claude (write JSON to stdin). Errors if the
-    /// subprocess has exited. A control-shaped message emits a `ControlChip` too.
     pub fn send_message(
         &mut self,
         app_handle: &tauri::AppHandle,
@@ -2046,7 +1794,6 @@ impl ChatSession {
         blocks: &[WireContentBlock],
         mut emit: impl FnMut(StreamChunk),
     ) -> anyhow::Result<()> {
-        // Drop a bare `/` or blank before stdin — never reaches Claude.
         if is_blank_or_slash_only(blocks) {
             anyhow::bail!("empty message");
         }
@@ -2056,7 +1803,6 @@ impl ChatSession {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no active session"))?;
 
-        // Check if process is still alive
         if let Some(status) = child.try_wait()? {
             self.child = None;
             if speedwave_runtime::resources::is_oom_exit(&status) {
@@ -2091,11 +1837,6 @@ impl ChatSession {
         stdin.flush()?;
         drop(stdin);
 
-        // Emitted only after the write succeeds, so a dead stdin never leaves
-        // a phantom chip with no message reaching Claude.
-        // A control command is inherently one typed line - only a single-block
-        // message is eligible, so a future multi-block caller can never have
-        // its concatenated text spuriously match `/model`/`/effort`.
         if let [WireContentBlock::Text { text }] = blocks {
             if let Some((command, argument)) = speedwave_runtime::slash::parse_control_command(text)
             {
@@ -2109,24 +1850,18 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Test-only stdin stand-in: a real pipe wrapped as `ChildStdin` plus a
-    /// blocked child, so the send guards pass without a real Claude session.
     #[cfg(test)]
     fn set_test_stdin_sink(&mut self, buf: Vec<u8>) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_pipe_stdin(buf))));
         self.child = Some(spawn_test_blocked_child());
     }
 
-    /// Test-only stdin stand-in whose write end has no live reader, so any
-    /// write to it fails with a broken-pipe error (test-only).
     #[cfg(test)]
     fn set_test_stdin_broken_pipe(&mut self) {
         self.shared_stdin = Some(Arc::new(Mutex::new(test_broken_pipe_stdin())));
         self.child = Some(spawn_test_blocked_child());
     }
 
-    /// Record one slot's answer; once every slot is filled, write a single
-    /// `control_response` to stdin. Post-fill errors clear the slot for retry.
     pub fn submit_question_answer(
         &mut self,
         tool_use_id: &str,
@@ -2196,8 +1931,6 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Apply one answer to the pending entry. Validation errors restore the
-    /// entry so a later retry with a valid index/value still works.
     fn fill_slot(
         &self,
         tool_use_id: &str,
@@ -2224,8 +1957,6 @@ impl ChatSession {
         Ok(FillOutcome::Completed(entry))
     }
 
-    /// Best-effort re-insert of a `PartialAnswers` after a failure (logs on
-    /// poison); `cleared_idx` reverts that slot to `None` for re-submission.
     fn restore_partial(
         &self,
         tool_use_id: &str,
@@ -2248,10 +1979,7 @@ impl ChatSession {
         }
     }
 
-    /// Cancel the current turn without killing the session: writes a
-    /// `subtype: "interrupt"` control_request; Claude aborts but stays ready.
     pub fn interrupt(&mut self) -> anyhow::Result<()> {
-        // Detect an already-exited child for a clean "session exited"/OOM error.
         if let Some(child) = self.child.as_mut() {
             if let Some(status) = child.try_wait()? {
                 self.child = None;
@@ -2278,8 +2006,6 @@ impl ChatSession {
         Ok(())
     }
 
-    /// Kill the orphaned in-container process for `self.instance_id` (host kill
-    /// doesn't propagate). Best-effort; no-op (no runtime detected) without an id.
     fn reap_instance(&mut self) {
         let Some(id) = self.instance_id.take() else {
             return;
@@ -2297,18 +2023,13 @@ impl ChatSession {
         }
     }
 
-    /// Stop the Claude subprocess entirely (session end, not turn cancel).
     pub fn stop(&mut self) -> anyhow::Result<()> {
-        // Mark deliberate teardown before EOF so the reader stays silent.
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Drop stdin first to signal EOF to the child
         self.shared_stdin = None;
-        // Reap the orphaned in-container process; self-disarms (no-op) without an id.
         self.reap_instance();
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
-            // Wait up to 5 s for exit, then abandon it (OS reaps).
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 match child.try_wait() {
@@ -2327,7 +2048,6 @@ impl ChatSession {
                 }
             }
         }
-        // Join finished reader threads; detach the rest after a grace window so `is_finished` can flip.
         const READER_GRACE_MS: u64 = 200;
         const READER_POLL_MS: u64 = 10;
         let reader_grace_deadline =
@@ -2338,7 +2058,6 @@ impl ChatSession {
             }
             let name = format!("{:?}", handle.thread().id());
             if !handle.is_finished() {
-                // Pipe wedged — detach so `stop()` returns in bounded time.
                 log::warn!(
                     "reader thread {name} still running after {READER_GRACE_MS}ms grace \
                      on stop, detaching"
@@ -2349,7 +2068,6 @@ impl ChatSession {
                 log::warn!("reader thread panicked during stop: {e:?}");
             }
         }
-        // Log session end ONLY if session actually started
         if let Some(ref log_path) = self.session_log_path {
             let mut f = speedwave_runtime::log_file::open_log_file(log_path);
             speedwave_runtime::log_file::write_log_line(&mut f, "SESSION", "stopped");
@@ -2368,11 +2086,8 @@ impl Drop for ChatSession {
     }
 }
 
-/// Thread-safe wrapper for ChatSession, to be used from Tauri commands.
 pub type SharedChatSession = Arc<Mutex<ChatSession>>;
 
-/// Drain any queued message for `session_id` (ADR-045) and write it to `stdin`
-/// as the next turn (on a `Result` chunk). Best-effort: failures are logged.
 fn drain_queued_message(
     app_handle: &AppHandle,
     session_id: &str,
@@ -2389,16 +2104,12 @@ fn drain_queued_message(
     });
 }
 
-/// Writes `text` to `stdin` as the next turn, then emits `ControlChip` (when
-/// `text` is control-shaped) followed by `QueueDrained`. Best-effort: a stdin
-/// write/flush failure is logged and skips both emissions.
 fn write_and_emit_drained_message(
     session_id: &str,
     text: &str,
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
     mut emit: impl FnMut(StreamChunk),
 ) {
-    // Queue is text-only (ADR-065).
     let payload = build_user_message(&text_only(text));
     match stdin.lock() {
         Ok(mut handle) => {
@@ -2430,8 +2141,6 @@ fn write_and_emit_drained_message(
     log::debug!("queue drained: {} bytes for session", text.len());
 }
 
-/// A real OS pipe write-end wrapped as `ChildStdin`; `buf` is drained on a
-/// background thread so writes never block on a full pipe (test-only).
 #[cfg(test)]
 fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
     let (mut reader, writer) = std::io::pipe().expect("create test stdin pipe");
@@ -2452,8 +2161,6 @@ fn test_pipe_stdin(buf: Vec<u8>) -> std::process::ChildStdin {
     stdin
 }
 
-/// A pipe write-end wrapped as `ChildStdin` whose read end is dropped
-/// immediately, so every write to it fails (broken pipe) (test-only).
 #[cfg(test)]
 fn test_broken_pipe_stdin() -> std::process::ChildStdin {
     let (reader, writer) = std::io::pipe().expect("create test stdin pipe");
@@ -2471,8 +2178,6 @@ fn test_broken_pipe_stdin() -> std::process::ChildStdin {
     stdin
 }
 
-/// A trivial child blocked reading its own stdin, giving `set_test_stdin_sink`
-/// a real, live `Child` (test-only — never a Claude session).
 #[cfg(test)]
 fn spawn_test_blocked_child() -> Child {
     #[cfg(unix)]
@@ -2504,16 +2209,10 @@ fn spawn_test_blocked_child() -> Child {
 mod tests {
     use super::*;
 
-    // -- sanitize_chunk: secrets must not reach the UI on any chunk channel --
-
-    /// Enforcement: the ONLY `emit("chat_stream", ...)` in production source is
-    /// inside emit_sanitized_chunk. A new raw emit elsewhere would leak.
     #[test]
     fn chat_stream_emits_go_through_helper() {
         let src = include_str!("chat.rs");
-        // Strip the test module so test-only emits don't count.
         let prod = src.split("\nmod tests {").next().unwrap_or(src);
-        // Count actual emit calls, ignoring doc/comment lines.
         let raw_emits = prod
             .lines()
             .filter(|l| {
@@ -2585,7 +2284,6 @@ mod tests {
 
     #[test]
     fn sanitize_chunk_redacts_result_text() {
-        // result_text reaches the UI only via chat_stream — sanitize covers it.
         let chunk = StreamChunk::Result {
             session_id: "s".into(),
             total_cost: None,
@@ -2604,7 +2302,6 @@ mod tests {
 
     #[test]
     fn sanitize_chunk_leaves_tool_input_delta_untouched() {
-        // partial_json is incremental JSON — sanitizing could corrupt structure.
         let raw = r#"{"path":"/x","token":"abc"#;
         let chunk = StreamChunk::ToolInputDelta {
             tool_id: "t1".into(),
@@ -2617,8 +2314,6 @@ mod tests {
             other => panic!("variant changed: {other:?}"),
         }
     }
-
-    // -- detokenize_chunk: PII display detokenization at the emit chokepoint --
 
     fn detok_test_key(tmp: &std::path::Path, project: &str) -> speedwave_pii_engine::EngineKey {
         speedwave_runtime::pii_key::ensure_project_key_in(tmp, project)
@@ -2831,8 +2526,6 @@ mod tests {
         }
     }
 
-    // -- interrupt protocol tests (behavioural via free helpers) --
-
     #[test]
     fn interrupt_without_active_session_errors() {
         let mut s = ChatSession::new("test-project");
@@ -2847,8 +2540,6 @@ mod tests {
 
     #[test]
     fn send_message_rejects_bare_slash_before_session_check() {
-        // The bare-slash guard runs before the active-session check: with no
-        // child the error is "empty message", proving it never reaches stdin.
         let mut s = ChatSession::new("test-project");
         let err = s
             .send_message_with_emit(&text_only("/"), |_| {})
@@ -2861,7 +2552,6 @@ mod tests {
 
     #[test]
     fn send_message_allows_real_text_through_to_session_check() {
-        // Real text passes the guard and hits the no-active-session error.
         let mut s = ChatSession::new("test-project");
         let err = s
             .send_message_with_emit(&text_only("hej"), |_| {})
@@ -2902,8 +2592,6 @@ mod tests {
 
     #[test]
     fn send_message_stdin_write_failure_propagates_error_and_emits_no_control_chip() {
-        // A dead stdin (broken pipe) must not leave a phantom "command sent"
-        // chip for a message that never reached Claude.
         let mut session = ChatSession::new("proj");
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_broken_pipe();
@@ -2931,8 +2619,6 @@ mod tests {
 
     #[test]
     fn send_message_bare_model_without_argument_emits_no_control_chip() {
-        // Bare "/model" (no argument) shows current model - CC's own reply, not
-        // a switch - and must go to stdin as plain text, not a chip.
         let mut session = ChatSession::new("proj");
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
@@ -2944,9 +2630,6 @@ mod tests {
 
     #[test]
     fn send_message_multi_block_never_matches_control_shape_even_when_joined_text_would() {
-        // A control command is inherently one typed line: a hypothetical
-        // multi-block message whose concatenated text reads "/model x" must
-        // NOT emit a ControlChip - only a genuine single-block message can.
         let mut session = ChatSession::new("proj");
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
@@ -2969,7 +2652,6 @@ mod tests {
 
     #[test]
     fn send_message_single_block_control_command_still_matches() {
-        // Same text, single block: the genuine control path still fires.
         let mut session = ChatSession::new("proj");
         let mut emitted: Vec<StreamChunk> = Vec::new();
         session.set_test_stdin_sink(Vec::new());
@@ -3033,12 +2715,10 @@ mod tests {
 
     #[test]
     fn build_interrupt_payload_matches_sdk_protocol() {
-        // Wire format per SDKControlInterruptRequest in claude-agent-sdk-python.
         let v = build_interrupt_payload("req_interrupt_42");
         assert_eq!(v["type"], "control_request");
         assert_eq!(v["request_id"], "req_interrupt_42");
         assert_eq!(v["request"]["subtype"], "interrupt");
-        // Defensive: no extra top-level keys leak in.
         let obj = v.as_object().expect("object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
@@ -3060,7 +2740,6 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         write_interrupt(&mut buf, &payload).expect("write");
         let s = String::from_utf8(buf).expect("utf8");
-        // Exactly one trailing newline (NDJSON framing) and one parse-able value.
         assert!(s.ends_with('\n'), "must end with newline, got: {s:?}");
         let line = s.trim_end_matches('\n');
         assert!(!line.contains('\n'), "must be single line, got: {s:?}");
@@ -3070,8 +2749,6 @@ mod tests {
 
     #[test]
     fn write_interrupt_propagates_io_errors() {
-        // Writer that always fails on first write — verifies the error path
-        // (the production code logs and returns this error to the caller).
         struct FailWriter;
         impl Write for FailWriter {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -3086,8 +2763,6 @@ mod tests {
         assert!(err.to_string().contains("boom"), "got: {err}");
     }
 
-    // -- reap_instance targeting --
-
     #[test]
     fn reap_exec_plan_targets_project_container_with_marker() {
         let (container, argv) = reap_exec_plan("acme", "inst-123");
@@ -3095,8 +2770,6 @@ mod tests {
             container.ends_with("_acme_claude"),
             "must target the project's claude container, got: {container}"
         );
-        // The kill command carries the exact instance marker so only this
-        // session's in-container process is reaped.
         let joined = argv.join(" ");
         assert!(joined.contains("SPW_SESSION_INSTANCE_ID=inst-123"));
         assert!(joined.contains("kill"));
@@ -3104,15 +2777,11 @@ mod tests {
 
     #[test]
     fn reap_instance_is_noop_without_an_id() {
-        // No spawn happened → no marker → reap takes nothing and never touches a
-        // runtime (would otherwise panic in a unit-test environment).
         let mut s = ChatSession::new("test-project");
         assert!(s.instance_id.is_none());
         s.reap_instance();
         assert!(s.instance_id.is_none());
     }
-
-    // -- EOF-error gating (cross-session error-emission race) --
 
     #[test]
     fn stop_sets_stopping_flag() {
@@ -3125,8 +2794,6 @@ mod tests {
             "stop() must mark deliberate teardown so the reader stays silent"
         );
     }
-
-    // -- ChatSession::stop() tests --
 
     #[test]
     fn stop_is_idempotent_when_no_session_running() {
@@ -3141,8 +2808,6 @@ mod tests {
 
     #[test]
     fn stop_grace_period_joins_reader_that_finishes_late() {
-        // Regression: a reader finishing after ~50 ms (below the 200 ms grace)
-        // must be joined by `stop()`, not classified as "still running".
         let mut s = ChatSession::new("test-project");
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -3151,8 +2816,6 @@ mod tests {
         assert!(s.stop().is_ok());
         let elapsed = start.elapsed();
         assert!(s.drain_handles.is_empty(), "handle must be drained");
-        // Upper bound: grace window is 200ms; joining a 50ms thread must
-        // finish well inside it. The generous ceiling absorbs CI jitter.
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "stop() took {elapsed:?} — grace window should have joined the reader well under 500ms"
@@ -3161,8 +2824,6 @@ mod tests {
 
     #[test]
     fn stop_grace_period_gives_up_on_genuinely_stuck_reader() {
-        // A wedged reader's grace window must stay bounded; simulate one by
-        // sleeping longer than the window.
         let mut s = ChatSession::new("test-project");
         s.drain_handles.push(std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(10));
@@ -3171,8 +2832,6 @@ mod tests {
         assert!(s.stop().is_ok());
         let elapsed = start.elapsed();
         assert!(s.drain_handles.is_empty(), "handle must be drained");
-        // Upper bound: 200 ms grace window; 1000 ms allows CI jitter while
-        // catching a regression to an unbounded join.
         assert!(
             elapsed < std::time::Duration::from_millis(1000),
             "stop() took {elapsed:?} — a stuck reader must be detached within the grace window, not joined"
@@ -3213,14 +2872,11 @@ mod tests {
         assert!(s2.stop().is_ok());
     }
 
-    /// Convenience: parse a JSON string and return the first StreamChunk
-    /// (for single-chunk test assertions).
     fn parse_line_str(parser: &mut StreamParser, line: &str) -> Option<StreamChunk> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         parser.parse_line(&parsed).0.into_iter().next()
     }
 
-    /// Convenience: parse a JSON string and return all emitted chunks.
     fn parse_line_all_str(parser: &mut StreamParser, line: &str) -> Vec<StreamChunk> {
         let parsed: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -3229,8 +2885,6 @@ mod tests {
         parser.parse_line(&parsed).0
     }
 
-    /// Convenience: parse a JSON string and call `parser.parse_line`.
-    /// Returns the full tuple (first chunk, log_entry) for log entry assertions.
     fn parse_line_full(
         parser: &mut StreamParser,
         line: &str,
@@ -3243,13 +2897,10 @@ mod tests {
         (chunks.into_iter().next(), log)
     }
 
-    /// Convenience: parse a JSON string and call `StreamParser::try_parse_control_request`.
     fn try_parse_control_request_str(line: &str) -> Option<ControlRequest> {
         let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
         StreamParser::try_parse_control_request(&parsed)
     }
-
-    // ── Unknown stream-json types ────────────────────────────────────
 
     #[test]
     fn parse_line_logs_unknown_type_once_per_session() {
@@ -3260,7 +2911,6 @@ mod tests {
         let log = log.expect("first occurrence must produce a log entry");
         assert_eq!(log.prefix, "STREAM");
         assert!(log.message.contains("compaction_event"));
-        // Second occurrence: silent (dedup), still no chunk.
         let (chunks2, log2) = parse_line_full(&mut parser, line);
         assert!(chunks2.is_none());
         assert!(log2.is_none(), "repeat occurrences must not spam the log");
@@ -3291,21 +2941,16 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
             assert!(parser.parse_line(&parsed).1.is_some());
         }
-        // Past the cap: dropped without logging (and without growing the set).
         let parsed: serde_json::Value = serde_json::from_str(r#"{"type":"overflow"}"#).unwrap();
         assert!(parser.parse_line(&parsed).1.is_none());
     }
 
     #[test]
     fn control_request_with_unknown_shape_returns_none() {
-        // A future subtype without tool_name/tool_use_id must not parse into a
-        // ControlRequest (the reader loop logs it instead of auto-approving).
         let line =
             r#"{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback"}}"#;
         assert!(try_parse_control_request_str(line).is_none());
     }
-
-    // ── StreamChunk serialization ────────────────────────────────────
 
     #[test]
     fn stream_chunk_text_serializes_tagged() {
@@ -3385,8 +3030,6 @@ mod tests {
         }
     }
 
-    // ── blank / bare-slash guard ─────────────────────────────────────
-
     #[test]
     fn is_blank_or_slash_only_rejects_lone_slash() {
         assert!(is_blank_or_slash_only(&text_only("/")));
@@ -3407,7 +3050,6 @@ mod tests {
 
     #[test]
     fn is_blank_or_slash_only_accepts_real_slash_command() {
-        // A real slash command (slash + name) must still be sendable.
         assert!(!is_blank_or_slash_only(&text_only("/code-review")));
         assert!(!is_blank_or_slash_only(&text_only("/clear")));
     }
@@ -3418,16 +3060,12 @@ mod tests {
         assert!(!is_blank_or_slash_only(&text_only("what is 2/3?")));
     }
 
-    // ── send_message JSON format ─────────────────────────────────────
-
     #[test]
     fn build_user_message_produces_correct_json_structure() {
         let msg = build_user_message(&text_only("test msg"));
 
         assert_eq!(msg["type"], "user");
         assert_eq!(msg["message"]["role"], "user");
-        // No `parent_tool_use_id` on user-input envelope — that field is
-        // an output-side correlation tag for tool_use, never appears here.
         assert!(msg.get("parent_tool_use_id").is_none());
 
         let content = &msg["message"]["content"];
@@ -3448,8 +3086,6 @@ mod tests {
 
     #[test]
     fn build_user_message_with_paste_reference_in_text() {
-        // ADR-065: pastes go to `<project>/.speedwave/pastes/` with an inlined
-        // `@…` ref; the wire is text-only.
         let blocks = text_only("Co tu widać?\n\n@/workspace/.speedwave/pastes/paste-123.png");
         let msg = build_user_message(&blocks);
         let items = msg["message"]["content"].as_array().unwrap();
@@ -3461,8 +3097,6 @@ mod tests {
 
     #[test]
     fn build_user_message_snapshot_wire_format() {
-        // Contract snapshot pinning the text-only wire shape (ADR-065); trips
-        // on inline image blocks, `media_type`→`mimeType`, or `parent_tool_use_id`.
         let blocks = text_only(
             "review these\n\n@/workspace/.speedwave/pastes/paste-1.png\n@/workspace/.speedwave/pastes/paste-2.jpg",
         );
@@ -3480,8 +3114,6 @@ mod tests {
             }
         });
         assert_eq!(msg, expected);
-        // Defence-in-depth: ensure no `image` block ever appears in this
-        // snapshot — that path is gone for good.
         assert!(!serde_json::to_string(&msg).unwrap().contains("\"image\""));
     }
 
@@ -3504,11 +3136,8 @@ mod tests {
 
     #[test]
     fn max_wire_bytes_is_1_mib() {
-        // ADR-065: the cap is sized for text + paste-path refs only.
         assert_eq!(MAX_WIRE_BYTES, 1024 * 1024);
     }
-
-    // ── soft-impose mismatch detection ───────────────────────────────
 
     #[test]
     fn soft_impose_message_returns_command_on_mismatch() {
@@ -3556,10 +3185,6 @@ mod tests {
 
     #[test]
     fn soft_impose_message_matches_when_catalog_id_already_prefixed() {
-        // Regression pin for the `expected` re-normalization: when the catalog
-        // id already carries `<entry_id>/`, `wire_model_id` leaves it unchanged
-        // (no double-prefix), so `expected` needs its own normalize_observed
-        // pass to compare equal to the already-prefixed observed model.
         let msg = soft_impose_message(
             speedwave_runtime::config::LlmProviderKind::Local,
             "llama",
@@ -3574,8 +3199,6 @@ mod tests {
 
     #[test]
     fn soft_impose_message_still_fires_for_openrouter_and_local_kinds_on_mismatch() {
-        // Non-anthropic kinds behave identically under the simplified-looking
-        // comparison: soft-impose still fires on mismatch and suppresses on match.
         for kind in [
             speedwave_runtime::config::LlmProviderKind::OpenRouter,
             speedwave_runtime::config::LlmProviderKind::Local,
@@ -3587,8 +3210,6 @@ mod tests {
             assert_eq!(matching, None, "{kind:?} must suppress on match");
         }
     }
-
-    // ── soft-impose injection at session spawn ───────────────────────
 
     #[test]
     fn soft_impose_fires_once_on_mismatch_and_writes_wrapped_stdin_line() {
@@ -3616,8 +3237,6 @@ mod tests {
         });
 
         assert_eq!(captured.len(), 1, "must fire exactly once across two calls");
-        // The stdin line must be the same JSON envelope send_message serializes -
-        // build_user_message(&[WireContentBlock::Text{..}]) - never a bare string.
         let expected = build_user_message(&text_only("/model local/llama-3.1-70b")).to_string();
         assert_eq!(captured[0], expected);
         let decoded: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
@@ -3676,8 +3295,6 @@ mod tests {
         assert!(captured.is_empty());
     }
 
-    // ── StreamParser: text delta ─────────────────────────────────────
-
     #[test]
     fn parse_text_delta_produces_text_chunk() {
         let mut parser = StreamParser::new();
@@ -3688,8 +3305,6 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
     }
-
-    // ── StreamParser: thinking delta ─────────────────────────────────
 
     #[test]
     fn parse_thinking_delta_emits_thinking_chunk() {
@@ -3713,13 +3328,10 @@ mod tests {
         }
     }
 
-    // ── StreamParser: tool_use with input_json_delta ──────────────────
-
     #[test]
     fn parse_tool_use_with_input_json_delta_correlates_by_index() {
         let mut parser = StreamParser::new();
 
-        // content_block_start: tool_use at index 1
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
         let chunk = parse_line_str(&mut parser, start).unwrap();
         match &chunk {
@@ -3730,7 +3342,6 @@ mod tests {
             other => panic!("expected ToolStart, got {other:?}"),
         }
 
-        // content_block_delta: input_json_delta at index 1
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/src/main.rs\"}"}}}"#;
         let chunk = parse_line_str(&mut parser, delta).unwrap();
         match chunk {
@@ -3752,54 +3363,41 @@ mod tests {
         assert!(parse_line_str(&mut parser, delta).is_none());
     }
 
-    // ── StreamParser: content_block_stop cleans up ────────────────────
-
     #[test]
     fn parse_content_block_stop_cleans_up_active_blocks() {
         let mut parser = StreamParser::new();
 
-        // Start a tool at index 2
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_X","name":"Bash","input":{}}}}"#;
         parse_line_str(&mut parser, start);
 
-        // Stop at index 2 — should clean up
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":2}}"#;
         parse_line_str(&mut parser, stop);
 
-        // Now a delta at index 2 should return None (cleaned up)
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}}"#;
         assert!(parse_line_str(&mut parser, delta).is_none());
     }
-
-    // ── StreamParser: message_stop resets state ───────────────────────
 
     #[test]
     fn parse_message_stop_resets_parser_state() {
         let mut parser = StreamParser::new();
 
-        // Start a tool
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_Y","name":"Edit","input":{}}}}"#;
         parse_line_str(&mut parser, start);
 
-        // message_stop should reset
         let stop = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
         parse_line_str(&mut parser, stop);
 
         assert!(parser.active_blocks.is_empty());
     }
 
-    /// Regression: an interrupted turn emits `result` without `message_stop`,
-    /// so the stdout-reader calls `parser.reset()` after every terminal chunk.
     #[test]
     fn reset_after_result_prevents_stale_tool_contamination() {
         let mut parser = StreamParser::new();
 
-        // Turn 1: a tool starts at index 0 and receives a partial input delta.
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_OLD","name":"Read","input":{}}}}"#;
         parse_line_str(&mut parser, start);
         assert!(parser.active_blocks.contains_key(&0));
 
-        // Simulate the reader's `reset()` after `result` (parse_line does not).
         let result = r#"{"type":"result","subtype":"error_during_execution","session_id":"s","total_cost_usd":0.0,"usage":{}}"#;
         parse_line_str(&mut parser, result);
         parser.reset();
@@ -3807,8 +3405,6 @@ mod tests {
         assert!(parser.active_blocks.is_empty());
         assert!(parser.tool_input.is_empty());
 
-        // Turn 2 reuses index 0; without the reset above, the input delta
-        // would route to the OLD tool_id.
         let start2 = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_NEW","name":"Edit","input":{}}}}"#;
         parse_line_str(&mut parser, start2);
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x\"}"}}}"#;
@@ -3818,8 +3414,6 @@ mod tests {
             other => panic!("expected ToolInputDelta for toolu_NEW, got {other:?}"),
         }
     }
-
-    // ── StreamParser: user tool_result ────────────────────────────────
 
     #[test]
     fn parse_user_tool_result_emits_tool_result() {
@@ -3842,8 +3436,6 @@ mod tests {
 
     #[test]
     fn parse_user_multiple_tool_results_emit_one_chunk_each() {
-        // Parallel batches pack several tool_result blocks into one user line;
-        // an early return would leave later tools stuck as "running".
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"tool_result","tool_use_id":"t1","content":"ok"},
@@ -3890,7 +3482,6 @@ mod tests {
 
     #[test]
     fn parse_user_malformed_tool_result_skips_block_not_siblings() {
-        // A block without tool_use_id is dropped; the valid sibling still emits.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"role":"user","content":[
             {"type":"tool_result","content":"orphan"},
@@ -3937,8 +3528,6 @@ mod tests {
         }
     }
 
-    // ── StreamParser: result ──────────────────────────────────────────
-
     #[test]
     fn parse_result_extracts_cost_and_usage() {
         let mut parser = StreamParser::new();
@@ -3972,8 +3561,6 @@ mod tests {
         }
     }
 
-    // The parser reads `total_cost_usd` (current) / `total_cost` (legacy);
-    // this guards against re-adding the dead `cost_usd` alias.
     #[test]
     fn parse_result_with_legacy_cost_usd_only_produces_no_cost() {
         let mut parser = StreamParser::new();
@@ -4011,7 +3598,6 @@ mod tests {
     #[test]
     fn parse_result_with_flat_usage_and_model_usage() {
         let mut parser = StreamParser::new();
-        // Real CLI sends both flat usage (per-step) and modelUsage (cumulative)
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.078,"result":"","usage":{"input_tokens":3,"cache_read_input_tokens":11204,"cache_creation_input_tokens":11358,"output_tokens":65},"modelUsage":{"claude-opus-4-6[1m]":{"inputTokens":3,"cacheReadInputTokens":11204,"cacheCreationInputTokens":11358,"outputTokens":65,"contextWindow":1000000,"costUSD":0.078}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -4021,15 +3607,12 @@ mod tests {
                 total_cost,
                 ..
             } => {
-                // Should use flat usage (per-step), not modelUsage (cumulative)
                 let u = usage.unwrap();
                 assert_eq!(u.input_tokens, 3);
                 assert_eq!(u.output_tokens, 65);
                 assert_eq!(u.cache_read_tokens, Some(11204));
                 assert_eq!(u.cache_write_tokens, Some(11358));
-                // contextWindow from modelUsage
                 assert_eq!(context_window_size, Some(1_000_000));
-                // cost from total_cost_usd
                 assert_eq!(total_cost, Some(0.078));
             }
             other => panic!("expected Result, got {other:?}"),
@@ -4038,8 +3621,6 @@ mod tests {
 
     #[test]
     fn parse_result_falls_back_to_dominant_model_when_no_conversation_model_known() {
-        // Fallback path only: no SystemInit/assistant model captured yet (e.g.
-        // a local-LLM turn) — pick the modelUsage entry with the most outputTokens.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":10,"outputTokens":50,"contextWindow":200000},"claude-opus-4-7":{"inputTokens":100,"outputTokens":500,"contextWindow":1000000}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -4066,9 +3647,6 @@ mod tests {
 
     #[test]
     fn parse_result_chronological_model_wins_over_usage_dominant_old_model() {
-        // Regression: a mid-session /model switch to B produces little B usage
-        // next to a lot of accumulated A usage. Chronological last-observed
-        // model (B) must win — usage-dominance would wrongly report A.
         let mut parser = StreamParser::new();
         let init_a = r#"{"type":"system","subtype":"init","model":"model-a"}"#;
         parse_line_str(&mut parser, init_a);
@@ -4092,11 +3670,6 @@ mod tests {
 
     #[test]
     fn parse_result_does_not_revert_tracker_on_later_plain_usage_turn() {
-        // Regression: a result event must never re-seed the chronological
-        // tracker from cumulative usage-dominance. Session observes model-a
-        // then model-b (chronologically later, fewer cumulative tokens); a
-        // result whose modelUsage still lists model-a as dominant-by-usage
-        // must not revert the tracker for the NEXT event.
         let mut parser = StreamParser::new();
         let assistant_a =
             r#"{"type":"assistant","message":{"id":"msg_a","model":"model-a","usage":{}}}"#;
@@ -4121,8 +3694,6 @@ mod tests {
              cumulative-dominant model-a"
         );
 
-        // A later interrupt-style result with no assistant events in between
-        // must still resolve model-b, not the reverted model-a.
         let interrupt_line = r#"{"type":"result","session_id":"abc","is_error":false,"result":""}"#;
         let interrupt_chunk = parse_line_str(&mut parser, interrupt_line).unwrap();
         match interrupt_chunk {
@@ -4135,10 +3706,6 @@ mod tests {
 
     #[test]
     fn parse_result_plain_usage_only_turn_still_resolves_model_for_context_window() {
-        // Last-resort seed: when the tracker has observed nothing yet, a
-        // usage-only result must still resolve a model (for contextWindow
-        // lookup), seeding the tracker since there is no chronological value
-        // to protect.
         let mut parser = StreamParser::new();
         assert!(parser.model_tracker.resolve().is_none());
 
@@ -4160,8 +3727,6 @@ mod tests {
 
     #[test]
     fn parse_line_assistant_model_feeds_result_without_modelusage() {
-        // Only `capture_assistant_model` (via parse_line's "assistant" arm) can
-        // seed the tracker here: no preceding system init in this transcript.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_1","model":"model-observed","usage":{}}}"#;
@@ -4179,9 +3744,6 @@ mod tests {
 
     #[test]
     fn parse_line_sidechain_assistant_model_does_not_override_main_chain() {
-        // A subagent (sidechain) turn commonly runs a cheaper model (e.g.
-        // haiku); it must not overwrite the main-chain session model or
-        // its context window.
         let mut parser = StreamParser::new();
         let init_a = r#"{"type":"system","subtype":"init","model":"model-a"}"#;
         parse_line_str(&mut parser, init_a);
@@ -4205,10 +3767,6 @@ mod tests {
 
     #[test]
     fn synthetic_confirmation_after_a_chip_send_emits_no_chunk() {
-        // Empirically verified on the pinned CC: with --include-partial-messages
-        // a /model or /effort confirmation is a single complete assistant event
-        // (model "<synthetic>"), never a stream_event delta - so no suppression
-        // is needed; resume-side folding is Task 22's job (history.rs).
         let mut parser = StreamParser::new();
         let synthetic_line = r#"{"type":"assistant","message":{"id":"u_synth_1","role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"Set model to Sonnet 5 for this session only"}]}}"#;
         let chunks = parse_line_all_str(&mut parser, synthetic_line);
@@ -4220,8 +3778,6 @@ mod tests {
 
     #[test]
     fn parse_result_uses_conversation_model_window_not_the_dominant_subagent_model() {
-        // Regression: a Haiku subagent produced far more output than the
-        // conversation model, but the window must still be the latter's.
         let mut parser = StreamParser::new();
         parse_line_str(
             &mut parser,
@@ -4258,7 +3814,6 @@ mod tests {
             &mut parser,
             r#"{"type":"system","subtype":"init","model":"claude-opus-4-7"}"#,
         );
-        // Main-chain assistant event (parent_tool_use_id: null) — supersedes init.
         parse_line_str(
             &mut parser,
             r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_1","model":"claude-sonnet-4-6","role":"assistant"}}"#,
@@ -4290,12 +3845,10 @@ mod tests {
             &mut parser,
             r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
         );
-        // Sidechain via parent_tool_use_id.
         parse_line_str(
             &mut parser,
             r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"msg_1","model":"claude-haiku-4-5","role":"assistant"}}"#,
         );
-        // Sidechain via the on-disk isSidechain marker (no parent_tool_use_id).
         parse_line_str(
             &mut parser,
             r#"{"type":"assistant","isSidechain":true,"message":{"id":"msg_2","model":"claude-haiku-4-5","role":"assistant"}}"#,
@@ -4328,7 +3881,6 @@ mod tests {
             r#"{"type":"system","subtype":"init","model":"claude-fable-5"}"#,
         );
 
-        // modelUsage carries only a subagent's model this turn.
         let line = r#"{"type":"result","session_id":"abc","is_error":false,"total_cost_usd":0.10,"result":"","modelUsage":{"claude-haiku-4-5":{"inputTokens":10,"outputTokens":5000,"contextWindow":200000}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -4395,8 +3947,6 @@ mod tests {
 
     #[test]
     fn parse_result_error_produces_error_chunk() {
-        // `write_log_line` sanitizes on write, so `parse_result` itself must
-        // return the raw (unsanitized) result text in both chunk and log entry.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","is_error":true,"result":"Something went wrong"}"#;
         let (chunk, log_entry) = parse_line_full(&mut parser, line);
@@ -4410,12 +3960,9 @@ mod tests {
     }
     #[test]
     fn parse_result_error_with_empty_result_returns_placeholder_error() {
-        // Regression guard: `is_error=true` with empty `result` now surfaces a
-        // placeholder Error chunk instead of being swallowed.
         let mut parser = StreamParser::new();
         for line in [
             r#"{"type":"result","is_error":true,"result":""}"#,
-            // Missing `result` key entirely — same semantics as empty.
             r#"{"type":"result","is_error":true}"#,
         ] {
             let (chunk, log_entry) = parse_line_full(&mut parser, line);
@@ -4457,12 +4004,8 @@ mod tests {
         }
     }
 
-    // ── StreamParser: ignored types ──────────────────────────────────
-
     #[test]
     fn parse_assistant_type_emits_no_chunk() {
-        // Assistant messages emit no chunks (content streams via deltas; the
-        // Result carries the UUID); a missing `message.id` is ignored.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
         assert!(parse_line_str(&mut parser, line).is_none());
@@ -4474,8 +4017,6 @@ mod tests {
 
     #[test]
     fn parse_assistant_with_id_captures_pending_uuid() {
-        // Regression: the parser must stash `message.id` when seeing an
-        // `assistant` event so the next `Result` commits it.
         let mut parser = StreamParser::new();
         let line =
             r#"{"type":"assistant","message":{"id":"msg_abc123","role":"assistant","content":[]}}"#;
@@ -4486,8 +4027,6 @@ mod tests {
 
     #[test]
     fn result_commits_pending_assistant_uuid_and_clears_it() {
-        // The pending assistant UUID commits onto the Result (ADR-046) and is
-        // cleared for the next turn.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_turn1","role":"assistant","content":[]}}"#;
@@ -4502,7 +4041,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Fresh turn: Result with no preceding assistant must have None.
         parser.reset();
         let result2 = r#"{"type":"result","session_id":"550e8400-e29b-41d4-a716-446655440000","total_cost_usd":0.01,"is_error":false,"result":""}"#;
         let chunk = parse_line_str(&mut parser, result2).unwrap();
@@ -4519,8 +4057,6 @@ mod tests {
 
     #[test]
     fn assistant_uuid_does_not_leak_into_error_result() {
-        // An error turn also takes the pending UUID so a later success without
-        // its own `assistant` event isn't mislabeled.
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_err","role":"assistant","content":[]}}"#;
@@ -4528,15 +4064,11 @@ mod tests {
         parse_line_str(&mut parser, assistant);
         let chunk = parse_line_str(&mut parser, error_result).unwrap();
         assert!(matches!(chunk, StreamChunk::Error { .. }));
-        // parse_result `.take()`s the uuid up-front, so an error turn consumes
-        // it — no leak onto the next turn, without relying on reset().
         assert!(parser.pending_assistant_uuid.is_none());
     }
 
     #[test]
     fn assistant_uuid_survives_message_stop_before_result() {
-        // Local-LLM order: assistant → message_stop → result. message_stop's
-        // reset() must NOT drop the uuid the result needs (footer reconcile).
         let mut parser = StreamParser::new();
         let assistant =
             r#"{"type":"assistant","message":{"id":"msg_local","role":"assistant","content":[]}}"#;
@@ -4567,8 +4099,6 @@ mod tests {
 
     #[test]
     fn user_message_tool_result_does_not_emit_commit() {
-        // Tool-result wrappers carry a user role but must NOT commit a
-        // retry-point UUID — they're not real user prompts.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_tr","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
         let chunks = parse_line_all_str(&mut parser, line);
@@ -4578,8 +4108,6 @@ mod tests {
 
     #[test]
     fn user_message_mixed_text_and_tool_result_emits_tool_result_only() {
-        // Mixed content: a text block alongside a tool_result wrapper MUST NOT
-        // trigger a UserMessageCommit.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_mix","role":"user","content":[{"type":"text","text":"here is the result"},{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
         let chunks = parse_line_all_str(&mut parser, line);
@@ -4592,8 +4120,6 @@ mod tests {
 
     #[test]
     fn user_message_commit_is_emitted_exactly_once() {
-        // Duplicate user messages (observed on retry/resume) must not
-        // emit the commit twice — only the first occurrence wins.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_once","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
@@ -4614,8 +4140,6 @@ mod tests {
 
     #[test]
     fn user_message_commit_survives_reset() {
-        // Across a turn boundary (reset), a committed user UUID must stay in
-        // the dedup set so a re-echoed prompt isn't re-committed.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"user","message":{"id":"u_persist","role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(parse_line_all_str(&mut parser, line).len(), 1);
@@ -4677,8 +4201,6 @@ mod tests {
         assert!(parse_line_str(&mut parser, line).is_none());
     }
 
-    // ── StreamParser: system init message ────────────────────────────
-
     #[test]
     fn parse_system_init_extracts_model() {
         let mut parser = StreamParser::new();
@@ -4709,8 +4231,6 @@ mod tests {
 
     #[test]
     fn parse_system_init_without_model_still_surfaces_session_id() {
-        // ADR-045: the first-turn queue needs the session id even when the
-        // init line lacks a model.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -4766,7 +4286,6 @@ mod tests {
 
     #[test]
     fn stream_chunk_system_init_round_trips() {
-        // No session id → field omitted (wire shape unchanged for old events).
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: None,
@@ -4785,7 +4304,6 @@ mod tests {
             other => panic!("expected SystemInit after round-trip, got {other:?}"),
         }
 
-        // With session id → serialized for the frontend (ADR-045 first-turn queue).
         let chunk = StreamChunk::SystemInit {
             model: "test".to_string(),
             session_id: Some("abc".to_string()),
@@ -4867,8 +4385,6 @@ mod tests {
 
     #[test]
     fn parse_rate_limit_event_extracts_fields() {
-        // Real 2.1.173 wire shape: reset timestamp is camelCase `resetsAt`
-        // (drives the footer countdown).
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":73.5,"resetsAt":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -4893,7 +4409,6 @@ mod tests {
 
     #[test]
     fn parse_rate_limit_event_accepts_legacy_snake_case_resets_at() {
-        // Older builds emitted snake_case `resets_at`; the parser keeps a fallback.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resets_at":1738425600}}"#;
         let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -4991,8 +4506,6 @@ mod tests {
         assert!(parse_line_str(&mut parser, line).is_none());
     }
 
-    // ── ChatSession::new() ───────────────────────────────────────────
-
     #[test]
     fn chat_session_new_stores_project_name() {
         let session = ChatSession::new("acme-corp");
@@ -5007,12 +4520,8 @@ mod tests {
         assert!(session.pending_requests.lock().unwrap().is_empty());
     }
 
-    // ── Container name construction ──────────────────────────────────
-
     #[test]
     fn claude_container_name_uses_compose_prefix() {
-        // Use the `_with_prefix` variant with the fixed `COMPOSE_PREFIX` literal
-        // so the test does not depend on the process-global `data_dir()` basename.
         let name = claude_container_name_with_prefix(consts::COMPOSE_PREFIX, "myproject");
         assert_eq!(name, format!("{}_myproject_claude", consts::COMPOSE_PREFIX));
     }
@@ -5022,8 +4531,6 @@ mod tests {
         let name = claude_container_name_with_prefix(consts::COMPOSE_PREFIX, "acme-corp");
         assert_eq!(name, "speedwave_acme-corp_claude");
     }
-
-    // ── build_claude_args ────────────────────────────────────────────
 
     #[test]
     fn build_claude_args_without_resume() {
@@ -5046,7 +4553,6 @@ mod tests {
 
     #[test]
     fn build_claude_args_with_resume_and_uuid() {
-        // ADR-046: retry uses `--resume <session>` + `--resume-session-at <uuid>`.
         let session = "550e8400-e29b-41d4-a716-446655440000";
         let uuid = "msg_retry_anchor";
         let args = build_claude_args("inst", Some(session), Some(uuid), &[]);
@@ -5072,16 +4578,11 @@ mod tests {
 
     #[test]
     fn build_claude_args_prepends_instance_env_marker() {
-        // The instance marker is injected via `env VAR=id` BEFORE the claude
-        // binary so it lands in the container process's environ.
         let args = build_claude_args("my-instance-42", None, None, &[]);
         assert_eq!(args[0], "env");
         assert_eq!(args[1], "SPW_SESSION_INSTANCE_ID=my-instance-42");
-        // claude binary follows the env prefix.
         assert_eq!(args[2], consts::CLAUDE_BINARY);
     }
-
-    // ── Multi-event fixture test ─────────────────────────────────────
 
     #[test]
     fn full_turn_fixture_produces_expected_chunk_sequence() {
@@ -5092,8 +4593,6 @@ mod tests {
             .filter_map(|line| parse_line_str(&mut parser, line))
             .collect();
 
-        // Expected: Text×2, Thinking×2, ToolStart, ToolInputDelta×2,
-        // ToolResult, Text, Result (10 chunks; per-chunk asserts below).
         assert_eq!(chunks.len(), 10, "expected 10 chunks, got {}", chunks.len());
 
         match &chunks[0] {
@@ -5172,18 +4671,14 @@ mod tests {
         }
     }
 
-    // ── AskUserQuestion tests ───────────────────────────────────────
-
     #[test]
     fn parse_ask_user_question_suppressed_in_stream_events() {
         let mut parser = StreamParser::new();
 
-        // 1. content_block_start: tool_use with AskUserQuestion — suppressed (no ToolStart emitted)
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask1","name":"AskUserQuestion"}}}"#;
         let chunk = parse_line_str(&mut parser, start);
         assert!(chunk.is_none(), "AskUserQuestion should suppress ToolStart");
 
-        // 2. input_json_delta — also suppressed for AskUserQuestion
         let delta1 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"question\":\"Pick a fruit\","}}}"#;
         assert!(
             parse_line_str(&mut parser, delta1).is_none(),
@@ -5196,8 +4691,6 @@ mod tests {
             "AskUserQuestion input_json_delta should be suppressed"
         );
 
-        // 3. content_block_stop → AskUserQuestion is now handled via control_request,
-        //    stream events should NOT emit it (returns None)
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         assert!(
             parse_line_str(&mut parser, stop).is_none(),
@@ -5218,7 +4711,6 @@ mod tests {
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         parse_line_str(&mut parser, stop);
 
-        // tool_input should be cleaned up after emission
         assert!(parser.tool_input.is_empty());
         assert!(parser.active_blocks.is_empty());
     }
@@ -5289,19 +4781,15 @@ mod tests {
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_ask3","name":"AskUserQuestion"}}}"#;
         parse_line_str(&mut parser, start);
 
-        // Wrapped format: {"questions":[{...}]}
         let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"questions\":[{\"question\":\"Co wolisz?\",\"header\":\"Owoc\",\"multiSelect\":false,\"options\":[{\"label\":\"Gruszki\",\"description\":\"Zielone\"},{\"label\":\"Banany\",\"description\":\"Żółte\"}]}]}"}}}"#;
         parse_line_str(&mut parser, delta);
 
-        // content_block_stop should NOT emit AskUserQuestion (handled via control_request)
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         assert!(
             parse_line_str(&mut parser, stop).is_none(),
             "AskUserQuestion should not be emitted from stream events"
         );
     }
-
-    // ── Control protocol tests ────────────────────────────────────
 
     #[test]
     fn try_parse_control_request_returns_none_for_stream_event() {
@@ -5419,8 +4907,6 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_duplicate_question_text_fails_closed() {
-        // Two slots share question text; the host refuses the lossy payload
-        // and surfaces an error.
         let partial = make_partial(
             "req_dup",
             &[("Same?", "H1"), ("Same?", "H2")],
@@ -5450,8 +4936,6 @@ mod tests {
 
     #[test]
     fn submit_question_answer_no_session_errors_cleanly() {
-        // Without an active child, submit_question_answer must fail with
-        // "no active session" before mutating state.
         let mut s = ChatSession::new("test-project");
         s.pending_requests.lock().unwrap().insert(
             "tool-x".into(),
@@ -5464,7 +4948,6 @@ mod tests {
             err.to_string().contains("no active session"),
             "unexpected error: {err}"
         );
-        // The pending entry must NOT be mutated by a no-session error.
         let map = s.pending_requests.lock().unwrap();
         let entry = map.get("tool-x").expect("entry preserved");
         assert!(entry.answers[0].is_none(), "answers must not be modified");
@@ -5582,8 +5065,6 @@ mod tests {
 
     #[test]
     fn build_ask_user_response_multi_oversize_payload_serializes_to_more_than_64_kib() {
-        // Build a 4-question payload whose serialized wire response exceeds
-        // 64 KiB to exercise the wire-cap guard.
         let big = "x".repeat(20_000);
         let partial = make_partial(
             "req_oversize",
@@ -5706,7 +5187,6 @@ mod tests {
         assert_eq!(questions.len(), MAX_ASK_USER_QUESTIONS);
         assert_eq!(questions[0].question, "A");
         assert_eq!(questions[3].question, "D");
-        // E was truncated; we don't assert log capture here (covered by integration).
     }
 
     #[test]
@@ -5767,7 +5247,6 @@ mod tests {
         assert_eq!(questions[0].options.len(), 2);
         assert_eq!(questions[0].options[0].label, "Good");
         assert_eq!(questions[0].options[1].label, "Also good");
-        // Default value falls back to label when missing.
         assert_eq!(questions[0].options[1].value, "Also good");
     }
 
@@ -5796,10 +5275,6 @@ mod tests {
             .expect("--permission-prompt-tool should be in args");
         assert_eq!(args[pos + 1], "stdio");
     }
-
-    // ── Control request fixture test ────────────────────────────────
-
-    // ── prepare_args tests ──────────────────────────────────────────
 
     #[test]
     fn prepare_args_fails_when_project_not_in_config() {
@@ -5895,10 +5370,7 @@ mod tests {
         let (args, container) = result.unwrap();
         assert!(args.contains(&"-p".to_string()));
         assert!(container.contains("myproject"));
-        // No pin (SPEED-538): spawn must not carry any --effort flag.
         assert!(!args.contains(&"--effort".to_string()));
-        // SPEED-544: the spawn never carries --model; the pin file covers the
-        // pre-first-turn case via an idle respawn instead.
         assert!(!args.contains(&"--model".to_string()));
     }
 
@@ -5926,8 +5398,6 @@ mod tests {
         let pos = args.iter().position(|a| a == "--effort").unwrap();
         assert_eq!(args[pos + 1], "xhigh");
 
-        // max must round-trip too: it is session-only for CC's own settings
-        // key, but --effort at launch accepts it (SPEED-538).
         user_config.projects[0].effort_pin = Some("max".to_string());
         let (args, _) =
             ChatSession::prepare_args("myproject", &user_config, "inst", None, None).unwrap();
@@ -5959,7 +5429,6 @@ mod tests {
             ChatSession::prepare_args("proj", &user_config, "my-inst", Some(session_id), None);
         assert!(result.is_ok());
         let (args, _container) = result.unwrap();
-        // The instance marker is stamped ahead of the claude binary.
         assert!(args.contains(&format!(
             "{}=my-inst",
             speedwave_runtime::session::SESSION_INSTANCE_ENV
@@ -6014,8 +5483,6 @@ mod tests {
         }
     }
 
-    /// SPEED-544: no `--model` in argv ever; the pre-first-turn pick is covered by
-    /// the idle respawn reading the settings.json pin.
     #[test]
     fn prepare_args_never_appends_a_model_flag_without_a_pin_file() {
         let user_config = single_project_user_config();
@@ -6033,8 +5500,6 @@ mod tests {
             ChatSession::prepare_args("proj", &user_config, "inst", None, None).unwrap();
         assert!(!args.contains(&"--model".to_string()));
     }
-
-    // ── validate_retry_uuid ──────────────────────────────────────────
 
     #[test]
     fn validate_retry_uuid_accepts_api_msg_ids() {
@@ -6076,8 +5541,6 @@ mod tests {
         let too_long = "a".repeat(129);
         assert!(validate_retry_uuid(&too_long).is_err());
     }
-
-    // ── Silent failure prevention tests ──────────────────────────────
 
     #[test]
     fn tool_use_with_empty_id_returns_none() {
@@ -6173,14 +5636,12 @@ mod tests {
         let mut chunks: Vec<StreamChunk> = Vec::new();
 
         for line in fixture.lines() {
-            // control_requests are handled separately from stream events
             if let Some(ctrl) = try_parse_control_request_str(line) {
                 if ctrl.tool_name == ASK_USER_TOOL_NAME {
                     if let Some(chunk) = StreamParser::emit_ask_user_from_control_request(&ctrl) {
                         chunks.push(chunk);
                     }
                 }
-                // auto-approve for non-AskUserQuestion is a stdin write, not a chunk
                 continue;
             }
             if let Some(chunk) = parse_line_str(&mut parser, line) {
@@ -6188,7 +5649,6 @@ mod tests {
             }
         }
 
-        // Expected: Text, AskUserQuestion (from control_request), Text, Result
         assert_eq!(chunks.len(), 4, "expected 4 chunks, got {}", chunks.len());
 
         match &chunks[0] {
@@ -6219,8 +5679,6 @@ mod tests {
             other => panic!("chunk 3: expected Result, got {other:?}"),
         }
     }
-
-    // ── Slash command result_text tests ──────────────────────────────
 
     #[test]
     fn slash_command_result_includes_result_text() {
@@ -6308,9 +5766,6 @@ mod tests {
         );
     }
 
-    // ── context_usage (last main-chain API call) tests ──────────────
-
-    /// Assistant stream-json line with the given per-call usage numbers.
     fn assistant_line(input: u64, cr: u64, cw: u64, out: u64, parent: Option<&str>) -> String {
         let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
         format!(
@@ -6322,8 +5777,6 @@ mod tests {
 
     #[test]
     fn result_carries_last_assistant_call_usage_not_the_turn_sum() {
-        // Three API calls in one turn: summed cache_read (110k+120k+130k)
-        // would overflow any window; context_usage must be the LAST call only.
         let mut parser = StreamParser::new();
         for cr in [110_000, 120_000, 130_000] {
             parse_line_str(&mut parser, &assistant_line(5, cr, 100, 50, None));
@@ -6345,7 +5798,6 @@ mod tests {
     fn sidechain_assistant_usage_never_moves_the_context_meter() {
         let mut parser = StreamParser::new();
         parse_line_str(&mut parser, &assistant_line(5, 60_000, 100, 50, None));
-        // Subagent call with a huge foreign context must be ignored.
         parse_line_str(
             &mut parser,
             &assistant_line(9, 180_000, 900, 90, Some("toolu_task_1")),
@@ -6358,8 +5810,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
     }
-
-    // ── is_sidechain_event: shared heuristic (chat.rs live stream + history.rs transcript) ──
 
     #[test]
     fn is_sidechain_event_true_via_parent_tool_use_id() {
@@ -6393,7 +5843,6 @@ mod tests {
 
     #[test]
     fn is_sidechain_event_false_for_non_boolean_is_sidechain() {
-        // Malformed/unexpected type on isSidechain must not be treated as truthy.
         let v = serde_json::json!({"isSidechain": "true"});
         assert!(!is_sidechain_event(&v));
     }
@@ -6415,12 +5864,10 @@ mod tests {
     #[test]
     fn context_usage_absent_before_any_assistant_call_then_persists_across_turns() {
         let mut parser = StreamParser::new();
-        // Turn 1: no API call (e.g. local slash command) — nothing to report.
         match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
             StreamChunk::Result { context_usage, .. } => assert!(context_usage.is_none()),
             other => panic!("expected Result, got {other:?}"),
         }
-        // Turn 2: a real call; turn 3 has no call and must keep turn 2's value.
         parse_line_str(&mut parser, &assistant_line(5, 70_000, 100, 50, None));
         parse_line_str(&mut parser, RESULT_LINE).unwrap();
         match parse_line_str(&mut parser, RESULT_LINE).unwrap() {
@@ -6508,8 +5955,6 @@ mod tests {
         }
     }
 
-    // ── LogEntry tests ──────────────────────────────────────────────
-
     #[test]
     fn tool_use_start_produces_log_entry() {
         let mut parser = StreamParser::new();
@@ -6528,10 +5973,8 @@ mod tests {
     #[test]
     fn tool_use_stop_produces_log_entry() {
         let mut parser = StreamParser::new();
-        // Start first
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}}}"#;
         parse_line_full(&mut parser, start);
-        // Stop
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
         let (chunk, log_entry) = parse_line_full(&mut parser, stop);
         assert!(chunk.is_none(), "content_block_stop should not emit chunk");
@@ -6603,8 +6046,6 @@ mod tests {
         );
     }
 
-    // ── Session guard tests ─────────────────────────────────────────
-
     #[test]
     fn chat_session_new_has_no_session_log_path() {
         let session = ChatSession::new("test-project");
@@ -6625,8 +6066,6 @@ mod tests {
             "stop() on fresh session should not create log file"
         );
     }
-
-    // ── TurnUsage + per-turn meta tests ─────────────────────────────
 
     #[test]
     fn turn_usage_from_usage_info_defaults_missing_cache_fields_to_zero() {
@@ -6679,8 +6118,6 @@ mod tests {
 
     #[test]
     fn turn_usage_delta_saturates_on_reset() {
-        // After a resume or reset, `current` may momentarily be less than
-        // `previous`. The helper should report zero, not underflow.
         let prev = TurnUsage {
             input_tokens: 500,
             output_tokens: 500,
@@ -6699,8 +6136,6 @@ mod tests {
         assert_eq!(delta.cache_read_tokens, 0);
         assert_eq!(delta.cache_write_tokens, 0);
     }
-
-    // ── turn_usage_from_jsonl (JSONL usage SSOT) ────────────────────
 
     #[test]
     fn turn_usage_from_jsonl_maps_all_fields() {
@@ -6729,7 +6164,6 @@ mod tests {
 
     #[test]
     fn turn_usage_from_jsonl_zero_fills_malformed_values() {
-        // Non-u64 values (string, negative, float, null) read as 0, not an error.
         let u = serde_json::json!({
             "input_tokens": "many",
             "output_tokens": -3,
@@ -6755,8 +6189,6 @@ mod tests {
     #[test]
     fn parse_result_emits_turn_usage_from_flat_per_step_usage() {
         let mut parser = StreamParser::new();
-        // First turn: flat usage with all four fields. With no modelUsage,
-        // the parser treats this as per-step and emits it directly.
         let line = r#"{"type":"result","session_id":"s1","is_error":false,"result":"","total_cost_usd":0.003,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -6779,7 +6211,6 @@ mod tests {
     #[test]
     fn parse_result_three_turn_cumulative_modelusage_produces_correct_deltas() {
         let mut parser = StreamParser::new();
-        // Turn 1: cumulative = {in:5, out:3, cR:0, cW:10}. Delta = that.
         let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.01,"modelUsage":{"claude-opus-4-7":{"inputTokens":5,"outputTokens":3,"cacheReadInputTokens":0,"cacheCreationInputTokens":10}}}"#;
         let c1 = parse_line_str(&mut parser, t1).unwrap();
         match c1 {
@@ -6798,7 +6229,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Turn 2: cumulative = {in:12, out:8, cR:100, cW:10}. Delta = {7,5,100,0}.
         let t2 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.025,"modelUsage":{"claude-opus-4-7":{"inputTokens":12,"outputTokens":8,"cacheReadInputTokens":100,"cacheCreationInputTokens":10}}}"#;
         let c2 = parse_line_str(&mut parser, t2).unwrap();
         match c2 {
@@ -6817,7 +6247,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Turn 3: cumulative = {in:20, out:13, cR:200, cW:10}. Delta = {8,5,100,0}.
         let t3 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.040,"modelUsage":{"claude-opus-4-7":{"inputTokens":20,"outputTokens":13,"cacheReadInputTokens":200,"cacheCreationInputTokens":10}}}"#;
         let c3 = parse_line_str(&mut parser, t3).unwrap();
         match c3 {
@@ -6839,8 +6268,6 @@ mod tests {
 
     #[test]
     fn parse_result_resume_session_restores_snapshot_correctly() {
-        // Simulate mid-session resume: restore the snapshot, then verify the
-        // next Result's delta is against the baseline, not zero.
         let mut parser = StreamParser::new();
         parser.restore_session_snapshot(
             TurnUsage {
@@ -6854,8 +6281,6 @@ mod tests {
             None,
         );
 
-        // First Result after resume: cumulative = {in:110, out:55, cR:200, cW:30}.
-        // Expected delta: {10, 5, 0, 0}. turn_cost = 0.30 - 0.25 = 0.05.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.30,"modelUsage":{"claude-sonnet-4-6":{"inputTokens":110,"outputTokens":55,"cacheReadInputTokens":200,"cacheCreationInputTokens":30}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -6876,7 +6301,6 @@ mod tests {
             other => panic!("expected Result, got {other:?}"),
         }
 
-        // Snapshot advanced to the current cumulative total after the turn.
         let snap = parser.previous_session_usage();
         assert_eq!(snap.input_tokens, 110);
         assert_eq!(snap.output_tokens, 55);
@@ -6885,11 +6309,9 @@ mod tests {
     #[test]
     fn parse_result_uses_systeminit_model_when_modelusage_absent() {
         let mut parser = StreamParser::new();
-        // SystemInit captures the model
         let init = r#"{"type":"system","subtype":"init","model":"claude-haiku-4-5"}"#;
         parse_line_str(&mut parser, init);
 
-        // Result without modelUsage should fall back to the captured model
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":1,"output_tokens":1}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -6922,8 +6344,6 @@ mod tests {
 
     #[test]
     fn parse_result_treats_missing_cache_fields_as_zero() {
-        // Neither cache_read_input_tokens nor cache_creation_input_tokens —
-        // both must flatten to 0 in the emitted TurnUsage.
         let mut parser = StreamParser::new();
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":3,"output_tokens":4}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
@@ -6942,7 +6362,6 @@ mod tests {
     #[test]
     fn parse_result_first_turn_cost_uses_total_cost_when_no_prior_snapshot() {
         let mut parser = StreamParser::new();
-        // First Result: no previous cost snapshot — turn_cost == total_cost.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.123,"usage":{"input_tokens":1,"output_tokens":1}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -6982,7 +6401,6 @@ mod tests {
         );
         parser.new_session();
         assert_eq!(parser.previous_session_usage(), TurnUsage::default());
-        // Next Result with no prior history should emit the turn at face value.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.001,"usage":{"input_tokens":2,"output_tokens":3}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {
@@ -7000,8 +6418,6 @@ mod tests {
 
     #[test]
     fn parse_result_with_negative_cost_delta_drops_turn_cost() {
-        // Defensive: a cumulative cost below the previous snapshot drops
-        // `turn_cost` instead of reporting a negative value.
         let mut parser = StreamParser::new();
         let t1 = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.50}"#;
         parse_line_str(&mut parser, t1);
@@ -7020,8 +6436,6 @@ mod tests {
 
     #[test]
     fn extract_cumulative_usage_sums_multiple_models() {
-        // Rare but defined case: modelUsage has entries for two models
-        // (e.g., mid-session model switch). The cumulative is the sum.
         let parsed: serde_json::Value = serde_json::from_str(
             r#"{
                 "modelUsage": {
@@ -7048,8 +6462,6 @@ mod tests {
 
     #[test]
     fn turn_usage_serializes_with_required_cache_fields() {
-        // No optional fields: cache_read/write are always present in the
-        // wire format so the TS frontend can render without `??` guards.
         let t = TurnUsage {
             input_tokens: 1,
             output_tokens: 2,
@@ -7065,8 +6477,6 @@ mod tests {
 
     #[test]
     fn first_turn_after_resume_seed_emits_delta_not_cumulative() {
-        // Resume path: seed like `compute_resume_snapshot`, then assert the
-        // first result is the per-turn delta, not the cumulative.
         let mut parser = StreamParser::new();
         parser.restore_session_snapshot(
             TurnUsage {
@@ -7080,8 +6490,6 @@ mod tests {
             None,
         );
 
-        // First post-resume Result: cumulative jumps by {5 in, 3 out}.
-        // Without the seed the parser would report all 95/43 as the turn.
         let line = r#"{"type":"result","session_id":"s","is_error":false,"result":"","total_cost_usd":0.27,"modelUsage":{"claude-opus-4-7":{"inputTokens":95,"outputTokens":43,"cacheReadInputTokens":150,"cacheCreationInputTokens":20}}}"#;
         let chunk = parse_line_str(&mut parser, line).unwrap();
         match chunk {

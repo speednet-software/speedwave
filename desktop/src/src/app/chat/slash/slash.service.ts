@@ -51,7 +51,6 @@ export interface SlashCommand {
 export interface SlashDiscovery {
   readonly commands: readonly SlashCommand[];
   readonly source: DiscoverySource;
-  /** Why discovery failed, when `source === 'Unavailable'`. Absent on success. */
   readonly reason?: string | null;
 }
 
@@ -64,25 +63,16 @@ export class SlashService {
   private readonly tauri = inject(TauriService);
   private readonly log = inject(LoggerService);
 
-  /** Last discovered list of commands (empty until refresh resolves). */
   readonly commands = signal<readonly SlashCommand[]>([]);
-  /** True while a discovery call is in-flight. */
   readonly discovering = signal<boolean>(false);
-  /** Source of the last successful discovery; `null` on error. */
   readonly source = signal<DiscoverySource | null>(null);
-  /** Error message from the last failed discovery, if any. */
   readonly error = signal<string | null>(null);
-  /** True when the last discovery reported `source: 'Unavailable'`. */
   readonly unavailable = computed(() => this.source() === 'Unavailable');
-  /** Reason the last discovery was unavailable, if the backend supplied one. */
   readonly unavailableReason = signal<string | null>(null);
 
-  /** Convenience computed: is the popover "empty and loading"? */
   readonly isLoadingEmpty = computed(() => this.discovering() && this.commands().length === 0);
 
-  /** Promise of the in-flight `refresh()` call, if any (TS-side single-flight guard). */
   private inFlight: Promise<void> | null = null;
-  /** Project id the in-flight `refresh()` call is fetching for. */
   private inFlightProjectId: string | null = null;
 
   /**

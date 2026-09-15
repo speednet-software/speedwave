@@ -332,7 +332,6 @@ describe('MessageMetadataComponent', () => {
   });
 
   it('keeps a single [1m] suffix when the raw id ends with one', () => {
-    // Preserve a single `[1m]` suffix on the prettified id.
     setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m]' } }));
 
     const el = fixture.nativeElement as HTMLElement;
@@ -342,7 +341,6 @@ describe('MessageMetadataComponent', () => {
   });
 
   it('collapses repeated [1m] suffixes (regression: opus-4-7[1m][1m])', () => {
-    // Dedupe a doubled `[1m][1m]` suffix to a single `[1m]`.
     setEntry(baseAssistant({ meta: { model: 'claude-opus-4-7[1m][1m]' } }));
 
     const el = fixture.nativeElement as HTMLElement;

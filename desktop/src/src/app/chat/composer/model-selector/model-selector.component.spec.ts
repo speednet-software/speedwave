@@ -95,9 +95,6 @@ describe('ModelSelectorComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
     const badge = fixture.debugElement.query(By.css('[data-testid="composer-model-badge"]'));
-    // Exact "openrouter/" prefix stripped; the inner "anthropic/…" first
-    // segment must survive (a naive first-`/` slice would drop it). Not a
-    // catalog id, so the family-label mapping never applies: stays verbatim.
     expect(badge.nativeElement.textContent).toContain('anthropic/claude-sonnet-5');
     expect(badge.nativeElement.textContent).not.toContain('openrouter/');
   });
@@ -126,7 +123,6 @@ describe('ModelSelectorComponent', () => {
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-loading"]'))
     ).toBeFalsy();
-    // 1M-capable selectable entry expands to two options: bare and [1m].
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-option-claude-sonnet-5"]'))
     ).toBeTruthy();
@@ -174,11 +170,9 @@ describe('ModelSelectorComponent', () => {
     await fixture.componentInstance.openCombobox();
     await fixture.componentInstance.whenOptionsSettled();
     fixture.detectChanges();
-    // fable-5 has a 200k bare context but has_1m=true: must still offer [1m].
     expect(
       fixture.debugElement.query(By.css('[data-testid="model-selector-option-claude-fable-5[1m]"]'))
     ).toBeTruthy();
-    // haiku is also 200k context but has_1m=false: no [1m] alias offered.
     expect(
       fixture.debugElement.query(
         By.css('[data-testid="model-selector-option-claude-haiku-4-5[1m]"]')
@@ -345,13 +339,11 @@ describe('ModelSelectorComponent', () => {
     await fixture.componentInstance.whenOptionsSettled();
     expect(discoverCalls).toBe(1);
 
-    // Close and reopen for the same provider/base_url: reuses the cached result.
     fixture.componentInstance.open.set(false);
     await fixture.componentInstance.openCombobox();
     await fixture.componentInstance.whenOptionsSettled();
     expect(discoverCalls).toBe(1);
 
-    // A different base_url (provider/summary change) must invalidate the cache.
     const otherLocalSummary: ActiveProviderSummary = {
       ...localSummary,
       base_url: 'http://host.docker.internal:22222',
@@ -371,7 +363,6 @@ describe('ModelSelectorComponent', () => {
     await fixture.componentInstance.whenOptionsSettled();
     expect(discoverCalls).toBe(2);
 
-    // Retry (force) bypasses the cache even for the same key.
     await fixture.componentInstance.fetchOptions(true);
     expect(discoverCalls).toBe(3);
   });
@@ -595,12 +586,10 @@ describe('ModelSelectorComponent', () => {
         });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
-    // Start a load for project A (in flight, not yet resolved).
     fixture.componentRef.setInput('projectId', 'proj-effort-a');
     fixture.detectChanges();
     await fixture.whenStable();
 
-    // Switch to project B before A resolves; B gets its own pin going forward.
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summary);
       if (cmd === 'list_anthropic_models') return Promise.resolve(anthropicCatalog);
@@ -612,7 +601,6 @@ describe('ModelSelectorComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    // A's stale load resolves last; it must be dropped, not overwrite B's pin.
     resolvePinA('xhigh');
     await fixture.whenStable();
     fixture.detectChanges();
@@ -635,12 +623,10 @@ describe('ModelSelectorComponent', () => {
         });
       return Promise.reject(new Error(`unexpected: ${cmd}`));
     });
-    // Start a load for project A (in flight, not yet resolved).
     fixture.componentRef.setInput('projectId', 'proj-a');
     fixture.detectChanges();
     await fixture.whenStable();
 
-    // Switch to project B before A resolves; B gets its own summary going forward.
     tauriInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summaryB);
       if (cmd === 'list_anthropic_models') return Promise.resolve([]);
@@ -651,7 +637,6 @@ describe('ModelSelectorComponent', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    // A's stale load resolves last; it must be dropped, not overwrite B's summary.
     resolveA({
       provider_id: 'anthropic',
       kind: 'anthropic_oauth',
@@ -671,14 +656,10 @@ describe('ModelSelectorComponent', () => {
       model: 'openrouter/some-model',
       base_url: null,
     };
-    // Project A resolves first, leaving a non-null summary in place.
     await fixture.whenStable();
     fixture.detectChanges();
     expect(fixture.componentInstance['summary']()).toEqual(summary);
 
-    // Switch to project B, but do not let the constructor effect's own load
-    // race the assertion below: it resolves to summaryB too, so either caller
-    // observes the same correct result.
     tauriInvoke.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_active_provider_summary') return Promise.resolve(summaryB);
       if (cmd === 'discover_llm_models') return Promise.resolve({ models: [] });
@@ -701,7 +682,6 @@ describe('ModelSelectorComponent', () => {
   it('surfaces a model-selection write-through error next to the badge, then clears it', async () => {
     await fixture.whenStable();
     fixture.detectChanges();
-    // No error input yet: nothing is shown.
     expect(fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'))).toBeFalsy();
 
     fixture.componentRef.setInput('modelError', 'locked config');
@@ -710,7 +690,6 @@ describe('ModelSelectorComponent', () => {
     expect(err).toBeTruthy();
     expect(err.nativeElement.textContent).toContain('locked config');
 
-    // A successful selection clears the error upstream; the input goes empty.
     fixture.componentRef.setInput('modelError', '');
     fixture.detectChanges();
     expect(fixture.debugElement.query(By.css('[data-testid="model-selection-error"]'))).toBeFalsy();
@@ -720,8 +699,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
   let fixture: ComponentFixture<ModelSelectorComponent>;
   let tauriInvoke: ReturnType<typeof vi.fn>;
 
-  // The REAL backend shape: effective_active_model() is None for anthropic
-  // (license-default rules the model; clear_anthropic_models wipes any stored one).
   const configlessSummary: ActiveProviderSummary = {
     provider_id: 'anthropic',
     kind: 'anthropic_oauth',
@@ -789,16 +766,12 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     fixture.componentRef.setInput('projectId', 'proj-2');
     fixture.detectChanges();
     await fixture.whenStable();
-    // The hint fetch is fired from inside loadSummary; flush its microtask chain.
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
     expect(badgeText()).toBe('Fable 5 [1m]');
   });
 
   it('shows an id the catalog does not know verbatim (SPEED-540 demo: fable[1m] -> claude-fable-5-1[1m])', async () => {
-    // get_model_hint resolves a Claude Code alias to its catalog id server-side
-    // (defaults::resolve_model_alias); this fixture's catalog only carries
-    // claude-fable-5, so claude-fable-5-1 is unknown here and stays verbatim.
     modelHint = 'claude-fable-5-1[1m]';
     fixture.componentRef.setInput('projectId', 'proj-2');
     fixture.detectChanges();
@@ -819,9 +792,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
   });
 
   it('prefers the live session model over the stored config model (wire switch truth)', async () => {
-    // Field repro (OpenRouter): a session-scoped wire /model diverges from the
-    // config, which is only the next-session default - the badge must follow
-    // the init-reported live model, not the stale stored one.
     tauriInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === 'get_active_provider_summary')
         return {
@@ -850,13 +820,10 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     fixture.detectChanges();
     await fixture.whenStable();
     fixture.detectChanges();
-    // claude-opus-4-8 is not in this fixture's catalog: verbatim.
     expect(badgeText()).toBe('claude-opus-4-8');
   });
 
   it('drops a session-scoped pick when a new conversation starts, falling back to the hint', async () => {
-    // Field repro: pick mid-session, press "+" (session ends) - the badge must
-    // NOT keep the previous conversation's session-scoped pick.
     modelHint = 'claude-opus-4-8';
     fixture.componentRef.setInput('sessionModel', 'claude-opus-4-8');
     await fixture.whenStable();
@@ -879,7 +846,6 @@ describe('ModelSelectorComponent badge fallback (anthropic carries no config mod
     await fixture.whenStable();
     await new Promise((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
-    // claude-opus-4-8 is not in this fixture's catalog: verbatim.
     expect(badgeText()).toBe('claude-opus-4-8');
   });
 
@@ -972,10 +938,6 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
     });
   }
 
-  /**
-   * Settles the summary→catalog-load effect cascade, which needs a macrotask turn beyond `whenStable`.
-   * @param fixt - Fixture under test.
-   */
   async function flush(fixt: ComponentFixture<ModelSelectorComponent>): Promise<void> {
     await fixt.whenStable();
     fixt.detectChanges();
@@ -1088,7 +1050,6 @@ describe('ModelSelectorComponent effort slider — per-model stop restriction', 
 
     expect(fixture.debugElement.query(By.css('[data-testid="effort-popover"]'))).toBeFalsy();
     expect(emitted).toEqual([]);
-    // Re-opening starts fresh from the (unchanged) pin, not the discarded tentative move.
     fixture.debugElement.query(By.css('[data-testid="effort-segment"]')).nativeElement.click();
     fixture.detectChanges();
     const reopened = fixture.debugElement.query(By.css('[data-testid="effort-slider"]'));

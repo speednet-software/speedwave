@@ -18,7 +18,6 @@ import { isAnthropicKind } from '../../../models/llm';
 import { normalizeObserved, wireModelId } from './wire-model-id';
 import { EffortSliderComponent, capitalizeLevel } from './effort-slider.component';
 
-/** One row in the combobox, normalized across the three provider sources. */
 interface ModelOption {
   id: string;
   label: string;
@@ -179,21 +178,15 @@ export class ModelSelectorComponent {
   private readonly anthropicModels = inject(AnthropicModelsService);
   private readonly log = inject(LoggerService);
 
-  /** Active project id, used for the summary fetch and discovery calls. */
   readonly projectId = input.required<string>();
-  /** True while a turn is streaming; disables the badge (ADR-045-style lock). */
   readonly streaming = input(false);
 
-  /** Write-through error from `ChatStateService.applyModelSelection`; '' when none. */
   readonly modelError = input('');
 
-  /** Live session model (SystemInit); the anthropic badge fallback, since config carries no model. */
   readonly sessionModel = input('');
 
-  /** Routed to `ChatStateService.applyModelSelection`. */
   readonly modelSelected = output<ModelSelection>();
 
-  /** Effort pick, routed to `ChatStateService.applyEffortSelection` (live wire `/effort`). */
   readonly effortSelected = output<string>();
 
   readonly open = signal(false);
@@ -201,75 +194,51 @@ export class ModelSelectorComponent {
   readonly loading = signal(false);
   readonly error = signal('');
   protected readonly summary = signal<ActiveProviderSummary | null>(null);
-  /** Project id the current `summary` was fetched for; drives staleness checks. */
   private summaryProjectId: string | null = null;
   private readonly options = signal<ModelOption[]>([]);
 
-  /** In-flight option fetch, awaited by tests to settle the fire-and-forget open. */
   private optionsFetch: Promise<void> = Promise.resolve();
 
-  /**
-   * Last-successful local/OpenRouter discovery result, keyed by `kind|base_url` so a
-   * provider or summary change invalidates it; re-opening the combobox for the same
-   * key reuses it instead of re-issuing a live `discover_llm_models` VM+host probe.
-   */
   private discoverCache: { key: string; options: ModelOption[] } | null = null;
 
-  /** Full Anthropic catalog (selectable and legacy entries), the slider stops' SSOT. */
   private readonly anthropicCatalog = signal<AnthropicModel[]>([]);
   protected readonly currentEffortPin = signal<string | null>(null);
   protected readonly effortOpen = signal(false);
 
-  /** Optimistic badge value after a live anthropic pick (no config write to re-read it from). */
   private readonly lastPicked = signal('');
 
-  /** CC-parity pre-session hint: settings.json model pin, else the newest transcript's model. */
   private readonly modelHint = signal('');
 
-  /** Anthropic-only: `effortLevel` is a Claude Code settings.json concept, not a provider one. */
   protected readonly showEffortControl = computed(() => {
     const summary = this.summary();
     return summary !== null && isAnthropicKind(summary.kind);
   });
 
-  /** Full catalog entry backing the displayed model id (`[1m]` suffix stripped). */
   private readonly currentModelEntry = computed<AnthropicModel | null>(() => {
     const bare = this.displayModel().replace(/(\[1m\])+$/, '');
     return this.anthropicCatalog().find((m) => m.id === bare) ?? null;
   });
 
-  /**
-   * Any full 5-level catalog entry — the stop-list fallback for a display state with
-   * no resolved catalog id (the pre-session "default" state, or an unrecognized pin).
-   */
   private readonly fullLevelEntry = computed<AnthropicModel | null>(
     () => this.anthropicCatalog().find((m) => m.effort_levels.length === 5) ?? null
   );
 
-  /** Slider stops for the active model, `low`→`max`; empty hides the segment (Haiku 4.5). */
   protected readonly effortStops = computed<string[]>(
     () => this.currentModelEntry()?.effort_levels ?? this.fullLevelEntry()?.effort_levels ?? []
   );
 
-  /** The active model's own default effort (`high`, `xhigh` on Opus 4.7), shown unpinned. */
   private readonly catalogDefaultEffort = computed<string | null>(
     () => this.currentModelEntry()?.default_effort ?? this.fullLevelEntry()?.default_effort ?? null
   );
 
-  /** Canonical `low`→`max` order, read from a full 5-level entry (never a hardcoded list). */
   private readonly canonicalOrder = computed<string[]>(
     () => this.fullLevelEntry()?.effort_levels ?? []
   );
 
-  /** Hidden entirely when the active model has no effort levels (Haiku 4.5) or provider is routed. */
   protected readonly showEffortSegment = computed(
     () => this.showEffortControl() && this.effortStops().length > 0
   );
 
-  /**
-   * The level the handle/segment show: the pin if supported, else the highest supported
-   * level at or below it (Claude Code's own clamp); unpinned, the model's catalog default.
-   */
   protected readonly effectiveEffortLevel = computed<string | null>(() => {
     const stops = this.effortStops();
     if (stops.length === 0) return null;
@@ -284,14 +253,12 @@ export class ModelSelectorComponent {
     return stops[0];
   });
 
-  /** Pill segment text: capitalized effective level, or "Default" with no pin. */
   protected readonly effortSegmentLabel = computed<string>(() => {
     if (this.currentEffortPin() === null) return 'Default';
     const level = this.effectiveEffortLevel();
     return level ? capitalizeLevel(level) : 'Default';
   });
 
-  /** Pill model segment: catalog family label (+ ` [1m]`) for a known id, else verbatim. */
   protected readonly displayModelLabel = computed<string>(() => {
     const id = this.displayModel();
     const entry = this.currentModelEntry();
@@ -299,10 +266,8 @@ export class ModelSelectorComponent {
     return id.endsWith('[1m]') ? `${entry.family} [1m]` : entry.family;
   });
 
-  /** Last `sessionModel` seen by the reload effect; detects a genuine session-start transition. */
   private lastSessionModel = '';
 
-  /** Last `modelError` seen by the resync effect; detects a genuine new failure. */
   private lastModelError = '';
 
   /** Reloads the active-provider summary whenever the project id changes. */
@@ -319,7 +284,6 @@ export class ModelSelectorComponent {
       const id = this.projectId();
       if (this.showEffortControl() && id) void this.loadAnthropicCatalog();
     });
-    // A new session applies any pending effort pin; re-read it so the badge clears.
     effect(() => {
       const live = this.sessionModel();
       const changed = live !== '' && live !== this.lastSessionModel;
@@ -327,15 +291,11 @@ export class ModelSelectorComponent {
       this.lastSessionModel = live;
       const id = this.projectId();
       if (changed && this.showEffortControl() && id) void this.loadEffortState(id);
-      // Session over (new conversation/reset): a wire pick was session-scoped, so
-      // drop the optimistic badge and re-read the next-session hint.
       if (ended) {
         this.lastPicked.set('');
         if (id && !this.summary()?.model) void this.loadModelHint(id);
       }
     });
-    // A failed pin write-through (ChatStateService.applyEffortSelection)
-    // must not leave the optimistic badge on a level that never persisted.
     effect(() => {
       const err = this.modelError();
       const changed = err !== '' && err !== this.lastModelError;
@@ -345,12 +305,6 @@ export class ModelSelectorComponent {
     });
   }
 
-  /**
-   * Badge text, never empty: optimistic anthropic pick -> observed session model
-   * (the CURRENT-session truth: a wire /model can diverge from the stored config,
-   * which is only the next-session default) -> config model -> CC's own pin /
-   * last-transcript hint -> 'default' (a virgin project, CC resolves its default).
-   */
   readonly displayModel = computed<string>(() => {
     const s = this.summary();
     const picked = this.lastPicked();
@@ -390,7 +344,6 @@ export class ModelSelectorComponent {
     return this.optionsFetch;
   }
 
-  /** Escape closes whichever popover (model list or effort slider) is open. */
   protected onEscape(): void {
     if (this.open()) this.open.set(false);
     if (this.effortOpen()) this.effortOpen.set(false);
@@ -404,14 +357,6 @@ export class ModelSelectorComponent {
     this.query.set(value);
   }
 
-  /**
-   * Expands a 1M-priced selectable Anthropic entry into two options: the bare
-   * id and the `[1m]` 1M-priced-alias id (Task 7 catalog contract). Gated on
-   * `has_1m` (backend `pricing_1m.is_some()`), NOT `context_tokens >= 1_000_000`
-   * — claude-fable-5 reports a 200k bare context yet still prices a `[1m]` alias.
-   * @param list - Full Anthropic catalog from `list_anthropic_models`.
-   * @returns The selectable options, `[1m]` variants included.
-   */
   private anthropicOptionsFrom(list: AnthropicModel[]): ModelOption[] {
     const rows: ModelOption[] = [];
     for (const m of list) {
@@ -428,12 +373,6 @@ export class ModelSelectorComponent {
     return rows;
   }
 
-  /**
-   * Runs a `discover_llm_models` probe for one provider and maps the result into
-   * combobox options; the single source both the OpenRouter and local branches call.
-   * @param provider - Wire provider id (`'openrouter'` or `'local'`).
-   * @param baseUrl - Server base URL (`''` for OpenRouter, the summary's URL for local).
-   */
   private async fetchDiscoverOptions(provider: string, baseUrl: string): Promise<ModelOption[]> {
     const res = await this.tauri.invoke<DiscoverResult>('discover_llm_models', {
       args: { provider, baseUrl, apiKey: undefined },
@@ -504,10 +443,6 @@ export class ModelSelectorComponent {
     this.open.set(false);
   }
 
-  /**
-   * Drops the result if the project changed while the fetch was in flight.
-   * @param projectId - Project id to fetch the active-provider summary for.
-   */
   private async loadSummary(projectId: string): Promise<void> {
     try {
       const summary = await this.tauri.invoke<ActiveProviderSummary>(
@@ -531,10 +466,6 @@ export class ModelSelectorComponent {
     }
   }
 
-  /**
-   * Loads the pre-session model hint; drops the result if the project changed mid-flight.
-   * @param projectId - Project id the hint is fetched for.
-   */
   private async loadModelHint(projectId: string): Promise<void> {
     try {
       const hint = await this.tauri.invoke<string | null>('get_model_hint', { projectId });
@@ -546,11 +477,6 @@ export class ModelSelectorComponent {
     }
   }
 
-  /**
-   * Loads the current launch-effort pin for the project (or `null` when unset).
-   * Drops the result if the project changed while the fetch was in flight.
-   * @param projectId - Active project id to read the pin for.
-   */
   private async loadEffortState(projectId: string): Promise<void> {
     try {
       const pin = await this.tauri.invoke<string | null>('get_effort_pin', { projectId });
@@ -562,23 +488,16 @@ export class ModelSelectorComponent {
     }
   }
 
-  /** Loads the full Anthropic catalog backing the slider stops and the pill's family label. */
   private async loadAnthropicCatalog(): Promise<void> {
     const list = await this.anthropicModels.list();
     this.anthropicCatalog.set(list);
   }
 
-  /** Toggles the effort popover, closing the model combobox if it was open. */
   protected toggleEffortPopover(): void {
     this.open.set(false);
     this.effortOpen.update((v) => !v);
   }
 
-  /**
-   * Applies a slider pick: closes the popover, updates the pin display, and emits
-   * `effortSelected` (`ChatStateService.applyEffortSelection` persists the pin then wires).
-   * @param level - The chosen stop, one of `effortStops()`.
-   */
   protected onEffortSliderSelect(level: string): void {
     this.currentEffortPin.set(level);
     this.effortOpen.set(false);

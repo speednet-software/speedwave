@@ -12,7 +12,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Recorded `remove_images` call args: `(tags, force)`.
 type RemoveImagesCall = (Vec<String>, bool);
 
 /// Shared introspection handles cloned into the mock before wrapping.
@@ -186,8 +185,6 @@ enum BuildResult {
     AllErr(String),
 }
 
-/// Per-tag build attempt counter. Keyed by image tag, value is the running
-/// 1-based attempt count.
 type AttemptCounter = Arc<Mutex<HashMap<String, u32>>>;
 
 impl Default for MockRuntimeBuilder {
@@ -559,7 +556,6 @@ impl ContainerRuntime for MockRuntime {
         if let Some(err) = &self.exec_piped_error {
             anyhow::bail!("{err}");
         }
-        // FIFO failure queue: returns a Command that writes stderr and exits non-zero.
         let next_failure = {
             let mut q = self.exec_piped_failure_queue.lock().unwrap();
             if q.is_empty() {
@@ -607,7 +603,6 @@ impl ContainerRuntime for MockRuntime {
         containerfile: &str,
         build_args: &[(&str, &str)],
     ) -> anyhow::Result<()> {
-        // Panic before recording so panicking calls do not show up in `build_calls`.
         for needle in &self.build_panic_substrings {
             if tag.contains(needle.as_str()) {
                 panic!("mock build_image panic for tag containing {needle:?}");
@@ -628,7 +623,6 @@ impl ContainerRuntime for MockRuntime {
             *entry += 1;
             *entry
         };
-        // Per-attempt override beats the global tag/all-err result.
         let outcome = if let Some(msg) = self.build_attempt_errors.get(&(tag.to_string(), attempt))
         {
             Err(msg.clone())
@@ -644,7 +638,6 @@ impl ContainerRuntime for MockRuntime {
         };
         match outcome {
             Ok(()) => {
-                // Mirror real-runtime semantics: a successful build makes the tag exist.
                 self.image_exists
                     .lock()
                     .unwrap()
@@ -693,7 +686,6 @@ impl ContainerRuntime for MockRuntime {
         if let Some(err) = &self.image_exists_error {
             anyhow::bail!("{err}");
         }
-        // Exact-match override wins; then substring "missing" rule; then default.
         if let Some(v) = self.image_exists.lock().unwrap().get(tag).copied() {
             return Ok(v);
         }
@@ -865,7 +857,6 @@ mod tests {
 
     #[test]
     fn validate_script_consumes_in_fifo_order() {
-        // First push -> first pop. Matches push_exec_piped_failure semantics.
         let (rt, _) = MockRuntimeBuilder::new()
             .push_validate_result(Err("propagation lag".to_string()))
             .push_validate_result(Ok(()))
@@ -906,7 +897,6 @@ mod tests {
 
     #[test]
     fn successful_build_makes_image_exist_next_call() {
-        // Mirrors real-runtime semantics: image_exists returns true after a successful build.
         let (rt, handles) = MockRuntimeBuilder::new().build();
         assert!(!rt.image_exists("fresh:1").unwrap());
         rt.build_image("fresh:1", ".", "C", &[]).unwrap();
@@ -968,7 +958,6 @@ mod tests {
             .push_exec_piped_failure("first failure stderr")
             .push_exec_piped_failure("second failure stderr")
             .build();
-        // First call: returns Command that fails with the first message.
         let out1 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
@@ -976,7 +965,6 @@ mod tests {
             .unwrap();
         assert!(!out1.status.success());
         assert!(String::from_utf8_lossy(&out1.stderr).contains("first failure stderr"));
-        // Second call: pops the second entry.
         let out2 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()
@@ -984,7 +972,6 @@ mod tests {
             .unwrap();
         assert!(!out2.status.success());
         assert!(String::from_utf8_lossy(&out2.stderr).contains("second failure stderr"));
-        // Third call: queue drained, falls back to default success.
         let out3 = rt
             .container_exec_piped("c", &["true"])
             .unwrap()

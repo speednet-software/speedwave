@@ -1,6 +1,3 @@
-//! Chronological session-model tracking: the LAST init or real assistant model
-//! wins, never cumulative-usage dominance (a mid-session /model switch must stick).
-
 pub(crate) const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 #[derive(Default)]

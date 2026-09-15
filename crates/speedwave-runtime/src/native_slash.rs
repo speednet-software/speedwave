@@ -296,10 +296,6 @@ mod tests {
         }
     }
 
-    /// Pins the exact name set of `NATIVE_SLASH_COMMANDS`. This is a
-    /// default-deny allowlist with no live guard against Claude Code shipping
-    /// new built-ins: any addition or removal here must be a deliberate,
-    /// reviewed change, not a silent drift — this test forces that review.
     #[test]
     fn native_slash_commands_name_set_is_pinned() {
         let mut actual: Vec<&str> = NATIVE_SLASH_COMMANDS.iter().map(|c| c.name).collect();

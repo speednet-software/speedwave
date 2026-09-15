@@ -17,12 +17,6 @@ interface ControlShapeCase {
   readonly is_control: boolean;
 }
 
-/**
- * Shared Rust↔TS fixture table (`crates/speedwave-runtime/src/fixtures/control_command_shape.json`):
- * both Rust `parse_control_command` and this spec assert against the same
- * cases, so a divergence (e.g. TS matching a tab that Rust rejects) fails on
- * whichever side regresses.
- */
 const FIXTURE_REL = join(
   'crates',
   'speedwave-runtime',
@@ -31,7 +25,6 @@ const FIXTURE_REL = join(
   'control_command_shape.json'
 );
 
-// __dirname depth varies under the coverage transform; walk up to the repo root.
 function locateFixture(): string {
   let dir = __dirname;
   for (let i = 0; i < 12; i++) {
@@ -113,7 +106,6 @@ function makeMockLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 }
 
-/** Resolves only after `tick()` is called; lets a test hold a refresh() mid-flight. */
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (v: T) => void;
@@ -280,9 +272,7 @@ describe('SlashService', () => {
   });
 
   it('isLoadingEmpty computes true only while discovering an empty list', async () => {
-    const never = new Promise<SlashDiscovery>(() => {
-      /* pending forever */
-    });
+    const never = new Promise<SlashDiscovery>(() => {});
     tauri.invokeMock.mockReturnValue(never);
     const pending = service.refresh('acme');
     expect(service.isLoadingEmpty()).toBe(true);
@@ -296,7 +286,6 @@ describe('SlashService', () => {
     const call1 = service.refresh('acme');
     expect(service.discovering()).toBe(true);
 
-    // Second caller arrives while the first is still in flight.
     const call2 = service.refresh('acme');
 
     first.resolve({
@@ -323,7 +312,6 @@ describe('SlashService', () => {
     tauri.invokeMock.mockReturnValueOnce(forB.promise);
     const callB = service.refresh('project-b');
 
-    // Both calls actually hit the backend — no coalescing across projects.
     expect(tauri.invokeMock).toHaveBeenCalledTimes(2);
     expect(tauri.invokeMock).toHaveBeenNthCalledWith(1, 'list_slash_commands', {
       projectId: 'project-a',
@@ -342,7 +330,6 @@ describe('SlashService', () => {
     expect(service.commands().map((c) => c.name)).toEqual(['b-cmd']);
     expect(service.discovering()).toBe(false);
 
-    // A's late result must not clobber B's already-applied signals.
     forA.resolve({
       commands: [
         { name: 'a-cmd', description: null, argument_hint: null, kind: 'Command', plugin: null },

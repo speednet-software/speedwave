@@ -1,11 +1,8 @@
-//! Tauri commands for the composer's effort pin and model hint.
-
 use std::path::Path;
 
 use crate::types::check_project;
 use speedwave_runtime::config;
 
-/// Resolves `project_id` to its persisted project name, or a frontend-facing error string.
 fn resolve_project_name(project_id: &str) -> Result<String, String> {
     check_project(project_id)?;
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -15,8 +12,6 @@ fn resolve_project_name(project_id: &str) -> Result<String, String> {
     Ok(project.name.clone())
 }
 
-/// One-time takeover of a legacy `effortLevel` into a registered, unpinned project's config
-/// pin; best-effort, so an unreadable settings.json is logged and never blocks a spawn.
 pub(crate) fn ensure_effort_pin_migrated_in(
     data_dir: &std::path::Path,
     project_name: &str,
@@ -51,8 +46,6 @@ pub(crate) fn ensure_effort_pin_migrated_in(
     .map_err(|e: anyhow::Error| e.to_string())
 }
 
-/// `data_dir`-parameterized effort pin write, under the config lock; rejects a
-/// level outside `defaults::EFFORT_LEVELS`. Mirrors `containers_cmd::set_provider_model_in`.
 fn set_effort_pin_in(
     data_dir: &std::path::Path,
     project_name: &str,
@@ -90,8 +83,6 @@ pub(crate) fn set_effort_pin(project_id: String, level: String) -> Result<(), St
     set_effort_pin_in(speedwave_runtime::consts::data_dir(), &project_name, &level)
 }
 
-/// Pre-session badge hint: the settings `model` pin first (CC aliases resolved), else the newest
-/// transcript model; only `claude-*` ids qualify, so a foreign provider id never leaks.
 #[tauri::command]
 pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, String> {
     let project_name = resolve_project_name(&project_id)?;
@@ -101,8 +92,6 @@ pub(crate) fn get_model_hint(project_id: String) -> Result<Option<String>, Strin
     ))
 }
 
-/// Testable core of [`get_model_hint`]: explicit `data_dir` so the source order can be
-/// unit-tested against a tempdir.
 fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
     let pin = crate::claude_settings::get_model_pin(data_dir, project)
         .map(|pin| speedwave_runtime::defaults::resolve_model_alias(&pin))
@@ -112,8 +101,6 @@ fn get_model_hint_in(data_dir: &Path, project: &str) -> Option<String> {
     })
 }
 
-/// Persists an Anthropic model pick as the settings.json `model` key for the next spawn;
-/// routed (local/OpenRouter) picks never call this.
 #[tauri::command]
 pub(crate) fn set_model_pin(project_id: String, model: String) -> Result<(), String> {
     let project_name = resolve_project_name(&project_id)?;
@@ -133,8 +120,6 @@ pub(crate) fn set_model_pin(project_id: String, model: String) -> Result<(), Str
 mod tests {
     use super::*;
 
-    /// Writes a raw `model` value straight into settings.json (bypassing `set_model_pin`)
-    /// so the read side can be tested with aliases Claude Code itself writes.
     fn write_model_pin(data_dir: &Path, project: &str, model: &str) {
         let dir =
             speedwave_runtime::claude_home::claude_home_dir(data_dir, project).join(".claude");
@@ -146,8 +131,6 @@ mod tests {
         .unwrap();
     }
 
-    /// Writes a one-line transcript whose session-start model is `model`,
-    /// standing in for a prior chat session `last_session_model` walks back to.
     fn write_transcript_session(data_dir: &Path, project: &str, model: &str) {
         let dir = crate::history::sessions_dir_impl(data_dir, project);
         std::fs::create_dir_all(&dir).unwrap();
@@ -225,15 +208,11 @@ mod tests {
 
     #[test]
     fn set_model_pin_shares_the_same_resolution_error_as_the_effort_commands() {
-        // set_model_pin delegates to the same resolve_project_name as the effort
-        // commands: an invalid project_id must surface the identical error class.
         let model_err = set_model_pin(String::new(), "claude-sonnet-5".to_string()).unwrap_err();
         let effort_err = set_effort_pin(String::new(), "low".to_string()).unwrap_err();
         assert_eq!(model_err, effort_err);
         assert_eq!(model_err, resolve_project_name("").unwrap_err());
     }
-
-    // ── get_model_hint_in: pin-first, transcript-fallback, none ──────────
 
     #[test]
     fn get_model_hint_in_prefers_the_pin_over_transcript_history() {
@@ -246,8 +225,6 @@ mod tests {
         );
     }
 
-    /// Ticket demo: a hand-written `fable[1m]` pin resolves to the latest Fable id with
-    /// the `[1m]` suffix kept.
     #[test]
     fn get_model_hint_in_resolves_an_alias_pin_to_its_latest_catalog_id() {
         let tmp = tempfile::tempdir().unwrap();
@@ -423,7 +400,6 @@ mod tests {
         );
     }
 
-    /// A slash-free routed model id left in settings.json by an interactive CLI session.
     #[test]
     fn get_model_hint_in_skips_a_foreign_pin_and_falls_back_to_transcript_history() {
         let tmp = tempfile::tempdir().unwrap();
@@ -511,8 +487,6 @@ mod tests {
         );
     }
 
-    /// The transcript-side protection survives: without a pin, a foreign
-    /// provider's transcript must not poison the Anthropic badge.
     #[test]
     fn get_model_hint_in_ignores_a_foreign_provider_transcript_without_a_pin() {
         let tmp = tempfile::tempdir().unwrap();

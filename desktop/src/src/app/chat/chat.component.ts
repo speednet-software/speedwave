@@ -56,14 +56,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   historyError = '';
   projectMemory = '';
   memoryError = '';
-  /**
-   * Active project's git branch, or `null` when not a repo. Re-read after each turn.
-   */
   readonly gitBranch = signal<string | null>(null);
-  /**
-   * Index of the most recent assistant message in `messagesFromState()`;
-   * `-1` when none.
-   */
   readonly lastAssistantIndex = computed(() => {
     const msgs = this.chat.messagesFromState();
     for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -72,18 +65,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     return -1;
   });
 
-  /** Composer's max-context hint (e.g. `200k`); empty when the window is unknown (local model). */
   readonly composerContextLabel = computed(() => {
     const windowSize = this.chat.sessionStatsFromState()?.context_window_size;
     return windowSize ? formatContextLabel(windowSize) : '';
   });
 
-  /** Controls the context-overflow confirm dialog visibility. */
   readonly contextOverflowOpen = signal(false);
-  /** Resolves the pending `promptResumeOrFresh` promise when a button is chosen. */
   private contextOverflowResolve: ((choice: 'resume' | 'fresh') => void) | null = null;
 
-  /** Composer reference used to refocus the textarea after parent-driven state resets. */
   @ViewChild('composer') private composer?: { focusInput: () => void };
 
   readonly chat = inject(ChatStateService);
@@ -113,7 +102,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Wires effects driven by the state-tree signal and the drawer toggles. */
   constructor() {
-    // Refresh branch on streaming->idle to catch mid-turn git checkout.
     let wasStreaming = false;
     effect(() => {
       const streaming = this.chat.isStreamingFromState();
@@ -122,10 +110,8 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
       wasStreaming = streaming;
       this.cdr.markForCheck();
-      // Live-chat scrolling is owned by <app-chat-message-list>; no-op here.
     });
 
-    // Decouple toggle from data load so keyboard shortcut works like button.
     effect(() => {
       if (this.ui.sidebarOpen()) void this.loadConversations();
     });
@@ -136,7 +122,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   /** Boots the chat session and subscribes to project lifecycle events (auth + ready). */
   async ngOnInit(): Promise<void> {
-    // Run init and branch read in parallel; they are independent.
     await Promise.all([this.chat.init(), this.refreshGitBranch()]);
     this.cdr.markForCheck();
 
@@ -146,8 +131,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       }
     });
 
-    // Resume-on-restart lives in ChatStateService (survives this component being destroyed on
-    // /settings); register the overflow-prompt opener while mounted, else the service auto-resumes.
     this.chat.setResumeDecider(() => this.promptResumeOrFresh());
 
     this.unsubProjectReady = this.projectState.onProjectReady(async () => {
@@ -157,7 +140,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.projectMemory = '';
       this.memoryError = '';
       this.cdr.markForCheck();
-      // Bypass TTL: project switch is a strong signal the branch could be different.
       await this.refreshGitBranch(true);
       if (wasHistoryOpen) {
         await this.loadConversations();
@@ -168,15 +150,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Min interval between two `get_git_branch` IPC roundtrips. */
   private static readonly GIT_BRANCH_TTL_MS = 1500;
-  /** Epoch-ms of the last branch read; `0` forces the next call. */
   private gitBranchLastReadAt = 0;
 
-  /**
-   * Pulls the active project's git branch; silent on errors (chip hides) and a no-op within the TTL window.
-   * @param force - Skip the TTL check (used after a project switch).
-   */
   private async refreshGitBranch(force = false): Promise<void> {
     const project = this.projectState.activeProject();
     if (!project) {
@@ -196,7 +172,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** True if the current turn is paused on an unanswered AskUserQuestion slot. */
   private hasUnansweredQuestion(): boolean {
     return this.chat
       .currentBlocksFromState()
@@ -210,7 +185,7 @@ export class ChatComponent implements OnInit, OnDestroy {
    */
   onEscape(event: Event): void {
     if (!this.chat.isStreaming) return;
-    if (this.hasUnansweredQuestion()) return; // let the block own ESC semantics
+    if (this.hasUnansweredQuestion()) return;
     event.preventDefault();
     this.chat.stopConversation();
   }
@@ -254,10 +229,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  /**
-   * Appends the staged meeting transcript, if one is pinned, after a blank line.
-   * @param text - the user's own message text.
-   */
   private withStagedTranscript(text: string): string {
     const staged = this.transcription.stagedTranscript();
     return staged ? `${text}\n\n${staged}` : text;
@@ -369,7 +340,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.chat.resetForNewConversation();
     this.cdr.markForCheck();
     await this.chat.init();
-    // Re-focus composer so user can type immediately after clicking new conversation.
     this.composer?.focusInput();
   }
 
@@ -408,12 +378,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     const href = target.getAttribute('href');
     if (!href) return;
 
-    // Fragments/relative links are same-origin; let the WebView handle them.
     const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(href);
     if (!schemeMatch) return;
 
-    // Absolute URL: open http(s) externally, block every other scheme
-    // (data:/vbscript:/javascript:) from navigating the main WebView.
     event.preventDefault();
     const scheme = schemeMatch[1].toLowerCase();
     if (scheme === 'http' || scheme === 'https') {
@@ -431,9 +398,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.unsubAuthWatch();
       this.unsubAuthWatch = null;
     }
-    // Unregister the overflow-prompt opener → service auto-resumes while unmounted.
     this.chat.setResumeDecider(null);
-    // Dismiss any pending context-overflow dialog.
     this.contextOverflowResolve?.('fresh');
     this.contextOverflowResolve = null;
     this.contextOverflowOpen.set(false);

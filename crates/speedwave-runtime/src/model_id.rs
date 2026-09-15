@@ -65,10 +65,6 @@ mod tests {
         assert_eq!(normalize_observed(&wire, entry_id), catalog_id);
     }
 
-    /// Regression for the routing-bypass bug: a custom (non-`openrouter`,
-    /// non-`local`) provider slug must get the SAME `<entry_id>/` treatment,
-    /// or the wire id's first segment matches no route in the rendered
-    /// proxy.json (`compose/proxy.rs`) and `router.rs::resolve` returns `None`.
     #[test]
     fn custom_provider_slug_prefixes_with_its_own_entry_id() {
         let catalog_id = "anthropic/claude-sonnet-5";
@@ -78,9 +74,6 @@ mod tests {
         assert_eq!(normalize_observed(&wire, entry_id), catalog_id);
     }
 
-    /// Regression: the already-prefixed guard checks a `/`-terminated prefix,
-    /// not a bare `starts_with(entry_id)` — a catalog id that merely shares a
-    /// character run with `entry_id` (no `/` boundary) must still be prefixed.
     #[test]
     fn catalog_id_sharing_a_prefix_without_slash_boundary_is_still_prefixed() {
         let entry_id = "my-ollama";
@@ -111,18 +104,12 @@ mod tests {
 
     #[test]
     fn normalize_on_different_entry_prefix_is_identity() {
-        // Wire id was built for entry "local"; normalizing with a different entry id
-        // ("openrouter") must not strip a prefix that does not match.
         let wire = wire_model_id(LlmProviderKind::Local, "local", "qwen2.5-coder");
         assert_eq!(normalize_observed(&wire, "openrouter"), wire);
     }
 
     #[test]
     fn wire_model_id_matches_ts() {
-        // Cross-read guard: the TS mirror in
-        // desktop/src/src/app/chat/composer/model-selector/wire-model-id.ts must
-        // implement the identical anthropic-passthrough / entry-id-prefix /
-        // already-prefixed guard rule.
         let ts = include_str!(
             "../../../desktop/src/src/app/chat/composer/model-selector/wire-model-id.ts"
         );
@@ -139,8 +126,6 @@ mod tests {
             "TS wireModelId must guard against double-prefixing an already-prefixed catalog id, matching Rust wire_model_id"
         );
 
-        // Behavioral parity, not just substring containment: run the same
-        // already-prefixed input through both implementations' documented rule.
         let rust_already_prefixed = crate::model_id::wire_model_id(
             LlmProviderKind::Local,
             "my-ollama",
@@ -164,8 +149,6 @@ mod tests {
 
     #[test]
     fn normalize_observed_matches_ts() {
-        // Cross-read guard: the TS mirror `normalizeObserved` must strip only an
-        // exact leading `<entryId>/` prefix, matching Rust normalize_observed.
         let ts = include_str!(
             "../../../desktop/src/src/app/chat/composer/model-selector/wire-model-id.ts"
         );
@@ -178,8 +161,6 @@ mod tests {
             "TS normalizeObserved must strip only an exact leading prefix, matching Rust normalize_observed"
         );
 
-        // Behavioral parity on the mis-strip regression: a first segment that is
-        // NOT the entry id must survive.
         let rust_non_matching =
             crate::model_id::normalize_observed("unsloth/Qwen2.5-Coder-32B", "my-ollama");
         assert_eq!(

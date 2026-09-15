@@ -3,33 +3,17 @@
  * returned by the `list_anthropic_models` Tauri command. Backend is the SSOT.
  */
 export interface AnthropicModel {
-  /**
-   * API alias (e.g. `claude-opus-4-7`). Never compose-injected; persists via the
-   * in-container `settings.json` `model` key (SPEED-541/SPEED-539).
-   */
   id: string;
-  /** Display label for dropdowns and labels (e.g. `"Opus 4.7"`). */
   family: string;
-  /** Context window in tokens (`1_000_000` for 1M-context families, `200_000` otherwise). */
   context_tokens: number;
-  /** Whether this entry belongs to the "Latest" optgroup; `false` for legacy snapshots. */
   latest: boolean;
-  /** Premium tier (Opus/Fable) — skipped by the everyday-model placeholder hint. */
   premium: boolean;
-  /** Offered by the composer selector; `false` for legacy entries kept for pricing history. */
   selectable: boolean;
-  /**
-   * True when a priced `[1m]` alias exists (backend `pricing_1m.is_some()`). The
-   * SSOT for offering the `[1m]` combobox option, independent of `context_tokens`.
-   */
   has_1m: boolean;
-  /** Effort levels this model supports (`low`→`max` order); empty when unsupported (Haiku 4.5). */
   effort_levels: string[];
-  /** Catalog default effort; `null` exactly when `effort_levels` is empty (SSOT for the slider). */
   default_effort: string | null;
 }
 
-/** Default fallback context window for a model the SSOT doesn't know. */
 export const DEFAULT_CONTEXT_TOKENS = 200_000;
 
 /**
@@ -37,9 +21,7 @@ export const DEFAULT_CONTEXT_TOKENS = 200_000;
  * `discover_llm_models` (Tauri command).
  */
 export interface DiscoveredModel {
-  /** Model id as advertised by the local server (e.g. `llama3.3`, `qwen2.5-coder`). */
   id: string;
-  /** Context window in tokens; absent when the provider didn't expose one. */
   context_tokens?: number;
 }
 
@@ -64,10 +46,8 @@ export type LegacyLocalProviderId = 'ollama' | 'lmstudio' | 'llamacpp';
 /** Value domain of the flat `provider` field: targets + unmigrated legacy ids. */
 export type FlatProviderId = ProviderTarget | LegacyLocalProviderId;
 
-/** Local-provider names treated as "Local" in the UI (`isLocalProvider`). */
 export const LOCAL_PROVIDERS: ReadonlyArray<string> = ['ollama', 'lmstudio', 'llamacpp', 'local'];
 
-/** Legacy local-provider names auto-migrated to `local` on Save. */
 export const LEGACY_LOCAL_PROVIDERS: ReadonlyArray<string> = LOCAL_PROVIDERS.filter(
   (p) => p !== 'local'
 );
@@ -89,17 +69,11 @@ export interface LlmConfigResponse {
   model: string | null;
   base_url: string | null;
   default_base_url: string | null;
-  /** Persisted context window for the active model (in tokens). */
   context_tokens?: number | null;
-  /** True when an api_key file exists for this project. */
   has_api_key?: boolean;
-  /** True when a custom_headers file exists for this project. */
   has_custom_headers?: boolean;
-  /** v2 provider list (ADR-073); absent on never-migrated legacy configs. */
   providers?: LlmProviderEntry[];
-  /** v2 active provider+model selection (ADR-073). */
   active?: LlmActive | null;
-  /** ADR-073 kill-switch; absent = enabled. */
   proxy_enabled?: boolean | null;
 }
 
@@ -114,11 +88,9 @@ export type LlmProviderKind = 'anthropic_oauth' | 'anthropic_api_key' | 'local' 
  * key VALUES never reach the frontend, only `has_api_key`.
  */
 export interface LlmProviderEntry {
-  /** Slug id (`^[a-z][a-z0-9-]{0,63}$`); becomes file/env names backend-side. */
   id: string;
   kind: LlmProviderKind;
   base_url?: string | null;
-  /** Last model used with this provider — restored on re-activation. */
   model?: string | null;
   has_api_key?: boolean;
   context_tokens?: number | null;
@@ -162,22 +134,16 @@ export interface UsageBucket {
   completion_tokens: number;
   cache_read: number;
   cache_write: number;
-  /** Summed cost over priced requests; `null` when none priced (never 0). */
   cost_usd: number | null;
-  /** Throughput numerator: completion tokens from successful timed records. */
   throughput_completion_tokens: number;
-  /** Throughput denominator: decode-phase ms (latency − ttft) of timed records. */
   decode_latency_ms_sum: number;
 }
 
 /** Usage dashboard payload from `get_llm_usage` (ADR-073). */
 export interface UsageSummary {
-  /** `YYYY-MM-DD` → model → bucket (sorted by the backend's BTreeMap). */
   days: Record<string, Record<string, UsageBucket>>;
-  /** `YYYY-MM-DD` → requests per local hour (24 entries) — heatmap input. */
   hours: Record<string, number[]>;
   totals: UsageBucket;
-  /** Unparseable JSONL lines skipped by the aggregator (crash-truncated tails). */
   skipped_lines: number;
 }
 
@@ -206,9 +172,7 @@ export interface ResponseUsage {
   completion_tokens: number;
   cache_read: number;
   cache_write: number;
-  /** `null` when unpriced (subscription/unknown). */
   cost_usd: number | null;
-  /** Provenance; `''` when no sidecar entry yet. */
   cost_source: CostSourceKind | '';
 }
 

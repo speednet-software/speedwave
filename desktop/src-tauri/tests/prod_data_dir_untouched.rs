@@ -25,9 +25,6 @@ use std::time::SystemTime;
 
 use speedwave_runtime::{config, consts};
 
-/// `SPEEDWAVE_DATA_DIR` basename must match `^[a-z][a-z0-9-]{0,63}$`.
-/// `tempfile` basenames start with a dot and mix case, so nest a
-/// regex-valid child under an outer tempdir.
 fn regex_valid_data_dir() -> (tempfile::TempDir, PathBuf) {
     let outer = tempfile::tempdir().expect("tempdir");
     let child = outer.path().join("speedwave-desktop-prod-untouched");
@@ -35,8 +32,6 @@ fn regex_valid_data_dir() -> (tempfile::TempDir, PathBuf) {
     (outer, child)
 }
 
-/// `None` if the path does not exist (the strongest assertion — production
-/// was never created); otherwise `Some(mtime)`.
 fn snapshot(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
@@ -51,13 +46,8 @@ fn desktop_llm_save_smoke_does_not_touch_prod_data_dir() {
 
     let (_outer, tmp_data_dir) = regex_valid_data_dir();
 
-    // Defense-in-depth: routes any transitive bare-`data_dir()` into the tempdir.
     std::env::set_var(consts::DATA_DIR_ENV, &tmp_data_dir);
 
-    // This is the exact fn that leaked (config::save_user_config, reached
-    // transitively by the pre-split `update_llm_config`'s write path).
-    // Calling it first in this fresh process proves it respects the env var
-    // rather than a `Path`-parameterized twin the leak could route around.
     let cfg = config::SpeedwaveUserConfig::default();
     // SSOT-allow: deliberate bare call — the point of this test is proving it respects SPEEDWAVE_DATA_DIR in a fresh process.
     config::save_user_config(&cfg).expect("save_user_config");

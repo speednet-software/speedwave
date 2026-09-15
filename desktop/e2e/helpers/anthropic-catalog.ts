@@ -1,7 +1,4 @@
-/** Direct Tauri-bridge access to the Anthropic model catalog (SPEED-545) — a spec reads
- *  the SSOT catalog itself (`list_anthropic_models`) instead of hard-coding a model id. */
 
-/** Mirrors `speedwave_runtime::defaults::AnthropicModelInfo` (`models/llm.ts::AnthropicModel`). */
 export interface AnthropicCatalogEntry {
   id: string;
   family: string;
@@ -14,7 +11,6 @@ export interface AnthropicCatalogEntry {
   default_effort: string | null;
 }
 
-/** Fetches the full Anthropic catalog via `list_anthropic_models`. */
 export async function anthropicCatalog(): Promise<AnthropicCatalogEntry[]> {
   return browser.executeAsync((done: (rows: AnthropicCatalogEntry[]) => void) => {
     (
@@ -27,15 +23,11 @@ export async function anthropicCatalog(): Promise<AnthropicCatalogEntry[]> {
   });
 }
 
-/** Catalog ids marked `latest: true` — the account-default set the fresh-install
- *  scenario checks membership against (never a hard-coded specific model id). */
 export async function latestAnthropicModelIds(): Promise<string[]> {
   const rows = await anthropicCatalog();
   return rows.filter((r) => r.latest).map((r) => r.id);
 }
 
-/** Maps a `composer-model-badge` label (`entry.family`, optionally suffixed ` [1m]`)
- *  back to its catalog entry, or `null` for an unrecognized/verbatim-shown value. */
 export function catalogEntryForBadgeLabel(
   catalog: AnthropicCatalogEntry[],
   label: string

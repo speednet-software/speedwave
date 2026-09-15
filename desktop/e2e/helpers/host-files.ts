@@ -1,12 +1,8 @@
-/** Direct host-fs access to a project's pin files (SPEED-545 teardown only) — no product
- * "clear pin" command exists, so cleanup pokes the files directly, `engine.ts`-style. */
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-/** Resolves SPEEDWAVE_DATA_DIR the way the runtime does, default `~/.speedwave`
- *  (same one-liner as `engine.ts`'s private `dataDir()`; neither module imports the other). */
 function dataDir(): string {
   return process.env.SPEEDWAVE_DATA_DIR || path.join(os.homedir(), '.speedwave');
 }
@@ -19,7 +15,6 @@ function configJsonPath(): string {
   return path.join(dataDir(), 'config.json');
 }
 
-/** Removes the `model` key from a project's claude-home `settings.json`, if present. */
 export function clearModelPinFile(project: string): void {
   const settingsPath = settingsJsonPath(project);
   if (!fs.existsSync(settingsPath)) return;
@@ -29,7 +24,6 @@ export function clearModelPinFile(project: string): void {
   fs.writeFileSync(settingsPath, JSON.stringify(raw, null, 2));
 }
 
-/** Removes `effort_pin` from a project's entry in `config.json`, if present. */
 export function clearEffortPinFile(project: string): void {
   const configPath = configJsonPath();
   if (!fs.existsSync(configPath)) return;

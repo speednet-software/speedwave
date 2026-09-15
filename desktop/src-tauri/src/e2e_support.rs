@@ -1,19 +1,11 @@
-//! E2E-only startup helpers (`feature = "e2e"`); compiled for tests so the
-//! helper stays covered on every platform.
-
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
-/// Must match tauri-plugin-webdriver's hardcoded 127.0.0.1:4445 bind.
 pub const E2E_WEBDRIVER_PORT: u16 = 4445;
 
-/// Most recent Claude Code spawn argv (SPEED-545 e2e observation only — the call site in
-/// `chat.rs` is `#[cfg(feature = "e2e")]`-gated, so this never runs in a shipped build).
 #[cfg(any(test, feature = "e2e"))]
 static LAST_SPAWN_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// Overwrites the recorded spawn argv; the plain fn (not the Tauri command) stays under
-/// `any(test, feature = "e2e")` so its round-trip is covered by a normal `cargo test`.
 #[cfg(any(test, feature = "e2e"))]
 pub fn record_spawn_args(args: &[String]) {
     if let Ok(mut guard) = LAST_SPAWN_ARGS.lock() {
@@ -21,7 +13,6 @@ pub fn record_spawn_args(args: &[String]) {
     }
 }
 
-/// Reads back the last-recorded spawn argv; empty when none has been recorded yet.
 #[cfg(any(test, feature = "e2e"))]
 pub fn last_spawn_args() -> Vec<String> {
     LAST_SPAWN_ARGS
@@ -30,31 +21,23 @@ pub fn last_spawn_args() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// E2E-only Tauri command: exposes [`last_spawn_args`] to the WebDriver suite so a spec can
-/// assert the exact argv a spawn used (e.g. no `--model`/`--effort` without a pin).
 #[cfg(feature = "e2e")]
 #[tauri::command]
 pub fn e2e_last_spawn_args() -> Vec<String> {
     last_spawn_args()
 }
 
-/// E2E-only Tauri command: restarts the app with no data wipe (unlike `factory_reset`'s
-/// post-wipe `app.restart()`), proving a pin survives a real relaunch, not just a new session.
 #[cfg(feature = "e2e")]
 #[tauri::command]
 pub fn e2e_restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
-/// A held port surfaces as `AddrInUse`; on Windows it can also surface as
-/// WSAEACCES → `PermissionDenied` (SO_EXCLUSIVEADDRUSE, port-exclusion ranges).
 fn is_retryable_bind_error(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::AddrInUse
         || (cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied)
 }
 
-/// Blocks until `addr` is bindable (the probe listener is dropped immediately)
-/// or `deadline` elapses — a relaunch must not race the dying instance's port.
 pub fn wait_until_port_free(
     addr: SocketAddr,
     deadline: Duration,

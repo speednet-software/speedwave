@@ -4,7 +4,6 @@ import { signal } from '@angular/core';
 import { SlashMenuComponent } from './slash-menu.component';
 import { SlashService, type SlashCommand, type DiscoverySource } from './slash.service';
 
-/** Stub SlashService with writable signals so tests can drive the component. */
 class FakeSlashService {
   commands = signal<readonly SlashCommand[]>([]);
   discovering = signal(false);
@@ -75,25 +74,12 @@ describe('SlashMenuComponent', () => {
     });
   });
 
-  /**
-   * Reads the protected `activeIndex` signal on a SlashMenuComponent.
-   * @param c - Component instance whose `activeIndex` signal to read.
-   */
   const readActive = (c: SlashMenuComponent): number =>
     (c as unknown as { activeIndex: { (): number; set(v: number): void } }).activeIndex();
 
-  /**
-   * Writes the protected `activeIndex` signal directly for assertion setup.
-   * @param c - Component instance whose `activeIndex` signal to write.
-   * @param v - New index value.
-   */
   const writeActive = (c: SlashMenuComponent, v: number): void =>
     (c as unknown as { activeIndex: { (): number; set(v: number): void } }).activeIndex.set(v);
 
-  /**
-   * Builds a KeyboardEvent so the component's handler sees the right `key`.
-   * @param key - DOM key value (e.g. `'ArrowDown'`).
-   */
   const keyEvent = (key: string): KeyboardEvent => new KeyboardEvent('keydown', { key });
 
   describe('keyboard navigation', () => {

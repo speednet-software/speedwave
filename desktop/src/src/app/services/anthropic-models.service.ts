@@ -28,13 +28,11 @@ export class AnthropicModelsService {
           this.cache = result;
           return result;
         }
-        // Non-array payload is a contract violation; not caching.
         this.logger.warn(
           `list_anthropic_models returned a non-array payload (${typeof result}); not caching`
         );
         return [];
       } catch (e: unknown) {
-        // Do NOT cache on failure — leave `cache` null so the next call retries.
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.warn(`list_anthropic_models failed: ${msg}`);
         return [];
@@ -56,7 +54,6 @@ export class AnthropicModelsService {
     if (!trimmed) return null;
     const direct = this.cache.find((m) => m.id === trimmed);
     if (direct) return direct.context_tokens;
-    // Session metadata may carry the short form (`opus-4.7`); try prefixed too.
     const candidate = trimmed.startsWith('claude-')
       ? trimmed
       : `claude-${trimmed.replace('.', '-')}`;

@@ -22,11 +22,6 @@ import type { ConversationSummary } from '../../models/chat';
 import { IconComponent } from '../../shared/icon.component';
 import { isControlShaped } from '../slash/slash.service';
 
-/**
- * Buckets a conversation into today/yesterday/older by relative day.
- * @param ts - ISO timestamp of the conversation's last activity.
- * @param now - Reference epoch in ms; defaults to `Date.now()`.
- */
 function bucketForTimestamp(ts: string | null | undefined, now: number = Date.now()): string {
   if (!ts) return 'older';
   const parsed = Date.parse(ts);
@@ -38,21 +33,18 @@ function bucketForTimestamp(ts: string | null | undefined, now: number = Date.no
   return 'older';
 }
 
-/** One conversation row prepared for rendering with cleaned preview/timestamp. */
 interface ConversationRow {
   readonly conv: ConversationSummary;
   readonly preview: string;
   readonly timestamp: string;
 }
 
-/** A bucket with the matching prepared rows, in display order. */
 interface ConversationGroup {
   key: string;
   label: string;
   rows: readonly ConversationRow[];
 }
 
-/** Display order — drives both grouping and rendering. */
 const BUCKET_ORDER: readonly { key: string; label: string }[] = [
   { key: 'today', label: 'today' },
   { key: 'yesterday', label: 'yesterday' },
@@ -166,7 +158,6 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
                       </div>
                     </div>
                   } @else {
-                    <!-- Row click resumes directly — no "view → resume" two-step. -->
                     <button
                       type="button"
                       class="min-w-0 flex-1 px-3 py-2 text-left"
@@ -205,37 +196,24 @@ const BUCKET_ORDER: readonly { key: string; label: string }[] = [
   `,
 })
 export class ConversationsSidebarComponent {
-  /** Whether the drawer is currently open. Drives the CDK overlay attach/detach. */
   readonly open = input<boolean>(false);
-  /** Conversations to display, in newest-first order. */
   readonly conversations = input.required<readonly ConversationSummary[]>();
-  /** Active session id — gets the accent left-border in the list. */
   readonly currentSessionId = input<string | null>(null);
 
-  /** Drawer requested to close (close button, backdrop click, or Escape). */
   readonly closed = output<void>();
-  /** Resume `conv` as the live session — emitted on row click (primary action). */
   readonly resumeConversation = output<ConversationSummary>();
-  /** Delete confirmed for `conv`; parent calls the backend + reloads. */
   readonly deleteConversation = output<ConversationSummary>();
 
-  /** Free-text filter applied to the buckets — narrows preview matches case-insensitively. */
   protected readonly query = signal('');
 
-  /** Session id pending confirm; `null` when no row is in the confirm state. */
   protected readonly pendingDeleteId = signal<string | null>(null);
 
-  /** Template containing the drawer content — handed to the CDK overlay portal. */
   protected readonly content = viewChild.required<TemplateRef<unknown>>('content');
 
   private readonly overlay = inject(Overlay);
   private readonly viewContainerRef = inject(ViewContainerRef);
   private overlayRef: OverlayRef | null = null;
 
-  /**
-   * Buckets the filtered list (today/yesterday/older); preview+timestamp are
-   * formatted once here, not per change-detection tick.
-   */
   protected readonly groups = computed<readonly ConversationGroup[]>(() => {
     const q = this.query().trim().toLowerCase();
     const list = this.conversations();
@@ -267,28 +245,21 @@ export class ConversationsSidebarComponent {
       if (this.open()) this.openOverlay();
       else this.closeOverlay();
     });
-    // Scroll active row into view on open, active-session change, or rows arriving.
     effect(() => {
       this.open();
       this.currentSessionId();
       this.groups();
       this.scheduleActiveRowScroll();
     });
-    // Dispose the overlay if the host is torn down while open.
     inject(DestroyRef).onDestroy(() => this.closeOverlay());
   }
 
-  /** After the next render, scroll the active row into view within the overlay. */
   private scheduleActiveRowScroll(): void {
     const root = this.overlayRef?.overlayElement;
     if (!root) return;
     afterNextRender(() => scrollActiveRowIntoView(root), { injector: this.injector });
   }
 
-  /**
-   * Filter input handler — kept native to avoid a one-off form group.
-   * @param event Native input event from the search field.
-   */
   protected onQuery(event: Event): void {
     const target = event.target as HTMLInputElement | null;
     this.query.set(target?.value ?? '');
@@ -310,7 +281,6 @@ export class ConversationsSidebarComponent {
   private openOverlay(): void {
     if (this.overlayRef !== null) return;
     const overlayRef = this.overlay.create({
-      // Anchor past the 56px nav-rail so the drawer doesn't cover it.
       positionStrategy: this.overlay.position().global().left('56px').top('0'),
       height: '100%',
       hasBackdrop: true,
@@ -353,11 +323,6 @@ const PREVIEW_TAG_RE =
 const PREVIEW_OTHER_TAG_RE = /<[^>]+>/g;
 const PREVIEW_PLAN_PREFIX_RE = /^\[Plan mode\][^\n]*\n+/i;
 
-/**
- * Strips internal markers (`<command-message>` etc.) from a backend preview;
- * falls back to "untitled" when nothing usable remains.
- * @param raw - Raw preview text from `list_conversations`.
- */
 function cleanConversationPreview(raw: string): string {
   if (!raw) return 'untitled';
   if (isControlShaped(raw)) return 'untitled';
@@ -370,11 +335,6 @@ function cleanConversationPreview(raw: string): string {
   return stripped || 'untitled';
 }
 
-/**
- * Formats a timestamp as a short relative label (`2m`, `1h`, `3d`); returns
- * unparseable input unchanged so pre-formatted strings pass through.
- * @param value - ISO timestamp string (or pre-formatted display label).
- */
 function formatRelativeTime(value: string | null | undefined): string {
   if (!value) return '—';
   const parsed = Date.parse(value);

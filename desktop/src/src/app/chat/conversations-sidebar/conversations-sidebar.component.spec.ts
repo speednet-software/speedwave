@@ -52,10 +52,6 @@ const sample: readonly ConversationSummary[] = [
   { session_id: 's3', preview: '', timestamp: null, message_count: 0 },
 ];
 
-/**
- * Query the CDK overlay portal under document.body.
- * @param sel - CSS selector to locate the element under document.
- */
 function q(sel: string): HTMLElement | null {
   return document.querySelector(sel) as HTMLElement | null;
 }
@@ -71,7 +67,6 @@ describe('ConversationsSidebarComponent', () => {
   });
 
   afterEach(() => {
-    // Tear down the overlay so each test starts with a clean container.
     host.open = false;
     fixture.detectChanges();
     fixture.destroy();
@@ -92,7 +87,6 @@ describe('ConversationsSidebarComponent', () => {
     });
 
     it('detaches the overlay when open transitions back to false', () => {
-      // Destroy the shared open=true fixture to avoid two drawers in the overlay.
       fixture.destroy();
       const childFixture = TestBed.createComponent(ConversationsSidebarComponent);
       childFixture.componentRef.setInput('conversations', sample);
@@ -210,7 +204,6 @@ describe('ConversationsSidebarComponent', () => {
       fixture.detectChanges();
       const actives = document.querySelectorAll('[data-active="true"]');
       expect(actives.length).toBe(1);
-      // The data-active row is the one wrapping the active session's resume button.
       expect(actives[0].querySelector('[data-testid="conversation-resume-s3"]')).not.toBeNull();
     });
 

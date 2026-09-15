@@ -1,6 +1,4 @@
-/** SSOT for LLM-provider test config + reusable config/chat actions. */
 
-/** Reads a required env var, throwing a spec-friendly message when unset. */
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -9,17 +7,14 @@ function requireEnv(name: string): string {
   return value;
 }
 
-/** OpenRouter model id from the environment; throws when the spec needs it. */
 export function requireOpenrouterModel(): string {
   return requireEnv('OPENROUTER_MODEL');
 }
 
-/** OpenRouter API key from the environment; throws when the spec needs it. */
 export function requireOpenrouterKey(): string {
   return requireEnv('OPENROUTER_API_KEY');
 }
 
-/** Local OpenAI-compatible LLM server config — all values from .env. */
 export function requireLocalLlm(): { baseUrl: string; apiKey: string; model: string } {
   return {
     baseUrl: requireEnv('LOCAL_LLM_BASE_URL'),
@@ -28,7 +23,6 @@ export function requireLocalLlm(): { baseUrl: string; apiKey: string; model: str
   };
 }
 
-/** Navigates to /settings and waits for the settings page to mount. */
 export async function openSettings(): Promise<void> {
   const nav = await $('[data-testid="nav-settings"]');
   await nav.waitForExist({ timeout: 15_000 });
@@ -36,15 +30,11 @@ export async function openSettings(): Promise<void> {
   await $('[data-testid="settings-title"]').waitForExist({ timeout: 10_000 });
 }
 
-/** Selects OpenRouter, enters the key, validates it via a catalog discovery, saves.
- *  Model choice moved to the composer (ADR-088); a fresh save auto-defaults it. */
 export async function configureOpenRouter(apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-extra-select-openrouter"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
   await selectBtn.click();
 
-  // Clicking an already-active row TOGGLES its panel — if the key input did not
-  // appear, the click collapsed a still-expanded row; click again to re-expand.
   const keyInput = await $('[data-testid="settings-llm-extra-key-openrouter"]');
   try {
     await keyInput.waitForExist({ timeout: 3_000 });
@@ -54,9 +44,6 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   }
   await keyInput.setValue(apiKey);
 
-  // The connection test is a live key check: a bad OPENROUTER_API_KEY fails HERE with a
-  // clear reason instead of somewhere downstream in a chat spec. Its outcome is the only
-  // settle signal (SPEED-555): a success line or an inline error, never the button label.
   await (await $('[data-testid="settings-llm-extra-refresh-openrouter"]')).click();
   const success = await $('[data-testid="settings-llm-extra-test-success-openrouter"]');
   const orError = await $('[data-testid="settings-llm-extra-discovery-error-openrouter"]');
@@ -71,8 +58,6 @@ export async function configureOpenRouter(apiKey: string): Promise<void> {
   await saveProvider();
 }
 
-/** Selects the local provider, enters base_url + key, validates via discovery, saves.
- *  Model choice moved to the composer (ADR-088); a fresh save auto-defaults it. */
 export async function configureLocalProvider(baseUrl: string, apiKey: string): Promise<void> {
   const selectBtn = await $('[data-testid="settings-llm-provider-local"]');
   await selectBtn.waitForExist({ timeout: 10_000 });
@@ -99,11 +84,7 @@ export async function configureLocalProvider(baseUrl: string, apiKey: string): P
   await saveProvider();
 }
 
-/** Picks `catalogId` in the composer model selector — the single model control
- *  (ADR-088); non-anthropic picks write through to the project config. */
 export async function pickComposerModel(catalogId: string): Promise<void> {
-  // A just-flushed control turn briefly streams, and the badge click is a
-  // deliberate no-op then (openCombobox streaming guard) — retry until open.
   const search = await $('[data-testid="model-selector-search"]');
   await browser.waitUntil(
     async () => {
@@ -126,7 +107,6 @@ export async function pickComposerModel(catalogId: string): Promise<void> {
   });
 }
 
-/** Clicks Save, waits for the enabled state then the saved confirmation. */
 export async function saveProvider(): Promise<void> {
   const saveBtn = await $('[data-testid="settings-llm-save"]');
   await browser.waitUntil(async () => await saveBtn.isEnabled(), {
@@ -137,7 +117,6 @@ export async function saveProvider(): Promise<void> {
   await (await $('[data-testid="settings-llm-saved"]')).waitForExist({ timeout: 15_000 });
 }
 
-/** Navigates to /chat and waits for the ready chat view to mount. */
 export async function openChat(timeoutMs = 180_000): Promise<void> {
   const nav = await $('[data-testid="nav-chat"]');
   await nav.waitForExist({ timeout: 15_000 });
@@ -145,20 +124,17 @@ export async function openChat(timeoutMs = 180_000): Promise<void> {
   await $('[data-testid="chat-view"]').waitForExist({ timeout: timeoutMs });
 }
 
-/** Navigates to the usage dashboard and waits for it to mount. */
 export async function openUsage(): Promise<void> {
   await (await $('[data-testid="nav-usage"]')).click();
   await $('[data-testid="usage-title"]').waitForExist({ timeout: 10_000 });
   await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
 }
 
-/** Navigates to the integrations page and waits for it to mount. */
 export async function openIntegrations(): Promise<void> {
   await (await $('[data-testid="nav-integrations"]')).click();
   await $('[data-testid="integrations-body"]').waitForExist({ timeout: 15_000 });
 }
 
-/** The status pill text for a service row (running / starting / disabled). */
 export async function rowStatus(service: string): Promise<string> {
   const status = await $(`[data-testid="integrations-row-${service}"]`).$(
     '[data-testid="integrations-row-status"]'
@@ -166,14 +142,12 @@ export async function rowStatus(service: string): Promise<string> {
   return (await status.getText()).trim();
 }
 
-/** Clicks the enable/disable toggle for an integration service row. */
 export async function toggleIntegration(service: string): Promise<void> {
   const toggle = await $(`[data-testid="integrations-row-toggle-${service}"]`);
   await toggle.waitForExist({ timeout: 10_000 });
   await toggle.click();
 }
 
-/** Types `text` and clicks send; does not wait for the turn to finish. */
 export async function sendMessageNoWait(text: string): Promise<void> {
   const input = await $('[data-testid="chat-input"]');
   await input.waitForExist({ timeout: 15_000 });
@@ -187,9 +161,6 @@ export async function sendMessageNoWait(text: string): Promise<void> {
   await sendBtn.click();
 }
 
-/** Types `text` and submits with Enter. While a turn streams the send button is
- *  replaced by Stop (ADR-045), so Enter is the only way to queue — this routes
- *  to queueRequested instead of clicking a (hidden) send button. */
 export async function queueMessageViaEnter(text: string): Promise<void> {
   const input = await $('[data-testid="chat-input"]');
   await input.waitForExist({ timeout: 15_000 });
@@ -197,7 +168,6 @@ export async function queueMessageViaEnter(text: string): Promise<void> {
   await browser.keys('Enter');
 }
 
-/** Waits until the current turn stops streaming and the send button returns. */
 export async function waitForTurnComplete(responseTimeoutMs = 180_000): Promise<void> {
   await browser.waitUntil(
     async () =>
@@ -209,7 +179,6 @@ export async function waitForTurnComplete(responseTimeoutMs = 180_000): Promise<
   );
 }
 
-/** Waits until the current turn begins streaming (placeholder or stop button). */
 export async function waitForTurnStart(timeoutMs = 30_000): Promise<void> {
   await browser.waitUntil(
     async () =>
@@ -220,28 +189,18 @@ export async function waitForTurnStart(timeoutMs = 30_000): Promise<void> {
   );
 }
 
-/** Types `text`, sends it, waits for streaming to start then finish. */
 export async function sendMessageAndWait(text: string, responseTimeoutMs = 180_000): Promise<void> {
   await sendMessageNoWait(text);
   await waitForTurnStart();
   await waitForTurnComplete(responseTimeoutMs);
 }
 
-/** True when the usage-dashboard table rows for `model` all show "—" (unpriced).
- *  Targets the per-model row cost, not the project-wide total (which also sums
- *  any priced provider the project used earlier). The usage JSONL stores the
- *  model as `<provider_kind>/<model>` (e.g. `local/unsloth/…`), so match on the
- *  data-model SUFFIX. The dashboard aggregates async, so wait for the model's
- *  row(s) to appear (a `nav-usage` re-click re-fetches on each poll) before
- *  asserting cost — a missing row is a not-yet-loaded dashboard, not a verdict. */
 export async function modelRowsUnpriced(model: string, timeoutMs = 30_000): Promise<boolean> {
   const sel = `[data-testid="llm-usage-row"][data-model$="${model}"]`;
   try {
     await browser.waitUntil(
       async () => {
         if ((await $$(sel).getElements()).length > 0) return true;
-        // The dashboard fetches once per mount (effect on the project input), so
-        // re-mount it — nav away then back — to re-run get_llm_usage.
         await (await $('[data-testid="nav-chat"]')).click();
         await (await $('[data-testid="nav-usage"]')).click();
         await $('[data-testid="llm-usage"]').waitForExist({ timeout: 10_000 });
@@ -250,8 +209,6 @@ export async function modelRowsUnpriced(model: string, timeoutMs = 30_000): Prom
       { timeout: timeoutMs, interval: 2_000, timeoutMsg: 'no row' }
     );
   } catch {
-    // Surface the data-model values that DID render, so a format/timing mismatch
-    // is diagnosable from the failure instead of a bare boolean.
     const all = await $$('[data-testid="llm-usage-row"]').getElements();
     const models: (string | null)[] = [];
     for (const r of all) {
@@ -269,7 +226,6 @@ export async function modelRowsUnpriced(model: string, timeoutMs = 30_000): Prom
   return true;
 }
 
-/** Numeric USD from a `$X.XXXX` element, or null when unpriced (`—`) / absent. */
 export async function readUsd(selector: string): Promise<number | null> {
   const el = await $(selector);
   if (!(await el.isExisting())) return null;
@@ -277,7 +233,6 @@ export async function readUsd(selector: string): Promise<number | null> {
   return match ? parseFloat(match[1]) : null;
 }
 
-/** Polls readUsd until it resolves to a priced (non-null) value. */
 export async function waitForUsd(
   selector: string,
   opts: { timeout: number; interval: number; timeoutMsg: string }
@@ -293,8 +248,6 @@ export async function waitForUsd(
   return resolved;
 }
 
-/** Polls the dashboard cost card, remounting the view each round so it refetches
- *  (the usage view only fetches on mount / project change, not on a timer). */
 export async function waitForDashboardUsd(
   opts: { timeout: number; interval: number; timeoutMsg: string }
 ): Promise<number> {
@@ -310,10 +263,6 @@ export async function waitForDashboardUsd(
   }
 }
 
-/** Polls the chat footer cost until it reconciles to within `tol` of `target`.
- *  The footer first shows Claude Code's live-preview cost (mispriced for a
- *  proxied provider), then reconcileFooterCost overwrites it with the proxy
- *  SSOT — this waits for that convergence. Requires being on /chat. */
 export async function waitForFooterToReconcile(
   target: number,
   tol: number,
@@ -334,17 +283,14 @@ export async function waitForFooterToReconcile(
   return resolved;
 }
 
-/** True when a `$X.XXXX`/`—` cost element shows no priced value (unpriced). */
 export async function isUnpriced(selector: string): Promise<boolean> {
   return (await readUsd(selector)) === null;
 }
 
-/** Text of the last assistant message's text blocks only (excludes metadata). */
 export async function lastAssistantText(): Promise<string> {
   const messages = await $$('[data-testid="chat-message"][data-role="assistant"]').getElements();
   if (messages.length === 0) return '';
   const last = messages[messages.length - 1];
-  // Scope to app-text-block so token/cost metadata digits can't satisfy asserts.
   const blocks = await last.$$('app-text-block').getElements();
   const parts: string[] = [];
   for (const block of blocks) {
@@ -353,12 +299,10 @@ export async function lastAssistantText(): Promise<string> {
   return parts.join('\n').trim();
 }
 
-/** Count of rendered assistant message bubbles in the current chat window. */
 export async function assistantMessageCount(): Promise<number> {
   return (await $$('[data-testid="chat-message"][data-role="assistant"]').getElements()).length;
 }
 
-/** Concatenated text of ALL assistant messages currently in the window. */
 export async function conversationText(): Promise<string> {
   const messages = await $$('[data-testid="chat-message"]').getElements();
   const parts: string[] = [];
@@ -368,8 +312,6 @@ export async function conversationText(): Promise<string> {
   return parts.join('\n');
 }
 
-/** Waits until the window holds at least `min` assistant messages (a resumed
- *  transcript has loaded prior turns), proving a real conversation is open. */
 export async function waitForConversationLoaded(min = 1, timeoutMs = 30_000): Promise<void> {
   await browser.waitUntil(async () => (await assistantMessageCount()) >= min, {
     timeout: timeoutMs,
@@ -378,13 +320,11 @@ export async function waitForConversationLoaded(min = 1, timeoutMs = 30_000): Pr
   });
 }
 
-/** Opens the conversations sidebar (history list). */
 export async function openHistory(): Promise<void> {
   await (await $('[data-testid="chat-header-history"]')).click();
   await $('[data-testid="conversations-sidebar"]').waitForExist({ timeout: 10_000 });
 }
 
-/** Opens history and resumes the newest conversation (first row, newest-first). */
 export async function resumeNewestConversation(): Promise<void> {
   await openHistory();
   const rows = await $$('[data-testid="conversations-sidebar-row"]').getElements();
@@ -393,7 +333,6 @@ export async function resumeNewestConversation(): Promise<void> {
   await resume.click();
 }
 
-/** Starts a brand-new conversation from the chat header. */
 export async function startNewConversation(): Promise<void> {
   await (await $('[data-testid="chat-header-new"]')).click();
 }

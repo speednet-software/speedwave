@@ -10,18 +10,10 @@ use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Hard cap on how long we wait for the `system/init` line from Claude Code
-/// before giving up and returning `DiscoverySource::Unavailable`.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a cached discovery result stays valid before re-running discovery.
-/// Claude Code installs change rarely; 10 minutes balances freshness and cost.
 const CACHE_STALENESS: Duration = Duration::from_secs(10 * 60);
 
-/// How long a failed (`Unavailable`) discovery stays cached before retrying.
-/// Short relative to `CACHE_STALENESS` so a container that recovers is
-/// re-probed soon, but a bare `/` keystroke storm does not re-run the up to
-/// 60s probe on every press while the container stays down.
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Indicates whether the discovery result came from Claude Code itself
@@ -99,8 +91,6 @@ impl ProjectHandle {
     }
 }
 
-// Public API
-
 /// Discovers slash commands for `project`'s active Claude session. Returns a
 /// cached result younger than [`CACHE_STALENESS`], else runs+caches discovery.
 pub fn discover_slash_commands(
@@ -110,9 +100,6 @@ pub fn discover_slash_commands(
     discover_slash_commands_with_timeout(runtime, project, DISCOVERY_TIMEOUT)
 }
 
-/// Test seam for [`discover_slash_commands`] with an injectable timeout.
-/// A failed run is cached too (`NEGATIVE_CACHE_TTL`), so a container that
-/// stays down does not re-run the full probe on every bare `/`.
 fn discover_slash_commands_with_timeout(
     runtime: &crate::runtime::LockedRuntime,
     project: &ProjectHandle,
@@ -146,8 +133,6 @@ fn discover_slash_commands_with_timeout(
     }
 }
 
-/// One in-flight discovery slot: the shared result and a condvar so
-/// followers can wait without polling.
 struct InFlightSlot {
     result: Mutex<Option<Result<RawDiscovery, String>>>,
     ready: std::sync::Condvar,
@@ -158,8 +143,6 @@ fn in_flight_map() -> &'static Mutex<HashMap<String, std::sync::Arc<InFlightSlot
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Publishes a leader-failure on drop when the leader never published a
-/// result (panic/cancel safety), then removes the slot from the map.
 struct LeaderGuard<'a> {
     project: &'a str,
     slot: std::sync::Arc<InFlightSlot>,
@@ -183,8 +166,6 @@ impl Drop for LeaderGuard<'_> {
     }
 }
 
-/// Runs `run` at most once per `project` across concurrent callers; other
-/// callers block on the leader's result instead of re-running discovery.
 fn lead_discovery(
     project: &str,
     run: impl FnOnce() -> Result<RawDiscovery, String>,
@@ -250,7 +231,6 @@ pub fn is_bare_slash(text: &str) -> bool {
     text.trim() == "/"
 }
 
-/// Matches `^/(model|effort) +\S+$` on trimmed `text` (a literal space separator,
 /// not `\s+` — a tab does not match), returning `(command, argument)`. SSOT for
 /// control-chip shape, called by both live emission and history reconstruction.
 pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
@@ -266,14 +246,10 @@ pub fn parse_control_command(text: &str) -> Option<(&str, &str)> {
     Some((command, argument))
 }
 
-/// Logs a poisoned-mutex condition at `warn!`; the cache update is skipped.
 fn log_cache_poisoned<G>(site: &str, err: &std::sync::PoisonError<G>) {
     log::warn!("slash discovery cache mutex poisoned at {site}: {err}; cache update skipped");
 }
 
-// Cache
-
-/// Cache entry tracks when the discovery was stored so we can expire it.
 #[derive(Clone)]
 struct CachedDiscovery {
     stored_at: Instant,
@@ -285,8 +261,6 @@ fn cache() -> &'static Mutex<HashMap<String, CachedDiscovery>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// TTL for a cache entry: failed discoveries expire sooner so a recovered
-/// container is re-probed promptly.
 fn ttl_for(discovery: &SlashDiscovery) -> Duration {
     match discovery.source {
         DiscoverySource::Init => CACHE_STALENESS,
@@ -311,8 +285,6 @@ fn cache_get(project_name: &str) -> Option<SlashDiscovery> {
     }
 }
 
-/// Test-only seam: rewinds a cache entry's `stored_at` by `age` so TTL
-/// expiry can be asserted deterministically instead of sleeping for real.
 #[cfg(test)]
 fn backdate_cache_entry(project_name: &str, age: Duration) {
     if let Ok(mut map) = cache().lock() {
@@ -337,10 +309,6 @@ fn cache_put(project_name: &str, discovery: SlashDiscovery) {
     }
 }
 
-// Discovery (running claude -p and parsing the init event)
-
-/// Raw payload extracted from the first `system/init` line emitted by
-/// `claude -p`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RawDiscovery {
     slash_commands: Vec<String>,
@@ -354,8 +322,6 @@ struct PluginEntry {
     path: Option<PathBuf>,
 }
 
-/// Parses a single stream-json line and returns `Some(RawDiscovery)` when
-/// it is the init event; otherwise `None` so the caller keeps waiting.
 fn parse_init_line(line: &str) -> Option<RawDiscovery> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -412,8 +378,6 @@ fn parse_init_line(line: &str) -> Option<RawDiscovery> {
     })
 }
 
-/// Runs `claude -p ... -- /` in `container` and returns the first parsed
-/// `system/init` event. Test-only; production uses `run_discovery_with_timeout`.
 #[cfg(test)]
 fn run_discovery(
     runtime: &crate::runtime::LockedRuntime,
@@ -422,7 +386,6 @@ fn run_discovery(
     run_discovery_with_timeout(runtime, container, DISCOVERY_TIMEOUT)
 }
 
-/// Reader events: one parsed init, EOF with the line count seen, or an IO error.
 enum ReaderEvent {
     Init(RawDiscovery),
     Eof { saw_lines: bool },
@@ -519,8 +482,6 @@ fn run_discovery_with_timeout(
             reap_in_container_bounded(runtime, container, &instance_id);
             let _ = child.kill();
             let _ = child.wait();
-            // Reap kills by env marker, not pipe fd, so a held write end means no EOF here;
-            // wait briefly, then hand the reader to a background joiner instead of blocking.
             if rx.recv_timeout(Duration::from_secs(2)).is_ok() {
                 let _ = reader.join();
             } else {
@@ -535,20 +496,12 @@ fn run_discovery_with_timeout(
     }
 }
 
-/// Test-only counter of background joins that have completed, so tests can
-/// prove an abandoned reader thread actually terminates instead of parking
-/// forever (never joined by the caller, never observed by anything else).
 #[cfg(test)]
 fn background_joins_completed() -> &'static std::sync::atomic::AtomicUsize {
     static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     &COUNT
 }
 
-/// Reclaims an abandoned reader thread once its blocking `read_line` finally
-/// returns (pipe closed by the in-container process exiting, or the guest
-/// process tree unwinding some other way), instead of leaving the
-/// `JoinHandle` dropped and unobserved. Runs on its own thread so it never
-/// blocks the discovery caller.
 fn spawn_background_joiner(reader: std::thread::JoinHandle<()>, container: String) {
     std::thread::spawn(move || {
         let _ = reader.join();
@@ -558,8 +511,6 @@ fn spawn_background_joiner(reader: std::thread::JoinHandle<()>, container: Strin
     });
 }
 
-/// Reap the in-container claude by marker (host kill alone does not propagate);
-/// the reap exec itself is bounded to 5s and then killed.
 fn reap_in_container_bounded(
     runtime: &crate::runtime::LockedRuntime,
     container: &str,
@@ -595,25 +546,16 @@ fn reap_in_container_bounded(
     }
 }
 
-// Enrichment and filtering
-
-/// Frontmatter fields we care about. All fields are optional so missing or
-/// malformed frontmatter degrades gracefully.
 #[derive(Debug, Default, Clone, Deserialize)]
 struct SlashFrontmatter {
     description: Option<String>,
     #[serde(rename = "argument-hint")]
     argument_hint: Option<String>,
-    /// When explicitly `false`, the entry is hidden from the popover
-    /// (it is model-only). Missing or `true` keeps it visible.
     #[serde(rename = "user-invocable")]
     user_invocable: Option<bool>,
 }
 
-/// Turns raw discovery into a filtered, enriched, sorted `SlashDiscovery`.
-/// Default-deny: a name with no provenance anywhere (plugin/agent/native/on-disk) is dropped.
 fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> SlashDiscovery {
-    // Core skills are copied to <data_dir>/claude-resources, the tree the container links from.
     let bundled_dir = data_dir.join("claude-resources");
     let personal_dir = personal_claude_dir();
     let mut commands: Vec<SlashCommand> = Vec::new();
@@ -627,10 +569,6 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
             None
         };
 
-        // Native allowlist hit (and not shadowed by a plugin/agent name): badge
-        // and show-filter come from the allowlist, but an on-disk skill/command
-        // of the same bare name is consulted first so a user's own frontmatter
-        // (description, user-invocable: false) is never silently dropped.
         if let Some(native) = native {
             let (on_disk, _origin) = lookup_frontmatter(
                 clean_name,
@@ -669,9 +607,6 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
             &raw.plugins,
         );
 
-        // Plugin-prefixed and agent-matched names are kept even without an
-        // on-disk hit; everything else needs project/personal/plugin OR
-        // integration-resource provenance (default-deny for unknown natives).
         let (frontmatter, kind) = if plugin.is_some() || is_agent {
             (frontmatter, kind)
         } else if let Some(origin) = origin {
@@ -692,8 +627,6 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
             continue;
         };
 
-        // Hide on `user-invocable: false` only, never `disable-model-invocation`;
-        // this applies uniformly across every source, integration skills included.
         if matches!(frontmatter.user_invocable, Some(false)) {
             continue;
         }
@@ -708,7 +641,6 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
     }
 
     for agent in raw.agents {
-        // Skip agents already present as slash_commands.
         if commands.iter().any(|c| c.name == agent) {
             continue;
         }
@@ -730,8 +662,6 @@ fn enrich_and_filter(raw: RawDiscovery, project_dir: &Path, data_dir: &Path) -> 
     }
 }
 
-/// Splits a command name on the first `:` into `(bare_name, plugin)`.
-/// Returns `(name, None)` when there is no plugin prefix.
 fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
     match name.split_once(':') {
         Some((plugin, bare)) if !plugin.is_empty() && !bare.is_empty() => {
@@ -741,9 +671,6 @@ fn split_plugin_prefix(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Classifies a command by plugin prefix and `agents` presence (native-allowlist
-/// hits are handled earlier in `enrich_and_filter` and never reach here).
-/// Default `Command` is the safest fallback (UI renders `cmd`).
 fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKind {
     if plugin.is_some() {
         return SlashKind::Plugin;
@@ -751,12 +678,9 @@ fn classify_kind(name: &str, plugin: Option<&str>, agents: &[String]) -> SlashKi
     if agents.iter().any(|a| a == name) {
         return SlashKind::Agent;
     }
-    // Default; refined to Skill by enrich_and_filter when the file is under skills/.
     SlashKind::Command
 }
 
-/// Returns the first on-disk frontmatter hit and its origin (`None` when no
-/// file matched). Priority: project → bundled Speedwave resources → personal → plugin paths.
 fn lookup_frontmatter(
     name: &str,
     plugin: Option<&str>,
@@ -786,7 +710,6 @@ fn lookup_frontmatter(
             }
         }
     }
-    // Scan remaining plugin paths for unprefixed skills/commands.
     let already_scanned: Option<&str> = plugin;
     for plugin_entry in plugins {
         if Some(plugin_entry.name.as_str()) == already_scanned {
@@ -803,7 +726,6 @@ fn lookup_frontmatter(
                 if let Some(fm) = parse_frontmatter(&contents) {
                     return (fm, Some(origin));
                 }
-                // File exists without parseable frontmatter — still a kind hit.
                 return (SlashFrontmatter::default(), Some(origin));
             }
             Err(err) => {
@@ -820,7 +742,6 @@ fn lookup_frontmatter(
     (SlashFrontmatter::default(), None)
 }
 
-/// Whether the matching file lived under a `skills/` directory or a `commands/` directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrontmatterOrigin {
     Skill,
@@ -838,8 +759,6 @@ fn push_skill_candidates(base: &Path, name: &str, out: &mut Vec<(PathBuf, Frontm
     ));
 }
 
-/// Resolves `name` under `<data_dir>/claude-resources/<type>/integrations/<name>/`,
-/// mirroring the entrypoint symlink layout.
 fn lookup_integration_frontmatter(
     name: &str,
     data_dir: &Path,
@@ -880,14 +799,10 @@ fn lookup_integration_frontmatter(
     None
 }
 
-/// Returns the user's personal `.claude/` directory when the home
-/// directory can be resolved; `None` otherwise.
 fn personal_claude_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude"))
 }
 
-/// Parses YAML frontmatter bounded by `---` delimiters at the file top.
-/// Returns `None` when the block is absent or the YAML is malformed.
 fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     let trimmed = contents.trim_start_matches('\u{feff}');
     let mut lines = trimmed.lines();
@@ -906,13 +821,9 @@ fn parse_frontmatter(contents: &str) -> Option<SlashFrontmatter> {
     None
 }
 
-// Helpers
-
 fn claude_container_name(project: &str) -> String {
     format!("{}_{}_claude", consts::compose_prefix(), project)
 }
-
-// Tests
 
 #[cfg(test)]
 #[expect(
@@ -933,7 +844,6 @@ mod tests {
 
     #[test]
     fn is_bare_slash_rejects_real_commands_and_text() {
-        // A real slash command and ordinary text are messages, not the trigger.
         assert!(!is_bare_slash("/code-review"));
         assert!(!is_bare_slash("/clear"));
         assert!(!is_bare_slash("what is 2/3?"));
@@ -942,15 +852,12 @@ mod tests {
 
     #[test]
     fn is_bare_slash_rejects_empty() {
-        // Empty is blank, not the slash trigger — callers handle blank separately.
         assert!(!is_bare_slash(""));
         assert!(!is_bare_slash("   "));
     }
 
     #[test]
     fn is_bare_slash_matches_ts_mirror() {
-        // Cross-language SSOT guard (cf. host_gateway_alias_matches_mcp_shared_ts):
-        // TS `isBareSlash` in slash.service.ts must stay byte-identical in behavior.
         let src = include_str!("../../../desktop/src/src/app/chat/slash/slash.service.ts");
         let re = regex::Regex::new(
             r"export function isBareSlash\(text: string\): boolean \{\s*return text\.trim\(\) === '/';\s*\}",
@@ -1047,10 +954,6 @@ mod tests {
 
     #[test]
     fn parse_control_command_matches_ts_is_control_shaped() {
-        // Cross-language SSOT guard (cf. is_bare_slash_matches_ts_mirror):
-        // TS `isControlShaped` in slash.service.ts must stay byte-identical in shape.
-        // A literal space (not `\s+`) is load-bearing: `strip_prefix("/model ")`
-        // does not match a tab, so the TS regex must not either.
         let src = include_str!("../../../desktop/src/src/app/chat/slash/slash.service.ts");
         let re = regex::Regex::new(
             r"const CONTROL_COMMAND_RE = /\^\\/\(model\|effort\) \+\(\\S\+\)\$/;",
@@ -1071,10 +974,6 @@ mod tests {
         );
     }
 
-    /// Fixture-table SSOT guard: both Rust `parse_control_command` and TS
-    /// `isControlShaped` (`slash.service.spec.ts`) read this same file, so a
-    /// behavioral divergence (e.g. TS matching a tab that Rust rejects) fails
-    /// loudly on whichever side regresses, not just on a regex-string diff.
     #[derive(Deserialize)]
     struct ControlShapeCase {
         input: String,
@@ -1280,7 +1179,6 @@ mod tests {
 
     #[test]
     fn enrich_keeps_disable_model_invocation_true() {
-        // vibe-kanban filters these out — we must NOT.
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join(".claude/skills/user-only");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1303,7 +1201,6 @@ mod tests {
 
     #[test]
     fn enrich_prefers_project_skill_over_personal() {
-        // Verify priority via a project skill's description (no HOME redirect).
         let tmp = tempfile::tempdir().unwrap();
         let project_skill = tmp.path().join(".claude/skills/myskill");
         std::fs::create_dir_all(&project_skill).unwrap();
@@ -1325,9 +1222,6 @@ mod tests {
 
     #[test]
     fn enrich_native_hit_prefers_on_disk_description_over_allowlist() {
-        // A project skill named like a native command ("model") must not be
-        // silently shadowed: its own description should surface, not the
-        // hardcoded allowlist description.
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join(".claude/skills/model");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1355,8 +1249,6 @@ mod tests {
 
     #[test]
     fn enrich_native_hit_falls_back_to_allowlist_description_without_on_disk_hit() {
-        // No on-disk skill/command named "model" exists: the allowlist
-        // description must still be used (regression guard for the 5b/5c fix).
         let tmp = tempfile::tempdir().unwrap();
         let raw = RawDiscovery {
             slash_commands: vec!["model".into()],
@@ -1373,9 +1265,6 @@ mod tests {
 
     #[test]
     fn enrich_native_hit_hidden_by_on_disk_user_invocable_false() {
-        // A project skill named like a native command with user-invocable:
-        // false intends to hide it; the native allowlist's show=true must
-        // not override that.
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = tmp.path().join(".claude/skills/model");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1539,9 +1428,6 @@ mod tests {
 
     #[test]
     fn abandoned_reader_thread_is_background_joined_once_pipe_closes() {
-        // The orphan hang must outlast the 2s post-reap grace window (so the
-        // background-joiner path, not the in-line join, actually triggers)
-        // but still exit soon enough for this test to observe reclamation.
         let before = background_joins_completed().load(std::sync::atomic::Ordering::SeqCst);
         let (runtime, _handles) = MockRuntimeBuilder::new()
             .with_exec_piped_orphan_hang(4)
@@ -1589,8 +1475,6 @@ mod tests {
             first.reason
         );
 
-        // A second call within the negative TTL must hit the cache, not re-probe,
-        // and the cached negative entry must keep its reason.
         let second = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(second.source, DiscoverySource::Unavailable);
         assert_eq!(second.reason, first.reason);
@@ -1666,7 +1550,6 @@ mod tests {
             "a successful discovery must carry no reason"
         );
 
-        // A failing runtime must still return the cached Init result.
         let (failing, _) = MockRuntimeBuilder::new()
             .with_exec_piped_error("container not running")
             .build();
@@ -1675,7 +1558,6 @@ mod tests {
         assert_eq!(first, second);
 
         invalidate_cache(&project.name);
-        // After invalidation, the failing runtime must produce Unavailable.
         let third = discover_slash_commands(&failing, &project).unwrap();
         assert_eq!(third.source, DiscoverySource::Unavailable);
     }
@@ -1688,7 +1570,6 @@ mod tests {
 
     #[test]
     fn personal_claude_dir_resolves_to_home() {
-        // Result is `HOME/.claude` whenever HOME resolves.
         let home = dirs::home_dir();
         let personal = personal_claude_dir();
         assert_eq!(home.map(|h| h.join(".claude")), personal);
@@ -1734,8 +1615,6 @@ mod tests {
     fn concurrent_discovery_runs_exactly_one_exec_and_shares_the_result() {
         invalidate_all_caches();
         let project = unique_project_name("single-flight");
-        // One-shot hang (2s) gates the leader long enough for followers to attach;
-        // 300ms injected timeout keeps the whole test far under the sleep.
         let (runtime, handles) = MockRuntimeBuilder::new()
             .with_exec_piped_hang(2)
             .with_exec_piped_script("")
@@ -1770,13 +1649,6 @@ mod tests {
 
     #[test]
     fn leader_panic_publishes_error_instead_of_deadlocking_followers() {
-        // Real synchronization, not a sleep race: the leader's closure signals
-        // `started_tx` right before blocking on `release_rx`, so the main thread
-        // only spawns the follower after `lead_discovery` has synchronously
-        // inserted the slot (see `lead_discovery`) - the follower is thus
-        // guaranteed to attach to a live slot instead of racing to become a
-        // second leader. Dropping `release_tx` then unblocks the leader's
-        // `recv()`, which panics.
         let project = unique_project_name("panic");
         let p2 = project.clone();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -1862,7 +1734,6 @@ mod tests {
 
     #[test]
     fn skills_origin_promotes_command_to_skill_kind() {
-        // A bare name under .claude/skills/ must surface as kind=Skill.
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let skill_dir = project.join(".claude/skills/tool");

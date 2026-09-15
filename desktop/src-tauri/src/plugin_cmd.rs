@@ -1,14 +1,9 @@
-// Plugin management commands — Tauri backend for the Plugins UI. All `#[tauri::command]`
-// functions here are registered in the main `generate_handler!` macro via their FQ paths.
-
 use crate::types::check_project;
 use speedwave_runtime::config;
 use speedwave_runtime::consts;
 use speedwave_runtime::plugin;
 use std::collections::HashMap;
 use tauri::Emitter;
-
-// ── DTOs ────────────────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize, Clone)]
 pub(crate) struct PluginStatusEntry {
@@ -17,36 +12,22 @@ pub(crate) struct PluginStatusEntry {
     pub(crate) service_id: Option<String>,
     pub(crate) version: String,
     pub(crate) description: String,
-    /// Optional long-form Markdown setup/usage guide from the manifest,
-    /// rendered on the Dashboard tab. `None` when the manifest omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) instructions: Option<String>,
-    /// Markdown release notes from the plugin's `CHANGELOG.md`, rendered on
-    /// the Changelog tab. `None` when the package ships no changelog.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) changelog: Option<String>,
     pub(crate) enabled: bool,
     pub(crate) configured: bool,
     pub(crate) auth_fields: Vec<plugin::AuthFieldDef>,
-    /// Stored non-secret values for prefilling the form; secret fields are never included.
     pub(crate) current_values: HashMap<String, String>,
-    /// Keys of `auth_fields` with a non-empty value stored on disk.
-    /// Metadata only — secret contents are NOT read, only existence + non-zero length.
     pub(crate) configured_fields: Vec<String>,
     pub(crate) token_mount: String,
     pub(crate) settings_schema: Option<serde_json::Value>,
     pub(crate) requires_integrations: Vec<String>,
-    /// Outcome of `runtime::plugin::list_for_ui` for this entry.
-    /// Serializes to snake_case (`verified`, `missing_signature`, …).
     pub(crate) verification_status: plugin::VerificationStatus,
-    /// Human-readable diagnostic when `verification_status != Verified`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification_error: Option<String>,
-    /// True when the manifest declares `host_bridge`. Drives the
-    /// frontend "Bridge connection" section visibility.
     pub(crate) has_host_bridge: bool,
-    /// Access-token expiry (ISO-8601) from the off-mount OAuth state, when the
-    /// plugin is OAuth-authorized. `None` for non-OAuth or unauthorized plugins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) oauth_expires_at: Option<String>,
 }
@@ -56,14 +37,10 @@ pub(crate) struct PluginsResponse {
     pub(crate) plugins: Vec<PluginStatusEntry>,
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────────────────
-
-/// Returns the token directory path for a service, delegating to the runtime SSOT.
 fn token_dir_for(project: &str, service_id: &str) -> Result<std::path::PathBuf, String> {
     plugin::token_dir(project, service_id).map_err(|e| e.to_string())
 }
 
-/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
 #[cfg(test)]
 fn token_dir_for_in(
     data_dir: &std::path::Path,
@@ -73,14 +50,10 @@ fn token_dir_for_in(
     plugin::token_dir_in(data_dir, project, service_id)
 }
 
-/// True when a credential file exists on disk with non-zero length.
-/// Metadata-only: never reads the file contents, so it is safe for secret fields.
 fn field_has_stored_value(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
         Ok(m) => m.len() > 0,
-        // A missing file legitimately means "not configured".
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        // Permission/IO error: report false but log (path is a filename, not secret contents).
         Err(e) => {
             log::warn!("could not stat credential file {}: {e}", path.display());
             false
@@ -88,8 +61,6 @@ fn field_has_stored_value(path: &std::path::Path) -> bool {
     }
 }
 
-/// Returns the manifest `instructions` to surface in `PluginStatusEntry`.
-/// `None` when unverified, when no instructions are declared, or when the cap is exceeded.
 fn instructions_for_ui(verified: bool, instructions: Option<&str>) -> Option<String> {
     if !verified {
         return None;
@@ -105,7 +76,6 @@ fn instructions_for_ui(verified: bool, instructions: Option<&str>) -> Option<Str
     Some(s.to_string())
 }
 
-/// Validates a credential field name and value for safety.
 pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), String> {
     if key.contains('/') || key.contains('\\') || key.contains("..") || key.contains('\0') {
         return Err(format!("invalid field name: {}", key));
@@ -123,8 +93,6 @@ pub(crate) fn validate_credential_field(key: &str, value: &str) -> Result<(), St
     Ok(())
 }
 
-// ── Tauri commands ──────────────────────────────────────────────────────────────────────
-
 #[tauri::command]
 pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     check_project(&project)?;
@@ -137,12 +105,10 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     let integrations =
         config::resolve_integrations(std::path::Path::new(project_dir), &user_config, &project);
 
-    // Every installed directory becomes one entry; `verification_status` carries the verdict.
     let ui_entries = plugin::list_for_ui();
 
     let mut entries = Vec::new();
     for ui in &ui_entries {
-        // No parseable manifest: surface slug = directory name + status, rest empty defaults.
         let Some(manifest) = ui.manifest.as_ref() else {
             entries.push(PluginStatusEntry {
                 slug: ui.slug.clone(),
@@ -169,7 +135,6 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         };
 
         let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
-        // An unverified plugin must NOT count as enabled.
         let verified = matches!(ui.verification_status, plugin::VerificationStatus::Verified);
         let enabled = verified && integrations.is_plugin_enabled(sid);
 
@@ -183,7 +148,6 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             &project,
             sid,
         );
-        // Only OAuth plugins can have an off-mount state file.
         let has_oauth = manifest.auth_fields.iter().any(|f| f.oauth_flow);
         let oauth_expires_at = if has_oauth {
             plugin_oauth_expires_at(&project, sid)
@@ -200,7 +164,6 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
         let mut current_values = HashMap::new();
         let mut configured_fields = Vec::new();
         for field in &manifest.auth_fields {
-            // An oauth_flow field is "configured" once its credential is saved to the seed.
             if field.oauth_flow {
                 if seed_keys.contains(&field.key) || oauth_authorized {
                     configured_fields.push(field.key.clone());
@@ -208,11 +171,9 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
                 continue;
             }
             let path = svc_token_dir.join(&field.key);
-            // Metadata-only existence + non-empty check, without reading secret contents.
             if field_has_stored_value(&path) {
                 configured_fields.push(field.key.clone());
             }
-            // current_values exposes only non-secret values; secrets stay write-only.
             if field.is_secret {
                 continue;
             }
@@ -237,9 +198,7 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
             service_id: manifest.service_id.clone(),
             version: manifest.version.clone(),
             description: manifest.description.clone(),
-            // Free-form Markdown gated to verified plugins, with the install-time cap re-checked.
             instructions: instructions_for_ui(verified, manifest.instructions.as_deref()),
-            // Read by the runtime lister inside its verify-then-read pass; None when unverified.
             changelog: ui.changelog.clone(),
             enabled,
             configured,
@@ -259,14 +218,10 @@ pub fn get_plugins(project: String) -> Result<PluginsResponse, String> {
     Ok(PluginsResponse { plugins: entries })
 }
 
-/// Reads the off-mount OAuth state's `expiresAt` (ISO-8601), or `None` when not authorized.
-/// OAuth credentials live off-mount, so the state file — not `/tokens` — is the readiness signal.
 fn plugin_oauth_expires_at(project: &str, slug: &str) -> Option<String> {
     plugin_oauth_expires_at_in(speedwave_runtime::consts::data_dir(), project, slug)
 }
 
-/// `data_dir`-parameterised variant — tests pass a tempdir to bypass the
-/// `consts::data_dir()` OnceLock (cf. `plugin::oauth_state_file_in`).
 fn plugin_oauth_expires_at_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -280,18 +235,14 @@ fn plugin_oauth_expires_at_in(
         .map(String::from)
 }
 
-/// True when the plugin has an authorized OAuth state on disk.
 fn plugin_oauth_authorized_in(data_dir: &std::path::Path, project: &str, slug: &str) -> bool {
     plugin_oauth_expires_at_in(data_dir, project, slug).is_some()
 }
 
-/// Keys present in the off-mount pre-auth seed (saved client credentials); marks an
-/// `oauth_flow` field "configured" so Authorize can unlock before authorization happens.
 fn oauth_seed_keys(project: &str, slug: &str) -> std::collections::HashSet<String> {
     oauth_seed_keys_in(speedwave_runtime::consts::data_dir(), project, slug)
 }
 
-/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
 fn oauth_seed_keys_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -322,7 +273,6 @@ fn is_plugin_configured(
     )
 }
 
-/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
 fn is_plugin_configured_in(
     data_dir: &std::path::Path,
     svc_token_dir: &std::path::Path,
@@ -331,8 +281,6 @@ fn is_plugin_configured_in(
     project: &str,
     slug: &str,
 ) -> bool {
-    // OAuth fields are stored off-mount; readiness for them = an authorized
-    // state file, not a token in `/tokens`.
     let has_oauth = auth_fields.iter().any(|f| f.oauth_flow);
     if has_oauth && !plugin_oauth_authorized_in(data_dir, project, slug) {
         return false;
@@ -342,7 +290,6 @@ fn is_plugin_configured_in(
         .iter()
         .filter(|f| plugin::blocks_plugin_readiness(f) && !f.oauth_flow)
         .collect();
-    // Check non-oauth secret fields if any exist
     if !secret_fields.is_empty() {
         let all_present = secret_fields.iter().all(|f| {
             let path = svc_token_dir.join(&f.key);
@@ -356,7 +303,6 @@ fn is_plugin_configured_in(
         }
     }
 
-    // Check that all required integrations are configured
     for integration in requires_integrations {
         if !crate::integrations_cmd::is_service_configured_in(data_dir, project, integration) {
             return false;
@@ -366,8 +312,6 @@ fn is_plugin_configured_in(
     true
 }
 
-/// Reads `plugin.json` from a ZIP without extracting, verifying signature, or building.
-/// Returns a lightweight summary so the install overlay knows which steps to render.
 #[tauri::command]
 pub async fn peek_plugin_manifest(
     zip_path: String,
@@ -410,7 +354,6 @@ pub async fn install_plugin(
         plugin::InstallOutcome::InstalledPendingBuild(m) => m,
     };
 
-    // Auto-enable only when image is ready and no required secret is missing.
     let should_auto_enable = matches!(outcome, plugin::InstallOutcome::Installed(_))
         && !manifest
             .auth_fields
@@ -451,7 +394,6 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     log::info!("removing plugin {slug}");
     crate::bridges::plugin_bridge_manager::stop_for(&slug);
 
-    // Removal must work for tampered plugins too; tolerant lister gives a slug fallback.
     let entries = plugin::list_for_ui();
     let entry = entries.iter().find(|e| e.slug == slug);
     let manifest = entry.and_then(|e| e.manifest.as_ref());
@@ -460,19 +402,16 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| slug.clone());
 
-    // Delete plugin files + cached image; image cleanup is best-effort if no runtime.
     let rt = speedwave_runtime::runtime::detect_runtime();
     let rt_ref: Option<&speedwave_runtime::runtime::LockedRuntime> =
         if rt.is_available() { Some(&rt) } else { None };
     plugin::remove_plugin(&slug, rt_ref).map_err(|e| e.to_string())?;
 
-    // Collect project names for token cleanup (before config lock)
     let project_names: Vec<String> = {
         let cfg = config::load_user_config().map_err(|e| e.to_string())?;
         cfg.projects.iter().map(|p| p.name.clone()).collect()
     };
 
-    // Clean config: plugin_settings + integrations.plugins
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         let mut changed = false;
@@ -497,27 +436,21 @@ pub fn remove_plugin(slug: String) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
 
-    // Delete the token dir and the off-mount OAuth secrets (state + seed).
     for project_name in &project_names {
         let svc_dir = token_dir_for(project_name, &service_id)?;
         if svc_dir.exists() {
-            // Whole-dir wipe covers access_token too.
             std::fs::remove_dir_all(&svc_dir).map_err(|e| e.to_string())?;
         }
-        // Off-mount OAuth state/seed never live under tokens/.
         remove_oauth_offmount(project_name, &service_id)?;
     }
 
     Ok(())
 }
 
-/// Deletes the off-mount OAuth state + seed for a service (refresh token +
-/// client secret). Keyed on service_id, matching every other OAuth path.
 pub(crate) fn remove_oauth_offmount(project: &str, service_id: &str) -> Result<(), String> {
     remove_oauth_offmount_in(speedwave_runtime::consts::data_dir(), project, service_id)
 }
 
-/// `data_dir`-parameterised variant (see `plugin_oauth_expires_at_in`).
 fn remove_oauth_offmount_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -545,7 +478,6 @@ pub fn set_plugin_enabled(
     check_project(&project)?;
     log::info!("setting plugin enabled={enabled} for project={project} service_id={service_id}");
 
-    // Verified-only on enable (re-checked here, UI gate is advisory); disable skips the check.
     if enabled {
         let entries = plugin::list_for_ui();
         let matches_id = |m: &plugin::PluginManifest| {
@@ -577,8 +509,6 @@ pub fn set_plugin_enabled(
     set_plugin_enabled_in_config(&project, &service_id, enabled)
 }
 
-/// Writes the enabled flag for a plugin into the project config (no verify gate — callers
-/// gate as needed). Used by set_plugin_enabled and OAuth auto-enable-on-success (ADR-069).
 pub(crate) fn set_plugin_enabled_in_config(
     project: &str,
     plugin_key: &str,
@@ -607,23 +537,17 @@ pub fn save_plugin_credentials(
     check_project(&project)?;
     log::info!("saving plugin credentials for project={project} slug={slug}");
 
-    // Verified-only: reject credential writes for an unverified plugin.
     let manifest = require_verified_with_manifest(&slug)?;
     save_plugin_credentials_in(consts::data_dir(), &project, &manifest, &credentials)
 }
 
-/// `data_dir`-parameterised core of [`save_plugin_credentials`], past the verify gate (see
-/// `plugin_oauth_expires_at_in`). Validate-all-then-write: a rejected save mutates nothing.
 fn save_plugin_credentials_in(
     data_dir: &std::path::Path,
     project: &str,
     manifest: &plugin::PluginManifest,
     credentials: &HashMap<String, String>,
 ) -> Result<(), String> {
-    // Phase 1: every entry passes every check before the first filesystem touch. `credentials`
-    // iterates in hash order, so a write here would leak an order-dependent partial set.
     let mut plain: Vec<(&str, &str)> = Vec::new();
-    // OAuth fields (`oauth_flow: true`) are kept off-mount, accumulating into the seed file.
     let mut oauth_seed: HashMap<String, String> = HashMap::new();
     for (key, value) in credentials {
         let field = manifest
@@ -632,7 +556,6 @@ fn save_plugin_credentials_in(
             .find(|f| f.key == *key)
             .ok_or_else(|| format!("field '{}' not allowed for plugin '{}'", key, manifest.slug))?;
         validate_credential_field(key, value)?;
-        // Enforce the field's optional regex constraint host-side (UI `pattern` is advisory).
         plugin::validate_credential_value(field, value)?;
         if field.oauth_flow {
             oauth_seed.insert(key.clone(), value.clone());
@@ -641,7 +564,6 @@ fn save_plugin_credentials_in(
         }
     }
 
-    // Phase 2: all validated — create the service dir, write the `/tokens` files, then the seed.
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
     let svc_dir = plugin::token_dir_in(data_dir, project, sid);
     std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
@@ -651,14 +573,11 @@ fn save_plugin_credentials_in(
         speedwave_runtime::fs_perms::set_owner_only(&file_path)?;
     }
     if !oauth_seed.is_empty() {
-        // Key the seed on `sid` (service_id ?? slug), matching the token dir.
         write_oauth_seed_in(data_dir, project, sid, &oauth_seed)?;
     }
     Ok(())
 }
 
-/// Writes OAuth client credentials to the host-only pre-auth seed file
-/// (`oauth/<project>/<slug>.seed.json`, 0o600). Read by `start_plugin_oauth`; never mounted.
 fn write_oauth_seed_in(
     data_dir: &std::path::Path,
     project: &str,
@@ -667,7 +586,6 @@ fn write_oauth_seed_in(
 ) -> Result<(), String> {
     let path = plugin::oauth_seed_file_in(data_dir, project, slug);
     let parent = path.parent().ok_or_else(|| "seed: no parent".to_string())?;
-    // Owner-only dir on both platforms (Unix 0o700 + Windows ACL).
     speedwave_runtime::fs_perms::ensure_owner_only_dir(parent).map_err(|e| e.to_string())?;
     let body = serde_json::to_string_pretty(seed).map_err(|e| e.to_string())? + "\n";
     speedwave_runtime::fs_perms::write_restricted_file(&path, &body).map_err(|e| e.to_string())?;
@@ -683,10 +601,8 @@ pub fn plugin_save_settings(
     check_project(&project)?;
     log::info!("saving plugin settings for project={project} slug={slug}");
 
-    // Verified-only: reject settings writes for an unverified plugin.
     let manifest = require_verified_with_manifest(&slug)?;
 
-    // Cap settings JSON size (`consts::PLUGIN_SETTINGS_MAX_BYTES`).
     let serialised = serde_json::to_vec(&settings).map_err(|e| e.to_string())?;
     if serialised.len() > consts::PLUGIN_SETTINGS_MAX_BYTES {
         return Err(format!(
@@ -696,7 +612,6 @@ pub fn plugin_save_settings(
         ));
     }
 
-    // If the plugin declared a `settings_schema`, the payload must validate against it.
     if let Some(ref schema) = manifest.settings_schema {
         validate_settings_against_schema(&slug, schema, &settings)?;
     }
@@ -717,18 +632,14 @@ pub fn plugin_save_settings(
     })
     .map_err(|e| e.to_string())?;
 
-    // Persisted like the auth_fields files, so a container start picks it up and a worker
-    // re-reading per request sees the change without a restart.
     let sid = manifest.service_id.as_deref().unwrap_or(&slug);
     plugin::write_settings_file(&project, sid, &settings).map_err(|e| e.to_string())
 }
 
-/// Rejects calls targeting a plugin whose verification status is not `Verified`.
 fn require_verified(slug: &str) -> Result<(), String> {
     require_verified_with_manifest(slug).map(|_| ())
 }
 
-/// Same gate as [`require_verified`] but returns the parsed manifest.
 pub(crate) fn require_verified_with_manifest(slug: &str) -> Result<plugin::PluginManifest, String> {
     let entries = plugin::list_for_ui();
     let entry = entries
@@ -750,8 +661,6 @@ pub(crate) fn require_verified_with_manifest(slug: &str) -> Result<plugin::Plugi
         .ok_or_else(|| format!("plugin '{}' has no manifest", slug))
 }
 
-/// Validates a settings payload against a plugin's declared JSON Schema (Draft 7).
-/// Returns an error string on a malformed schema or non-conforming payload; `Ok(())` otherwise.
 fn validate_settings_against_schema(
     slug: &str,
     schema: &serde_json::Value,
@@ -773,7 +682,6 @@ pub fn plugin_load_settings(project: String, slug: String) -> Result<serde_json:
     check_project(&project)?;
     log::info!("loading plugin settings for project={project} slug={slug}");
 
-    // Verified-only: settings can hold non-secret private project metadata.
     require_verified(&slug)?;
 
     let user_config = config::load_user_config().map_err(|e| e.to_string())?;
@@ -795,8 +703,6 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     check_project(&project)?;
     log::info!("deleting plugin credentials for project={project} slug={slug}");
 
-    // Recovery action: clear credentials even for a tampered plugin (tolerant lister).
-    // Token dir keyed by service_id (or slug when no manifest); every deletion stays inside it.
     let entries = plugin::list_for_ui();
     let entry = entries.iter().find(|e| e.slug == slug);
     let manifest = entry.and_then(|e| e.manifest.as_ref());
@@ -806,7 +712,6 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
 
     let svc_dir = token_dir_for(&project, sid)?;
     if svc_dir.exists() {
-        // Delete the manifest's auth_fields, or everything in the dir when no manifest.
         let keys: Vec<String> = match manifest {
             Some(m) => m.auth_fields.iter().map(|f| f.key.clone()).collect(),
             None => std::fs::read_dir(&svc_dir)
@@ -815,13 +720,11 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
                 .filter_map(|e| e.file_name().into_string().ok())
                 .collect(),
         };
-        // Single symlink-aware helper shared by bulk and per-field delete.
         for key in &keys {
             remove_credential_file_guarded(&svc_dir, key)?;
         }
     }
 
-    // Auto-disable the plugin since credentials are removed
     config::with_config_lock(|| {
         let mut user_config = config::load_user_config()?;
         if let Some(entry) = user_config.projects.iter_mut().find(|p| p.name == project) {
@@ -834,8 +737,6 @@ pub fn delete_plugin_credentials(project: String, slug: String) -> Result<(), St
     .map_err(|e| e.to_string())
 }
 
-/// Deletes a SINGLE stored credential field. Verified-only + allowlist +
-/// symlink-guard. See ADR-015 "Credentials" for the layered safety contract.
 #[tauri::command]
 pub fn delete_plugin_credential_field(
     project: String,
@@ -848,22 +749,18 @@ pub fn delete_plugin_credential_field(
     let manifest = require_verified_with_manifest(&slug)?;
     let sid = manifest.service_id.as_deref().unwrap_or(&manifest.slug);
 
-    // The key must be a declared auth_field.
     if !manifest.auth_fields.iter().any(|f| f.key == key) {
         return Err(format!(
             "field '{}' is not declared in plugin '{}' auth_fields",
             key, slug
         ));
     }
-    // Reuse the field-name safety check (rejects '/', '\\', '..', null); empty value is unchecked.
     validate_credential_field(&key, "")?;
 
     let svc_dir = token_dir_for(&project, sid)?;
     remove_credential_file_guarded(&svc_dir, &key)
 }
 
-/// Removes a single credential file under `svc_dir`, refusing any symlink
-/// (via no-follow `symlink_metadata`). Idempotent: a missing entry is success.
 fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Result<(), String> {
     let path = svc_dir.join(key);
     match std::fs::symlink_metadata(&path) {
@@ -877,8 +774,6 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -888,7 +783,6 @@ fn remove_credential_file_guarded(svc_dir: &std::path::Path, key: &str) -> Resul
 mod tests {
     use super::*;
 
-    // remove_oauth_offmount must delete the off-mount state + seed and tolerate their absence.
     #[test]
     fn remove_oauth_offmount_deletes_state_and_seed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -901,7 +795,6 @@ mod tests {
         remove_oauth_offmount_in(tmp.path(), "proj", "svc").unwrap();
         assert!(!state.exists(), "state file must be deleted");
         assert!(!seed.exists(), "seed file must be deleted");
-        // Idempotent: a second call on absent files is Ok (NotFound tolerated).
         remove_oauth_offmount_in(tmp.path(), "proj", "svc").unwrap();
     }
 
@@ -941,9 +834,7 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("test-plugin"));
         assert!(json.contains("api_key"));
-        // Pin the snake_case wire literal the Angular `PluginVerificationStatus` union depends on.
         assert!(json.contains(r#""verification_status":"verified""#));
-        // instructions is None here → omitted from the wire (skip_serializing_if).
         assert!(
             !json.contains("instructions"),
             "None instructions must not serialize a key"
@@ -984,17 +875,12 @@ mod tests {
 
     #[test]
     fn instructions_for_ui_gates_unverified_oversized_and_absent() {
-        // Verified + within cap → passes through unchanged.
         let ok = instructions_for_ui(true, Some("# Setup\nclean"));
         assert_eq!(ok.as_deref(), Some("# Setup\nclean"));
-        // Unverified plugin → withheld regardless of content.
         assert_eq!(instructions_for_ui(false, Some("# Setup")), None);
-        // Verified + no instructions → still None.
         assert_eq!(instructions_for_ui(true, None), None);
-        // Verified + oversized → withheld (install-time cap re-checked).
         let huge = "a".repeat(speedwave_runtime::consts::PLUGIN_INSTRUCTIONS_MAX_BYTES + 1);
         assert_eq!(instructions_for_ui(true, Some(&huge)), None);
-        // Verified + exactly at cap → passes (cap is inclusive).
         let at_cap = "a".repeat(speedwave_runtime::consts::PLUGIN_INSTRUCTIONS_MAX_BYTES);
         assert!(instructions_for_ui(true, Some(&at_cap)).is_some());
     }
@@ -1042,8 +928,6 @@ mod tests {
         assert!(json.contains(r#""verification_status":"verified""#));
     }
 
-    // ── settings-schema validation (the `plugin_save_settings` gate) ─────
-
     #[test]
     fn validate_settings_against_schema_accepts_conforming_payload() {
         let schema = serde_json::json!({
@@ -1067,19 +951,16 @@ mod tests {
             },
             "required": ["currency"]
         });
-        // Value outside the enum.
         let bad_enum = serde_json::json!({ "currency": "BTC" });
         let err = super::validate_settings_against_schema("example-plugin", &schema, &bad_enum)
             .expect_err("off-enum value must be rejected");
         assert!(err.contains("do not match its schema"), "got: {err}");
 
-        // Wrong type.
         let bad_type = serde_json::json!({ "currency": 42 });
         let err = super::validate_settings_against_schema("example-plugin", &schema, &bad_type)
             .expect_err("wrong-type value must be rejected");
         assert!(err.contains("do not match its schema"), "got: {err}");
 
-        // Missing required field.
         let missing = serde_json::json!({});
         let err = super::validate_settings_against_schema("example-plugin", &schema, &missing)
             .expect_err("missing required field must be rejected");
@@ -1088,8 +969,6 @@ mod tests {
 
     #[test]
     fn validate_settings_against_schema_rejects_malformed_schema() {
-        // Not a valid Draft-7 schema (`type` set to nonsense); `jsonschema::draft7::new`
-        // fails to compile it and we surface that as a clean error.
         let bogus_schema = serde_json::json!({ "type": 12345 });
         let payload = serde_json::json!({ "anything": true });
         let err =
@@ -1328,7 +1207,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_credential_file_guarded_refuses_symlink_escape() {
-        // A symlink targeting outside the token dir must be refused; the target survives.
         let svc = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let victim = outside.path().join("victim");
@@ -1346,7 +1224,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_credential_file_guarded_refuses_intra_dir_symlink() {
-        // An intra-dir symlink is refused and its target is preserved.
         let svc = tempfile::tempdir().unwrap();
         let target = svc.path().join("real");
         std::fs::write(&target, "real credential").unwrap();
@@ -1363,7 +1240,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_credential_file_guarded_refuses_dangling_symlink() {
-        // A dangling symlink is rejected outright.
         let svc = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("/no/such/thing", svc.path().join("ghost")).unwrap();
 
@@ -1373,7 +1249,6 @@ mod tests {
 
     #[test]
     fn delete_field_rejects_key_not_in_auth_fields_allowlist() {
-        // delete_plugin_credential_field rejects keys outside the verified manifest's auth_fields.
         let manifest = plugin::PluginManifest {
             name: "Test".to_string(),
             service_id: Some("test-plugin".to_string()),
@@ -1428,7 +1303,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
 
-        // Create a config with one project
         let initial_config = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "test-project".into(),
@@ -1447,7 +1321,6 @@ mod tests {
         let json = serde_json::to_string_pretty(&initial_config).unwrap();
         std::fs::write(&config_path, &json).unwrap();
 
-        // Simulate save: load, mutate, save
         let content = std::fs::read_to_string(&config_path).unwrap();
         let mut cfg: config::SpeedwaveUserConfig = serde_json::from_str(&content).unwrap();
         let entry = cfg
@@ -1461,7 +1334,6 @@ mod tests {
         let json_out = serde_json::to_string_pretty(&cfg).unwrap();
         std::fs::write(&config_path, &json_out).unwrap();
 
-        // Simulate load: read back and extract
         let content2 = std::fs::read_to_string(&config_path).unwrap();
         let cfg2: config::SpeedwaveUserConfig = serde_json::from_str(&content2).unwrap();
         let loaded = cfg2
@@ -1494,7 +1366,6 @@ mod tests {
             telemetry: None,
         };
 
-        // Load for unknown plugin — should return empty object
         let loaded = cfg
             .projects
             .iter()
@@ -1506,7 +1377,6 @@ mod tests {
 
         assert_eq!(loaded, serde_json::json!({}));
 
-        // Also test with empty plugin_settings map
         let cfg2 = config::SpeedwaveUserConfig {
             projects: vec![config::ProjectUserEntry {
                 name: "test-project".into(),
@@ -1534,7 +1404,6 @@ mod tests {
 
         assert_eq!(loaded2, serde_json::json!({}));
 
-        // Test for unknown project — should also return empty object
         let loaded3 = cfg
             .projects
             .iter()
@@ -1582,7 +1451,6 @@ mod tests {
             telemetry: None,
         };
 
-        // Simulate the cleanup logic from remove_plugin
         let slug = "my-plugin";
         for project in &mut cfg.projects {
             if let Some(ps) = project.plugin_settings.as_mut() {
@@ -1590,12 +1458,10 @@ mod tests {
             }
         }
 
-        // proj-a: my-plugin removed, other-plugin stays
         let ps_a = cfg.projects[0].plugin_settings.as_ref().unwrap();
         assert!(!ps_a.contains_key("my-plugin"));
         assert!(ps_a.contains_key("other-plugin"));
 
-        // proj-b: my-plugin removed, map empty
         let ps_b = cfg.projects[1].plugin_settings.as_ref().unwrap();
         assert!(!ps_b.contains_key("my-plugin"));
     }
@@ -1686,7 +1552,6 @@ mod tests {
     fn remove_plugin_cleans_tokens_from_disk() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Create token dirs for two projects
         let dir_a = tmp.path().join("tokens/proj-a/example-plugin");
         let dir_b = tmp.path().join("tokens/proj-b/example-plugin");
         std::fs::create_dir_all(&dir_a).unwrap();
@@ -1790,7 +1655,6 @@ mod tests {
         assert!(validate_credential_field("key", &over_limit).is_err());
     }
 
-    // OAuth seed lives under oauth/, NOT under the tokens/ mount.
     #[test]
     fn oauth_seed_path_is_off_mount() {
         let base = std::path::Path::new("/data");
@@ -1840,7 +1704,6 @@ mod tests {
     fn is_plugin_configured_false_when_required_integration_missing() {
         let dir = tempfile::tempdir().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        // No auth fields required (always "configured" for own creds)
         let configured = is_plugin_configured_in(
             tmp.path(),
             dir.path(),
@@ -1881,7 +1744,6 @@ mod tests {
         }
     }
 
-    // An oauth_flow plugin is NOT configured until an authorized oauth state file exists.
     #[test]
     fn is_plugin_configured_false_for_oauth_plugin_without_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1897,7 +1759,6 @@ mod tests {
         assert!(!configured, "no oauth state -> not configured");
     }
 
-    /// Writes a full authorized OAuth state file with the given `expiresAt`.
     fn write_oauth_state(data_dir: &std::path::Path, project: &str, slug: &str, expires_at: &str) {
         let path = speedwave_runtime::plugin::oauth_state_file_in(data_dir, project, slug);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1941,7 +1802,6 @@ mod tests {
         );
     }
 
-    // A seed file alone must NOT count as authorized; only the full state file does.
     #[test]
     fn plugin_oauth_authorized_false_with_seed_but_no_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1955,7 +1815,6 @@ mod tests {
         );
     }
 
-    // A saved seed marks its fields configured before any authorization has happened.
     #[test]
     fn oauth_seed_keys_returns_saved_credential_keys() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2064,7 +1923,6 @@ mod tests {
             ui: None,
             telemetry: None,
         };
-        // Simulate the auto-enable block from install_plugin
         let plugin_key = "my-skills";
         if let Some(active) = cfg.active_project.clone() {
             if let Some(entry) = cfg.projects.iter_mut().find(|p| p.name == active) {
@@ -2087,9 +1945,6 @@ mod tests {
         );
     }
 
-    // ── save_plugin_credentials_in ──────────────────────────────────────────────────────
-
-    /// Minimal manifest for the credential-save core; `service_id` == `slug` == "test-plugin".
     fn manifest_with_auth_fields(auth_fields: Vec<plugin::AuthFieldDef>) -> plugin::PluginManifest {
         plugin::PluginManifest {
             name: "Test".to_string(),
@@ -2114,7 +1969,6 @@ mod tests {
         }
     }
 
-    /// Secret auth field; `pattern` adds a regex constraint whose message names the key.
     fn auth_field(key: &str, oauth_flow: bool, pattern: Option<&str>) -> plugin::AuthFieldDef {
         plugin::AuthFieldDef {
             key: key.to_string(),
@@ -2139,8 +1993,6 @@ mod tests {
             .collect()
     }
 
-    /// Recursive `relative path → Some(bytes) | None (dir)` view of `root`, so "nothing
-    /// changed" is one equality assertion.
     fn fs_snapshot(
         root: &std::path::Path,
     ) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
@@ -2165,8 +2017,6 @@ mod tests {
         out
     }
 
-    /// Owner-only file: Unix asserts mode 0o600; the Windows DACL contract is pinned by
-    /// `fs_perms`' own tests, so there only regular-file existence is checked.
     fn assert_owner_only_file(path: &std::path::Path) {
         let meta = std::fs::metadata(path).unwrap();
         assert!(meta.is_file(), "{} must be a regular file", path.display());
@@ -2294,7 +2144,6 @@ mod tests {
 
     #[test]
     fn save_plugin_credentials_in_rejects_a_null_byte_value_without_touching_disk() {
-        // The failing field is an OAuth one: neither the token dir nor the seed may appear.
         let tmp = tempfile::tempdir().unwrap();
         let manifest = manifest_with_auth_fields(vec![
             auth_field("api_key", false, None),
@@ -2358,7 +2207,6 @@ mod tests {
         ]);
         save_plugin_credentials_in(tmp.path(), "proj", &manifest, &first).unwrap();
 
-        // A later save resubmits only some fields: those are replaced, the rest stay.
         let second = credentials(&[("api_key", "new-key"), ("client_id", "new-cid")]);
         save_plugin_credentials_in(tmp.path(), "proj", &manifest, &second).unwrap();
 

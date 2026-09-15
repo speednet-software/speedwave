@@ -1,7 +1,4 @@
-/** e2e-only observation of the Claude Code spawn argv (SPEED-545). */
 
-/** Reads the argv of the most recent Claude Code spawn (backend `e2e_support::last_spawn_args`,
- *  only registered behind the `e2e` Cargo feature -- never present in a shipped build). */
 export async function lastSpawnArgs(): Promise<string[]> {
   return browser.executeAsync((done: (args: string[]) => void) => {
     (
@@ -14,8 +11,6 @@ export async function lastSpawnArgs(): Promise<string[]> {
   });
 }
 
-/** Polls until `lastSpawnArgs()` is non-empty and differs from `priorArgs`, proving a NEW spawn: an
- *  app restart empties the one-slot recorder, and a stale earlier value would pass a non-empty check. */
 export async function waitForFreshSpawnArgs(
   priorArgs: string[],
   timeoutMs = 30_000

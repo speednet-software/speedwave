@@ -1,12 +1,7 @@
-//! Accessors for a project's claude-home `settings.json` (Claude Code's user
-//! settings file): the legacy `effortLevel` migration and the `model` key.
-
 use std::path::Path;
 
 use speedwave_runtime::fs_perms;
 
-/// Reads Claude Code's own saved default model (`model` key, written by an
-/// interactive `/model` save) from the project's claude-home `settings.json`.
 pub fn get_model_pin(data_dir: &Path, project: &str) -> Option<String> {
     read_settings_string_key(data_dir, project, "model")
 }
@@ -20,8 +15,6 @@ fn read_settings_string_key(data_dir: &Path, project: &str, key: &str) -> Option
     value.get(key)?.as_str().map(str::to_string)
 }
 
-/// One-time takeover of the legacy `effortLevel` key: reads and removes it under the
-/// settings lock, preserving other keys; `None` (file untouched) when absent/non-string.
 pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<String>, String> {
     let path = settings_path(data_dir, project);
     fs_perms::with_file_lock_in(&settings_lock_path(data_dir, project), || {
@@ -46,8 +39,6 @@ pub fn take_legacy_effort_pin(data_dir: &Path, project: &str) -> Result<Option<S
     .map_err(|e| e.to_string())
 }
 
-/// Writes the `model` key (a selectable catalog id or its priced `[1m]` alias) under the
-/// settings lock, preserving every other key; a malformed file is rejected untouched.
 pub fn set_model_pin(data_dir: &Path, project: &str, model: &str) -> Result<(), String> {
     if !speedwave_runtime::defaults::is_selectable_anthropic_model_id(model) {
         return Err(format!("unknown Anthropic model: {model}"));
@@ -82,8 +73,6 @@ fn settings_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
         .join("settings.json")
 }
 
-/// Sibling lock file serializing this module's host-side read-modify-writes; entrypoint.sh cannot
-/// take it, so its container-start merge rewrites `settings.json` only when the merge changes it.
 fn settings_lock_path(data_dir: &Path, project: &str) -> std::path::PathBuf {
     speedwave_runtime::claude_home::claude_home_dir(data_dir, project)
         .join(".claude")
@@ -260,7 +249,6 @@ mod tests {
     #[test]
     fn set_model_pin_rejects_the_1m_alias_for_a_model_without_1m_pricing() {
         let tmp = tempfile::tempdir().unwrap();
-        // claude-haiku-4-5 is selectable but has no priced 1M variant.
         let err = set_model_pin(tmp.path(), "proj", "claude-haiku-4-5[1m]").unwrap_err();
         assert!(err.contains("unknown Anthropic model"));
         assert_eq!(get_model_pin(tmp.path(), "proj"), None);
@@ -297,8 +285,6 @@ mod tests {
         );
     }
 
-    /// Two writers racing under the shared lock: no torn/lost write, the final file
-    /// holds exactly one of the two values.
     #[test]
     fn set_model_pin_concurrent_writers_serialize_without_lost_update() {
         let tmp = tempfile::tempdir().unwrap();

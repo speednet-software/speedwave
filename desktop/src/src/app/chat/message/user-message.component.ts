@@ -9,7 +9,6 @@ import { ControlChipComponent } from '../blocks/control-chip.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { class: 'flex justify-end' },
   template: `
-    <!-- Right-aligned bubble, max 80% column width. -->
     <div data-testid="user-message" class="max-w-[80%]">
       @if (editedAt() !== undefined) {
         <div

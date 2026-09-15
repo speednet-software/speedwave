@@ -53,7 +53,6 @@ const FIXTURE: AnthropicModel[] = [
   },
 ];
 
-// Payload carries pricing fields the `AnthropicModel` type omits (cast on assignment); rates off-catalog.
 const PRICED_FIXTURE = FIXTURE.map((m) => ({
   ...m,
   pricing: { input: 9, cachedInput: 0.9, cacheWrite: 11.25, output: 45 },
@@ -114,7 +113,6 @@ describe('AnthropicModelsService', () => {
       expect(a).toEqual(PRICED_FIXTURE);
       expect(b).toEqual(PRICED_FIXTURE);
       expect(c).toEqual(PRICED_FIXTURE);
-      // Only one backend invoke despite three concurrent callers.
       expect(invokeCount).toBe(1);
     });
 
@@ -129,7 +127,6 @@ describe('AnthropicModelsService', () => {
     });
 
     it('does NOT cache on failure — the next call retries the backend', async () => {
-      // Regression: a transient failure must not cache `[]`; cache stays null.
       let calls = 0;
       mockTauri.invokeHandler = async () => {
         calls++;
@@ -139,10 +136,10 @@ describe('AnthropicModelsService', () => {
       service.resetForTesting();
 
       const first = await service.list();
-      expect(first).toEqual([]); // failure → empty, not cached
+      expect(first).toEqual([]);
 
       const second = await service.list();
-      expect(second).toEqual(PRICED_FIXTURE); // retried and succeeded
+      expect(second).toEqual(PRICED_FIXTURE);
       expect(calls).toBe(2);
     });
 
@@ -201,7 +198,6 @@ describe('AnthropicModelsService', () => {
     });
 
     it('skips Fable (premium tier) when picking the everyday placeholder', async () => {
-      // Fable 5 leads the catalog but is premium — placeholder must pick Sonnet.
       const withFable = [
         {
           id: 'claude-fable-5',
@@ -258,7 +254,6 @@ describe('AnthropicModelsService', () => {
     });
 
     it('resolves the short alias Claude Code emits in session metadata', async () => {
-      // Alias `opus-4.7`: `.` becomes `-`, `claude-` re-prepended.
       await service.list();
       expect(service.contextTokensFor('opus-4.7')).toBe(1_000_000);
       expect(service.contextTokensFor('haiku-4.5')).toBe(200_000);
