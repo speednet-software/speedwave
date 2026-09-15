@@ -1721,16 +1721,24 @@ mod tests {
 
     #[test]
     fn unalias_with_renders_after_case_pattern() {
-        // Case-insensitive alias hit in Title case: the match text is Title-cased FIRST,
-        // then escaped — a leading escape byte must never be case-folded.
+        // Case-insensitive alias hit: the replacement takes the match's case pattern FIRST,
+        // then is escaped, so the letter of an escape sequence is never case-folded.
         let result = unalias_text_preserving_tokens_with(
-            "use brandex here",
+            "use Brandex here",
             "new\nline",
             "Brandex",
             false,
             &|shaped| json_escape(shaped),
         );
         assert_eq!(result, "use New\\nline here");
+        let result = unalias_text_preserving_tokens_with(
+            "use BRANDEX here",
+            "new\nline",
+            "Brandex",
+            false,
+            &|shaped| json_escape(shaped),
+        );
+        assert_eq!(result, "use NEW\\nLINE here");
     }
 
     #[test]
