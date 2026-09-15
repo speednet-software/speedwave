@@ -257,12 +257,23 @@ pub fn remove_project(name: &str) -> anyhow::Result<()> {
     config::with_config_lock(|| remove_project_with_data_dir(name, crate::consts::data_dir()))
 }
 
-fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<()> {
+/// Pre-flight shared with the Desktop teardown that precedes a removal: rejects the
+/// active project (sentinel-prefixed) and an unknown name before any engine work.
+pub fn check_removable(name: &str) -> anyhow::Result<()> {
+    check_removable_in(name, crate::consts::data_dir())
+}
+
+fn check_removable_in(name: &str, data_dir: &Path) -> anyhow::Result<()> {
     validation::validate_project_name(name)?;
+    let user_config = config::load_user_config_from(&data_dir.join("config.json"))?;
+    removable_position(&user_config, name).map(|_| ())
+}
 
-    let config_path = data_dir.join("config.json");
-    let mut user_config = config::load_user_config_from(&config_path)?;
-
+/// Index of `name` in the project list, or the removal-rejection error (SSOT for both).
+fn removable_position(
+    user_config: &config::SpeedwaveUserConfig,
+    name: &str,
+) -> anyhow::Result<usize> {
     if user_config.active_project.as_deref() == Some(name) {
         anyhow::bail!(
             "{}Cannot remove the active project '{}'. Switch to a different project first.",
@@ -270,12 +281,19 @@ fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<(
             name
         );
     }
-
-    let pos = user_config
+    user_config
         .projects
         .iter()
         .position(|p| p.name == name)
-        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", name))?;
+        .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", name))
+}
+
+fn remove_project_with_data_dir(name: &str, data_dir: &Path) -> anyhow::Result<()> {
+    validation::validate_project_name(name)?;
+
+    let config_path = data_dir.join("config.json");
+    let mut user_config = config::load_user_config_from(&config_path)?;
+    let pos = removable_position(&user_config, name)?;
 
     user_config.projects.remove(pos);
 
@@ -1188,6 +1206,46 @@ mod tests {
         let cfg = config::load_user_config_from(&data_dir.join("config.json")).unwrap();
         assert!(cfg.find_project("only").is_some());
         assert_eq!(cfg.active_project.as_deref(), Some("only"));
+    }
+
+    #[test]
+    fn check_removable_rejects_active_and_unknown_but_accepts_inactive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        for p in ["first", "second"] {
+            let pd = tmp.path().join(p);
+            std::fs::create_dir_all(&pd).unwrap();
+            let canonical = std::fs::canonicalize(&pd).unwrap();
+            add_project_with_validated_dir(
+                p,
+                canonical.clone(),
+                canonical.to_string_lossy().to_string(),
+                &data_dir,
+            )
+            .unwrap();
+        }
+        let config_path = data_dir.join("config.json");
+        let mut cfg = config::load_user_config_from(&config_path).unwrap();
+        cfg.active_project = Some("first".to_string());
+        save_user_config_to(&cfg, &config_path).unwrap();
+
+        let active = check_removable_in("first", &data_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            active.starts_with(REMOVE_ACTIVE_PROJECT_ERR_PREFIX),
+            "{active}"
+        );
+        check_removable_in("second", &data_dir).unwrap();
+        let unknown = check_removable_in("ghost", &data_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("not found"), "{unknown}");
+        assert!(check_removable_in("../escape", &data_dir).is_err());
+        // Read-only: the pre-flight unregisters nothing.
+        let after = config::load_user_config_from(&config_path).unwrap();
+        assert_eq!(after.projects.len(), 2);
     }
 
     #[test]

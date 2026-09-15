@@ -40,6 +40,10 @@ fn apply_switch_project(
 pub(crate) static PROJECT_TRANSITION_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
+/// Error returned when `PROJECT_TRANSITION_LOCK` is busy (switch, add, or remove).
+pub(crate) const PROJECT_TRANSITION_BUSY_ERR: &str =
+    "Another project operation is already in progress";
+
 #[tauri::command]
 pub(crate) async fn switch_project(
     name: String,
@@ -51,7 +55,7 @@ pub(crate) async fn switch_project(
     };
 
     let Ok(_transition_guard) = PROJECT_TRANSITION_LOCK.try_lock() else {
-        return Err("A project switch is already in progress".to_string());
+        return Err(PROJECT_TRANSITION_BUSY_ERR.to_string());
     };
 
     // Commit config first to keep the lock brief; rollback restores `previous` on failure.
