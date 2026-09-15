@@ -398,6 +398,8 @@ DESKTOP_BUILD_BATS := _tests/desktop/desktop-build.bats _tests/desktop/bundle-bu
   _tests/desktop/sign-bundled-binaries.bats _tests/desktop/release-workflow-signing.bats \
   _tests/desktop/sign-windows-binaries.bats _tests/desktop/setup-dev-windows.bats \
   _tests/desktop/info-plist.bats _tests/desktop/entitlements-reminders.bats \
+  _tests/desktop/main-app-entitlements.bats _tests/desktop/native-cli-info-plist.bats \
+  _tests/desktop/transcription-bundle.bats \
   _tests/desktop/bundle-native-assets.bats _tests/desktop/vulkan-scripts.bats \
   _tests/desktop/dev-server-port.bats _tests/desktop/check-windows-build-deps.bats
 

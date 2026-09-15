@@ -25,8 +25,8 @@ Extending a Mail/Notes gate or adding a new native automation gate must keep thi
 
 ## TCC and entitlements
 
-- macOS entitlements plists live in `desktop/src-tauri/entitlements/` (one per restricted API: apple-events, audio-capture, calendars, node, reminders, virtualization). Add a new plist for a new restricted API — never relax an existing one. Coverage is test-guarded (`_tests/desktop/entitlements-*.bats`, `info-plist.bats`).
-- Native CLI Info.plists must embed the tauri.conf.json version, correct sub-identifier, and TCC UsageDescription keys — test-guarded (`native-cli-info-plist.bats`); see alignments rules.
+- macOS entitlements plists live in `desktop/src-tauri/entitlements/` (one per restricted API: apple-events, audio-capture, calendars, node, reminders, virtualization). Add a new plist for a new restricted API — never relax an existing one. Coverage is test-guarded: `_tests/desktop/sign-bundled-binaries.bats` parses every plist in the directory and pins the single-key shape of all but node (two keys by design) and audio-capture; `entitlements-reminders.bats`, `main-app-entitlements.bats` and `transcription-bundle.bats` pin individual plists key-by-key, plus `info-plist.bats`.
+- Native CLI Info.plists must embed the tauri.conf.json version, correct sub-identifier, and TCC UsageDescription keys — test-guarded (`native-cli-info-plist.bats`); see alignments rules. The source-plist and `Package.swift` halves run everywhere, the embedded-section halves only after `make build-native-macos`.
 - **Microphone consent is requested in-process by the main Tauri app** (`mic_permission_cmd.rs`, before any capture spawn), never left to a spawned CLI: `AVCaptureDevice.requestAccess` shows no prompt from a headless helper — it silently denies, with no TCC entry to re-enable. The grant lands under `pl.speedwave.desktop` and child CLIs inherit it. The main app is therefore signed with `bundle.macOS.entitlements` (`audio-capture.plist`, guarded by `main-app-entitlements.bats`) and carries `NSMicrophoneUsageDescription` in its Info.plist.
 
 ## Reminders (EventKit)
