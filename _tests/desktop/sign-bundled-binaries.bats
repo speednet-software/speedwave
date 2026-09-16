@@ -208,7 +208,11 @@ for key in conf.get('bundle', {}).get('resources', {}):
     local ent_dir="$BATS_TEST_DIRNAME/../../desktop/src-tauri/entitlements"
     run python3 -c "
 import plistlib, glob, sys
-for path in glob.glob('$ent_dir/*.plist'):
+paths = glob.glob('$ent_dir/*.plist')
+if not paths:
+    print('no plists under $ent_dir — the loop below would pass vacuously', file=sys.stderr)
+    sys.exit(1)
+for path in paths:
     try:
         plistlib.load(open(path, 'rb'))
     except Exception as e:

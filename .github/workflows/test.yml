@@ -283,6 +283,12 @@ jobs:
       - name: Run Swift tests
         run: make test-swift
 
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: Native CLI embedded-plist guards
+        run: make test-native-cli-plist
+
   runtime-windows:
     runs-on: windows-latest
     timeout-minutes: 30
