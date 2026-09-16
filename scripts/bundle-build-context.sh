@@ -6,30 +6,23 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${BUNDLE_DEST:-$REPO_ROOT/desktop/src-tauri}"
 mkdir -p "$DEST"
 MCP_SERVERS_DIR="${BUNDLE_MCP_SERVERS_DIR:-$REPO_ROOT/mcp-servers}"
+CONTAINERS_DIR="${BUNDLE_CONTAINERS_DIR:-$REPO_ROOT/containers}"
 if [ ! -d "$MCP_SERVERS_DIR" ]; then
   echo "ERROR: mcp-servers tree not found at $MCP_SERVERS_DIR (BUNDLE_MCP_SERVERS_DIR)." >&2
   exit 1
 fi
+if [ ! -d "$CONTAINERS_DIR" ]; then
+  echo "ERROR: containers tree not found at $CONTAINERS_DIR (BUNDLE_CONTAINERS_DIR)." >&2
+  exit 1
+fi
 
 LOCK_DIR="$DEST/.bundle.lock"
-WASM_PKG_DIR="$REPO_ROOT/mcp-servers/policies/wasm-pkg"
-WASM_LOCK_DIR="$REPO_ROOT/mcp-servers/policies/.wasm-build.lock"
+WASM_PKG_DIR="${BUNDLE_WASM_PKG_DIR:-$REPO_ROOT/mcp-servers/policies/wasm-pkg}"
+WASM_LOCK_DIR="$(dirname "$WASM_PKG_DIR")/.wasm-build.lock"
+mkdir -p "$(dirname "$WASM_PKG_DIR")"
 
-_LOCK_CLEANUP=""
-acquire_lock() {
-  local dir="$1" holder
-  while ! mkdir "$dir" 2>/dev/null; do
-    holder="$(cat "$dir/pid" 2>/dev/null || true)"
-    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-      rm -rf "$dir"  
-      continue
-    fi
-    sleep 0.3
-  done
-  _LOCK_CLEANUP="rm -rf '$dir' 2>/dev/null || true; $_LOCK_CLEANUP"
-  trap 'eval "$_LOCK_CLEANUP"' EXIT INT TERM
-  echo "$$" >"$dir/pid"
-}
+# shellcheck source=mkdir-lock.sh
+source "$REPO_ROOT/scripts/mkdir-lock.sh"
 
 acquire_lock "$LOCK_DIR"
 acquire_lock "$WASM_LOCK_DIR"
@@ -51,7 +44,7 @@ fi
 
 
 mkdir -p "$DEST/build-context"
-cp -r "$REPO_ROOT/containers" "$DEST/build-context/"
+cp -r "$CONTAINERS_DIR" "$DEST/build-context/containers"
 
 mkdir -p "$DEST/build-context/containers/crates"
 cp -r "$REPO_ROOT/crates/pii-engine" "$DEST/build-context/containers/crates/pii-engine"
