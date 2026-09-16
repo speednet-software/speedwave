@@ -1118,6 +1118,13 @@ mod tests {
     }
 
     #[test]
+    fn test_is_eof_error_recognises_a_shaped_run_failure() {
+        let stderr = "time=\"2026-09-16T10:00:00+02:00\" level=info msg=\"Running [nerdctl compose up]\"\ntime=\"2026-09-16T10:00:01+02:00\" level=fatal msg=EOF\n";
+        let err = crate::runtime::run_failure("limactl", stderr.as_bytes(), b"");
+        assert!(is_eof_error(&err), "got: {err}");
+    }
+
+    #[test]
     fn test_retry_on_eof_succeeds_on_first_attempt() {
         let calls = Arc::new(Mutex::new(0usize));
         let calls_clone = Arc::clone(&calls);
