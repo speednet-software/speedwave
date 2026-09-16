@@ -109,7 +109,6 @@ pub async fn get_auth_status(project: String) -> Result<AuthStatusResponse, Stri
     .map_err(|e| e.to_string())?
 }
 
-// ── CLI auth command generation ──────────────────────────────────
 pub(crate) fn shell_escape_single_quoted(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
@@ -265,9 +264,9 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("// ── CLI auth command generation")
+            .find("\npub(crate) fn shell_escape_single_quoted(")
             .map(|i| fn_start + 1 + i)
-            .expect("CLI auth command generation divider must exist after get_auth_status");
+            .expect("shell_escape_single_quoted must exist after get_auth_status");
         let fn_body = &source[fn_start..fn_end];
 
         let ensure_pos = fn_body
@@ -305,9 +304,9 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("// ── CLI auth command generation")
+            .find("\npub(crate) fn shell_escape_single_quoted(")
             .map(|i| fn_start + 1 + i)
-            .expect("CLI auth command generation divider must exist after get_auth_status");
+            .expect("shell_escape_single_quoted must exist after get_auth_status");
         let fn_body = &source[fn_start..fn_end];
         assert!(
             fn_body.contains("project_needs_anthropic_auth"),
@@ -327,9 +326,9 @@ mod tests {
             .expect("get_auth_status Tauri command must exist");
         let fn_tail = &source[fn_start + 1..];
         let fn_end = fn_tail
-            .find("// ── CLI auth command generation")
+            .find("\npub(crate) fn shell_escape_single_quoted(")
             .map(|i| fn_start + 1 + i)
-            .expect("CLI auth command generation divider must exist after get_auth_status");
+            .expect("shell_escape_single_quoted must exist after get_auth_status");
         let fn_body = &source[fn_start..fn_end];
         assert!(
             fn_body.contains("!migrated.is_unconfigured()"),

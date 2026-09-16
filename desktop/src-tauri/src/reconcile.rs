@@ -496,8 +496,6 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         set_image_readiness(ImageReadiness::Ready);
         emit_bundle_status(app_handle);
 
-        // Converge crash-orphans: teardown intents left by a crashed session are
-        // resumed here, skipped entirely when config is unreadable (fail safe).
         match config::load_user_config() {
             Ok(cfg) => {
                 for project in crate::containers_cmd::crashed_teardown_intents() {
@@ -652,8 +650,6 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         }
     };
 
-    // Converge crash-interrupted teardowns before restoring projects: the id-changed
-    // path skips only projects already queued for restore (teardown vs restore race).
     for project in crate::containers_cmd::crashed_teardown_intents() {
         if user_config.active_project.as_deref() == Some(project.as_str()) {
             continue;
@@ -681,8 +677,6 @@ fn reconcile_bundle_update_inner(app_handle: &tauri::AppHandle) -> Result<(), St
         .phase
         .is_before(bundle::BundleReconcilePhase::ProjectsRestored)
     {
-        // Persist the merged set FIRST: a failed restore must not drop
-        // already-downed projects from the retry list.
         state.pending_running_projects = projects.clone();
         bundle::save_bundle_state(&state).map_err(|e| e.to_string())?;
         log::info!("restoring {} project(s)", projects.len());
@@ -1103,7 +1097,7 @@ mod tests {
     fn restore_set_is_persisted_before_restore_projects() {
         let source = include_str!("reconcile.rs");
         let anchor = source
-            .find("Persist the merged set FIRST")
+            .find("state.pending_running_projects = projects.clone();")
             .expect("restore-set persist must exist");
         let window = &source[anchor..anchor + 700];
         let save_pos = window.find("save_bundle_state").expect("must save state");
@@ -1148,7 +1142,7 @@ mod tests {
     fn teardown_convergence_skips_when_config_unreadable() {
         let source = include_str!("reconcile.rs");
         let anchor = source
-            .find("Converge crash-orphans")
+            .find("no reconcile changes needed, setting images Ready")
             .expect("convergence block must exist");
         let window = &source[anchor..anchor + 1400];
         let load_pos = window
@@ -1172,7 +1166,7 @@ mod tests {
         let source = include_str!("reconcile.rs");
 
         let anchor = source
-            .find("Converge crash-interrupted teardowns before restoring projects")
+            .find("failed to load user config, using pending list only")
             .expect("id-changed convergence block must exist");
         let window = &source[anchor..anchor + 1500];
         assert!(
@@ -1180,7 +1174,7 @@ mod tests {
             "id-changed path must read persisted teardown intents"
         );
         assert!(
-            window.contains("id-changed path"),
+            window.contains("(id-changed path)"),
             "id-changed convergence block must be labelled so it is distinguishable from the no-change block"
         );
         assert!(
