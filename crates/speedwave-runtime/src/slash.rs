@@ -1666,6 +1666,23 @@ mod tests {
         let follower_project = project.clone();
         let follower =
             std::thread::spawn(move || lead_discovery(&follower_project, || unreachable!()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiters = in_flight_map()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&project)
+                .map(std::sync::Arc::strong_count)
+                .unwrap_or(0);
+            if waiters >= 4 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "follower never attached to the leader's in-flight slot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         drop(release_tx);
         assert!(leader.join().is_err(), "leader must have panicked");
         let res = follower.join().unwrap();

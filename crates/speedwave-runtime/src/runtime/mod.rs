@@ -2392,15 +2392,15 @@ services:
 
     #[cfg(unix)]
     fn hanging_exec_command() -> Command {
-        let mut c = crate::binary::system_command("sh");
-        c.args(["-c", "sleep 5"]);
+        let mut c = crate::binary::system_command("sleep");
+        c.arg("5");
         c
     }
 
     #[cfg(windows)]
     fn hanging_exec_command() -> Command {
-        let mut c = crate::binary::system_command("cmd");
-        c.args(["/C", "ping -n 6 127.0.0.1 >NUL"]);
+        let mut c = crate::binary::system_command("ping");
+        c.args(["-n", "6", "127.0.0.1"]);
         c
     }
 
