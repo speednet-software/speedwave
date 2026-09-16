@@ -2035,6 +2035,8 @@ mod tests {
         );
     }
 
+    // -- restart_integration_containers structural tests --
+
     #[test]
     fn restart_rebuilds_images_before_compose_up() {
         let source = include_str!("integrations_cmd.rs");

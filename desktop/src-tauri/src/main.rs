@@ -923,6 +923,7 @@ fn main() {
                 Err(e) => log::warn!("auto-check handle mutex poisoned: {e}"),
             }
 
+            // Post-setup migrations, off the main thread.
             if setup_started {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
