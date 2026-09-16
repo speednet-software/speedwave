@@ -556,7 +556,7 @@ fn render_fresh_compose_for_rollback(
         Some(runtime),
         &host_bridges,
     )
-    .map_err(|e| log::warn!("rollback forward-fix: fresh render failed: {e}"))
+    .map_err(|e| log::warn!("rollback forward-fix: fresh render failed: {e:#}"))
     .ok()?;
     let manifests = crate::plugin::list_installed_plugins().unwrap_or_default();
     Some((compose_yml, manifests))

@@ -1171,7 +1171,7 @@ pub fn ensure_project_images_built(
         project,
     );
     let manifest = speedwave_runtime::bundle::load_current_bundle_manifest()
-        .map_err(|e| format!("failed to load bundle manifest: {e}"))?;
+        .map_err(|e| format!("failed to load bundle manifest: {e:#}"))?;
     let enabled = speedwave_runtime::build::enabled_images(&integrations);
     speedwave_runtime::build::build_missing_images_locked(rt, &enabled, &manifest)
         .map_err(|e| speedwave_runtime::build::user_facing_engine_error(&e))?;
@@ -1208,7 +1208,7 @@ fn prune_unused_worker_images(rt: &speedwave_runtime::runtime::LockedRuntime, pr
     let manifest = match speedwave_runtime::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
         Err(e) => {
-            log::warn!("failed to load bundle manifest while pruning worker images: {e}");
+            log::warn!("failed to load bundle manifest while pruning worker images: {e:#}");
             return;
         }
     };

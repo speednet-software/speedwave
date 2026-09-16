@@ -259,7 +259,7 @@ pub fn images_exist(
     let manifest = match crate::bundle::load_current_bundle_manifest() {
         Ok(m) => m,
         Err(e) => {
-            log::warn!("cannot load bundle manifest: {e}");
+            log::warn!("cannot load bundle manifest: {e:#}");
             return false;
         }
     };

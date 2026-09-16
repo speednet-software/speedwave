@@ -1,6 +1,7 @@
 //! Resolution and staging of bundled assets (build context, Node, binaries).
 
 use crate::{build, consts};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -287,7 +288,7 @@ pub fn load_current_bundle_manifest_from(build_root: &Path) -> anyhow::Result<Bu
     .map_err(
         |e| match resources_version.filter(|v| v != env!("CARGO_PKG_VERSION")) {
             Some(v) => anyhow::anyhow!(
-                "installed Desktop resources are v{v} but this binary is v{}: {e}. \
+                "installed Desktop resources are v{v} but this binary is v{}: {e:#}. \
                  Update Speedwave Desktop, then run `speedwave update`.",
                 env!("CARGO_PKG_VERSION")
             ),
@@ -720,13 +721,19 @@ fn collect_directory_entries(
         );
     }
     if dir.is_file() {
-        out.push((prefix.to_string(), std::fs::read(dir)?));
+        let content = std::fs::read(dir)
+            .with_context(|| format!("reading {} for the bundle digest", dir.display()))?;
+        out.push((prefix.to_string(), content));
         return Ok(());
     }
 
-    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<_, _>>()?;
+    let mut children: Vec<PathBuf> = std::fs::read_dir(dir)
+        .and_then(|entries| {
+            entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<_, _>>()
+        })
+        .with_context(|| format!("listing {} for the bundle digest", dir.display()))?;
     children.sort();
 
     for child in children {
@@ -753,7 +760,8 @@ fn collect_directory_entries(
             collect_directory_entries(&child, &format!("{prefix}/{rel_name}"), out)?;
             continue;
         }
-        let content = std::fs::read(&child)?;
+        let content = std::fs::read(&child)
+            .with_context(|| format!("reading {} for the bundle digest", child.display()))?;
         out.push((format!("{prefix}/{rel_name}"), content));
     }
     Ok(())
@@ -852,6 +860,87 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink not allowed"), "got: {err}");
+    }
+
+    fn io_error(err: &anyhow::Error) -> &std::io::Error {
+        err.downcast_ref::<std::io::Error>()
+            .expect("digest error must wrap an io::Error")
+    }
+
+    fn assert_digest_error_names(err: &anyhow::Error, path: &Path) {
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(&path.display().to_string()),
+            "got: {rendered}"
+        );
+        assert!(rendered.contains("(os error "), "got: {rendered}");
+    }
+
+    #[test]
+    fn digest_error_names_the_unreadable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        crate::fs_perms::make_unreadable_for_test(&locked);
+
+        let err = digest_paths(&[("p", tmp.path())]).unwrap_err();
+
+        assert_eq!(io_error(&err).kind(), std::io::ErrorKind::PermissionDenied);
+        assert_digest_error_names(&err, &locked);
+    }
+
+    #[test]
+    fn digest_error_names_the_unreadable_top_level_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        crate::fs_perms::make_unreadable_for_test(&locked);
+
+        let err = digest_paths(&[("p", &locked)]).unwrap_err();
+
+        assert_eq!(io_error(&err).kind(), std::io::ErrorKind::PermissionDenied);
+        assert_digest_error_names(&err, &locked);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn digest_error_names_the_unlistable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sealed = tmp.path().join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        std::fs::write(sealed.join("inner.txt"), "x").unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = digest_paths(&[("p", tmp.path())]);
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = result.unwrap_err();
+        assert_eq!(io_error(&err).kind(), std::io::ErrorKind::PermissionDenied);
+        assert_digest_error_names(&err, &sealed);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn digest_error_names_the_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked.txt");
+        std::fs::write(&locked, "x").unwrap();
+        let _holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+
+        let err = digest_paths(&[("p", tmp.path())]).unwrap_err();
+
+        assert_eq!(
+            io_error(&err).raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION as i32)
+        );
+        assert_digest_error_names(&err, &locked);
     }
 
     #[test]
@@ -1414,6 +1503,18 @@ mod tests {
         assert_eq!(legacy.applied_bundle_id.as_deref(), Some("aggregate-id"));
         assert_eq!(legacy.phase, BundleReconcilePhase::Done);
         assert_eq!(legacy.pending_running_projects, vec!["alpha"]);
+    }
+
+    #[test]
+    fn missing_manifest_file_regenerates_from_the_build_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        write_build_tree(temp.path());
+
+        let manifest = load_current_bundle_manifest_from(temp.path()).unwrap();
+
+        assert!(!manifest.image_hashes.is_empty());
+        assert_eq!(manifest.app_version, env!("CARGO_PKG_VERSION"));
+        assert!(!temp.path().join(BUNDLE_MANIFEST_FILE).exists());
     }
 
     #[test]

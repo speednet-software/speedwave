@@ -126,6 +126,15 @@ teardown() {
         echo "hash inputs unresolvable in the staged build-context:$missing"
         return 1
     fi
+    local -a input_paths=()
+    while IFS= read -r p; do input_paths+=("$p"); done <<< "$inputs"
+    local symlinks
+    symlinks="$(cd "$BATS_TEST_DIRNAME/../.." && git ls-files -s -- "${input_paths[@]}" containers/claude-resources | awk '$1 == "120000"')"
+    if [ -n "$symlinks" ]; then
+        echo "symlinks committed under image hash inputs (the digest rejects them):"
+        echo "$symlinks"
+        return 1
+    fi
 }
 
 @test "bundle script excludes host build outputs from containers/ at copy time (target, dist, node_modules)" {

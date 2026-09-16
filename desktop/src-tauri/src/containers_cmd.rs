@@ -605,8 +605,8 @@ pub async fn build_images() -> Result<(), String> {
     tokio::task::spawn_blocking(|| {
         log::info!("building images");
         setup_wizard::build_images().map_err(|e| {
-            log::error!("failed to build images: {e}");
-            e.to_string()
+            log::error!("failed to build images: {e:#}");
+            format!("{e:#}")
         })
     })
     .await
