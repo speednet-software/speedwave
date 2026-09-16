@@ -216,7 +216,7 @@ const cur  = JSON.parse(fs.readFileSync('${_dest}', 'utf8'));
 const merged = Object.assign({}, tmpl, cur);
 let changed = cur === null || typeof cur !== 'object' || Array.isArray(cur)
   || Object.keys(tmpl).some((k) => !Object.prototype.hasOwnProperty.call(cur, k));
-const foreign = typeof merged.model === 'string' && !/^(claude-.+|[a-z]+(\[1m\])?)\$/.test(merged.model);
+const foreign = typeof merged.model === 'string' && !/^(claude-.+|(default|best|fable|sonnet|opus|haiku|opusplan)(\[1m\])?)\$/.test(merged.model);
 if (!process.env.ANTHROPIC_MODEL && foreign) {
   console.error('entrypoint: dropping foreign settings.json model ' + merged.model);
   delete merged.model;
