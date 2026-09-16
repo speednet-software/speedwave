@@ -1,6 +1,7 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+import { ProjectStateService } from '../../services/project-state.service';
 
 /**
  * True when `text` trimmed is `/` (slash-menu trigger). Mirrors Rust SSOT `speedwave_runtime::slash::is_bare_slash`.
@@ -74,6 +75,16 @@ export class SlashService {
 
   private inFlight: Promise<void> | null = null;
   private inFlightProjectId: string | null = null;
+
+  /** Refreshes the active project once per project-ready event, for the app's lifetime. */
+  constructor() {
+    const projectState = inject(ProjectStateService);
+    const unsubscribe = projectState.onProjectReady(() => {
+      const id = projectState.activeProject();
+      if (id) void this.refresh(id);
+    });
+    inject(DestroyRef).onDestroy(unsubscribe);
+  }
 
   /**
    * Fetches the slash-command list and updates the signals; never throws.

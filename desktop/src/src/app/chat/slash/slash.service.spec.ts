@@ -11,6 +11,7 @@ import {
 } from './slash.service';
 import { TauriService } from '../../services/tauri.service';
 import { LoggerService } from '../../services/logger.service';
+import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
 import { createDeferred } from '../../testing/deferred';
 import { makeMockLogger } from '../../testing/mock-logger';
 
@@ -370,6 +371,61 @@ describe('SlashService', () => {
 
   it('invalidate() with empty projectId is a no-op', async () => {
     await service.invalidate('');
+    expect(tauri.invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('SlashService refresh on project ready', () => {
+  const READY: AuthStatusResponse = {
+    status: 'ready',
+    api_key_configured: false,
+    oauth_authenticated: true,
+    needs_anthropic_auth: true,
+    provider_configured: true,
+  };
+
+  let tauri: MockTauri;
+  let state: ProjectStateService;
+
+  beforeEach(() => {
+    tauri = new MockTauri();
+    tauri.invokeMock.mockResolvedValue({ commands: [], source: 'Init' } as SlashDiscovery);
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: TauriService, useValue: tauri },
+        { provide: LoggerService, useValue: makeMockLogger() },
+      ],
+    });
+    TestBed.inject(SlashService);
+    state = TestBed.inject(ProjectStateService);
+  });
+
+  function signIn(): void {
+    state.forceUnconfigured();
+    state.applyAuthStatus(READY);
+  }
+
+  it('refreshes the active project once per project-ready event', () => {
+    state.activeProject.set('acme');
+
+    signIn();
+
+    expect(tauri.invokeMock).toHaveBeenCalledTimes(1);
+    expect(tauri.invokeMock).toHaveBeenCalledWith('list_slash_commands', { projectId: 'acme' });
+  });
+
+  it('does not refresh on project ready without an active project', () => {
+    signIn();
+
+    expect(tauri.invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('stops refreshing once its injector is destroyed', () => {
+    state.activeProject.set('acme');
+    TestBed.resetTestingModule();
+
+    signIn();
+
     expect(tauri.invokeMock).not.toHaveBeenCalled();
   });
 });
