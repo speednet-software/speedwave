@@ -2,7 +2,6 @@ use std::sync::OnceLock;
 
 const DEFAULT_BUNDLE_IDENTIFIER: &str = "pl.speedwave.desktop";
 
-// `make dev` overrides identifier to `.dev` via TAURI_CONFIG.
 static BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 pub(crate) fn init_bundle_identifier(identifier: String) {
@@ -15,7 +14,6 @@ fn bundle_identifier() -> &'static str {
     match BUNDLE_IDENTIFIER.get() {
         Some(s) => s.as_str(),
         None => {
-            // Debug build warns; production returns the default silently.
             #[cfg(all(debug_assertions, not(test)))]
             log::warn!(
                 "bundle identifier not initialised yet; falling back to {DEFAULT_BUNDLE_IDENTIFIER}"
@@ -25,8 +23,6 @@ fn bundle_identifier() -> &'static str {
     }
 }
 
-// Matches tauri-plugin-log v2 TargetKind::LogDir resolution:
-// macOS: ~/Library/Logs/<bundle>, Windows: %LOCALAPPDATA%/<bundle>/logs.
 pub(crate) fn desktop_log_dir() -> Option<std::path::PathBuf> {
     let id = bundle_identifier();
     if cfg!(target_os = "macos") {
@@ -71,7 +67,6 @@ mod tests {
     fn desktop_log_dir_windows_path_under_local_appdata_logs() {
         let dir = desktop_log_dir().unwrap();
         let s = dir.to_string_lossy();
-        // tauri-plugin-log v2 uses LOCALAPPDATA + bundle + /logs on Windows.
         assert!(
             s.contains("AppData") && s.contains("Local") && s.ends_with("logs"),
             "Windows path must be under LocalAppData/<bundle>/logs, got {s}"

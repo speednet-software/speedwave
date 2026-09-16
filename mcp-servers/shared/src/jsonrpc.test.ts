@@ -53,7 +53,6 @@ describe('jsonrpc', () => {
     let handler: JSONRPCHandler;
 
     beforeEach(() => {
-      // Suppress console.log during tests
       vi.spyOn(console, 'log').mockImplementation(() => {});
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -150,7 +149,6 @@ describe('jsonrpc', () => {
         expect(result.response!.result).toBeDefined();
         const initResult = result.response!.result as Record<string, unknown>;
         expect(initResult.protocolVersion).toBe('2024-11-05');
-        // Session ID is now returned separately, not in _meta
         expect(result.sessionId).toBeDefined();
         expect(typeof result.sessionId).toBe('string');
       });
@@ -704,13 +702,11 @@ describe('jsonrpc', () => {
 
         expect(listResult.tools).toHaveLength(100);
         expect(listResult.nextCursor).toBeDefined();
-        // Decode cursor to verify it points to index 100
         expect(Buffer.from(listResult.nextCursor!, 'base64').toString()).toBe('100');
       });
 
       it('returns second page when using cursor from first page', async () => {
         registerNTools(handler, 150);
-        // First page
         const firstResult = await handler.processRequest(
           { jsonrpc: '2.0', method: 'tools/list', id: 1 },
           null
@@ -720,7 +716,6 @@ describe('jsonrpc', () => {
           nextCursor?: string;
         };
 
-        // Second page using cursor
         const secondResult = await handler.processRequest(
           {
             jsonrpc: '2.0',
@@ -820,7 +815,6 @@ describe('jsonrpc', () => {
         };
 
         const result = await handler.processRequest(request, null);
-        // Empty base64 encodes to empty string, which is falsy — treated as no cursor
         expect(result.response!.error).toBeUndefined();
         const listResult = result.response!.result as { tools: unknown[] };
         expect(listResult.tools).toHaveLength(5);
@@ -828,7 +822,6 @@ describe('jsonrpc', () => {
 
       it('returns invalidParams error for cursor with non-integer base64 content', async () => {
         registerNTools(handler, 5);
-        // "abc" is valid base64 that decodes to binary gibberish, parseInt returns NaN
         const cursor = 'abc';
         const request = {
           jsonrpc: '2.0',
@@ -859,7 +852,6 @@ describe('jsonrpc', () => {
       });
 
       it('creates auto-reconnect session when provided sessionId is not found in tools/list', async () => {
-        // Covers the second-OR branch: sessionId provided but session not found.
         registerNTools(handler, 1);
         const request = {
           jsonrpc: '2.0',
@@ -867,21 +859,17 @@ describe('jsonrpc', () => {
           id: 1,
         };
 
-        // Use a valid UUID that does not exist in the session store
         const nonExistentSession = '660e8400-e29b-41d4-a716-446655440099';
         const result = await handler.processRequest(request, nonExistentSession);
 
-        // Should still return the tools list (auto-reconnect handled it)
         expect(result.response!.error).toBeUndefined();
         const listResult = result.response!.result as { tools: unknown[] };
         expect(listResult.tools).toHaveLength(1);
       });
 
       it('skips auto-reconnect when tools/list is called with a valid existing sessionId', async () => {
-        // Covers the false branch: sessionId non-null AND session exists.
         registerNTools(handler, 2);
 
-        // First create a session via initialize
         const initRequest = {
           jsonrpc: '2.0',
           method: 'initialize',
@@ -896,7 +884,6 @@ describe('jsonrpc', () => {
         const existingSession = initResult.sessionId!;
         expect(existingSession).toBeDefined();
 
-        // Now call tools/list with the valid existing session
         const listResult = await handler.processRequest(
           { jsonrpc: '2.0', method: 'tools/list', id: 2 },
           existingSession
@@ -910,7 +897,6 @@ describe('jsonrpc', () => {
 
     describe('tools/call session auto-reconnect', () => {
       it('creates auto-reconnect session when provided sessionId is not found in tools/call', async () => {
-        // Covers the second-OR branch for the handleToolsCall path.
         const tool = {
           name: 'reconnect_tool',
           description: 'Test tool',
@@ -936,7 +922,6 @@ describe('jsonrpc', () => {
       });
 
       it('skips auto-reconnect when tools/call uses a valid existing sessionId', async () => {
-        // Covers the false branch: both !sessionId and !getSession(sessionId) are false
         const tool = {
           name: 'session_tool',
           description: 'Test tool',
@@ -947,7 +932,6 @@ describe('jsonrpc', () => {
         });
         handler.registerTool(tool, toolHandler);
 
-        // Create session via initialize
         const initResult = await handler.processRequest(
           {
             jsonrpc: '2.0',
@@ -980,7 +964,6 @@ describe('jsonrpc', () => {
 
     describe('tools/call with more than 10 registered tools', () => {
       it('truncates tool list with ellipsis in log when >10 tools are registered', async () => {
-        // Covers line 394: registeredTools.length > 10 ? '...' : '' ternary
         const tools = Array.from({ length: 12 }, (_, i) => ({
           name: `tool_${String(i).padStart(3, '0')}`,
           description: `Tool ${i}`,
@@ -1001,7 +984,6 @@ describe('jsonrpc', () => {
 
         expect(result.response!.error).toBeDefined();
         expect(result.response!.error?.code).toBe(JSONRPCErrorCode.MethodNotFound);
-        // Verify ellipsis was logged
         expect(console.error).toHaveBeenCalledWith(expect.stringContaining('...'));
       });
     });
@@ -1020,21 +1002,18 @@ describe('jsonrpc', () => {
       });
 
       it('returns sessionId only for initialize', async () => {
-        // tools/list should not have sessionId
         const listResult = await handler.processRequest(
           { jsonrpc: '2.0', method: 'tools/list', id: 1 },
           null
         );
         expect(listResult.sessionId).toBeUndefined();
 
-        // ping should not have sessionId
         const pingResult = await handler.processRequest(
           { jsonrpc: '2.0', method: 'ping', id: 2 },
           null
         );
         expect(pingResult.sessionId).toBeUndefined();
 
-        // initialize should have sessionId
         const initResult = await handler.processRequest(
           {
             jsonrpc: '2.0',
@@ -1055,7 +1034,6 @@ describe('jsonrpc', () => {
 
   describe('processRequest outer catch', () => {
     it('returns InternalError when a handler method throws unexpectedly', async () => {
-      // Covers the outer try-catch in processRequest when createSession throws.
       vi.spyOn(console, 'log').mockImplementation(() => {});
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.spyOn(console, 'error').mockImplementation(() => {});

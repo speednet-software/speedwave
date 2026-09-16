@@ -1,15 +1,9 @@
-# OCI Compose V2 — works with nerdctl compose (all platforms)
-# Template variables substituted by render_compose() in speedwave-runtime.
-# NEVER edit generated compose files — edit this template instead.
 
 services:
   claude:
     image: ${IMAGE_CLAUDE}
     pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_claude
-    # Start the proxy first: Claude routes /v1/messages through it (ADR-073).
-    # service_started (not _healthy) — the proxy has no healthcheck; Claude only
-    # POSTs on the first user prompt, by which time the scratch binary is up.
     depends_on:
       proxy:
         condition: service_started
@@ -28,16 +22,13 @@ services:
       - ${PROJECT_DIR}:/workspace
       - ${RESOURCES_DIR}:/speedwave/resources:ro
       - ${IDE_LOCK_DIR}:/home/speedwave/.claude/ide:ro
-      # Proxy usage JSONL (read-only): statusline reads cumulative tokens/cost (ADR-073).
       - ${PROXY_USAGE_DIR}:/usage:ro
     environment:
       - CLAUDE_VERSION=${CLAUDE_VERSION}
       - MCP_HUB_PORT=${PORT_HUB}
       - CLAUDE_CODE_IDE_HOST_OVERRIDE=${IDE_HOST_OVERRIDE}
-      # Auto-connect IDE bridge; value is literal `true` per Claude Code env-vars.
       - CLAUDE_CODE_AUTO_CONNECT_IDE=true
       - ANTHROPIC_LOG=debug
-      # Official Anthropic plugins installed+enabled at start (defaults::BUNDLED_PLUGINS).
       - SPEEDWAVE_BUNDLED_PLUGINS=${BUNDLED_PLUGINS}
       - SPEEDWAVE_BUNDLED_PLUGIN_MARKETPLACE=${BUNDLED_PLUGIN_MARKETPLACE}
     working_dir: /workspace
@@ -49,20 +40,15 @@ services:
           cpus: '${CLAUDE_CPUS}'
           memory: ${CLAUDE_MEMORY}
 
-  # Speedwave proxy (ADR-073): Claude routes through here; tokens mount :ro per-provider (ADR-062).
   proxy:
     image: ${IMAGE_PROXY}
     pull_policy: never
     restart: unless-stopped
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_proxy
     environment:
-      # Not read by the proxy — forces container recreation on config-up
-      # when the rendered config or a provider key changed.
       - SPW_CONFIG_DIGEST=${PROXY_CONFIG_DIGEST}
       - POLICY_FILE=/policy/policy.json
       - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
-      # Mirrors the /audit:rw mount below; the proxy's audit writer reads this to place
-      # audit-proxy.jsonl (mcp-hub already carries the equivalent AUDIT_DIR).
       - AUDIT_DIR=/audit
     read_only: true
     user: "${CONTAINER_USER}"
@@ -100,8 +86,6 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_HUB_TMPFS}
-    # Resolved PII policy: always rendered + mounted read-only; the hub
-    # fail-closes on an invalid file. Audit dir is the hub's only :rw mount.
     volumes:
       - ${POLICY_CONFIG_DIR}:/policy:ro
       - ${AUDIT_DIR}:/audit:rw
@@ -109,7 +93,6 @@ services:
       - PORT=${PORT_HUB}
       - POLICY_FILE=/policy/policy.json
       - POLICY_DIGEST=${POLICY_CONFIG_DIGEST}
-      # Mirrors the /audit:rw mount above; hub/src/audit-pii.ts reads this to place audit-hub.jsonl.
       - AUDIT_DIR=/audit
       - WORKER_SLACK_URL=http://mcp-slack:${PORT_WORKER}
       - WORKER_SHAREPOINT_URL=http://mcp-sharepoint:${PORT_WORKER}
@@ -122,7 +105,6 @@ services:
       - WORKER_CONTEXT7_URL=http://mcp-context7:${PORT_WORKER}
     networks:
       - ${NETWORK_NAME}
-      # Also on the egress-less office network so the hub can reach mcp-office (ADR-055).
       - ${NETWORK_NAME}_office
     deploy:
       resources:
@@ -144,9 +126,6 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_SLACK_TMPFS}
     volumes:
       - ${TOKENS_DIR}/slack:/tokens:ro
-      # Slack file downloads land under /workspace/.speedwave/slack/ so the office
-      # worker and Claude can read them (ADR-071; same rationale as sharepoint).
-      # Path SSOT: SLACK_DOWNLOAD_SUBPATH in mcp-servers/slack/src/client.ts.
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
@@ -171,7 +150,6 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_SHAREPOINT_TMPFS}
     volumes:
-      # :ro per ADR-060 (OAuth refresh on host-side oauth worker); token writes flow through here.
       - ${TOKENS_DIR}/sharepoint:/tokens:ro
       - ${PROJECT_DIR}:/workspace:rw
     environment:
@@ -254,8 +232,6 @@ services:
       resources:
         limits:
           cpus: '${MCP_GITHUB_CPUS}'
-          # Memory cap (and the 256m-vs-128m rationale) is the SSOT — see the
-          # github descriptor in crates/speedwave-runtime/src/consts.rs.
           memory: ${MCP_GITHUB_MEM}
 
   mcp-atlassian:
@@ -272,8 +248,6 @@ services:
       - /tmp:noexec,nosuid,size=${MCP_ATLASSIAN_TMPFS}
     volumes:
       - ${TOKENS_DIR}/atlassian:/tokens:ro
-      # Read-only so addAttachment can stream a file from the project workspace
-      # without shuttling base64 through the hub (parity with slack/sharepoint).
       - ${PROJECT_DIR}:/workspace:ro
     environment:
       - PORT=${PORT_WORKER}
@@ -285,8 +259,6 @@ services:
           cpus: '${MCP_ATLASSIAN_CPUS}'
           memory: ${MCP_ATLASSIAN_MEM}
 
-  # Office worker — pure file processor: no /tokens, no egress (internal ${NETWORK_NAME}_office, ADR-055).
-  # Mounts the project workspace read-write; outputs land under /workspace/.speedwave/office/.
   mcp-office:
     image: ${IMAGE_MCP_OFFICE}
     pull_policy: never
@@ -297,23 +269,17 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # /tmp holds the LibreOffice per-call profile, matplotlib config, and conversion scratch space.
-    # LibreOffice headless on a non-trivial .pptx can use a few hundred MB of temp space + RAM.
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_OFFICE_TMPFS}
     volumes:
-      # No /tokens mount — this worker has no credentials. /workspace is its only window onto the host.
       - ${PROJECT_DIR}:/workspace:rw
     environment:
       - PORT=${PORT_WORKER}
-      # Anti-DoS / resource limits. Defaults are baked into the worker; override here if needed.
       - OFFICE_MAX_INPUT_BYTES=52428800
       - OFFICE_MAX_PDF_PAGES=2000
       - OFFICE_TIMEOUT_STANDARD_MS=60000
       - OFFICE_TIMEOUT_LO_MS=120000
     networks:
-      # Internal-only: no route to the gateway → no internet (defence in depth on top of the
-      # application-level local-only resource loading in weasyprint/pandoc/LibreOffice).
       - ${NETWORK_NAME}_office
     deploy:
       resources:
@@ -326,27 +292,18 @@ services:
     pull_policy: never
     container_name: ${COMPOSE_PREFIX}_${PROJECT_NAME}_mcp_playwright
     read_only: true
-    # NOTE: Playwright image pre-creates pwuser (UID 1000); CONTAINER_USER is set
-    # via substitution for consistency with other workers.
     user: "${CONTAINER_USER}"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Host gateway alias for dev servers (e.g. Angular on localhost:4200); see ADR-062.
     extra_hosts:
       - "host.docker.internal:${HOST_GATEWAY}"
-    # Chromium uses /tmp for page caches and screenshot compositing.
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_PLAYWRIGHT_TMPFS}
-    # Chromium IPC shared-memory requirement; the 64 MiB default causes ENOMEM
-    # at page load time.
     shm_size: ${MCP_PLAYWRIGHT_SHM}
-    # No /tokens mount — Playwright accesses only public URLs and has no credentials.
-    # No /workspace mount in v1 — outputs return as base64 to shrink attack surface.
     environment:
       - PORT=${PORT_WORKER}
-      # MCP request/response logging (debug npm package); set to `pw:*` for full verbosity.
       - DEBUG=pw:mcp:*
     networks:
       - ${NETWORK_NAME}
@@ -369,7 +326,6 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=${MCP_CONTEXT7_TMPFS}
     volumes:
-      # Optional /tokens/api_key — anonymous mode (per-IP rate limit) if absent.
       - ${TOKENS_DIR}/context7:/tokens:ro
     environment:
       - PORT=${PORT_WORKER}
@@ -384,8 +340,6 @@ services:
 networks:
   ${NETWORK_NAME}:
     driver: bridge
-  # Egress-less network for mcp-office (ADR-055). Only mcp-office and mcp-hub attach to it;
-  # `internal: true` removes the gateway route so containers on it have no outbound internet.
   ${NETWORK_NAME}_office:
     driver: bridge
     internal: true

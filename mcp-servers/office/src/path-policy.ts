@@ -53,7 +53,6 @@ function assertNoSymlinkComponents(absPath: string): void {
     try {
       st = fs.lstatSync(cur);
     } catch (err) {
-      // ENOENT: component doesn't exist yet, fine for an unwritten output path. Other errno (EACCES/EPERM/EIO) must propagate — skipping it would defeat the guard.
       if (isPathAbsent(err)) {
         return;
       }
@@ -132,7 +131,6 @@ export async function resolveOutputPath(
   if (!outName) {
     abs = path.join(OUTPUT_DIR, generatedBase);
   } else if (outName.includes('/')) {
-    // Container is Linux, so '/' is the only separator that can appear here.
     abs = resolveWithinWorkspace(outName);
   } else {
     if (outName.includes('\0')) {
@@ -140,7 +138,6 @@ export async function resolveOutputPath(
     }
     abs = path.join(OUTPUT_DIR, outName);
   }
-  // A bare `outName` joined onto OUTPUT_DIR can still be unsafe (e.g. `..`); re-check.
   abs = resolveWithinWorkspace(abs);
   if (!overwrite) {
     try {
@@ -152,7 +149,6 @@ export async function resolveOutputPath(
       if (err instanceof PathPolicyError) {
         throw err;
       }
-      // ENOENT: the target is free. Any other errno (EACCES, EPERM) must propagate, not be mistaken for "free" — else the later write fails opaquely.
       if (!isPathAbsent(err)) {
         throw err;
       }

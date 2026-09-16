@@ -56,7 +56,6 @@ export async function initializeWorker(
   }
   const sessionId = response.headers.get('Mcp-Session-Id') ?? undefined;
 
-  // Send notifications/initialized (no id = notification, no response expected)
   const notifResponse = await fetch(workerUrl, {
     method: 'POST',
     headers: { ...headers, ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}) },
@@ -65,8 +64,6 @@ export async function initializeWorker(
     redirect: 'error',
   });
 
-  // A non-2xx here means the worker rejected a protocol notification — a spec
-  // violation worth an error, not a warning. Include a capped body for triage.
   if (!notifResponse.ok) {
     const body = (await notifResponse.text().catch(() => '')).slice(0, 512);
     console.error(
@@ -156,11 +153,9 @@ export async function discoverServiceTools(service: string): Promise<Tool[]> {
     const authToken = getAuthToken(service);
     const headers = buildWorkerHeaders(authToken);
 
-    // Perform MCP initialize handshake
     const sessionId = await initializeWorker(url, headers);
     const toolHeaders = sessionId ? { ...headers, 'Mcp-Session-Id': sessionId } : headers;
 
-    // Fetch all tools with pagination
     const tools = await fetchAllTools(url, toolHeaders);
     console.log(`${ts()} [tool-discovery] Discovered ${tools.length} tools from ${service}`);
     return tools;
@@ -198,7 +193,6 @@ export function mergeToolWithMeta(tool: Tool, service: string, methodName: strin
 
   return {
     name: methodName,
-    // Worker's original tool name (often snake_case); used verbatim for tools/call
     workerToolName: tool.name,
     description: tool.description,
     keywords: tool.keywords ?? [],

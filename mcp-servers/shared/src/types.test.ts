@@ -474,7 +474,6 @@ describe('isErrorLike', () => {
   });
 
   it('returns false for null', () => {
-    // null is typeof 'object' but the guard checks e !== null
     expect(isErrorLike(null)).toBe(false);
   });
 

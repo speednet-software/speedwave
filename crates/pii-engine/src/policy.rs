@@ -306,8 +306,6 @@ struct RulesYamlRule {
 /// keywords. SSOT fallback for every "no POLICY_FILE" caller (proxy, hub-wasm).
 pub fn default_policy_json() -> String {
     let yaml = include_str!("../../../mcp-servers/policies/rules.yaml");
-    // Fail-closed rather than panic: rules.yaml is a compile-time asset guarded by
-    // rules_integration_test.rs, so a parse failure here is unreachable in practice.
     let file: RulesYamlFile = serde_yaml_ng::from_str(yaml).unwrap_or(RulesYamlFile {
         version: 3,
         rules: Vec::new(),

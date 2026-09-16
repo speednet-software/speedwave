@@ -24,7 +24,6 @@ function mockMatchMedia(prefersDark: boolean): {
     matches: prefersDark,
     media: '(prefers-color-scheme: dark)',
     onchange: null,
-    // Honour `options.signal` like a real EventTarget.
     addEventListener: (
       _: string,
       fn: (e: MediaQueryListEvent) => void,
@@ -106,7 +105,6 @@ describe('ThemeService', () => {
     return TestBed.inject(ThemeService);
   }
 
-  // Happy path
   it('defaults to ember when nothing is stored and removes data-theme', () => {
     const svc = create();
     expect(svc.theme()).toBe<ThemeId>('ember');
@@ -137,7 +135,6 @@ describe('ThemeService', () => {
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('ember');
   });
 
-  // Edge cases
   it('treats unknown stored values as ember', () => {
     localStorage.setItem(THEME_STORAGE_KEY, 'bogus');
     const svc = create();
@@ -167,9 +164,7 @@ describe('ThemeService', () => {
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe(callsBefore);
   });
 
-  // Error path — corrupted localStorage
   it('survives a localStorage write failure without throwing', () => {
-    // Reinstall a storage whose setItem always throws.
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       writable: true,
@@ -191,8 +186,6 @@ describe('ThemeService', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
   });
 
-  // ── Mode axis (light / dark / auto) ──────────────────────────────────────
-
   describe('mode axis', () => {
     let media: ReturnType<typeof mockMatchMedia>;
 
@@ -204,7 +197,6 @@ describe('ThemeService', () => {
       media.restore();
     });
 
-    // Happy paths
     it('defaults to dark when no mode is persisted (first run)', () => {
       const svc = create();
       expect(svc.mode()).toBe<ThemeMode>('dark');
@@ -237,7 +229,6 @@ describe('ThemeService', () => {
       expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
-    // Edge cases
     it('treats unknown stored mode as dark', () => {
       localStorage.setItem(MODE_STORAGE_KEY, 'sepia');
       const svc = create();
@@ -266,7 +257,6 @@ describe('ThemeService', () => {
       const persisted = localStorage.getItem(MODE_STORAGE_KEY);
       svc.setMode('light');
       expect(svc.mode()).toBe<ThemeMode>('light');
-      // The early-return guard must skip the redundant persist.
       expect(localStorage.getItem(MODE_STORAGE_KEY)).toBe(persisted);
     });
 
@@ -287,7 +277,6 @@ describe('ThemeService', () => {
       expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
-    // State transitions
     it('reacts to prefers-color-scheme changes while in auto mode', () => {
       const svc = create();
       svc.setMode('auto');
@@ -306,7 +295,6 @@ describe('ThemeService', () => {
       expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
-    // Independence of axes
     it('setMode does not touch the accent theme', () => {
       const svc = create();
       svc.setTheme('mint');
@@ -323,7 +311,6 @@ describe('ThemeService', () => {
       expect(document.documentElement.classList.contains('dark')).toBe(false);
     });
 
-    // Error paths
     it('survives a localStorage write failure for mode without throwing', () => {
       Object.defineProperty(globalThis, 'localStorage', {
         configurable: true,
@@ -363,7 +350,6 @@ describe('ThemeService', () => {
       expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
     });
 
-    // Pins the literal the anti-FOUC script in index.html depends on.
     it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
       expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
     });
@@ -373,14 +359,12 @@ describe('ThemeService', () => {
       svc.setMode('auto');
       localStorage.removeItem(MODE_STORAGE_KEY);
       media.fireChange(true);
-      // The OS-driven listener must apply the class but not re-write storage.
       expect(document.documentElement.classList.contains('dark')).toBe(true);
       expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
     });
 
     it('cleans up via removeListener when addEventListener is absent (legacy WebKit)', () => {
       media.restore();
-      // A legacy MediaQueryList exposes only addListener/removeListener.
       const listeners = new Set<(e: MediaQueryListEvent) => void>();
       const legacyMq = {
         matches: false,
@@ -399,10 +383,9 @@ describe('ThemeService', () => {
       try {
         const svc = create();
         svc.setMode('auto');
-        expect(listeners.size).toBe(1); // constructor used the addListener branch
+        expect(listeners.size).toBe(1);
         svc.ngOnDestroy();
-        expect(listeners.size).toBe(0); // ngOnDestroy used the removeListener branch
-        // Firing after teardown must not flip the class.
+        expect(listeners.size).toBe(0);
         for (const fn of listeners) fn({ matches: true } as MediaQueryListEvent);
         expect(document.documentElement.classList.contains('dark')).toBe(false);
       } finally {
@@ -410,9 +393,6 @@ describe('ThemeService', () => {
       }
     });
   });
-  // Runs the provideAppInitializer hook in isolation to prove the persisted
-  // accent theme reaches <html> at bootstrap, without any component (Settings)
-  // injecting ThemeService first.
   describe('applyPersistedThemeOnStartup', () => {
     function runInitializer(): void {
       TestBed.resetTestingModule();
@@ -420,7 +400,6 @@ describe('ThemeService', () => {
       TestBed.runInInjectionContext(() => applyPersistedThemeOnStartup());
     }
 
-    // Happy path — the exact scenario from the ticket (iris survives cold start).
     it('applies the persisted accent theme to <html> at boot without opening Settings', () => {
       localStorage.setItem(THEME_STORAGE_KEY, 'iris');
       expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
@@ -428,14 +407,12 @@ describe('ThemeService', () => {
       expect(document.documentElement.getAttribute('data-theme')).toBe('iris');
     });
 
-    // Edge case — the ember default writes no attribute even via the boot hook.
     it('leaves data-theme unset when the persisted theme is the ember default', () => {
       localStorage.setItem(THEME_STORAGE_KEY, 'ember');
       runInitializer();
       expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
     });
 
-    // State transition — a later injection sees the same hydrated root singleton.
     it('hydrates the root singleton so a later injection reflects the boot theme', () => {
       localStorage.setItem(THEME_STORAGE_KEY, 'cyan');
       TestBed.resetTestingModule();

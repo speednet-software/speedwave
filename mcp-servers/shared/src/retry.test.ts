@@ -12,8 +12,6 @@ describe('retryAsync', () => {
     vi.useRealTimers();
   });
 
-  // ── Happy path ──────────────────────────────────────────────────────────
-
   it('returns result immediately when fn succeeds on first call', async () => {
     const fn = vi.fn().mockResolvedValue('ok');
 
@@ -22,8 +20,6 @@ describe('retryAsync', () => {
     expect(result).toBe('ok');
     expect(fn).toHaveBeenCalledTimes(1);
   });
-
-  // ── Retry on null ──────────────────────────────────────────────────────
 
   it('retries when fn returns null and succeeds on third attempt', async () => {
     vi.useFakeTimers();
@@ -41,17 +37,13 @@ describe('retryAsync', () => {
       label: 'null-retry',
     });
 
-    // Advance past retry 1 delay (100ms base * 2^0 = 100ms, jitter=0)
     await vi.advanceTimersByTimeAsync(100);
-    // Advance past retry 2 delay (100ms * 2^1 = 200ms, jitter=0)
     await vi.advanceTimersByTimeAsync(200);
 
     const result = await promise;
     expect(result).toBe('success');
     expect(fn).toHaveBeenCalledTimes(3);
   });
-
-  // ── Retry on exception ────────────────────────────────────────────────
 
   it('retries when fn throws an Error and succeeds on second attempt', async () => {
     vi.useFakeTimers();
@@ -68,15 +60,12 @@ describe('retryAsync', () => {
       label: 'dns-retry',
     });
 
-    // First retry delay: 50ms * 2^0 = 50ms
     await vi.advanceTimersByTimeAsync(50);
 
     const result = await promise;
     expect(result).toEqual({ data: 42 });
     expect(fn).toHaveBeenCalledTimes(2);
   });
-
-  // ── Exhaustion (null) ─────────────────────────────────────────────────
 
   it('returns null after exhausting retries when fn always returns null', async () => {
     vi.useFakeTimers();
@@ -90,18 +79,13 @@ describe('retryAsync', () => {
       label: 'exhaust-null',
     });
 
-    // Retry 1: 100ms
     await vi.advanceTimersByTimeAsync(100);
-    // Retry 2: 200ms
     await vi.advanceTimersByTimeAsync(200);
 
     const result = await promise;
     expect(result).toBeNull();
-    // 1 initial + 2 retries = 3
     expect(fn).toHaveBeenCalledTimes(3);
   });
-
-  // ── Exhaustion (exception) ────────────────────────────────────────────
 
   it('returns null (does not propagate) when fn throws on all attempts', async () => {
     vi.useFakeTimers();
@@ -123,8 +107,6 @@ describe('retryAsync', () => {
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
-  // ── Mixed failures ────────────────────────────────────────────────────
-
   it('handles mixed throw-then-null-then-success', async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -141,17 +123,13 @@ describe('retryAsync', () => {
       label: 'mixed',
     });
 
-    // Retry 1 delay: 100ms
     await vi.advanceTimersByTimeAsync(100);
-    // Retry 2 delay: 200ms
     await vi.advanceTimersByTimeAsync(200);
 
     const result = await promise;
     expect(result).toBe('recovered');
     expect(fn).toHaveBeenCalledTimes(3);
   });
-
-  // ── Custom options ────────────────────────────────────────────────────
 
   it('respects custom maxRetries=1', async () => {
     vi.useFakeTimers();
@@ -165,16 +143,12 @@ describe('retryAsync', () => {
       label: 'custom-opts',
     });
 
-    // Only 1 retry: 100ms
     await vi.advanceTimersByTimeAsync(100);
 
     const result = await promise;
     expect(result).toBeNull();
-    // 1 initial + 1 retry = 2
     expect(fn).toHaveBeenCalledTimes(2);
   });
-
-  // ── maxRetries=0 ──────────────────────────────────────────────────────
 
   it('does not retry when maxRetries=0', async () => {
     const fn = vi.fn().mockResolvedValue(null);
@@ -194,15 +168,12 @@ describe('retryAsync', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
-  // ── Backoff timing ────────────────────────────────────────────────────
-
   it('uses exponential backoff (2s, 4s, 8s pattern)', async () => {
     vi.useFakeTimers();
-    vi.spyOn(Math, 'random').mockReturnValue(0); // zero jitter
+    vi.spyOn(Math, 'random').mockReturnValue(0);
 
     const fn = vi.fn().mockResolvedValue(null);
 
-    // Capture sleep calls by intercepting setTimeout
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
 
     const promise = retryAsync(fn, {
@@ -211,22 +182,18 @@ describe('retryAsync', () => {
       label: 'backoff-test',
     });
 
-    // Advance through all retries: 2000ms, 4000ms, 8000ms
     await vi.advanceTimersByTimeAsync(2000);
     await vi.advanceTimersByTimeAsync(4000);
     await vi.advanceTimersByTimeAsync(8000);
 
     await promise;
 
-    // Extract the delay values passed to setTimeout for the sleep calls
     const sleepCalls = setTimeoutSpy.mock.calls
       .filter(([, ms]) => typeof ms === 'number' && ms >= 2000)
       .map(([, ms]) => ms);
 
     expect(sleepCalls).toEqual([2000, 4000, 8000]);
   });
-
-  // ── Jitter (deterministic) ────────────────────────────────────────────
 
   describe('jitter', () => {
     it('adds zero jitter when Math.random returns 0', async () => {
@@ -244,7 +211,6 @@ describe('retryAsync', () => {
       await vi.advanceTimersByTimeAsync(1000);
       await promise;
 
-      // delay = 1000 * 2^0 = 1000; jitter = floor(0 * 1000 * 0.3) = 0; total = 1000
       const sleepDelays = setTimeoutSpy.mock.calls
         .filter(([, ms]) => typeof ms === 'number' && ms >= 1000)
         .map(([, ms]) => ms);
@@ -253,7 +219,6 @@ describe('retryAsync', () => {
 
     it('adds maximum jitter when Math.random returns 1', async () => {
       vi.useFakeTimers();
-      // Math.random returning 1 is technically impossible but tests the boundary
       vi.spyOn(Math, 'random').mockReturnValue(1);
       const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
 
@@ -264,7 +229,6 @@ describe('retryAsync', () => {
         label: 'jitter-max',
       });
 
-      // delay = 1000; jitter = floor(1 * 1000 * 0.3) = 300; total = 1300
       await vi.advanceTimersByTimeAsync(1300);
       await promise;
 
@@ -286,7 +250,6 @@ describe('retryAsync', () => {
         label: 'jitter-half',
       });
 
-      // delay = 1000; jitter = floor(0.5 * 1000 * 0.3) = floor(150) = 150; total = 1150
       await vi.advanceTimersByTimeAsync(1150);
       await promise;
 
@@ -296,8 +259,6 @@ describe('retryAsync', () => {
       expect(sleepDelays).toContain(1150);
     });
   });
-
-  // ── maxDelayMs cap ────────────────────────────────────────────────────
 
   it('caps delay at maxDelayMs even with high attempt count', async () => {
     vi.useFakeTimers();
@@ -312,7 +273,6 @@ describe('retryAsync', () => {
       label: 'cap-test',
     });
 
-    // Advance enough to exhaust all retries: min(2000*2^n, 5000), so retries 3-5 are capped at 5000
     for (const ms of [2000, 4000, 5000, 5000, 5000]) {
       await vi.advanceTimersByTimeAsync(ms);
     }
@@ -323,15 +283,11 @@ describe('retryAsync', () => {
       .filter(([, ms]) => typeof ms === 'number' && ms >= 2000)
       .map(([, ms]) => ms);
 
-    // All delays must be <= maxDelayMs
     for (const d of sleepDelays) {
       expect(d).toBeLessThanOrEqual(5000);
     }
-    // Verify capping actually happened (retries 3-5 should be 5000)
     expect(sleepDelays.filter((d) => d === 5000).length).toBeGreaterThanOrEqual(3);
   });
-
-  // ── Logging ───────────────────────────────────────────────────────────
 
   describe('logging', () => {
     it('logs retry attempts with the label', async () => {
@@ -402,13 +358,11 @@ describe('retryAsync', () => {
     });
 
     it('converts non-Error thrown values to string in warning', async () => {
-      // Covers the `String(error)` branch when caught value is not an Error instance
       vi.useFakeTimers();
       vi.spyOn(Math, 'random').mockReturnValue(0);
 
       const fn = vi
         .fn()
-        // Throw a plain string (not an Error instance)
         .mockRejectedValueOnce('plain string failure')
         .mockResolvedValue('recovered');
 

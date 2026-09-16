@@ -159,10 +159,9 @@ describe('PluginDetailComponent', () => {
       ],
     });
 
-    // Set activeProject on the SSOT so loadActiveProject() picks it up
     const projectState = TestBed.inject(ProjectStateService);
     projectState.activeProject.set('test-project');
-    projectState.status.set('ready'); // credential saves/uninstalls happen on a ready project
+    projectState.status.set('ready');
 
     const fixture = TestBed.createComponent(PluginDetailComponent);
     return { component: fixture.componentInstance, fixture };
@@ -306,14 +305,11 @@ describe('PluginDetailComponent', () => {
 
     const el = fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]');
     expect(el).not.toBeNull();
-    // marked turned the markdown into HTML elements (heading + bold).
     expect(el.querySelector('h2')).not.toBeNull();
     expect(el.querySelector('strong')?.textContent).toBe('token');
   });
 
   it('keeps the instructions collapsed by default for a configured plugin', async () => {
-    // Default MOCK_PLUGINS has `configured: true`, so the disclosure is closed
-    // — we don't shout setup steps at someone who's already past setup.
     const { component, fixture } = setupWithPlugin({ instructions: '## Setup\n\nDo the thing.' });
     await initAndDetect(component, fixture);
 
@@ -328,8 +324,6 @@ describe('PluginDetailComponent', () => {
   });
 
   it('auto-opens the instructions disclosure for an unconfigured plugin (M10)', async () => {
-    // First-time user landing on a plugin with credentials still to fill in
-    // should see the setup guide immediately, not hunt for it.
     const { component, fixture } = setup();
     mockTauri.invokeHandler = (cmd: string) => {
       if (cmd === 'get_plugins') {
@@ -369,8 +363,6 @@ describe('PluginDetailComponent', () => {
   });
 
   it('does NOT render instructions for an unverified plugin (XSS trust boundary)', async () => {
-    // Defence-in-depth: even if the backend (buggily) shipped instructions for
-    // an unverified plugin, the template guard must withhold the [innerHTML].
     const { component, fixture } = setupWithPlugin({
       instructions: '## Evil\n\n<img src=x onerror=alert(1)>',
       verification_status: 'signature_invalid',
@@ -383,8 +375,6 @@ describe('PluginDetailComponent', () => {
   });
 
   it('escapes quotes in markdown link href and title (no attribute breakout)', async () => {
-    // A manifest author writing `[x](url "It's a \"quote\"")` should not break the attribute.
-    // esc() collapses `"` → &quot; and `&` → &amp; before interpolating into the template literal.
     const { component, fixture } = setupWithPlugin({
       instructions: '[click](http://example.com/?a="b"&c=d "It\'s a \\"quote\\"")',
     });
@@ -393,16 +383,12 @@ describe('PluginDetailComponent', () => {
       '[data-testid="plugin-instructions"] a'
     ) as HTMLAnchorElement;
     expect(link).not.toBeNull();
-    // Browser parses the attribute correctly — no extra siblings, no broken markup.
     expect(link.getAttribute('target')).toBe('_blank');
     expect(link.getAttribute('rel')).toContain('noopener');
-    // href contains the literal `"` after the browser un-escaped &quot;.
     expect(link.getAttribute('href')).toContain('"b"');
   });
 
   it('opens markdown links in a new tab with rel="noopener noreferrer"', async () => {
-    // Otherwise a click inside the Tauri webview would navigate the SPA away
-    // (state loss) and leak `window.opener` to the linked page.
     const { component, fixture } = setupWithPlugin({
       instructions: '## Docs\n\nSee [the spec](https://example.com/spec) for details.',
     });
@@ -418,8 +404,6 @@ describe('PluginDetailComponent', () => {
   });
 
   it('sanitises malicious markdown on the verified path (Angular DomSanitizer)', async () => {
-    // The unverified-path test above short-circuits before marked.parse() runs; this exercises
-    // the verified path so the sanitizer actually applies to <script>, <img onerror>, javascript:.
     const { component, fixture } = setupWithPlugin({
       instructions:
         '## Setup\n\n' +
@@ -432,13 +416,10 @@ describe('PluginDetailComponent', () => {
     const el = fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]');
     expect(el).not.toBeNull();
     const html = el.innerHTML.toLowerCase();
-    // Angular's DomSanitizer strips <script>, drops on* handler attributes, and rewrites
-    // `javascript:` URLs to `unsafe:javascript:` (literal string survives but is inert).
     expect(html).not.toContain('<script');
     expect(html).not.toContain('onerror');
     expect(html).not.toMatch(/href="javascript:/);
-    expect(html).toContain('unsafe:javascript:'); // sanitiser actually ran
-    // And the host scope was never poisoned.
+    expect(html).toContain('unsafe:javascript:');
     expect(
       (window as unknown as { __pwned?: boolean }).__pwned,
       'sanitiser must prevent inline-script execution'
@@ -446,7 +427,6 @@ describe('PluginDetailComponent', () => {
   });
 
   it('omits the instructions block when the manifest has none', async () => {
-    // Default MOCK_PLUGINS has no `instructions` field.
     const { component, fixture } = setup();
     await initAndDetect(component, fixture);
     expect(fixture.nativeElement.querySelector('[data-testid="plugin-instructions"]')).toBeNull();
@@ -480,8 +460,6 @@ describe('PluginDetailComponent', () => {
     const configuredBadge = fixture.nativeElement.querySelector('[data-testid="configured-badge"]');
     expect(configuredBadge).not.toBeNull();
   });
-
-  // -- Integration status tests --
 
   it('should show missing integration when not configured', async () => {
     const { component, fixture } = setup();
@@ -568,14 +546,12 @@ describe('PluginDetailComponent', () => {
     await projectState.init();
     await component.ngOnInit();
 
-    // Verify the unsub function exists before destroy
     expect(
       (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
     ).not.toBeNull();
 
     component.ngOnDestroy();
 
-    // Verify unsub was called and nulled
     expect(
       (component as unknown as { unsubProjectReady: unknown })['unsubProjectReady']
     ).toBeNull();
@@ -583,7 +559,6 @@ describe('PluginDetailComponent', () => {
 
   describe('terminal-minimal tabs + master toggle', () => {
     it('renders three tabs: dashboard / settings / logs', async () => {
-      // `tools` tab was removed.
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
       expect(fixture.nativeElement.querySelector('[data-testid="tab-bar"]')).not.toBeNull();
@@ -640,7 +615,6 @@ describe('PluginDetailComponent', () => {
         'set_plugin_enabled',
         expect.objectContaining({ enabled: !before })
       );
-      // Hold a direct reference; project-ready listener can replace this.plugin.
       expect(target.enabled).toBe(!before);
     });
   });
@@ -662,7 +636,6 @@ describe('PluginDetailComponent', () => {
       expect(el).not.toBeNull();
       expect(el.querySelector('h2')?.textContent).toContain('1.2.0');
       expect(el.querySelector('strong')?.textContent).toBe('bulk');
-      // Dashboard panel is swapped out while the changelog panel is active.
       expect(fixture.nativeElement.querySelector('[data-testid="dashboard-content"]')).toBeNull();
     });
 
@@ -705,7 +678,6 @@ describe('PluginDetailComponent', () => {
     });
 
     it('shows the fallback message when the changelog tab is active without content', async () => {
-      // Only reachable programmatically — the tab button is hidden without content.
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
       component.selectTab('changelog');
@@ -718,8 +690,6 @@ describe('PluginDetailComponent', () => {
     });
 
     it('does NOT show the changelog tab or content for an unverified plugin (XSS trust boundary)', async () => {
-      // Defence-in-depth mirroring the instructions gate: withhold [innerHTML] even if the
-      // backend (buggily) shipped a changelog for an unverified plugin.
       const { component, fixture } = setupWithPlugin({
         changelog: '## Evil\n\n<img src=x onerror=alert(1)>',
         verification_status: 'signature_invalid',
@@ -741,7 +711,6 @@ describe('PluginDetailComponent', () => {
       component.selectTab('changelog');
       fixture.detectChanges();
 
-      // Next reload (post-mutation refresh) returns the plugin without a changelog.
       mockTauri.invokeHandler = (cmd: string) => defaultInvokeHandler(cmd);
       await component.onSaveSettings({ currency: 'USD' });
       fixture.detectChanges();
@@ -819,7 +788,6 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'start_plugin_oauth') {
-          // Event can arrive before the IPC return resolves; must be buffered.
           mockTauri.dispatchEvent('plugin_oauth_progress', {
             status: 'awaiting_redirect',
             message: 'http://127.0.0.1:6001/callback',
@@ -851,7 +819,6 @@ describe('PluginDetailComponent', () => {
         message: '',
         request_id: 'rid',
       });
-      // Success handler awaits loadPlugin before requestRestart; drain macrotasks.
       await new Promise((r) => setTimeout(r, 0));
       expect(restartSpy).toHaveBeenCalled();
       expect(component.oauthRedirectUri).toBeNull();
@@ -892,7 +859,6 @@ describe('PluginDetailComponent', () => {
         request_id: 'OTHER-rid',
       });
       await Promise.resolve();
-      // status stays 'starting' from handleStartPluginOAuth — the stale event is dropped.
       expect(component.oauthStatus).toBe('starting');
     });
 
@@ -940,7 +906,6 @@ describe('PluginDetailComponent', () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
 
-      // Open confirm prompt by clicking the uninstall button.
       const uninstallBtn = fixture.nativeElement.querySelector(
         '[data-testid="uninstall-btn"]'
       ) as HTMLButtonElement;
@@ -963,7 +928,6 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
 
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
-      // Drive through the public API (button → confirm → invoke).
       component.confirmingRemove = true;
       await component.onConfirmUninstall();
 
@@ -975,7 +939,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
-      projectState.status.set('ready'); // action happens on a ready project
+      projectState.status.set('ready');
 
       await component.onConfirmUninstall();
 
@@ -1015,23 +979,19 @@ describe('PluginDetailComponent', () => {
       const { component, fixture } = setup();
       await initAndDetect(component, fixture);
 
-      // Hold remove_plugin pending to observe the mid-flight button state.
       const pendingRemove = createDeferred();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'remove_plugin') return pendingRemove.promise;
         return defaultInvokeHandler(cmd);
       };
 
-      // Open the confirm prompt via UI.
       const uninstallBtn = fixture.nativeElement.querySelector(
         '[data-testid="uninstall-btn"]'
       ) as HTMLButtonElement;
       uninstallBtn.click();
       fixture.detectChanges();
 
-      // Kick off uninstall without await; observe UI while invoke pending.
       const promise = component.onConfirmUninstall();
-      // Yield so onConfirmUninstall sets `removing = true` before re-render.
       await new Promise((r) => setTimeout(r, 0));
       fixture.detectChanges();
 
@@ -1044,13 +1004,11 @@ describe('PluginDetailComponent', () => {
       expect(confirmBtn.disabled).toBe(true);
       expect(cancelBtn.disabled).toBe(true);
 
-      // Resolve so the test does not leak a pending Promise.
       pendingRemove.resolve();
       await promise;
     });
   });
 
-  // ── Credentials in Settings tab ───────────────────────────────────────────────────────────────
   describe('credentials section in Settings tab', () => {
     /** Mock plugin entry with two auth_fields (required PAT, optional OAuth token); mirrors a host-bridged plugin manifest shape. */
     const PLUGIN_WITH_AUTH = {
@@ -1128,8 +1086,6 @@ describe('PluginDetailComponent', () => {
       return { component: fixture.componentInstance, fixture, mockTauri };
     }
 
-    // ── Happy path ────────────────────────────────────────────────────────
-
     it('renders the credentials section in Settings tab when auth_fields present', async () => {
       const { component, fixture } = setupWithAuth();
       await initAndDetect(component, fixture);
@@ -1143,7 +1099,7 @@ describe('PluginDetailComponent', () => {
     });
 
     it('does not render the credentials section when auth_fields is empty', async () => {
-      const { component, fixture } = setup(); // uses MOCK_PLUGINS (empty auth_fields)
+      const { component, fixture } = setup();
       await initAndDetect(component, fixture);
       component.selectTab('settings');
       fixture.detectChanges();
@@ -1182,7 +1138,7 @@ describe('PluginDetailComponent', () => {
       });
       const projectState = TestBed.inject(ProjectStateService);
       projectState.activeProject.set('test-project');
-      projectState.status.set('ready'); // credential saves happen on a ready project
+      projectState.status.set('ready');
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;
@@ -1222,8 +1178,6 @@ describe('PluginDetailComponent', () => {
       expect(component.success).toContain('2 fields');
     });
 
-    // ── Error paths ───────────────────────────────────────────────────────
-
     it('onSaveCredentials surfaces Tauri errors in component.error', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
@@ -1242,7 +1196,6 @@ describe('PluginDetailComponent', () => {
 
     it('onSaveCredentials sets an error (not silent return) when plugin is null', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
-      // Intentionally do NOT init — plugin stays null
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.onSaveCredentials({ credentials: { example_pat: 'x' } });
       expect(invokeSpy).not.toHaveBeenCalled();
@@ -1255,7 +1208,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
-      projectState.status.set('ready'); // action happens on a ready project
+      projectState.status.set('ready');
 
       await component.onSaveCredentials({ credentials: { example_pat: 'tok_X' } });
 
@@ -1263,7 +1216,6 @@ describe('PluginDetailComponent', () => {
     });
 
     it('save refreshes the plugin entry so the configured badge can flip', async () => {
-      // Simulate backend reporting configured:true after save.
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
       expect(component.plugin?.configured).toBe(false);
@@ -1282,7 +1234,6 @@ describe('PluginDetailComponent', () => {
     });
 
     it('save success message survives a post-save refresh failure', async () => {
-      // Credentials already saved; loadPlugin failure must not clobber success message.
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
       mockTauri.invokeHandler = (cmd: string) => {
@@ -1297,8 +1248,6 @@ describe('PluginDetailComponent', () => {
       expect(component.error).toBe('');
     });
 
-    // ── Reset flow (confirmingReset pattern, no window.confirm) ─────────────
-
     it('clear event from the form opens the confirm prompt instead of deleting', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
       await initAndDetect(component, fixture);
@@ -1312,7 +1261,6 @@ describe('PluginDetailComponent', () => {
       resetBtn.click();
       fixture.detectChanges();
 
-      // No delete yet — only the confirm prompt is shown.
       expect(component.confirmingReset).toBe(true);
       expect(
         fixture.nativeElement.querySelector('[data-testid="reset-confirm-prompt"]')
@@ -1351,7 +1299,7 @@ describe('PluginDetailComponent', () => {
       await initAndDetect(component, fixture);
       const projectState = TestBed.inject(ProjectStateService);
       projectState.needsRestart = false;
-      projectState.status.set('ready'); // action happens on a ready project
+      projectState.status.set('ready');
 
       await component.onResetCredentials();
 
@@ -1360,7 +1308,6 @@ describe('PluginDetailComponent', () => {
 
     it('onResetCredentials sets an error (not silent return) when plugin is null', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
-      // Do NOT init — plugin stays null
       const invokeSpy = vi.spyOn(mockTauri, 'invoke');
       await component.onResetCredentials();
       expect(invokeSpy).not.toHaveBeenCalled();
@@ -1382,8 +1329,6 @@ describe('PluginDetailComponent', () => {
 
       expect(component.error).toContain('permission denied');
     });
-
-    // ── #6: per-field clear ─────────────────────────────────────────────────
 
     it('onClearField invokes delete_plugin_credential_field with the key', async () => {
       const { component, fixture, mockTauri } = setupWithAuth();
@@ -1504,8 +1449,6 @@ describe('PluginDetailComponent', () => {
       expect(input.value).toBe('https://tenant.example.com');
     });
 
-    // ── M3: verification-status guard ───────────────────────────────────────
-
     it('hides the credentials section when the plugin is not verified', async () => {
       const unverified = JSON.parse(JSON.stringify(PLUGIN_WITH_AUTH));
       unverified.plugins[0].verification_status = 'invalid_signature';
@@ -1538,7 +1481,7 @@ describe('PluginDetailComponent', () => {
       });
       const projectState = TestBed.inject(ProjectStateService);
       projectState.activeProject.set('test-project');
-      projectState.status.set('ready'); // credential saves happen on a ready project
+      projectState.status.set('ready');
 
       const fixture = TestBed.createComponent(PluginDetailComponent);
       const component = fixture.componentInstance;

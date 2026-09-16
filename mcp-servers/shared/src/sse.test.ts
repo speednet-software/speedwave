@@ -369,7 +369,6 @@ describe('sse', () => {
         stream.sendMessage(response);
 
         const written = mockRes.write.mock.calls[0][0];
-        // JSON.stringify will escape newlines, so they appear as \n in the JSON string
         expect(written).toContain('data: ');
         expect(written).toContain('\\n');
       });
@@ -481,8 +480,6 @@ describe('sse', () => {
 
     describe('SSE field sanitization', () => {
       it('strips newlines from id field to prevent SSE injection', () => {
-        // Access sendEvent indirectly via sendMessage — the id is always
-        // an integer counter, but defense-in-depth strips \n and \r.
         stream.sendMessage({ jsonrpc: '2.0', id: 1, result: {} });
 
         const written = mockRes.write.mock.calls[0][0] as string;
@@ -501,7 +498,6 @@ describe('sse', () => {
       });
 
       it('strips carriage returns from data lines', () => {
-        // JSON.stringify never produces bare \r, but defense-in-depth strips it
         stream.sendMessage({ jsonrpc: '2.0', id: 1, result: { ok: true } });
 
         const written = mockRes.write.mock.calls[0][0] as string;
@@ -516,7 +512,6 @@ describe('sse', () => {
 
         const written = mockRes.write.mock.calls[0][0] as string;
         const lines = written.split('\n');
-        // id, event, data, empty, empty (trailing \n\n)
         expect(lines[0]).toMatch(/^id: \d+$/);
         expect(lines[1]).toBe('event: message');
         expect(lines[2]).toMatch(/^data: .+$/);
@@ -546,7 +541,7 @@ describe('sse', () => {
       const stream = createSSEStream(mockRes);
       stream.sendMessage({ jsonrpc: '2.0', id: 1, result: { test: true } });
 
-      expect(mockRes.write).toHaveBeenCalledTimes(2); // 1 for init, 1 for message
+      expect(mockRes.write).toHaveBeenCalledTimes(2);
     });
 
     it('can be used immediately after creation', () => {
@@ -556,7 +551,7 @@ describe('sse', () => {
       stream.sendHeartbeat();
       stream.close();
 
-      expect(mockRes.write).toHaveBeenCalledTimes(3); // init, heartbeat, close comment
+      expect(mockRes.write).toHaveBeenCalledTimes(3);
       expect(mockRes.end).toHaveBeenCalledTimes(1);
     });
   });
@@ -677,7 +672,6 @@ describe('sse', () => {
           retry?: number;
           data?: string;
         }): void {
-          // Access private sendEvent via bracket notation for test purposes
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (this as any).sendEvent(event);
         }

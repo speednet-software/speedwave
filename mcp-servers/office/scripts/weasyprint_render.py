@@ -41,8 +41,6 @@ def _run(argv: list[str]) -> None:
     from weasyprint import HTML
 
     doc = HTML(filename=src, base_url=base_url, url_fetcher=_local_only_url_fetcher)
-    # WeasyPrint downgrades url_fetcher exceptions to warnings and renders on with the
-    # resource missing; the recorded rejections keep this script fail-closed.
     pdf = doc.write_pdf(presentational_hints=False)
     if _rejected_urls:
         fail(f"rejected resources: {', '.join(sorted(set(_rejected_urls)))}")

@@ -1,22 +1,16 @@
-# Dependencies
 node_modules/
 
-# Build output
 dist/
 coverage/
 
-# TypeScript
 *.tsbuildinfo
 
-# Python
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# Logs
 *.log
 npm-debug.log*
 
-# Environment
 .env
 .env.local

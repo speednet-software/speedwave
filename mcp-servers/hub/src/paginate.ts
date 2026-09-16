@@ -3,8 +3,6 @@
  * @module paginate
  */
 
-// ── Types ───────────────────────────────────────────────────────────────────────────────────
-
 /**
  * Configuration options for pagination
  */
@@ -69,8 +67,6 @@ type PaginatedResponse<T> = {
   [key: string]: unknown;
 };
 
-// ── Main Pagination Generator ──────────────────────────────────────────────────────────────
-
 /**
  * Create an async generator that yields a PageResult<T> for each page of a paginated API call.
  * @param fetcher - Function that fetches a page given offset and limit
@@ -93,7 +89,6 @@ export async function* paginate<T>(
     const currentLimit = Math.min(limit, maxItems - totalFetched);
     const result = await fetcher(offset, currentLimit);
 
-    // Extract items from common response shapes
     const items = extractItems<T>(result);
     const totalCount = result.total_count as number | undefined;
 
@@ -104,7 +99,6 @@ export async function* paginate<T>(
     totalFetched += items.length;
     pageNumber++;
 
-    // Determine if more pages exist
     const hasMore =
       totalCount !== undefined ? offset + items.length < totalCount : items.length === currentLimit;
 
@@ -116,7 +110,6 @@ export async function* paginate<T>(
       hasMore,
     };
 
-    // Check stop condition
     if (config.stopWhen?.(items, pageNumber)) {
       break;
     }
@@ -135,7 +128,6 @@ export async function* paginate<T>(
  * @returns Array of items extracted from response
  */
 function extractItems<T>(result: PaginatedResponse<T>): T[] {
-  // Try common keys in order of likelihood
   const keys = [
     'issues',
     'time_entries',
@@ -155,15 +147,12 @@ function extractItems<T>(result: PaginatedResponse<T>): T[] {
     }
   }
 
-  // If result itself is an array, return it
   if (Array.isArray(result)) {
     return result as T[];
   }
 
   return [];
 }
-
-// ── Helper Functions ────────────────────────────────────────────────────────────────────────
 
 /**
  * Collect all pages into a single array.

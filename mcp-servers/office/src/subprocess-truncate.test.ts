@@ -9,7 +9,7 @@ vi.mock('./config.js', () => ({
   PYTHON_BIN: process.execPath,
   SCRIPTS_DIR: '/tmp',
   TIMEOUT_STANDARD_MS: 60_000,
-  MAX_SUBPROCESS_OUTPUT_BYTES: 5, // tiny: the very first chunk of any non-trivial output overflows it
+  MAX_SUBPROCESS_OUTPUT_BYTES: 5,
 }));
 
 import { run } from './subprocess.js';
@@ -33,7 +33,6 @@ describe('run with a tiny output cap', () => {
       'process.stdout.write("abcdefgh"); setTimeout(() => { process.stdout.write("ijkl"); }, 20)',
     ]);
     expect(r.stdoutTruncated).toBe(true);
-    // First chunk overflows immediately → "abcde" (5 bytes, full). Second chunk hits `len >= MAX` → dropped.
     expect(r.stdout).toBe('abcde');
   });
 });

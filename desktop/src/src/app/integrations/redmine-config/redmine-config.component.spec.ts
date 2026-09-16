@@ -325,7 +325,6 @@ describe('RedmineConfigComponent', () => {
       const firstCall = component.onValidate();
       expect(component.validating).toBe(true);
 
-      // Second call should be a no-op
       await component.onValidate();
       expect(tauriSpy.invoke).toHaveBeenCalledTimes(1);
 
@@ -349,7 +348,6 @@ describe('RedmineConfigComponent', () => {
       pendingValidate.resolve({ valid: true, user: { id: 1, login: 'admin' }, error: null });
       await validatePromise;
 
-      // Should not transition state after destroy
       expect(component.wizardState).toBe('credentials');
     });
 
@@ -371,23 +369,18 @@ describe('RedmineConfigComponent', () => {
         return Promise.resolve();
       });
 
-      // Validate succeeds, triggers loadEnumerations (fire-and-forget)
       await component.onValidate();
 
       expect(component.wizardState).toBe('mappings');
       expect(component.loadingEnumerations).toBe(true);
 
-      // Destroy while enumeration fetch is pending
       component.ngOnDestroy();
 
-      // Resolve the pending enumeration fetch
       pendingEnumerations.resolve(makeEnumerations());
       await pendingEnumerations.promise;
 
-      // Allow microtasks to flush
       await new Promise((r) => setTimeout(r, 0));
 
-      // Should remain in loading state — destroyed guard prevents state update
       expect(component.loadingEnumerations).toBe(true);
       expect(component.enumerations).toBeNull();
     });
@@ -420,35 +413,28 @@ describe('RedmineConfigComponent', () => {
         return Promise.resolve();
       });
 
-      // First validate -> succeeds -> loadEnumerations #1 starts (deferred)
       await component.onValidate();
       expect(component.wizardState).toBe('mappings');
       expect(component.loadingEnumerations).toBe(true);
 
-      // User clicks Edit (back to credentials), then re-validates
       component.onEdit();
       expect(component.wizardState).toBe('credentials');
       expect(component.validating).toBe(false);
 
-      // Second validate -> succeeds -> loadEnumerations #2 starts (deferred)
       await component.onValidate();
       expect(component.wizardState).toBe('mappings');
 
-      // Now resolve the FIRST (stale) enum fetch
       firstEnum.resolve(staleEnumerations);
       await firstEnum.promise;
       await new Promise((r) => setTimeout(r, 0));
 
-      // Stale result must be ignored — enumerations should still be null
       expect(component.enumerations).toBeNull();
       expect(component.loadingEnumerations).toBe(true);
 
-      // Resolve the SECOND (fresh) enum fetch
       secondEnum.resolve(freshEnumerations);
       await secondEnum.promise;
       await new Promise((r) => setTimeout(r, 0));
 
-      // Fresh result is applied
       expect(component.enumerations).not.toBeNull();
       expect(component.enumerations!.projects[0].name).toBe('Fresh');
       expect(component.loadingEnumerations).toBe(false);
@@ -471,7 +457,7 @@ describe('RedmineConfigComponent', () => {
       expect(select).not.toBeNull();
       const options = select.querySelectorAll('option');
       expect(options[0].textContent.trim()).toBe('All projects');
-      expect(options.length).toBe(3); // All projects + 2 projects
+      expect(options.length).toBe(3);
     });
 
     it('renders 0 projects as only All projects option', () => {

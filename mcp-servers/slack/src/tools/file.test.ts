@@ -7,7 +7,6 @@ import { RefreshLock, META_KEYS } from '@speedwave/mcp-shared';
 import { handleGetFileContent, handleDownloadFile, createFileTools } from './file-tools.js';
 import type { SlackClients } from '../client.js';
 
-// Mock the client module
 vi.mock('../client.js', async () => {
   const actual = await vi.importActual('../client.js');
   return {
@@ -117,7 +116,6 @@ describe('file-tools', () => {
       expect(read._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
       const download = tools[1].tool;
       expect(download.inputSchema.required).toEqual(['file']);
-      // A download writes to disk — it must NOT be a read-only hint.
       expect(download.annotations?.readOnlyHint).not.toBe(true);
       expect(download._meta?.[META_KEYS.DEFER_LOADING]).toBe(true);
     });

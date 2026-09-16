@@ -59,7 +59,6 @@ describe('classifyConnectionError', () => {
   });
 
   it('classifies a plain Error with no code/response as network', () => {
-    // Bare Error with no code/response classified as network.
     const err = new Error('boom');
     expect(classifyConnectionError(err).errorType).toBe('network');
   });

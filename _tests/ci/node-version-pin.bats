@@ -1,6 +1,4 @@
 #!/usr/bin/env bats
-# `.node-version` is the only Node pin: every CI setup reads it, no `.nvmrc` shadow copy exists,
-# the Makefile carries no literal fallback, and scripts/check-node-version.sh gates `make setup-dev`.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 CHECK="$REPO_ROOT/scripts/check-node-version.sh"
@@ -12,13 +10,11 @@ setup() {
     IFS=. read -r PIN_MAJOR PIN_MINOR PIN_PATCH <<<"$PIN"
 }
 
-# Fake `node` on PATH whose `node --version` prints the given text.
 stub_node() {
     printf '#!/usr/bin/env bash\necho "%s"\n' "$1" >"$STUB_DIR/node"
     chmod +x "$STUB_DIR/node"
 }
 
-# Runs the check with the stub dir first on PATH; a bare PATH so a missing stub means no `node`.
 run_check() {
     PATH="$STUB_DIR:/usr/bin:/bin" run bash "$CHECK" "$PIN"
 }

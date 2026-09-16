@@ -13,7 +13,6 @@ import {
   discoverAndMergeService,
 } from './tool-discovery.js';
 
-// Mock auth-tokens
 import { getAuthToken } from './auth-tokens.js';
 vi.mock('./auth-tokens.js', () => ({
   getAuthToken: vi.fn(() => null),
@@ -58,7 +57,6 @@ function createMcpMockFetch(tools: Tool[], sessionId?: string) {
   return vi.fn().mockImplementation(() => {
     callIndex++;
     if (callIndex === 1) {
-      // initialize response
       return Promise.resolve(
         mockJsonResponse(
           {
@@ -75,10 +73,8 @@ function createMcpMockFetch(tools: Tool[], sessionId?: string) {
       );
     }
     if (callIndex === 2) {
-      // notifications/initialized (204-like, no JSON body needed but mock returns ok)
       return Promise.resolve(mockJsonResponse(null, { status: 204 }));
     }
-    // tools/list response
     return Promise.resolve(
       mockJsonResponse({
         jsonrpc: '2.0',
@@ -132,7 +128,6 @@ describe('tool-discovery', () => {
     });
 
     it('resolves WORKER_*_URL for hyphenated slug via deriveWorkerEnv normalization', async () => {
-      // slug `my-plugin` looks up `WORKER_MY_PLUGIN_URL` (hyphens normalized to underscores)
       process.env.WORKER_MY_PLUGIN_URL = 'http://mcp-my-plugin:4040';
 
       const mockTools: Tool[] = [
@@ -167,8 +162,6 @@ describe('tool-discovery', () => {
     });
 
     it('returns empty array when worker URL fails SSRF validation', async () => {
-      // A URL that does not match the mcp-* container hostname pattern or the allowlist
-      // is rejected by validateWorkerUrl → discoverServiceTools returns []
       process.env.WORKER_SLACK_URL = 'http://192.168.1.100:3001/';
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -216,7 +209,6 @@ describe('tool-discovery', () => {
       const mockFetch = vi.fn().mockImplementation(() => {
         callIndex++;
         if (callIndex <= 2) {
-          // initialize + notification calls succeed
           return Promise.resolve(
             mockJsonResponse({
               jsonrpc: '2.0',
@@ -229,7 +221,6 @@ describe('tool-discovery', () => {
             })
           );
         }
-        // tools/list returns error
         return Promise.resolve(
           mockJsonResponse({
             jsonrpc: '2.0',
@@ -253,7 +244,6 @@ describe('tool-discovery', () => {
 
       await discoverServiceTools('slack');
 
-      // First call is initialize — should have auth header
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
@@ -380,10 +370,10 @@ describe('tool-discovery', () => {
         } as Record<string, unknown>,
       };
       const result = mergeToolWithMeta(tool, 'redmine', 'createIssue');
-      expect(result.deferLoading).toBe(true); // default when invalid
-      expect(result.timeoutClass).toBeUndefined(); // ignored
-      expect(result.timeoutMs).toBeUndefined(); // negative is invalid
-      expect(result.osCategory).toBeUndefined(); // invalid category
+      expect(result.deferLoading).toBe(true);
+      expect(result.timeoutClass).toBeUndefined();
+      expect(result.timeoutMs).toBeUndefined();
+      expect(result.osCategory).toBeUndefined();
     });
 
     it('reads userScoped, currentUserTool, selfParam from legacy unprefixed _meta keys', () => {
@@ -580,11 +570,10 @@ describe('tool-discovery', () => {
     it('skips tools that fail validateMergeResult with a warning (line 283)', async () => {
       process.env.WORKER_SLACK_URL = 'http://mcp-slack:3001';
 
-      // A tool with an empty description will fail validateMergeResult
       const mockTools: Tool[] = [
         {
           name: 'bad_tool',
-          description: '', // empty — fails validation
+          description: '',
           inputSchema: { type: 'object', properties: {} },
         },
         {
@@ -599,7 +588,6 @@ describe('tool-discovery', () => {
 
       const result = await discoverAndMergeService('slack');
 
-      // bad_tool is skipped (validation error), good_tool is included
       expect(result['badTool']).toBeUndefined();
       expect(result['goodTool']).toBeDefined();
       const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
@@ -626,8 +614,8 @@ describe('tool-discovery', () => {
 
       const result = await discoverAndMergeService('slack');
       expect(result['sendChannel']).toBeDefined();
-      expect(result['sendChannel'].deferLoading).toBe(true); // default
-      expect(result['sendChannel'].timeoutClass).toBeUndefined(); // ignored
+      expect(result['sendChannel'].deferLoading).toBe(true);
+      expect(result['sendChannel'].timeoutClass).toBeUndefined();
     });
 
     it('keeps currentUserTool when it points at an existing tool of the same service', async () => {
@@ -868,11 +856,9 @@ describe('tool-discovery', () => {
       await initializeWorker('http://mcp-test:3001', headers);
 
       expect(mockFetch).toHaveBeenCalledTimes(2);
-      // First call: initialize
       const initBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(initBody.method).toBe('initialize');
       expect(initBody.params.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
-      // Second call: notifications/initialized
       const notifBody = JSON.parse(mockFetch.mock.calls[1][1].body);
       expect(notifBody.method).toBe('notifications/initialized');
     });
@@ -950,7 +936,6 @@ describe('tool-discovery', () => {
 
       await initializeWorker('http://mcp-test:3001', { 'Content-Type': 'application/json' });
 
-      // Second call should include session header
       const notifHeaders = mockFetch.mock.calls[1][1].headers;
       expect(notifHeaders['Mcp-Session-Id']).toBe('abc-session');
     });
@@ -969,7 +954,6 @@ describe('tool-discovery', () => {
         initializeWorker('http://mcp-test:3001', { 'Content-Type': 'application/json' })
       ).rejects.toThrow('Worker initialize failed: [-32600] Invalid Request');
 
-      // Should NOT send notifications/initialized after error
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
@@ -992,7 +976,6 @@ describe('tool-discovery', () => {
         .mockResolvedValueOnce(mockTextResponse('method not found', { ok: false, status: 500 }));
       vi.stubGlobal('fetch', mockFetch);
 
-      // Should not throw — notification failures are logged, not thrown
       const sessionId = await initializeWorker('http://mcp-test:3001', {
         'Content-Type': 'application/json',
       });
@@ -1164,7 +1147,6 @@ describe('tool-discovery', () => {
       expect(result[1].name).toBe('tool_2');
       expect(mockFetch).toHaveBeenCalledTimes(2);
 
-      // Second call should include cursor
       const body2 = JSON.parse(mockFetch.mock.calls[1][1].body);
       expect(body2.params.cursor).toBe('cursor-1');
     });
@@ -1213,7 +1195,6 @@ describe('tool-discovery', () => {
     it('breaks after MAX_PAGINATION_PAGES and returns partial results', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      // Every page returns a nextCursor to simulate infinite pagination
       const mockFetch = vi.fn().mockImplementation(() => {
         return Promise.resolve(
           mockJsonResponse({
@@ -1238,11 +1219,9 @@ describe('tool-discovery', () => {
         'Content-Type': 'application/json',
       });
 
-      // Should have exactly MAX_PAGINATION_PAGES tools (1 per page)
       expect(result).toHaveLength(MAX_PAGINATION_PAGES);
       expect(mockFetch).toHaveBeenCalledTimes(MAX_PAGINATION_PAGES);
 
-      // Should have logged a warning
       const paginationWarns = warnSpy.mock.calls
         .map((c) => c.join(' '))
         .filter((msg) => msg.includes('Pagination limit reached'));

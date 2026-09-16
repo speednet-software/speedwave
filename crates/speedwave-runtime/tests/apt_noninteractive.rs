@@ -100,7 +100,6 @@ fn logical_lines_joins_continuations() {
 #[test]
 fn logical_lines_handles_empty_and_trailing_continuation() {
     assert!(logical_lines("").is_empty());
-    // Trailing `\` on the last line must not drop the buffered content.
     let lines = logical_lines("RUN a \\");
     assert_eq!(lines.len(), 1);
     assert!(lines[0].1.contains("RUN a"));

@@ -14,7 +14,6 @@ import {
   createMailTools,
 } from './mail-tools.js';
 
-// Mock the platform runner
 vi.mock('../platform-runner.js', () => ({
   runCommand: vi.fn(),
 }));

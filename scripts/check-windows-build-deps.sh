@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Reports the Windows-only desktop build prerequisites (ADR-085). Advisory: the hard gates
-# are `make dev`'s stage-vulkan-windows and whisper-rs-sys's own build script.
 
 set -uo pipefail
 
@@ -35,7 +33,5 @@ else
   echo "     Open a NEW Git Bash after make setup-dev-windows"
 fi
 
-# Print the gate's own verdict: it also fails when the target dir cannot be resolved at all,
-# which is a different diagnosis from "too deep".
 budget_out="$(bash "$repo_root/scripts/check-vulkan-path-budget.sh" 2>&1)" || true
 printf '%s\n' "$budget_out" | sed 's/^/  /'

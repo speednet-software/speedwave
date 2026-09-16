@@ -10,8 +10,6 @@ import { getAllServiceNames } from './service-list.js';
 import { TIMEOUTS, LATEST_PROTOCOL_VERSION, ts, validateWorkerUrl } from '@speedwave/mcp-shared';
 import { deriveWorkerEnv } from './worker-env.js';
 
-// ── Configuration ────────────────────────────────────────────────────────────────────────────────
-
 /**
  * Resolve worker URL for a service from WORKER_{SERVICE}_URL; undefined if unset (not enabled).
  * @param service - service name (e.g. 'slack', 'gitlab')
@@ -40,8 +38,6 @@ function getConfiguredServices(): string[] {
 export function getRequestTimeout(): number {
   return TIMEOUTS.WORKER_REQUEST_MS;
 }
-
-// ── Types ────────────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Worker response structure
@@ -90,7 +86,6 @@ export interface JSONRPCResponse {
  * @param authToken - Optional bearer token for authentication
  */
 export function buildWorkerHeaders(authToken?: string): Record<string, string> {
-  // Accept must include both application/json and text/event-stream per MCP spec.
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream',
@@ -139,8 +134,6 @@ export async function parseResponse(response: Response): Promise<JSONRPCResponse
     );
   }
 }
-
-// ── Worker Status Cache ──────────────────────────────────────────────────────────────────────────
 
 /**
  * Worker status cache entry
@@ -203,12 +196,10 @@ async function performMcpInitialize(url: string, authToken?: string): Promise<st
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
       redirect: 'error',
     });
-    // Per MCP spec, Mcp-Session-Id header must be echoed on subsequent requests.
     const sessionId = response.headers.get('Mcp-Session-Id') ?? '';
     const result = await parseResponse(response);
     if (result.error) return null;
 
-    // Per MCP spec, notifications/initialized must complete before further requests on the session.
     const notifHeaders = buildWorkerHeaders(authToken);
     if (sessionId) notifHeaders['Mcp-Session-Id'] = sessionId;
     const notifResponse = await fetch(url, {
@@ -218,7 +209,6 @@ async function performMcpInitialize(url: string, authToken?: string): Promise<st
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
       redirect: 'error',
     });
-    // Spec says 202; permissive servers return 200. Accept 2xx, drain body for socket reuse.
     await notifResponse.text().catch(() => undefined);
     if (!notifResponse.ok) {
       console.error(
@@ -282,11 +272,9 @@ async function checkWorkerHealth(service: string): Promise<boolean> {
     }
   };
 
-  // Attempt 1: plain ping.
   const first = await postPing();
   if (first.ok) return true;
 
-  // Attempt 2: if not initialised, run initialize + retry ping on the session.
   if (first.notInitialised) {
     const sessionId = await performMcpInitialize(url, authToken);
     if (sessionId !== null) {
@@ -295,7 +283,6 @@ async function checkWorkerHealth(service: string): Promise<boolean> {
     }
   }
 
-  // Attempt 3: legacy /health endpoint (backwards compatibility).
   try {
     const response = await fetch(`${url}/health`, {
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_CHECK_MS),
@@ -346,14 +333,11 @@ export const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * @param service - Service name to check
  */
 async function checkWorkerHealthAtStartup(service: string): Promise<boolean> {
-  // 4 total attempts: attempt 0 (first try) + 3 retries
   for (let attempt = 0; attempt <= STARTUP_HEALTH_RETRIES; attempt++) {
     try {
       const ok = await checkWorkerHealth(service);
       if (ok) return true;
-    } catch {
-      // expected during startup — worker may not be listening yet
-    }
+    } catch {}
 
     if (attempt < STARTUP_HEALTH_RETRIES) {
       const delay = STARTUP_RETRY_DELAYS_MS[attempt] ?? 4_000;
@@ -386,8 +370,6 @@ export async function getAvailableServices(): Promise<string[]> {
   return results.filter((r) => r.available).map((r) => r.service);
 }
 
-// ── Error Parsing ────────────────────────────────────────────────────────────────────────────────
-
 /**
  * Extracts a sanitized, user-friendly error message from an MCP service error, checked in order:
  * GitBeaker cause.description, HTTP response.body/status, network error.code, then error.message.
@@ -415,12 +397,10 @@ export function parseServiceError(error: unknown, serviceName: string): string {
     message?: string | object;
   };
 
-  // GitBeaker style: error.cause.description
   if (err.cause?.description) {
     return `${prefix}${err.cause.description}`;
   }
 
-  // HTTP response body message
   if (err.response?.body) {
     const body = err.response.body;
     if (typeof body === 'object' && body !== null) {
@@ -433,7 +413,6 @@ export function parseServiceError(error: unknown, serviceName: string): string {
     }
   }
 
-  // HTTP status codes
   if (err.response?.status) {
     const status = err.response.status;
     const statusMessages: Record<number, string> = {
@@ -449,7 +428,6 @@ export function parseServiceError(error: unknown, serviceName: string): string {
     return `${prefix}${statusMessages[status] || `HTTP error ${status}`}`;
   }
 
-  // Network errors
   if (err.code) {
     const networkMessages: Record<string, string> = {
       ECONNREFUSED: 'Connection refused - service not reachable',
@@ -461,7 +439,6 @@ export function parseServiceError(error: unknown, serviceName: string): string {
     }
   }
 
-  // Standard error message
   if (err.message) {
     if (typeof err.message === 'object') {
       return `${prefix}${JSON.stringify(err.message)}`;
@@ -471,8 +448,6 @@ export function parseServiceError(error: unknown, serviceName: string): string {
 
   return `${prefix}Unknown error`;
 }
-
-// ── HTTP Bridge Functions ────────────────────────────────────────────────────────────────────────
 
 /**
  * Per-service cache of Mcp-Session-Id values; empty string means stateless.
@@ -545,7 +520,6 @@ export async function callWorker<T = unknown>(
   const timeout = options?.timeoutMs ?? TIMEOUTS.WORKER_REQUEST_MS;
   const authToken = getAuthToken(service);
 
-  // Performs tools/call with an optional cached session id.
   const attemptCall = async (sessionId: string | undefined): Promise<Response> => {
     const headers = buildWorkerHeaders(authToken);
     if (sessionId) {
@@ -569,11 +543,9 @@ export async function callWorker<T = unknown>(
   };
 
   try {
-    // Fast path: use the cached session (or none for permissive workers).
     const cachedSid = workerSessionCache.get(service);
     let response = await attemptCall(cachedSid);
 
-    // On 400/404 'not initialized': invalidate the session, re-init, retry once.
     if (response.status === 400 || response.status === 404) {
       const body = await response.text();
       const bodyLower = body.toLowerCase();
@@ -603,23 +575,19 @@ export async function callWorker<T = unknown>(
       throw new Error(`Worker ${service} error: ${result.error.message}`);
     }
 
-    // Extract content from MCP response.
     const content = result.result?.content;
     if (content && content.length > 0) {
-      // errorResult() sets isError: true and wraps the message in an "Error: " prefix.
       if (result.result?.isError) {
         const firstText = content.find((c) => c.type === 'text')?.text ?? 'Unknown error';
         throw new Error(firstText);
       }
 
-      // Multi-item responses (e.g. text + base64 image): pass the whole array through.
       const textItems = content.filter((c) => c.type === 'text' && c.text !== undefined);
       const hasNonTextItems = content.some((c) => c.type !== 'text');
       if (hasNonTextItems) {
         return content as T;
       }
 
-      // Single/joined text item: try JSON parse first, fall back to the raw string.
       const text = textItems.map((c) => c.text).join('\n');
       try {
         return JSON.parse(text) as T;
@@ -644,8 +612,6 @@ export async function callWorker<T = unknown>(
     throw error;
   }
 }
-
-// ── Service-Specific Bridge Functions (for executor.ts compatibility) ────────────────────────────
 
 /** Create Slack bridge for executor sandbox. */
 export function createSlackBridge() {
@@ -672,8 +638,6 @@ export function createOsBridge() {
   return buildServiceBridge('os', callWorker);
 }
 
-// ── Create All Bridges (Lazy Initialization) ─────────────────────────────────────────────────────
-
 /** All service bridges combined; a dynamic Record to support both built-in and plugin services. */
 export type AllBridges = Record<string, ReturnType<typeof buildServiceBridge> | null>;
 
@@ -694,12 +658,10 @@ export async function initializeAllBridges(): Promise<AllBridges> {
       : null;
   }
 
-  // Check initial status with retry+backoff (workers may still be starting)
   const activeServices = allServices.filter((s) => enabledServices.has(s));
   const statusChecks = await Promise.all(activeServices.map((s) => checkWorkerHealthAtStartup(s)));
   const workerStatus = Object.fromEntries(activeServices.map((s, i) => [s, statusChecks[i]]));
 
-  // Seed the cache so subsequent calls don't re-check immediately
   const now = new Date();
   for (let i = 0; i < activeServices.length; i++) {
     workerStatusCache.set(activeServices[i], {

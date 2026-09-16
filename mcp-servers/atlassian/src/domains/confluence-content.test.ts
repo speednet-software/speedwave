@@ -63,9 +63,7 @@ describe('addComment', () => {
 
   it('enforces the space allowlist by resolving the page space', async () => {
     client = stubClient(['DEV']);
-    client.get
-      .mockResolvedValueOnce({ spaceId: '900' }) // page
-      .mockResolvedValueOnce({ key: 'OPS' }); // space
+    client.get.mockResolvedValueOnce({ spaceId: '900' }).mockResolvedValueOnce({ key: 'OPS' });
     const c = createConfluenceContentClient(client);
     await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(ScopeError);
     expect(client.post).not.toHaveBeenCalled();
@@ -107,7 +105,7 @@ describe('addComment', () => {
 
   it('rejects when the page has no spaceId and an allowlist is set', async () => {
     client = stubClient(['DEV']);
-    client.get.mockResolvedValueOnce({}); // page, no spaceId
+    client.get.mockResolvedValueOnce({});
     const c = createConfluenceContentClient(client);
     await expect(c.addComment('123', { text: 'x' })).rejects.toThrow(ScopeError);
   });
@@ -249,10 +247,9 @@ describe('listAttachments', () => {
 
 describe('space-allowlist enforcement', () => {
   it('is skipped (single GET) when confluenceSpaceKeys is empty', async () => {
-    client.get.mockResolvedValueOnce({ results: [] }); // getLabels
+    client.get.mockResolvedValueOnce({ results: [] });
     const c = createConfluenceContentClient(client);
     await c.getLabels('123');
-    // Only the getLabels GET — no extra page/space lookups.
     expect(client.get).toHaveBeenCalledTimes(1);
   });
 

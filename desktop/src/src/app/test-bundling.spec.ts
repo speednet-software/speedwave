@@ -2,9 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
-// esbuild takes an export-less file's module format (every spec) from its nearest package.json;
-// anything but "type": "module" there can bundle the spec as CommonJS, nesting its vi.mock calls.
-
 /**
  * Parses the package.json at `path`.
  * @param path - Manifest file to read.

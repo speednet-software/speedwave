@@ -395,7 +395,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       await this.loadActiveProject();
       await this.loadIntegrations();
     });
-    // Backend may roll a just-enabled service back on failed restart; refresh rows.
     this.unsubStatusRefresher = this.projectState.registerIntegrationStatusRefresher(() => {
       void this.loadIntegrations();
     });
@@ -425,8 +424,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
 
           this.oauthStatus = payload.status;
           this.oauthStatusMessage = payload.message;
-          // Loopback flows carry the redirect URI in the awaiting_redirect
-          // message (same contract as the plugin flow).
           if (payload.status === 'awaiting_redirect') {
             this.oauthRedirectUri = payload.message;
           }
@@ -455,7 +452,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         this.cdr.markForCheck();
       })
       .catch((e: unknown) => {
-        // Without the listener the flow would look hung — leave a breadcrumb.
         this.logger.warn(`${eventName} listener registration failed: ${String(e)}`);
         return () => {};
       });
@@ -521,14 +517,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         'validate_os_integrations_on_startup',
         { project: this.activeProject }
       );
-      // Defensive: the Tauri command can return undefined in tests where the mock handler
-      // doesn't recognise the command name; coerce to [] so .length is always safe.
       this.osIntegrationsAutoDisabled = Array.isArray(result) ? result : [];
       if (this.osIntegrationsAutoDisabled.length === 0) {
         this.logger.info('[integrations] validateOsIntegrations done — no auto-disabled services');
       } else {
-        // Per-service warn so each line lands in the user-supplied logs ZIP separately
-        // (easier to grep / cite when triaging support tickets).
         for (const entry of this.osIntegrationsAutoDisabled) {
           this.logger.warn(
             `[integrations] auto-disabled os.${entry.service} (was enabled, TCC denied) — reason: ${entry.reason}`
@@ -539,7 +531,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         );
       }
     } catch (e: unknown) {
-      // Non-fatal; validation failure does not block the integrations view.
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.error(`[integrations] validateOsIntegrations failed (non-fatal): ${msg}`);
       this.osIntegrationsAutoDisabled = [];
@@ -560,7 +551,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       const response = await this.tauri.invoke<IntegrationsResponse>('get_integrations', {
         project: this.activeProject,
       });
-      // BETA_ONLY_SERVICES hidden unless beta is on (ADR-058).
       const betaOn = this.betaEnabled();
       this.services = response.services.filter(
         (s) => betaOn || !IntegrationsComponent.BETA_ONLY_SERVICES.has(s.service)
@@ -717,7 +707,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     this.error = '';
     this.cdr.markForCheck();
 
-    // Save non-oauth fields first
     const nonOAuthCreds = { ...payload.credentials };
     if (Object.keys(nonOAuthCreds).length > 0) {
       try {
@@ -738,7 +727,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
     try {
       const result = await this.invokeOAuthStart(payload.svc.service, payload.credentials);
       if (myNonce !== this.oauthStartNonce) return;
-      // Loopback flows (slack) return only request_id — no device code to render.
       this.deviceCodeInfo = 'user_code' in result ? result : null;
       this.activeOAuthRequestId = result.request_id;
       this.oauthService = payload.svc.service;
@@ -766,12 +754,10 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
       });
     }
     if (service === 'slack') {
-      // Loopback PKCE flow with a bundled client_id (ADR-071).
       return this.tauri.invoke<LoopbackFlowStart>('start_slack_oauth', {
         project: this.activeProject,
       });
     }
-    // SharePoint (default).
     const clientId = credentials['client_id'] ?? '';
     const tenantId = credentials['tenant_id'] ?? '';
     if (!clientId || !tenantId) {
@@ -795,9 +781,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
           : 'cancel_sharepoint_oauth';
     try {
       await this.tauri.invoke(cancelCommand);
-    } catch {
-      // Best-effort cancel
-    }
+    } catch {}
     this.oauthService = null;
     this.activeOAuthRequestId = null;
     this.oauthProjectAtStart = null;
@@ -814,9 +798,7 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
   async handleOpenVerificationUrl(url: string): Promise<void> {
     try {
       await this.tauri.invoke('open_url', { url });
-    } catch {
-      // Best-effort open
-    }
+    } catch {}
   }
 
   /**
@@ -874,7 +856,6 @@ export class IntegrationsComponent implements OnInit, OnDestroy {
         enabled: next,
       });
       this.logger.info(`[integrations] os toggle persisted service=${os.service} enabled=${next}`);
-      // Drop the auto-disabled banner entry for this service.
       if (this.osIntegrationsAutoDisabled.some((e) => e.service === os.service)) {
         this.osIntegrationsAutoDisabled = this.osIntegrationsAutoDisabled.filter(
           (e) => e.service !== os.service

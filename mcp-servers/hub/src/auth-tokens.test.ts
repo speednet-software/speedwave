@@ -3,12 +3,10 @@ import { mkdtempSync, writeFileSync, mkdirSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-// Mock service-list before importing auth-tokens
 vi.mock('./service-list.js', () => ({
   getAllServiceNames: () => ['slack', 'gitlab'],
 }));
 
-// Mock /secrets path to use temp dir
 let secretsDir: string;
 
 vi.mock('fs', async (importOriginal) => {
@@ -80,7 +78,6 @@ describe('auth-tokens', () => {
   });
 
   it('handles readFileSync error gracefully without crashing', () => {
-    // Create a directory where a file is expected — readFileSync will throw EISDIR
     mkdirSync(join(secretsDir, 'slack-auth-token'));
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -106,8 +103,6 @@ describe('auth-tokens', () => {
   });
 
   it('iterates only services from getAllServiceNames', () => {
-    // Only slack and gitlab are in mocked getAllServiceNames
-    // Even if a token file exists for another service, it won't be loaded
     writeFileSync(join(secretsDir, 'redmine-auth-token'), 'redmine-token');
 
     loadAuthTokens();

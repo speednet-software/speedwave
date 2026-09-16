@@ -21,8 +21,6 @@ dirs = "6"
 fs2 = "0.4"
 log = { workspace = true }
 regex = "1"
-# The PII policy engine: policy.json v2 shape + default sensitive-key list,
-# so the host's rendered contract can never drift from what it compiles against.
 speedwave-pii-engine = { path = "../pii-engine" }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 ed25519-dalek = "3"
@@ -37,103 +35,45 @@ dashmap = "6"
 shlex = "2.0"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
-# Used for atomic plugin install staging — `tempdir_in(plugins_dir)`
-# guarantees the staging dir lives on the same filesystem as the
-# destination, which is the only way `rename(staging, dest)` is atomic.
 tempfile = "3"
 
-# --- Optional deps, gated behind the `audio-transcription` feature ---
-# (only the Desktop crate enables this feature; the CLI stays lean — see
-#  docs/adr/ADR-056-host-side-audio-transcription.md)
 hound = { version = "3", optional = true }
-# Model downloader (Phase 1b). `blocking` because ModelStore is a synchronous
-# API — a large download is a long blocking operation the Tauri layer wraps in
-# `spawn_blocking`; `stream` for chunked reads while hashing on the fly.
-# `rustls-tls` to match the rest of Speedwave (no system OpenSSL).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "stream"], optional = true }
-# Whisper (transcription) — links libwhisper, built from whisper.cpp's vendored
-# submodule via cmake at build time (so CI needs `cmake`). GPU backends come from the
-# target-specific blocks below: `metal` on macOS, `vulkan` on Windows (ADR-085); CPU otherwise.
-# `log_backend` routes whisper.cpp/ggml internals (backend picked, GPU init failures) into the
-# `log` facade — without it a GPU fallback is invisible.
 whisper-rs = { version = "0.16", optional = true, features = ["log_backend"] }
-# Physical-core count for the whisper thread budget (`accel::decode_threads`): std exposes only
-# logical CPUs, and SMT siblings add no whisper throughput.
 num_cpus = { version = "1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# On macOS, build whisper.cpp with the Metal backend (the Metal shader library
-# is embedded into the binary — no separate .metallib). Cargo merges this
-# feature set with the optional `whisper-rs` entry above.
 whisper-rs = { version = "0.16", optional = true, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
-# Loopback capture uses the `wasapi` crate directly (cpal loopback is fragile — RustAudio/cpal#476);
-# cpal stays for the microphone (ADR-056). macOS uses the bundled audio-capture-cli instead.
 cpal = { version = "0.18", optional = true }
 wasapi = { version = "0.24", optional = true }
-# Vulkan backend on Windows, mirroring the macOS `metal` block above — a target-conditional
-# feature union, deliberately not a cargo feature. Needs the pinned SDK (install-vulkan-sdk.ps1).
 whisper-rs = { version = "0.16", optional = true, features = ["vulkan"] }
-# Runtime GPU probe (`transcription/gpu_probe.rs`); `loaded` = ash itself loads dynamically.
-# The exe still cannot start without vulkan-1.dll — whisper's backend is a load-time import.
 ash = { version = "0.38", optional = true, default-features = false, features = ["loaded"] }
-# Job Object kill-on-parent-close for host MCP workers
-# (`host_mcp_process::job_object`). `Win32_Security` is required to gate
-# `CreateJobObjectW` in windows-sys 0.61.x. Same major version as in
-# `desktop/src-tauri/Cargo.toml` for workspace coherence.
-# SSOT-alignment with desktop/src-tauri/Cargo.toml — version must stay
-# in sync across the two workspaces (they have separate Cargo.lock files
-# so workspace.dependencies cannot be used). See CLAUDE.md "windows-sys
-# version" SSOT-alignment row.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
-    # Owner-only DACL in `fs_perms` (SetEntriesInAclW / SetNamedSecurityInfoW
-    # + LocalFree). Authorization gates the ACL APIs; Memory gates LocalFree.
     "Win32_Security_Authorization",
     "Win32_System_Memory",
     "Win32_System_JobObjects",
-    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION is gated behind
-    # Win32_System_Threading in windows-sys 0.61 (compiler hint:
-    # "the item is gated behind the `Win32_System_Threading` feature").
     "Win32_System_Threading",
-    # SHGetKnownFolderPath resolves ProgramData from the OS, not the spoofable
-    # env var, so MDM policy cannot be hidden (ADR-076). Com gates CoTaskMemFree.
     "Win32_UI_Shell",
     "Win32_Globalization",
     "Win32_System_Com",
 ] }
 
 [target.'cfg(unix)'.dependencies]
-# Durable writes: safe fsync wrappers (macOS F_FULLFSYNC); `unsafe`-free.
 rustix = { version = "1", features = ["fs"] }
 
 [features]
-# Host-side meeting transcription: WAV I/O + the model downloader + the Whisper
-# transcriber (+ wasapi/cpal on Windows for capture). Speaker diarization was
-# removed — ADR-075 — so sherpa-onnx and the tar/bzip2 archive deps are gone.
 audio-transcription = ["dep:hound", "dep:num_cpus", "dep:reqwest", "dep:whisper-rs", "windows-capture"]
-# Internal: the Windows capture deps (wasapi loopback, cpal mic) plus ash for the GPU probe.
-# Only meaningful on Windows, but listing it unconditionally keeps `--features` simple.
 windows-capture = ["dep:ash", "dep:cpal", "dep:wasapi"]
-# Re-exports `runtime::test_support` with mock builders, so downstream test
-# code can construct `LockedRuntime` without seeing the (pub(crate)) trait.
 test-support = []
-# Enables the mcp-os upgrade-path test that runs against the *real* bundled
-# desktop worker (`desktop/src-tauri/mcp-os/os/dist/index.js`) instead of the
-# stub. Off by default because the worker must be staged first; the
-# `make test-mcp-os-bundle` target builds the bundle, then runs the test under
-# this feature. See ADR-048.
 mcp-os-bundle-e2e = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
-# Local HTTP mock for the model-downloader tests (no real network in unit tests).
 mockito = "1"
-# Serialises tests that mutate the process-global environment
-# (`std::env::set_var`) — without it they race each other and concurrent
-# runtime tests.
 serial_test = "4"
 
 [lints]
@@ -149,11 +89,9 @@ required-features = ["test-support"]
 
 [[test]]
 name = "build_lock_cross_process"
-# No required-features — `build::with_build_lock_in` is plain public API.
 
 [[test]]
 name = "ssot_enforcement"
-# No required-features — pure source-parsing assertions, no runtime types.
 
 [[test]]
 name = "apply_transaction_behaviour"

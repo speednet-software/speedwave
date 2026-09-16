@@ -22,8 +22,6 @@ import { runCommand } from '../platform-runner.js';
 /** Tags become `[#tag]` markers inside the notes field, so these characters would forge markers. */
 const TAG_MARKER_CHARS = { pattern: /[[\]#]/, describe: '[, ], or # characters' };
 
-// ── Types ──────────────────────────────────────────────────────────────
-
 /** Input parameters for the listReminderLists tool (no params required). */
 type ListReminderListsParams = Record<string, never>;
 
@@ -84,8 +82,6 @@ interface CompleteReminderParams {
   /** Reminder ID to complete. */
   id: string;
 }
-
-// ── Tool Definitions ──────────────────────────────────────────────────
 
 const listReminderListsTool: Tool = {
   name: 'listReminderLists',
@@ -465,8 +461,6 @@ const completeReminderTool: Tool = {
   ],
 };
 
-// ── Handlers ──────────────────────────────────────────────────────────
-
 /**
  * Lists all reminder lists/groups available on this device.
  * @param _params - Unused tool input parameters.
@@ -574,8 +568,6 @@ export async function handleCompleteReminder(params: CompleteReminderParams): Pr
   const result = await runCommand('reminders', 'complete_reminder', p);
   return { success: true, data: result.parsed };
 }
-
-// ── Export ────────────────────────────────────────────────────────────
 
 /** Creates tool definitions for all reminder operations. */
 export function createReminderTools(): ToolDefinition[] {

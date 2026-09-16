@@ -8,7 +8,6 @@ import { createMCPServer } from '@speedwave/mcp-shared';
 
 describe('context7 worker healthcheck', () => {
   it('healthCheck does NOT make outbound HTTP — anonymous quota regression guard', async () => {
-    // Local readiness probe must not call Context7.
     const fetchSpy = vi.fn(() => {
       throw new Error('healthCheck must NOT make HTTP calls');
     });
@@ -21,7 +20,6 @@ describe('context7 worker healthcheck', () => {
         version: '0.0.0',
         port: 0,
         auth: { token: 'test-token' },
-        // Local readiness only; mirrors production src/index.ts.
         healthCheck: async () => {},
       });
       const actualPort = await server.start();
@@ -45,7 +43,6 @@ describe('context7 worker healthcheck', () => {
         });
       });
       expect(response.status).toBe(200);
-      // fetchSpy must NOT have been called even once.
       expect(fetchSpy).not.toHaveBeenCalled();
       await server.stop();
     } finally {

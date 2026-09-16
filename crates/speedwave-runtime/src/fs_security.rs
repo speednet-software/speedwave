@@ -104,27 +104,21 @@ pub(crate) fn collect_security_paths(
     project: &str,
 ) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
     let mut dirs: Vec<std::path::PathBuf> = vec![
-        // Top-level directories (prevent project name enumeration)
         data_dir.join("secrets"),
         data_dir.join("snapshots"),
         data_dir.join("tokens"),
-        // ADR-060: per-project OAuth state dir, must be 0o700.
         data_dir.join(consts::OAUTH_SUBDIR),
-        // Per-project directories
         data_dir.join("secrets").join(project),
         data_dir.join("snapshots").join(project),
         data_dir.join("ide-bridge"),
         data_dir.join("tokens").join(project),
         data_dir.join(consts::OAUTH_SUBDIR).join(project),
-        // Native Claude Code managed-settings dir (MDM telemetry policy), 0o700.
         data_dir.join(consts::CLAUDE_MANAGED_SUBDIR),
         data_dir.join(consts::CLAUDE_MANAGED_SUBDIR).join(project),
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
 
-    // --- tokens/<project>/<service>/ subdirectories ---
-    // Collects both directory paths (0o700) and credential file paths (0o600).
     let tokens_project_dir = data_dir.join("tokens").join(project);
     if let Ok(services) = std::fs::read_dir(&tokens_project_dir) {
         for entry in services.flatten() {
@@ -145,12 +139,9 @@ pub(crate) fn collect_security_paths(
         }
     }
 
-    // --- Root-level files ---
     files.push(data_dir.join("bundle-state.json"));
-    // ADR-054: mcp-os unified lock at data dir root, must be 0o600.
     files.push(data_dir.join(consts::MCP_OS_LOCK_FILE));
 
-    // --- secrets/<project>/* (worker auth tokens) ---
     let secrets_dir = data_dir.join("secrets").join(project);
     if let Ok(entries) = std::fs::read_dir(&secrets_dir) {
         for entry in entries.flatten() {
@@ -162,7 +153,6 @@ pub(crate) fn collect_security_paths(
         }
     }
 
-    // --- snapshots/<project>/*.json ---
     let snapshots_dir = data_dir.join("snapshots").join(project);
     if let Ok(entries) = std::fs::read_dir(&snapshots_dir) {
         for entry in entries.flatten() {
@@ -174,7 +164,6 @@ pub(crate) fn collect_security_paths(
         }
     }
 
-    // --- ide-bridge/*.lock (IDE auth tokens) ---
     let ide_dir = data_dir.join("ide-bridge");
     if let Ok(entries) = std::fs::read_dir(&ide_dir) {
         for entry in entries.flatten() {
@@ -187,8 +176,6 @@ pub(crate) fn collect_security_paths(
         }
     }
 
-    // --- oauth/<project>/* (ADR-060 OAuth worker state) ---
-    // Every file here must be 0o600.
     let oauth_project_dir = data_dir.join(consts::OAUTH_SUBDIR).join(project);
     if let Ok(entries) = std::fs::read_dir(&oauth_project_dir) {
         for entry in entries.flatten() {
@@ -200,7 +187,6 @@ pub(crate) fn collect_security_paths(
         }
     }
 
-    // --- claude-managed/<project>/managed-settings.json (MDM telemetry), 0o600 ---
     files.push(crate::claude_managed::managed_settings_path(
         data_dir, project,
     ));
@@ -264,9 +250,7 @@ mod tests {
             data_dir.join("snapshots/proj/snapshot.json"),
             data_dir.join("ide-bridge/1234.lock"),
             data_dir.join("bundle-state.json"),
-            // ADR-054 mcp-os singleton unified lock (data dir root).
             data_dir.join("mcp-os.lock.json"),
-            // ADR-060 oauth worker state — post-PR3 unified lock layout:
             data_dir.join("oauth/proj/sharepoint.json"),
             data_dir.join("oauth/proj/.bearer-map.json"),
             data_dir.join("oauth/proj/bearer-sharepoint"),
@@ -280,20 +264,16 @@ mod tests {
         }
     }
 
-    // ── collect_security_paths ─────────────────────────────────────────
-
     #[test]
     fn test_collect_security_paths_returns_correct_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         create_test_tree(data_dir, true);
 
-        // Also create a non-.lock file in ide-bridge (should NOT be in files)
         std::fs::write(data_dir.join("ide-bridge/not-a-lock.txt"), "test").unwrap();
 
         let (dirs, files) = collect_security_paths(data_dir, "proj");
 
-        // Expected 16 dirs (14 legacy + claude-managed + claude-managed/proj).
         assert_eq!(dirs.len(), 16, "expected 16 dirs, got: {dirs:?}");
         assert!(dirs.contains(&data_dir.join("secrets")));
         assert!(dirs.contains(&data_dir.join("secrets/proj")));
@@ -312,7 +292,6 @@ mod tests {
         assert!(dirs.contains(&data_dir.join("claude-managed")));
         assert!(dirs.contains(&data_dir.join("claude-managed/proj")));
 
-        // Expected 16 files: 8 legacy + 6 oauth + 1 mcp-os singleton + managed-settings.json.
         assert_eq!(files.len(), 16, "expected 16 files, got: {files:?}");
         assert!(files.contains(&data_dir.join("secrets/proj/worker-auth-token")));
         assert!(files.contains(&data_dir.join("tokens/proj/slack/token.txt")));
@@ -331,14 +310,11 @@ mod tests {
         assert!(files.contains(&data_dir.join("oauth/proj/audit.log.1")));
         assert!(files.contains(&data_dir.join("claude-managed/proj/managed-settings.json")));
 
-        // non-.lock file must NOT be included
         assert!(
             !files.contains(&data_dir.join("ide-bridge/not-a-lock.txt")),
             "ide-bridge/not-a-lock.txt should not be in files list"
         );
     }
-
-    // ── ensure_data_dir_permissions_in ─────────────────────────────────
 
     #[test]
     fn test_ensure_correct_permissions_noop() {
@@ -350,12 +326,10 @@ mod tests {
 
         ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
 
-        // All dirs still 0o700, all files still 0o600
         assert_eq!(get_mode(&data_dir.join("secrets")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens/proj/slack")), 0o700);
         assert_eq!(get_mode(&data_dir.join("bundle-state.json")), 0o600);
 
-        // SecurityCheck should also pass
         let uid = std::fs::metadata(data_dir).unwrap().uid();
         let violations =
             crate::compose::SecurityCheck::check_file_security_with_uid(data_dir, "proj", uid);
@@ -371,11 +345,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        create_test_tree(data_dir, false); // 0o755 dirs, 0o644 files
+        create_test_tree(data_dir, false);
 
         ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
 
-        // All dirs fixed to 0o700
         assert_eq!(get_mode(&data_dir.join("secrets")), 0o700);
         assert_eq!(get_mode(&data_dir.join("snapshots")), 0o700);
         assert_eq!(get_mode(&data_dir.join("tokens")), 0o700);
@@ -387,7 +360,6 @@ mod tests {
         assert_eq!(get_mode(&data_dir.join("tokens/proj/empty-service")), 0o700);
         assert_eq!(get_mode(&data_dir.join("ide-bridge")), 0o700);
 
-        // All files fixed to 0o600
         assert_eq!(
             get_mode(&data_dir.join("secrets/proj/worker-auth-token")),
             0o600
@@ -403,7 +375,6 @@ mod tests {
         );
         assert_eq!(get_mode(&data_dir.join("ide-bridge/1234.lock")), 0o600);
 
-        // Verify SecurityCheck passes after autofix
         let violations = crate::compose::SecurityCheck::check_file_security_with_uid(
             data_dir,
             "proj",
@@ -418,7 +389,6 @@ mod tests {
     #[test]
     fn test_ensure_missing_paths_ok() {
         let tmp = tempfile::tempdir().unwrap();
-        // Empty data_dir — no subdirs exist
         ensure_data_dir_permissions_in(tmp.path(), "proj").unwrap();
     }
 
@@ -427,14 +397,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
-        // Create a real target dir and symlink secrets/ to it
         let real_dir = data_dir.join("real-secrets");
         std::fs::create_dir_all(&real_dir).unwrap();
         std::os::unix::fs::symlink(&real_dir, data_dir.join("secrets")).unwrap();
 
         ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
 
-        // Symlink target should NOT have been changed
         assert_ne!(
             get_mode(&real_dir),
             0o700,
@@ -449,21 +417,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
-        // Create token dir structure
         let real_service = data_dir.join("tokens/proj/real-service");
         secure_mkdir(&data_dir.join("tokens"));
         secure_mkdir(&data_dir.join("tokens/proj"));
         std::fs::create_dir_all(&real_service).unwrap();
         std::fs::set_permissions(&real_service, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        // Create external target and symlink a service dir to it
         let external = tmp.path().join("external-target");
         std::fs::create_dir_all(&external).unwrap();
         std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink(&external, data_dir.join("tokens/proj/symlinked-service"))
             .unwrap();
 
-        // Create minimal other dirs so ensure doesn't fail
         secure_mkdir(&data_dir.join("secrets"));
         secure_mkdir(&data_dir.join("secrets/proj"));
         secure_mkdir(&data_dir.join("snapshots"));
@@ -472,10 +437,8 @@ mod tests {
 
         ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
 
-        // Real service dir should be fixed
         assert_eq!(get_mode(&real_service), 0o700);
 
-        // Symlink target should NOT be changed
         assert_eq!(
             get_mode(&external),
             0o755,
@@ -489,12 +452,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        create_test_tree(data_dir, true); // correct mode bits
+        create_test_tree(data_dir, true);
 
-        // Autofix should succeed (nothing to fix for mode bits)
         ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
 
-        // But SecurityCheck with a DIFFERENT expected UID should still find violations
         let real_uid = std::fs::metadata(data_dir).unwrap().uid();
         let wrong_uid = real_uid + 1;
         let violations = crate::compose::SecurityCheck::check_file_security_with_uid(
@@ -519,10 +480,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
 
-        // Create tree with various wrong permissions
-        create_test_tree(data_dir, false); // 0o755 dirs, 0o644 files
+        create_test_tree(data_dir, false);
 
-        // Make some even worse
         std::fs::set_permissions(
             data_dir.join("tokens"),
             std::fs::Permissions::from_mode(0o777),
@@ -534,10 +493,8 @@ mod tests {
         )
         .unwrap();
 
-        // Autofix
         ensure_data_dir_permissions_in(data_dir, "proj").unwrap();
 
-        // SecurityCheck should now pass
         let uid = std::fs::metadata(data_dir).unwrap().uid();
         let violations =
             crate::compose::SecurityCheck::check_file_security_with_uid(data_dir, "proj", uid);

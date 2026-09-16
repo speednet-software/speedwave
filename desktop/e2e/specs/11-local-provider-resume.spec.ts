@@ -1,4 +1,3 @@
-
 import { switchToProject, activeProjectSlug } from '../helpers/projects';
 import { confirmRestartAndWait } from '../helpers/shell';
 import {

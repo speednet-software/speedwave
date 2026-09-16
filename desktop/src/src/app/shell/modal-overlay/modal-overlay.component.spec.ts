@@ -71,7 +71,6 @@ describe('ModalOverlayComponent', () => {
   });
 
   afterEach(() => {
-    // Tear down the dialog so each test starts with a clean overlay container.
     host.open.set(false);
     fixture.detectChanges();
     fixture.destroy();
@@ -91,8 +90,6 @@ describe('ModalOverlayComponent', () => {
     it('uses the supplied testId on the rendered card', () => {
       host.testId.set('custom-id');
       fixture.detectChanges();
-      // testId is reflected on the dialog content; close + reopen so it picks up
-      // the new value (effect re-runs on open() change, not testId() change).
       host.open.set(false);
       fixture.detectChanges();
       host.open.set(true);

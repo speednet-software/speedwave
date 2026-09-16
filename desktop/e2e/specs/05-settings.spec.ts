@@ -16,7 +16,6 @@ describe('Settings', function () {
     });
     await nav.click();
 
-    // Settings ready signal: wait for the page heading.
     const title = await $('[data-testid="settings-title"]');
     await title.waitForExist({ timeout: 10_000 });
   });
@@ -58,7 +57,6 @@ describe('Settings', function () {
 
   it('should not duplicate the export-diagnostics control (moved to /logs)', async function () {
     this.timeout(15_000);
-    // Diagnostics export relocated to /logs; assert absence here.
     const exportBtn = await $('[data-testid="settings-export-diagnostics"]');
     expect(await exportBtn.isExisting()).toBe(false);
   });

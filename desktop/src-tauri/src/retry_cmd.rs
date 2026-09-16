@@ -102,7 +102,6 @@ pub async fn retry_last_turn(
     app_handle: AppHandle,
     state: tauri::State<'_, SharedChatSession>,
 ) -> Result<(), RetryError> {
-    // Log only lengths, never the session_id/user_uuid (CodeQL cleartext-logging).
     log::info!(
         "retry_last_turn: session_id_len={} user_uuid_len={}",
         session_id.len(),
@@ -156,8 +155,6 @@ mod tests {
     const VALID_SESSION: &str = "550e8400-e29b-41d4-a716-446655440000";
     const VALID_UUID: &str = "msg_01ABCdef";
 
-    // ── Happy path ──────────────────────────────────────────────────
-
     #[test]
     fn retry_happy_path_stops_then_starts_with_retry() {
         let mut drv = MockDriver::default();
@@ -169,8 +166,6 @@ mod tests {
             vec![(VALID_SESSION.to_string(), VALID_UUID.to_string())]
         );
     }
-
-    // ── Error paths ─────────────────────────────────────────────────
 
     #[test]
     fn retry_with_invalid_session_returns_session_not_found() {
@@ -210,7 +205,6 @@ mod tests {
 
     #[test]
     fn retry_stop_failure_returns_resume_failed_without_start() {
-        // If stop fails, start must not run.
         let mut drv = MockDriver {
             stop_err: Some("stop boom".to_string()),
             ..Default::default()
@@ -236,8 +230,6 @@ mod tests {
         assert_eq!(drv.start_calls.len(), 1);
     }
 
-    // ── RetryError serialisation ────────────────────────────────────
-
     #[test]
     fn retry_error_serialises_as_tagged_kind() {
         let v = serde_json::to_value(RetryError::NoAssistantTurn).unwrap();
@@ -249,7 +241,6 @@ mod tests {
 
     #[test]
     fn retry_error_round_trips() {
-        // Round-trip every variant.
         let cases = [
             RetryError::NoAssistantTurn,
             RetryError::SessionNotFound,
@@ -262,11 +253,8 @@ mod tests {
         }
     }
 
-    // ── State invariant: file checksum ──────────────────────────────
-
     #[test]
     fn retry_does_not_open_session_jsonl_in_mock_driver() {
-        // retry_last_turn_inner does not touch the session JSONL file.
         let mut drv = MockDriver::default();
         let r = retry_last_turn_inner(VALID_SESSION, VALID_UUID, &mut drv);
         assert!(r.is_ok());

@@ -193,7 +193,6 @@ export class SetupWizardComponent {
 
   /** Detect host platform and customize step descriptions. */
   constructor() {
-    // Pin total to TOTAL_STEPS for safety — the constant lives only here.
     void TOTAL_STEPS;
     this.detectPlatform();
   }
@@ -214,9 +213,7 @@ export class SetupWizardComponent {
       }
       this.stepsSig.set(next);
       this.cdr.markForCheck();
-    } catch {
-      // Fallback: keep generic descriptions
-    }
+    } catch {}
   }
 
   /** Begins the setup process by transitioning to the progress phase and running auto steps. */
@@ -259,8 +256,6 @@ export class SetupWizardComponent {
     await this.runFromStep(4);
   }
 
-  // ---- Private helpers ----
-
   private async runAutoSteps(): Promise<void> {
     try {
       const result = await this.tauri.invoke<{
@@ -281,7 +276,6 @@ export class SetupWizardComponent {
     for (let i = start; i < list.length; i++) {
       this.currentStepIndexSig.set(i);
 
-      // Step 3: Create Project — skip if user already has a project
       if (i === 3) {
         if (this.existingProjects.length > 0) {
           const active = this.existingProjects.find((p) => p.name === this.activeProject);
@@ -296,17 +290,14 @@ export class SetupWizardComponent {
         return;
       }
 
-      // All other steps: auto-run
       const ok = await this.executeStep(i);
-      if (!ok) return; // stop on error
+      if (!ok) return;
 
-      // If step 0 skipped VM init, jump loop ahead
       if (i === 0 && this.stepsSig()[1].status === 'done') {
-        i = 1; // loop will increment to 2
+        i = 1;
       }
     }
 
-    // All done
     this.phase.set('complete');
     this.cdr.markForCheck();
     setTimeout(
@@ -320,31 +311,28 @@ export class SetupWizardComponent {
     try {
       switch (index) {
         case 0: {
-          // Check Runtime
           const status = await this.tauri.invoke<string>('check_runtime');
           this.setStep(0, 'done');
           if (status === 'Ready') {
-            // Runtime ready — skip VM init
             this.setStep(1, 'done', 'Already available');
             this.currentStepIndexSig.set(2);
             return true;
           }
           break;
         }
-        case 1: // Initialize VM
+        case 1:
           await this.tauri.invoke('init_vm');
           this.setStep(1, 'done');
           break;
-        case 2: // Build Images
+        case 2:
           await this.tauri.invoke('build_images');
           this.setStep(2, 'done');
           break;
-        case 4: // Start Containers — deferred: a fresh project has no
-          // provider yet, so this would only bail. Settings starts it later.
+        case 4:
           await this.tauri.invoke('defer_container_start', { project: this.projectName() });
           this.setStep(4, 'done', 'Deferred until a provider is chosen');
           break;
-        case 5: // Finalize
+        case 5:
           this.setStep(5, 'active', 'Linking CLI...');
           this.cdr.markForCheck();
           await this.tauri.invoke('link_cli');

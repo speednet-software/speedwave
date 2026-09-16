@@ -6,19 +6,19 @@ use std::io::Write;
 /// Disable battery for every emulator mode Claude Code may leave enabled.
 /// Each entry is a spec-defined no-op when the mode is already off.
 pub const TERMINAL_SANITIZE_SEQUENCE: &str = concat!(
-    "\x1b[<99u",   // kitty keyboard: pop the whole stack (over-pop clears all flags)
-    "\x1b[=0u",    // kitty keyboard: hard-clear enhancement flags
-    "\x1b[>4;0m",  // xterm modifyOtherKeys off
-    "\x1b[?2004l", // bracketed paste off
-    "\x1b[?1004l", // focus reporting off
-    "\x1b[?1000l", // mouse: X11 tracking off
-    "\x1b[?1002l", // mouse: button-event tracking off
-    "\x1b[?1003l", // mouse: any-motion tracking off
-    "\x1b[?1006l", // mouse: SGR encoding off
-    "\x1b[?2026l", // synchronized output end
-    "\x1b[?1l",    // application cursor keys off
-    "\x1b[?25h",   // show cursor
-    "\x1b[0m",     // SGR reset
+    "\x1b[<99u",
+    "\x1b[=0u",
+    "\x1b[>4;0m",
+    "\x1b[?2004l",
+    "\x1b[?1004l",
+    "\x1b[?1000l",
+    "\x1b[?1002l",
+    "\x1b[?1003l",
+    "\x1b[?1006l",
+    "\x1b[?2026l",
+    "\x1b[?1l",
+    "\x1b[?25h",
+    "\x1b[0m",
 );
 
 /// Best-effort: writes the battery to stdout when it is a VT terminal.
@@ -46,8 +46,6 @@ fn stdout_is_vt_terminal() -> bool {
 #[cfg(windows)]
 fn stdout_is_vt_terminal() -> bool {
     use std::io::IsTerminal;
-    // Capability probe: enables VT interpretation on the console (no-op when
-    // already on); a console that cannot (pre-1607 conhost) would print raw escapes.
     std::io::stdout().is_terminal() && anstyle_query::windows::enable_ansi_colors().unwrap_or(false)
 }
 
@@ -86,7 +84,6 @@ mod tests {
 
     #[test]
     fn sequence_disables_kitty_keyboard_protocol() {
-        // Pop past an empty stack resets all flags (kitty spec); `=0u` hard-clears.
         assert!(TERMINAL_SANITIZE_SEQUENCE.contains("\x1b[<99u"));
         assert!(TERMINAL_SANITIZE_SEQUENCE.contains("\x1b[=0u"));
     }
@@ -126,8 +123,6 @@ mod tests {
 
     #[test]
     fn sequence_omits_destructive_resets() {
-        // RIS clears the screen; 1049l/DECSTBM can jump the cursor on a healthy
-        // terminal — the battery must stay invisible on a clean exit.
         assert!(!TERMINAL_SANITIZE_SEQUENCE.contains("\x1bc"));
         assert!(!TERMINAL_SANITIZE_SEQUENCE.contains("1049"));
         assert!(!TERMINAL_SANITIZE_SEQUENCE.contains("\x1b[r"));

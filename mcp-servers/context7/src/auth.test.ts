@@ -50,11 +50,8 @@ describe('context7 optional API key', () => {
       const result = await runWorker({
         MCP_CONTEXT7_AUTH_TOKEN: 'test-token',
         TOKENS_DIR: dir,
-        // Binds ephemerally and exits fast; the 4s timeout in runWorker kills it before it serves traffic.
         PORT: '0',
       });
-      // The worker keeps running until SIGTERM (timeout in runWorker). Look at
-      // its stdout/stderr for the anonymous-mode log.
       expect(result.stdout + result.stderr).toMatch(/anonymous mode/);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -77,8 +74,6 @@ describe('context7 optional API key', () => {
   }, 10_000);
 
   it('trims trailing whitespace from api_key — end-to-end via loadToken', async () => {
-    // Whitespace stripped by mcp-shared's `loadToken`: a pasted "ctx7sk_xxx\n" must not become
-    // "Bearer ctx7sk_xxx\n" (Context7 rejects that with 401).
     const { loadToken } = await import('@speedwave/mcp-shared');
     dir = await mkdtemp(join(tmpdir(), 'mcp-context7-test-'));
     try {
@@ -91,8 +86,6 @@ describe('context7 optional API key', () => {
   });
 
   it('rethrows on EACCES — never silently falls back to anonymous on a real misconfig', async () => {
-    // POSIX-only: chmod 000 doesn't deny root, and the CI image runs as root.
-    // Skip on Windows (different ACL model) and when running as root.
     if (platform() === 'win32') return;
     if (typeof process.getuid === 'function' && process.getuid() === 0) return;
 
@@ -105,7 +98,6 @@ describe('context7 optional API key', () => {
       const { loadToken } = await import('@speedwave/mcp-shared');
       await expect(loadToken(path)).rejects.toThrow(/Permission denied/);
     } finally {
-      // Restore perms so rm can clean up.
       await chmod(join(dir, 'api_key'), 0o600).catch(() => undefined);
       await rm(dir, { recursive: true, force: true });
     }

@@ -172,8 +172,6 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
     writer = PdfWriter()
     writer.append(reader)
     str_fields = {str(k): str(v) for k, v in fields.items()}
-    # Same widget-walking name-space update_page_form_field_values matches against, not
-    # reader.get_fields() alone: a hierarchical field's bare name would else be falsely "unknown".
     known_fields: set[str] = set()
     for page in writer.pages:
         known_fields |= _page_field_names(page)
@@ -184,9 +182,6 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
             for name in str_fields
             if name not in known_fields
         ]
-    # pypdf raises when a page has no form fields (the common case for most of a PDF's pages),
-    # so we silently skip those; a page whose own annotations DO include one of the fields we're
-    # writing narrows the except to that case only, so a genuine write failure there still surfaces.
     pages_filled = 0
     for page in writer.pages:
         page_field_names = _page_field_names(page) & set(str_fields)
@@ -203,7 +198,6 @@ def _fillform(src: str, output: str, flatten: bool, fields: dict) -> None:
         fill_warnings.append("no AcroForm fields found in the input PDF — values not written")
     flattened = False
     if flatten:
-        # Best-effort flatten via the private _root_object; degrades to a non-flat form on a pypdf rename.
         try:
             from pypdf.generic import NameObject
 

@@ -1,5 +1,4 @@
 import { Injectable, inject } from '@angular/core';
-// pica v10 ESM ships `pica` as default — namespace import from @types/pica is wrong.
 import pica, { type Pica } from 'pica';
 import { TauriService } from './tauri.service';
 import type { ChatAttachment } from '../models/chat';
@@ -67,7 +66,6 @@ export class ImagePreprocessorService {
     const mediaType = file.type as SupportedMediaType;
 
     if (file.type === 'image/gif') {
-      // GIFs are not resampled; size guard before host `MAX_PASTE_BYTES`.
       if (file.size > MAX_IMAGE_BYTES) {
         throw new Error(ERROR_TOO_LARGE);
       }
@@ -152,7 +150,6 @@ export class ImagePreprocessorService {
       dstCanvas.height = targetH;
       await this.pica.resize(srcCanvas, dstCanvas);
 
-      // PNG → PNG (transparency). JPEG/WebP → JPEG re-encode.
       const outMime: SupportedMediaType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
       const blob: Blob | null = await this.pica.toBlob(
         dstCanvas,
@@ -170,7 +167,6 @@ export class ImagePreprocessorService {
 }
 
 async function readImageDimensions(file: Blob): Promise<{ width: number; height: number }> {
-  // createImageBitmap decodes off-thread; falls back to Image() for older webviews.
   if (typeof createImageBitmap === 'function') {
     const bitmap = await createImageBitmap(file);
     try {

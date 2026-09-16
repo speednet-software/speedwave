@@ -108,7 +108,6 @@ describe('audit-log rotation', () => {
   it('rotateIfNeeded does nothing when size is at or below threshold', async () => {
     await writeFile(logPath, 'a'.repeat(10));
     await rotateIfNeeded(logPath, 10);
-    // Live log preserved, no .1 created.
     const live = await readFile(logPath, 'utf8');
     expect(live).toBe('a'.repeat(10));
     await expect(stat(`${logPath}.1`)).rejects.toThrow();
@@ -119,18 +118,16 @@ describe('audit-log rotation', () => {
     await rotateIfNeeded(logPath, 10);
     const rotated = await readFile(`${logPath}.1`, 'utf8');
     expect(rotated).toBe('a'.repeat(11));
-    // Live log gone (next append will recreate it).
     await expect(stat(logPath)).rejects.toThrow();
   });
 
   it.runIf(process.platform !== 'win32')(
     'rotateIfNeeded swallows rename errors (best-effort, covers audit-log.ts:55)',
     async () => {
-      // Make rotation fail: `${logPath}.1` is a non-empty directory.
       const { mkdir } = await import('node:fs/promises');
       await writeFile(logPath, 'a'.repeat(20));
       await mkdir(`${logPath}.1`);
-      await mkdir(`${logPath}.1/inner`); // non-empty so rename fails on POSIX
+      await mkdir(`${logPath}.1/inner`);
 
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
@@ -163,12 +160,10 @@ describe('audit-log rotation', () => {
         action: 'refresh',
         outcome: 'ok',
       },
-      50 // tiny threshold
+      50
     );
-    // Old contents moved to .1
     const rotated = await readFile(`${logPath}.1`, 'utf8');
     expect(rotated).toBe('a'.repeat(100));
-    // New live log starts fresh with just one line.
     const live = await readFile(logPath, 'utf8');
     expect(live.split('\n').filter(Boolean)).toHaveLength(1);
   });

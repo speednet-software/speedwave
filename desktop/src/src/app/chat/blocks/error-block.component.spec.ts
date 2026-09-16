@@ -31,7 +31,6 @@ describe('ErrorBlockComponent', () => {
     expect(el().textContent).toContain('Something went wrong');
     const wrapper = el().querySelector('[data-testid="error-block"]');
     expect(wrapper?.getAttribute('data-kind')).toBe('generic');
-    // Every variant is a left-border timeline; red variant uses red-500/50.
     expect(wrapper?.classList.contains('border-l-2')).toBe(true);
     expect(wrapper?.className).toContain('border-red-500/50');
   });
@@ -55,7 +54,6 @@ describe('ErrorBlockComponent', () => {
       expect(wrapper?.className).toContain('border-red-500/50');
       expect(wrapper?.className).not.toContain('border-[var(--amber)]/50');
       expect(wrapper?.className).not.toContain('border-[var(--ink-mute)]/50');
-      // Red variants without an action label render no action button.
       const hasAction = kind === 'session_exited' || kind === 'broken_pipe';
       if (hasAction) {
         expect(el().querySelector('[data-testid="error-action"]')).toBeTruthy();

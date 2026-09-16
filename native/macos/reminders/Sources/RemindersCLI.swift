@@ -2,7 +2,6 @@ import EventKit
 import Foundation
 import SharedCLI
 
-// File-scope so tests can reach it via @testable import reminders_cli.
 struct EventStoreGate: PermissionGate {
     let store: EKEventStore
     func authorizationStatus() -> RawAuthorizationStatus {
@@ -17,7 +16,6 @@ struct EventStoreGate: PermissionGate {
     }
 }
 
-// MARK: - CLI Entry Point
 
 /// reminders-cli <command> [json-args]
 /// Commands: check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder
@@ -27,7 +25,6 @@ struct RemindersCLI {
         "check_permission, list_lists, list_reminders, get_reminder, create_reminder, update_reminder, complete_reminder"
 
     static func main() {
-        // Shared store; check_permission uses its own gate.
         let store = EKEventStore()
         runCLI(
             cliName: "reminders-cli",
@@ -54,7 +51,6 @@ struct RemindersCLI {
     }
 }
 
-// MARK: - Permission Helpers
 
 /// Requests Reminders access from EventKit. Uses the macOS 14+ full-access API
 /// when available, falling back to the legacy requestAccess(to:) API.
@@ -91,7 +87,6 @@ func requestReminderAccess(store: EKEventStore, timeout: TimeInterval? = nil) ->
     return (accessGranted, accessError)
 }
 
-// MARK: - Commands
 
 func listLists(store: EKEventStore) throws -> [String: Any] {
     let calendars = store.calendars(for: .reminder)
@@ -112,7 +107,6 @@ func listReminders(store: EKEventStore, params: [String: Any]) throws -> [String
         calendars = try resolveCalendars(for: .reminder, filter: filter, store: store)
     }
 
-    // TCC-gated: show_completed dual-fetch path cannot be unit-tested without Reminders permission
     let showCompleted = params["show_completed"] as? Bool ?? false
 
     var fetchedReminders: [EKReminder]?
@@ -234,7 +228,6 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
     }
 
     if params["due_date"] is NSNull {
-        // EventKit refuses a recurring reminder without a due date, so the rules go with it.
         reminder.dueDateComponents = nil
         reminder.recurrenceRules = nil
     } else if let dueDateStr = params["due_date"] as? String {
@@ -253,7 +246,6 @@ func updateReminder(store: EKEventStore, params: [String: Any]) throws -> [Strin
         reminder.completionDate = completed ? Date() : nil
     }
 
-    // Notes and tags share one EventKit field: only touch it when the caller sends either.
     if params["notes"] != nil || params["tags"] != nil {
         reminder.notes = mergeNotes(
             existing: reminder.notes,
@@ -284,7 +276,6 @@ func completeReminder(store: EKEventStore, params: [String: Any]) throws -> [Str
     return ["status": "completed"]
 }
 
-// MARK: - Helpers
 
 /// One list by id or exact name; several lists sharing a name are refused rather than picked blindly.
 func resolveReminderList(_ filter: String, store: EKEventStore) throws -> EKCalendar {
@@ -329,11 +320,9 @@ func reminderToDict(_ r: EKReminder) -> [String: Any] {
     return dict
 }
 
-// MARK: - Due Date Helpers
 
 private let gregorian = Calendar(identifier: .gregorian)
 
-// Validates wall-clock fields without a zone, so a floating time inside a DST gap is not refused.
 private let zonelessGregorian: Calendar = {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -358,7 +347,6 @@ func dueDateComponents(from string: String) -> DateComponents? {
     let wallClock = matches(wallClockPattern)
     guard dateOnly || wallClock || matches(offsetPattern) else { return nil }
 
-    // ICU `\d` also matches non-ASCII digits, which Int() refuses; impossible dates are refused too.
     let ymd = string.prefix(10).split(separator: "-").compactMap { Int($0) }
     guard ymd.count == 3 else { return nil }
     var components = DateComponents(calendar: gregorian, year: ymd[0], month: ymd[1], day: ymd[2])
@@ -396,7 +384,6 @@ func dueDateString(from components: DateComponents) -> String? {
     return iso8601String(from: date, timeZone: timeZone)
 }
 
-// MARK: - Tag Helpers
 
 /// Tags are stored in the notes field using `[#tag]` format, e.g. `[#work] [#urgent]\nActual notes`.
 /// Pattern is a compile-time constant; a failure here is a programmer error, not runtime input.

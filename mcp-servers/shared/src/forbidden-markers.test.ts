@@ -66,7 +66,6 @@ function extractComments(source: string): string[] {
   while (i < n) {
     const c = source[i];
     const next = source[i + 1];
-    // String literals — consume verbatim (their contents are not comments).
     if (c === '"' || c === "'" || c === '`') {
       const quote = c;
       i++;
@@ -83,7 +82,6 @@ function extractComments(source: string): string[] {
       }
       continue;
     }
-    // Line comment — capture to end of line.
     if (c === '/' && next === '/') {
       let j = i + 2;
       while (j < n && source[j] !== '\n') j++;
@@ -91,7 +89,6 @@ function extractComments(source: string): string[] {
       i = j;
       continue;
     }
-    // Block comment — capture to the closing delimiter.
     if (c === '/' && next === '*') {
       let j = i + 2;
       while (j < n && !(source[j] === '*' && source[j + 1] === '/')) j++;
@@ -120,16 +117,13 @@ function gatherMarkerViolations(): string[] {
 
 describe('forbidden-markers — mcp-servers comment scan', () => {
   it('locates the mcp-servers root and finds source files to scan', () => {
-    // Guards the anchor: a broken root-finder scans nothing and hides markers.
     expect(walkTsSources(MCP_ROOT, false).length).toBeGreaterThan(0);
   });
 
   it('extracts comments but not string-literal contents', () => {
-    // A marker word inside a string literal is data, not a marker comment.
     expect(extractComments(`const x = { query: 'TODO' };`)).toEqual([]);
     expect(extractComments(`foo(); // real TODO marker`)).toEqual([' real TODO marker']);
     expect(extractComments(`/* block FIXME */`)).toEqual([' block FIXME ']);
-    // Only the trailing comment is extracted, not the string-literal marker.
     expect(extractComments(`const s = 'TODO'; // and HACK here`)).toEqual([' and HACK here']);
   });
 

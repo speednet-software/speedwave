@@ -18,7 +18,6 @@ export const routes: Routes = [
       { path: '', redirectTo: 'chat', pathMatch: 'full' },
       {
         path: 'chat',
-        // No authRequiredGuard — chat surfaces an inline "auth required" block
         loadComponent: () => import('./chat/chat.component').then((m) => m.ChatComponent),
       },
       {

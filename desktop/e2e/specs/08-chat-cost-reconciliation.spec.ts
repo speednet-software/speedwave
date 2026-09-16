@@ -41,7 +41,6 @@ describe('Chat Cost Reconciliation', function () {
     this.timeout(120_000);
     await sendMessageAndWait('Reply with a single short sentence.');
 
-    // At least one assistant message rendered with metadata (cost/tokens footer).
     const assistantMsg = await $('[data-testid="chat-message"][data-role="assistant"]');
     await assistantMsg.waitForExist({ timeout: 10_000 });
     const metadata = await assistantMsg.$('[data-testid="message-metadata"]');
@@ -49,13 +48,8 @@ describe('Chat Cost Reconciliation', function () {
   });
 
   it('should reconcile the footer cost against the usage dashboard aggregate', async function () {
-    // OpenRouter cost is deferred and reconciled on a backoff spanning ~60s
-    // (chat-state.service.ts DEFERRED_RECONCILE_BACKOFF_MS); allow headroom.
     this.timeout(180_000);
 
-    // The usage dashboard reads the proxy SSOT cost (sidecar) and re-polls the
-    // deferred enrichment itself — take it as the source of truth. Remount each
-    // round so it refetches (it fetches on mount / project change only).
     const dashboardCost = await waitForDashboardUsd({
       timeout: 90_000,
       interval: 3_000,
@@ -63,10 +57,6 @@ describe('Chat Cost Reconciliation', function () {
     });
     expect(dashboardCost).toBeGreaterThan(0);
 
-    // The footer first shows Claude Code's live-preview cost (priced with
-    // Anthropic rates, wrong for a proxied provider), then reconcileFooterCost
-    // overwrites it with the same proxy SSOT. Wait for the footer to converge
-    // on the dashboard value rather than reading the transient live preview.
     await openChat();
     const footerCost = await waitForFooterToReconcile(dashboardCost, 0.015, {
       timeout: 90_000,

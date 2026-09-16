@@ -1,8 +1,6 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Embeds Resources/Info.plist into Mach-O `__TEXT,__info_plist` section so the
-// CLI binary carries `CFBundleIdentifier` and `NSAppleEventsUsageDescription`.
 let package = Package(
     name: "mail-cli",
     platforms: [.macOS(.v13)],

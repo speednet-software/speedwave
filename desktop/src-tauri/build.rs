@@ -21,7 +21,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")?;
     let allow_stubs = std::env::var_os("SPEEDWAVE_ALLOW_BUNDLE_STUBS").is_some();
-    // build-context is hash root only when every declared hash input exists.
     let build_context_complete = speedwave_runtime::build::IMAGES
         .iter()
         .flat_map(|img| img.hash_inputs.iter())

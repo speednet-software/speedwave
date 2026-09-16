@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Speedwave CLI diagnostic script
-# Run on a machine where `speedwave` command is not working.
 
 set -uo pipefail
 

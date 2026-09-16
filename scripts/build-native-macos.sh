@@ -18,13 +18,11 @@ for arch in "${ARCH_LIST[@]}"; do
   BUILD_ARGS+=(--arch "$arch")
 done
 
-# Read app version from tauri.conf.json (SSOT), stamp into each CLI's Info.plist.
 APP_VERSION="0.0.0"
 if [[ -f "$TAURI_CONF" ]]; then
   if command -v jq >/dev/null 2>&1; then
     APP_VERSION="$(jq -r '.version // "0.0.0"' "$TAURI_CONF")"
   else
-    # jq not available in some minimal CI images; grep the single version line.
     APP_VERSION="$(grep -E '^\s*"version"\s*:' "$TAURI_CONF" | head -1 | sed -E 's/.*"version"\s*:\s*"([^"]+)".*/\1/')"
     [[ -z "$APP_VERSION" ]] && APP_VERSION="0.0.0"
   fi

@@ -254,7 +254,6 @@ mod tests {
 
     #[test]
     fn platform_availability_is_consistent() {
-        // `lima` is the only MacOnly source today.
         let mac_only: Vec<&str> = DIAGNOSTIC_SOURCES
             .iter()
             .filter(|s| s.platforms == Platforms::MacOnly)
@@ -278,6 +277,5 @@ mod tests {
         assert!(entry("claude").ends_with(consts::CLAUDE_SESSION_LOG_FILE));
         assert!(entry("audit-proxy").ends_with(consts::AUDIT_PROXY_FILE));
         assert!(entry("audit-hub").ends_with(consts::AUDIT_HUB_FILE));
-        // `lima`/`compose-yml`/`proxy-usage` filenames aren't Speedwave consts, nothing to drift against.
     }
 }

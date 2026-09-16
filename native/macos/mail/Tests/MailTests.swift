@@ -4,13 +4,11 @@ import XCTest
 
 final class MailTests: XCTestCase {
 
-    // MARK: - Client Detection
 
     func testAppleMailAlwaysAvailable() {
         XCTAssertTrue(AppleMailClient.isAvailable())
     }
 
-    // MARK: - detectClients structure + permission/absence distinction
 
     func testDetectClientsHasMailAndOutlookEntries() {
         let result = detectClients()
@@ -21,7 +19,6 @@ final class MailTests: XCTestCase {
         let outlook = clients.last
         XCTAssertEqual(outlook?["name"] as? String, OutlookClient.name)
         XCTAssertNotNil(outlook?["available"], "Outlook entry must always carry an availability flag")
-        // An `error` must pair with available=false.
         if let err = outlook?["error"] as? String {
             XCTAssertEqual(outlook?["available"] as? Bool, false,
                            "an Outlook error must pair with available=false")
@@ -35,7 +32,6 @@ final class MailTests: XCTestCase {
         let scriptFailed = ScriptError.scriptFailed("syntax error")
 
         func classify(_ e: ScriptError) -> Bool {
-            // true = rethrown (ambiguous, surface to user); false = treated as not-available
             switch e {
             case .automationPermission, .timeout: return true
             case .scriptFailed: return false
@@ -46,7 +42,6 @@ final class MailTests: XCTestCase {
         XCTAssertFalse(classify(scriptFailed), "a generic failure means Outlook is simply not available")
     }
 
-    // MARK: - Error Messages
 
     func testMailErrorMissingField() {
         let error = MailError.missingField("to")
@@ -68,7 +63,6 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(error.errorDescription!.contains("confirm_send"))
     }
 
-    // MARK: - Client Resolution
 
     func testResolveClientDefaultIsMail() throws {
         let client = try resolveClient(preferred: nil)
@@ -89,7 +83,6 @@ final class MailTests: XCTestCase {
         XCTAssertThrowsError(try resolveClient(preferred: "thunderbird"))
     }
 
-    // MARK: - splitAddressList (shared)
 
     func testSplitAddressListSingleAddress() {
         XCTAssertEqual(splitAddressList("alice@example.com"), ["alice@example.com"])
@@ -103,7 +96,6 @@ final class MailTests: XCTestCase {
     }
 
     func testSplitAddressListDropsEmptyEntries() {
-        // Trailing/double commas must not produce a blank recipient.
         XCTAssertEqual(splitAddressList("alice@example.com,, bob@example.com,"), ["alice@example.com", "bob@example.com"])
     }
 
@@ -111,7 +103,6 @@ final class MailTests: XCTestCase {
         XCTAssertEqual(splitAddressList(""), [])
     }
 
-    // MARK: - AppleMailClient.recipientClauses
 
     func testAppleMailRecipientClausesSingleAddress() {
         let result = AppleMailClient.recipientClauses("alice@example.com", kind: "to")
@@ -133,7 +124,6 @@ final class MailTests: XCTestCase {
         XCTAssertEqual(AppleMailClient.recipientClauses("", kind: "bcc"), "")
     }
 
-    // MARK: - OutlookClient.recipientClauses
 
     func testOutlookRecipientClausesSingleAddress() {
         let result = OutlookClient.recipientClauses("alice@example.com", kind: "to")
@@ -148,11 +138,8 @@ final class MailTests: XCTestCase {
         XCTAssertTrue(lines[1].contains("bcc recipient") && lines[1].contains("bob@example.com"))
     }
 
-    // MARK: - sendEmail bcc parameter (dispatch-level)
 
     func testSendEmailParamsCarryBccUpToConfirmGate() {
-        // Real sendEmail(params:) dispatch: to/subject/body parse cleanly even with bcc
-        // present, and confirm_send=false still stops the call before any AppleScript runs.
         let params: [String: Any] = [
             "to": "alice@example.com",
             "subject": "Test",
@@ -167,10 +154,8 @@ final class MailTests: XCTestCase {
         }
     }
 
-    // MARK: - runMailScript (mailbox-not-found teaching error)
 
     func testRunMailScriptMapsMailboxNotFoundToTeachingError() {
-        // A -1728 miss plus a probe confirming the mailbox is absent maps to the teaching error.
         let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
         XCTAssertThrowsError(
             try runMailScript(script, timeout: 5, mailbox: "Nope", mailboxMissing: { true })
@@ -183,8 +168,6 @@ final class MailTests: XCTestCase {
     }
 
     func testRunMailScriptPropagatesWhenMailboxExists() {
-        // A -1728 during a scoped call whose mailbox still exists (e.g. a per-message
-        // property read) must surface the raw failure, not a wrong "mailbox not found".
         let script = "error \"Can\u{2019}t get subject of message 1 of mailbox \\\"Inbox\\\". (-1728)\""
         XCTAssertThrowsError(
             try runMailScript(script, timeout: 5, mailbox: "Inbox", mailboxMissing: { false })
@@ -196,8 +179,6 @@ final class MailTests: XCTestCase {
     }
 
     func testRunMailScriptDoesNotWrapWhenMailboxIsNil() {
-        // Inbox-only calls (mailbox: nil) must surface the raw scriptFailed, not the
-        // mailbox teaching-error mapping, even for AppleScript output that looks like a miss.
         let script = "error \"Can\u{2019}t get mailbox \\\"Nope\\\". (-1728)\""
         XCTAssertThrowsError(try runMailScript(script, timeout: 5, mailbox: nil)) { error in
             guard case ScriptError.scriptFailed = error else {
@@ -220,7 +201,6 @@ final class MailTests: XCTestCase {
         }
     }
 
-    // MARK: - Send Email Validation (empty 'to')
 
     func testSendEmailRejectsEmptyTo() {
         let params: [String: Any] = [
@@ -245,7 +225,6 @@ final class MailTests: XCTestCase {
     }
 
     func testSendEmailRejectsCommaOnlyTo() {
-        // A raw "," is non-empty as a string but splits to zero recipients.
         let params: [String: Any] = [
             "to": ",", "subject": "Test", "body": "Hello", "confirm_send": true,
         ]
@@ -268,7 +247,6 @@ final class MailTests: XCTestCase {
     }
 
     func testSendEmailRejectsCommaOnlyCc() {
-        // A provided cc that reduces to zero addresses must error, not silently vanish.
         let params: [String: Any] = [
             "to": "alice@example.com", "subject": "Test", "body": "Hello",
             "cc": " , ", "confirm_send": true,
@@ -293,7 +271,6 @@ final class MailTests: XCTestCase {
     }
 
     func testSendEmailAllowsOmittedCcAndBcc() {
-        // Omitted cc/bcc are valid; the call must reach the confirm gate, not the empty guard.
         let params: [String: Any] = [
             "to": "alice@example.com", "subject": "Test", "body": "Hello",
         ]
@@ -312,7 +289,6 @@ final class MailTests: XCTestCase {
     }
 
     func testSendEmailValidToStillReachesConfirmGate() {
-        // A valid 'to' must pass the emptiness check and fail only on the confirm gate.
         let params: [String: Any] = [
             "to": "alice@example.com", "subject": "Test", "body": "Hello",
         ]
@@ -323,7 +299,6 @@ final class MailTests: XCTestCase {
         }
     }
 
-    // MARK: - Send Email Validation
 
     func testSendEmailRequiresConfirmation() {
         let params: [String: Any] = [
@@ -331,7 +306,6 @@ final class MailTests: XCTestCase {
             "subject": "Test",
             "body": "Hello",
         ]
-        // confirm_send is not set
         XCTAssertNil(params["confirm_send"])
     }
 
@@ -341,10 +315,8 @@ final class MailTests: XCTestCase {
         XCTAssertNil(params["body"])
     }
 
-    // MARK: - Permission Check Script
 
     func testPermissionCheckScriptAccessesData() {
-        // "to name" does NOT require Automation permission.
         XCTAssertFalse(
             permissionCheckScript.hasSuffix("to name"),
             "permissionCheckScript must not use 'to name' — it does not require Automation permission"
@@ -356,12 +328,10 @@ final class MailTests: XCTestCase {
     }
 
     func testPermissionCheckScriptDeniedIncludesGuidance() {
-        // Denied error must guide to System Settings > Automation.
         let detail = "Mail access denied: some error\nGrant access in System Settings > Privacy & Security > Automation"
         XCTAssertTrue(detail.contains("Automation"))
     }
 
-    // MARK: - Permission Check (formatPermissionResult with domain-specific errors)
 
     func testFormatPermissionResultWithAutomationPermissionError() {
         let errorMsg = ScriptError.automationPermission("not allowed").errorDescription!
@@ -394,7 +364,6 @@ final class MailTests: XCTestCase {
         XCTAssertTrue((parsed["error"] as! String).contains("AppleScript error"))
     }
 
-    // MARK: - AppleEventsGate end-to-end through performCheckPermission
 
     final class FakeMailGate: PermissionGate {
         var initialStatus: RawAuthorizationStatus = .notDetermined
@@ -413,7 +382,6 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionGrantedWhenAEReturnsNoErr() {
-        // Initial status .granted (AE returned noErr) and data access succeeds → granted.
         let gate = FakeMailGate()
         gate.initialStatus = .granted
         let result = performCheckPermission(gate: gate, entity: .mail)
@@ -423,7 +391,6 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionDeniedReturnsAppleEventsTccutil() {
-        // Mail uses kTCCServiceAppleEvents, so denied must reset AppleEvents, not Mail.
         let gate = FakeMailGate()
         gate.initialStatus = .denied
         let result = performCheckPermission(gate: gate, entity: .mail)
@@ -437,7 +404,6 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionTargetNotRunningOnProcNotFound() {
-        // post-status must also be .targetNotRunning (no short-circuit on initial).
         let gate = FakeMailGate()
         gate.initialStatus = .targetNotRunning(bundleId: "com.apple.mail")
         gate.postRequestStatus = .targetNotRunning(bundleId: "com.apple.mail")
@@ -452,7 +418,6 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionSilentRejectWhenNotDeterminedTwice() {
-        // .notDetermined unchanged after request maps to .silentReject.
         let gate = FakeMailGate()
         gate.initialStatus = .notDetermined
         gate.postRequestStatus = .notDetermined
@@ -466,7 +431,6 @@ final class MailTests: XCTestCase {
     }
 
     func testCheckPermissionGrantedButDataAccessFails() {
-        // .granted but data-access probe fails downgrades to silentReject.
         let gate = FakeMailGate()
         gate.initialStatus = .granted
         gate.dataAccessError = "AppleScript error: cannot read mailboxes"

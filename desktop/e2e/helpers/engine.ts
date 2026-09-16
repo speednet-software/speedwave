@@ -80,8 +80,6 @@ export function storeSnapshot(): Map<string, string> {
     try {
       content = engineExec(['cat', `${dir}/${name}`]);
     } catch (err) {
-      // Entries can be legitimately reaped between ls and cat (session-scoped
-      // containers) — skip iff the file is truly gone, rethrow real read errors.
       try {
         engineExec(['test', '-e', `${dir}/${name}`]);
       } catch {
@@ -115,8 +113,6 @@ export function plantGhost(containerName: string): void {
   }
   engineExec(['nerdctl', 'rm', '-f', containerName]);
   const file = `${nameStoreDir()}/${containerName}`;
-  // Base64 keeps the redirect script quote/metachar-free through both transports'
-  // default-shell re-parse — the runtime's wrap_base64_sh rationale (runtime/mod.rs).
   const b64 = Buffer.from(`printf '%s' ${DEAD_ID} > ${file} && chmod 600 ${file}`, 'utf8').toString(
     'base64'
   );

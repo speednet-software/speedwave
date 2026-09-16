@@ -9,7 +9,6 @@ describe('formatBytes', () => {
   });
 
   it('formats GB-range sizes', () => {
-    // 3 GiB exactly.
     expect(formatBytes(3 * 1024 ** 3)).toBe('3.0 GB');
     expect(formatBytes(1_610_612_736)).toBe('1.5 GB');
   });

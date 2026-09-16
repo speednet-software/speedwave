@@ -12,8 +12,6 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 0
 fi
 
-# Both `.build/release` (swift build) and `.build/apple/Products/Release` (universal build)
-# are legitimate producers — newest wins; an equal-mtime tie deterministically prefers `release`.
 resolve_binary_path() {
   local pkg_dir="$1"
   local binary_name="$2"
@@ -31,7 +29,6 @@ resolve_binary_path() {
 
 mkdir -p "$DEST"
 
-# Swift release builds set the `linker-signed` flag; taskgated SIGKILLs it.
 adhoc_resign() {
   local path="$1" pkg="$2"
   command -v codesign >/dev/null 2>&1 || return 0

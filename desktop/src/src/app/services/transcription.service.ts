@@ -144,9 +144,7 @@ export class TranscriptionService {
       const stored = localStorage.getItem(LIVE_TRANSCRIPT_STORAGE_KEY);
       if (stored === 'on') return true;
       if (stored === 'off') return false;
-    } catch {
-      // Private mode / quota — fall through to the hardware default.
-    }
+    } catch {}
     return (this.gpuClassSignal() ?? 'discrete') === 'discrete';
   }
 
@@ -157,9 +155,7 @@ export class TranscriptionService {
   setLiveTranscriptPreferred(live: boolean): void {
     try {
       localStorage.setItem(LIVE_TRANSCRIPT_STORAGE_KEY, live ? 'on' : 'off');
-    } catch {
-      // Best-effort: losing the preference only costs a default next session.
-    }
+    } catch {}
   }
 
   /** Audio sources the user can pick from (depends on host + capabilities). */
@@ -205,7 +201,6 @@ export class TranscriptionService {
     try {
       await this.attachListener(ack.event_name);
     } catch (e) {
-      // The backend capture already runs; stop it rather than orphan it.
       try {
         await this.tauri.invoke<void>('stop_transcription', { sessionId: ack.session_id });
         this.recordingSessionIdSignal.set(null);
@@ -213,7 +208,6 @@ export class TranscriptionService {
         this.recordingLanguageSignal.set(null);
         this.recordingLiveSignal.set(null);
       } catch {
-        // Stop failed — keep the id so the Stop control still targets the session.
         this.recordingSessionIdSignal.set(ack.session_id);
       }
       throw e;
@@ -221,8 +215,6 @@ export class TranscriptionService {
     this.recordingSessionIdSignal.set(ack.session_id);
     this.recordingSourceSignal.set(source);
     this.recordingLanguageSignal.set(language);
-    // `models_used.live` is the authoritative mode: `null` means record-only, whatever the
-    // client preference asked for (ADR-056 Am. 13).
     this.recordingLiveSignal.set(ack.snapshot.models_used.live != null);
     return ack;
   }
@@ -317,8 +309,6 @@ export class TranscriptionService {
    * @param target - `'new-chat'` (default) opens a fresh conversation first; `'current-chat'` keeps the active thread.
    */
   async stageForChat(sessionId: string, target: SendTarget = 'new-chat'): Promise<void> {
-    // Read the transcript before touching the chat: a failed read must not wipe
-    // the conversation the user was in.
     const [session, md] = await Promise.all([this.get(sessionId), this.getMarkdown(sessionId)]);
     if (target === 'new-chat') await this.chatState.startNewConversation();
     this.stagedTranscriptSignal.set(md);
@@ -355,7 +345,6 @@ export class TranscriptionService {
       throw new Error(`a model download is already in progress`);
     }
     try {
-      // Inside try: a failed listener attach must also clear the tracking.
       await this.beginDownloadTracking(modelId);
       await this.tauri.invoke<void>('download_transcription_model', { modelId });
     } finally {
@@ -385,8 +374,6 @@ export class TranscriptionService {
     }
     try {
       const ack = await this.recommendedModel();
-      // The offline-pass model is a separate entry, so match `modelId` against both; keying only
-      // off the live one would poll forever while the other model downloads.
       const entry = ack.live.key === modelId ? ack.live : ack.finalize;
       if (entry?.key === modelId && !entry.downloading) {
         this.clearDownloadTracking();
@@ -419,7 +406,7 @@ export class TranscriptionService {
   }
 
   private async beginDownloadTracking(modelId: string): Promise<void> {
-    this.clearDownloadTracking(); // drop a stale listener before re-attaching
+    this.clearDownloadTracking();
     this.downloadingModelKeySignal.set(modelId);
     this.downloadUnlisten = await this.tauri.listen<DownloadProgress>(MODEL_PROGRESS_EVENT, (e) => {
       if (e.payload.model_key === modelId) this.downloadProgressSignal.set(e.payload);
@@ -465,7 +452,7 @@ export class TranscriptionService {
   private activateSnapshot(snapshot: TranscriptSession): void {
     this.lastSeq = snapshot.last_seq ?? 0;
     if (snapshot.id !== this.recordingSessionIdSignal()) {
-      this.liveDraftSignal.set(''); // a genuinely different session starts with no draft
+      this.liveDraftSignal.set('');
     } else if (snapshot.status.state !== 'recording') {
       this.liveDraftSignal.set('');
       this.audioLevelsSignal.set(null);
@@ -509,7 +496,6 @@ export class TranscriptionService {
         break;
       case 'status_changed':
         next.status = ev.status;
-        // A draft/meter is only meaningful while recording (e.g. stale on failure).
         if (ev.status.state !== 'recording') {
           this.liveDraftSignal.set('');
           this.audioLevelsSignal.set(null);
@@ -520,7 +506,6 @@ export class TranscriptionService {
         next.status = { state: 'finalizing', progress: ev.progress };
         break;
       case 'final_segments_ready':
-        // The offline pass produced a higher-quality transcript; swap it in.
         next.final_segments = ev.segments;
         break;
       case 'finished':
@@ -529,13 +514,11 @@ export class TranscriptionService {
         this.clearInProgressRecording(cur.id);
         break;
       case 'capture_warning': {
-        // Both conditions can be live at once, and the host repeats a raise it already sent.
         const raised = next.active_warnings ?? [];
         next.active_warnings = raised.includes(ev.warning) ? raised : [...raised, ev.warning];
         break;
       }
       case 'capture_warning_cleared':
-        // Only the banner for the recovered warning goes away.
         next.active_warnings = (next.active_warnings ?? []).filter((w) => w !== ev.warning);
         break;
     }

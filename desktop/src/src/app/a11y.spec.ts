@@ -29,7 +29,6 @@ import { TauriService } from './services/tauri.service';
 import { MockTauriService } from './testing/mock-tauri.service';
 import { THEME_IDS, THEME_MODES, type ThemeId, type EffectiveMode } from './services/theme.service';
 
-// Derived from THEME_MODES so a future explicit (non-auto) mode is swept automatically.
 const EFFECTIVE_MODES: readonly EffectiveMode[] = THEME_MODES.filter(
   (m): m is EffectiveMode => m !== 'auto'
 );
@@ -142,7 +141,6 @@ async function render(view: ViewUnderTest, mockTauri: MockTauriService): Promise
   const fixture = TestBed.createComponent(view.component);
   view.prepare?.(fixture);
   fixture.detectChanges();
-  // Allow microtasks from ngOnInit to settle so conditional content renders.
   await fixture.whenStable();
   fixture.detectChanges();
   return fixture.nativeElement as HTMLElement;

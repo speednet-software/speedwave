@@ -1,19 +1,14 @@
 #!/usr/bin/env bats
-# ci-gate is the one required status check: scripts/ci-gate.sh fails unless every job in
-# its toJSON(needs) payload reports success, and test.yml routes every job through it.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 GATE="$REPO_ROOT/scripts/ci-gate.sh"
 WORKFLOW="$REPO_ROOT/.github/workflows/test.yml"
-# A job header line under `jobs:` (two-space indent, GitHub's job-id charset).
 JOB_HEADER='^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$'
 
-# Runs the gate with NEEDS_JSON set to the given toJSON(needs)-shaped payload.
 run_gate() {
     NEEDS_JSON="$1" run bash "$GATE"
 }
 
-# Builds a toJSON(needs)-shaped object from job=result pairs.
 needs_json() {
     local json="{" sep=""
     for pair in "$@"; do
@@ -23,7 +18,6 @@ needs_json() {
     echo "${json}}"
 }
 
-# Every job id under `jobs:` in test.yml.
 _workflow_job_ids() {
     awk -v hdr="$JOB_HEADER" '
         /^jobs:/ { in_jobs=1; next }
@@ -31,7 +25,6 @@ _workflow_job_ids() {
     ' "$WORKFLOW"
 }
 
-# Lines of the ci-gate job block (job-level keys and steps).
 _ci_gate_block() {
     awk -v hdr="$JOB_HEADER" '
         /^  ci-gate:[[:space:]]*$/ { in_job=1; next }
@@ -40,7 +33,6 @@ _ci_gate_block() {
     ' "$WORKFLOW"
 }
 
-# Job ids of the `needs:` in a job block on stdin, flow (`[a, b]`) or block (`- a`) form.
 _needs_ids() {
     awk '
         /^    needs:[[:space:]]*\[/ {
@@ -57,7 +49,6 @@ _ci_gate_needs() {
     _ci_gate_block | _needs_ids
 }
 
-# `<job> <expression>` for every `if:` (job- or step-level) under `jobs:` in test.yml.
 _job_ifs() {
     awk -v hdr="$JOB_HEADER" '
         /^jobs:/ { in_jobs=1; next }
@@ -66,7 +57,6 @@ _job_ifs() {
     ' "$WORKFLOW"
 }
 
-# ── scripts/ci-gate.sh ──
 
 @test "gate passes when every job succeeded" {
     run_gate "$(needs_json lint=success test=success)"
@@ -137,7 +127,6 @@ _job_ifs() {
     [[ "$output" == *"::error::ci-gate: lint"*"missing"* ]]
 }
 
-# ── .github/workflows/test.yml wiring ──
 
 @test "ci-gate needs every other job in test.yml" {
     expected="$(_workflow_job_ids | grep -v '^ci-gate$' | sort)"

@@ -47,13 +47,11 @@ describe('NavRailComponent', () => {
     fixture.detectChanges();
   });
 
-  // Happy path
   it('renders one button per entry inside data-testid="nav-rail"', () => {
     const buttons = fixture.nativeElement.querySelectorAll('a[data-testid^="nav-"]');
     expect(buttons.length).toBe(3);
   });
 
-  // Inline currentColor SVG — not a CSS-mask span (breaks under tauri://localhost) nor a static image.
   it('renders the Speedwave logo as an inline theme-adaptive SVG mark', () => {
     const logo = fixture.nativeElement.querySelector(
       'app-logo[role="img"][aria-label="Speedwave"]'
@@ -80,7 +78,6 @@ describe('NavRailComponent', () => {
     expect(tipKbd).toBeNull();
   });
 
-  // Edge cases
   it('renders nothing in the nav when entries is empty', () => {
     host.entries.set([]);
     fixture.detectChanges();
@@ -97,7 +94,6 @@ describe('NavRailComponent', () => {
     }
   });
 
-  // ARIA
   it('exposes role="navigation" and aria-label="Primary" on the host', () => {
     const el =
       fixture.debugElement.nativeElement.querySelector('app-nav-rail') ??
@@ -106,7 +102,6 @@ describe('NavRailComponent', () => {
     expect(el.getAttribute('aria-label')).toBe('Primary');
   });
 
-  // Output
   it('emits paletteOpened when the palette trigger is clicked', () => {
     const trigger = fixture.nativeElement.querySelector(
       '[data-testid="nav-rail-palette"]'

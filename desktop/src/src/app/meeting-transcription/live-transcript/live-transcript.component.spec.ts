@@ -98,7 +98,6 @@ describe('LiveTranscriptComponent', () => {
   it('labels channel-tagged segments and sorts lines chronologically', () => {
     const sys = { ...seg(2, 'ze spotkania'), source: 'system' as const };
     const mic = { ...seg(0, 'moja wypowiedź'), source: 'mic' as const };
-    // Mic committed after system (per-lane cycles append out of order).
     fixture.componentRef.setInput('session', session({ live_segments: [sys, mic] }));
     fixture.detectChanges();
     const lines = component.lines();
@@ -255,8 +254,6 @@ describe('LiveTranscriptComponent', () => {
       const btn = fixture.nativeElement.querySelector('[data-testid="append-to-chat-btn"]');
       expect(btn.disabled).toBe(true);
       expect(component.appendBlockedReason()).toBe('No open chat to add to');
-      // A disabled button fires no hover or focus events, so the reason must also
-      // reach the accessibility tree, not only the tooltip.
       expect(btn.getAttribute('aria-label')).toContain('No open chat to add to');
       expect(
         fixture.debugElement
@@ -264,7 +261,6 @@ describe('LiveTranscriptComponent', () => {
           .parent?.injector.get(TooltipDirective)
           .label()
       ).toBe('No open chat to add to');
-      // The new-chat path stays available: it does not need an existing conversation.
       expect(component.sendBlockedReason()).toBe('');
       expect(fixture.nativeElement.querySelector('[data-testid="send-to-chat-btn"]').disabled).toBe(
         false
@@ -329,7 +325,7 @@ describe('LiveTranscriptComponent', () => {
     it('stops following once the user scrolls up, and re-arms at the bottom', () => {
       fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
       fixture.detectChanges();
-      const el = bodyEl(100); // 1000 - 100 - 200 = 700 from the bottom
+      const el = bodyEl(100);
       el.dispatchEvent(new Event('scroll'));
       const spy = scrollSpy();
       fixture.componentRef.setInput(
@@ -339,7 +335,7 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       expect(spy).not.toHaveBeenCalled();
 
-      el.scrollTop = 790; // 1000 - 790 - 200 = 10 → within the 50 px re-arm band
+      el.scrollTop = 790;
       el.dispatchEvent(new Event('scroll'));
       fixture.componentRef.setInput(
         'session',
@@ -375,7 +371,7 @@ describe('LiveTranscriptComponent', () => {
       fixture.componentRef.setInput('session', session({ live_segments: [seg(0, 'a')] }));
       fixture.detectChanges();
       const el = bodyEl(100);
-      el.dispatchEvent(new Event('scroll')); // user reads older lines
+      el.dispatchEvent(new Event('scroll'));
       const spy = scrollSpy();
       fixture.componentRef.setInput(
         'session',
@@ -429,7 +425,6 @@ describe('LiveTranscriptComponent', () => {
       expect(meter.textContent).toContain('Meeting');
       expect(meter.textContent).toContain('You');
       const bars = component.meterBars();
-      // -20 dBFS ≈ 67%, -60 dBFS floor = 0% — a linear meter would show 10% and 0.1%.
       expect(bars[0].pct).toBeGreaterThan(60);
       expect(bars[0].pct).toBeLessThan(75);
       expect(bars[1].pct).toBe(0);
@@ -444,8 +439,6 @@ describe('LiveTranscriptComponent', () => {
       fixture.detectChanges();
       expect(component.meterBars()).toEqual([{ label: 'You', pct: expect.any(Number) }]);
 
-      // Recording but no level event yet: a flat 0% bar reads "silent",
-      // a missing meter reads "broken" — the meter must not disappear.
       svc.audioLevels.set(null);
       fixture.detectChanges();
       expect(component.meterBars()).toEqual([{ label: 'You', pct: 0 }]);
@@ -453,7 +446,6 @@ describe('LiveTranscriptComponent', () => {
         fixture.nativeElement.querySelector('[data-testid="audio-level-meter"]')
       ).not.toBeNull();
 
-      // Not recording → no meter at all.
       fixture.componentRef.setInput(
         'session',
         session({
@@ -479,20 +471,17 @@ describe('LiveTranscriptComponent', () => {
     });
 
     it('shows the record-only hint only while recording without a live model', () => {
-      // Default fixture: recording, models_used.live = null → record-only.
       fixture.componentRef.setInput('session', session());
       fixture.detectChanges();
       expect(
         fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')
       ).not.toBeNull();
-      // A live session (live model recorded) shows no hint.
       fixture.componentRef.setInput(
         'session',
         session({ models_used: { live: 'small', finalize: null } })
       );
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();
-      // Neither does a finished record-only session.
       fixture.componentRef.setInput('session', session({ status: { state: 'done' } }));
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-testid="record-only-hint"]')).toBeNull();

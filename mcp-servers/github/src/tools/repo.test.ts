@@ -82,7 +82,6 @@ describe('Repo Tools', () => {
       const tools = createRepoTools(mockClient as unknown as GitHubClient);
       expect(tools).toHaveLength(3);
       expect(tools.map((t) => t.tool.name)).toEqual(['listRepos', 'getRepo', 'searchCode']);
-      // listRepos is the primary list tool — eager-loaded
       expect(
         tools.find((t) => t.tool.name === 'listRepos')?.tool._meta?.[META_KEYS.DEFER_LOADING]
       ).toBe(false);

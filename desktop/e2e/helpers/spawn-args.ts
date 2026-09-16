@@ -1,11 +1,11 @@
-
 export async function lastSpawnArgs(): Promise<string[]> {
   return browser.executeAsync((done: (args: string[]) => void) => {
     (
       window as unknown as {
         __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<string[]> };
       }
-    ).__TAURI_INTERNALS__.invoke('e2e_last_spawn_args')
+    ).__TAURI_INTERNALS__
+      .invoke('e2e_last_spawn_args')
       .then((args) => done(args))
       .catch(() => done([]));
   });

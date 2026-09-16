@@ -79,7 +79,6 @@ fn iterm2_installed() -> bool {
 
 #[cfg(target_os = "macos")]
 fn spawn_iterm2(cmd: &str) -> anyhow::Result<()> {
-    // `$SHELL -ilc 'cmd'` runs argv via the login shell with PATH from .zshrc.
     let shell = safe_login_shell();
     let inner_escaped = cmd.replace('\'', "'\\''");
     let wrapped = format!("{shell} -ilc '{inner_escaped}'");
@@ -203,7 +202,6 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
         "powershell.exe"
     };
 
-    // wt.exe is an App Execution Alias; spawn by name (is_file() returns false).
     let argv = build_wt_terminal_argv(ps, cmd);
     match speedwave_runtime::binary::interactive_command("wt.exe")
         .args(argv)
@@ -214,7 +212,6 @@ fn open_terminal_with_command(cmd: &str) -> anyhow::Result<()> {
         Err(e) => log::warn!("wt.exe not available ({e}); falling back to direct PowerShell"),
     }
 
-    // Direct PowerShell spawn (its own console window) — pumps input from start.
     let argv = build_powershell_argv(cmd);
     speedwave_runtime::binary::interactive_command(ps)
         .args(argv)
@@ -233,7 +230,6 @@ pub async fn start_oauth_login(project: String) -> Result<(), String> {
         let (project_dir, home, data_dir, default_data_dir) = resolve_project_dirs(&project)?;
         ensure_cli_installed()?;
 
-        // Same renderer as get_auth_command's copy-paste fallback.
         let cmd = build_auth_command_for_platform(
             &project,
             &project_dir,
@@ -261,10 +257,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::*;
 
-    // -- Windows terminal argv (cross-platform: pure pattern) --
-
-    // Decode a base64 (standard alphabet) string back to bytes — test helper to
-    // prove encode_powershell_command round-trips.
     fn base64_decode(s: &str) -> Vec<u8> {
         fn val(c: u8) -> u32 {
             match c {
@@ -279,13 +271,11 @@ mod tests {
         let symbols: Vec<u8> = s.bytes().filter(|b| *b != b'=').collect();
         let mut out = Vec::new();
         for chunk in symbols.chunks(4) {
-            // Each base64 symbol carries 6 bits; a chunk of n symbols decodes to
-            // n-1 bytes (4→3, 3→2, 2→1).
             let mut n = 0u32;
             for &c in chunk {
                 n = (n << 6) | val(c);
             }
-            n <<= 6 * (4 - chunk.len()); // left-align to a full 24-bit group
+            n <<= 6 * (4 - chunk.len());
             for i in 0..(chunk.len() - 1) {
                 out.push(((n >> (16 - 8 * i)) & 0xff) as u8);
             }
@@ -293,7 +283,6 @@ mod tests {
         out
     }
 
-    // Reconstruct the original UTF-16LE-encoded command from the base64 payload.
     fn decode_ps_encoded(b64: &str) -> String {
         let bytes = base64_decode(b64);
         let u16s: Vec<u16> = bytes
@@ -307,17 +296,12 @@ mod tests {
     fn wt_terminal_argv_opens_tab_with_encoded_command() {
         let cmd = "Set-Location 'C:\\proj'; speedwave login --project 'p'";
         let argv = super::build_wt_terminal_argv("powershell.exe", cmd);
-        // No `cmd /c start` / detached console — wt.exe pumps stdin from start.
         assert_eq!(argv[0], "new-tab");
         assert_eq!(argv[1], "powershell.exe");
         assert_eq!(argv[2], "-NoExit");
-        // -EncodedCommand, NOT -Command: the `;` in cmd must survive wt.exe's
-        // action-delimiter parser (regression: 0x80070002 file-not-found).
         assert_eq!(argv[3], "-EncodedCommand");
-        // The encoded payload has no `;` or space for wt.exe to split on.
         assert!(!argv[4].contains(';'));
         assert!(!argv[4].contains(' '));
-        // …and round-trips back to the exact command, semicolon intact.
         assert_eq!(decode_ps_encoded(&argv[4]), cmd);
     }
 
@@ -337,19 +321,14 @@ mod tests {
 
     #[test]
     fn encode_powershell_command_is_utf16le_base64() {
-        // "A" => UTF-16LE bytes 0x41 0x00 => base64 "QQA="
         assert_eq!(super::encode_powershell_command("A"), "QQA=");
-        // empty string => empty base64
         assert_eq!(super::encode_powershell_command(""), "");
-        // round-trip a command with a semicolon (the actual bug trigger)
         let cmd = "Set-Location 'C:\\x'; speedwave login --project 'p'";
         assert_eq!(
             decode_ps_encoded(&super::encode_powershell_command(cmd)),
             cmd
         );
     }
-
-    // -- escape_for_applescript (macOS only) --
 
     #[test]
     #[cfg(target_os = "macos")]
@@ -366,15 +345,12 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn escape_applescript_backslash() {
-        // Single backslash in input becomes two in output (escaped)
         assert_eq!(escape_for_applescript(r"a\b").unwrap(), r"a\\b");
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn escape_applescript_backslash_then_quote() {
-        // `\"` in input must escape both the backslash AND the quote — output
-        // sees `\\\"` (4 chars). Order-of-operations matters here.
         assert_eq!(escape_for_applescript(r#"\""#).unwrap(), r#"\\\""#);
     }
 
@@ -405,11 +381,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn escape_applescript_rejects_del() {
-        // DEL (0x7f) is in the rejected control-char set.
         assert!(escape_for_applescript("foo\x7fbar").is_err());
     }
-
-    // -- sanitize_login_shell (pure; no env mutation) --
 
     #[test]
     #[cfg(target_os = "macos")]
@@ -466,8 +439,6 @@ mod tests {
         assert_eq!(sanitize_login_shell(Some("")), DEFAULT_LOGIN_SHELL);
     }
 
-    // -- iterm2_installed --
-
     #[test]
     #[cfg(target_os = "macos")]
     fn iterm2_installed_in_returns_true_when_system_root_has_app() {
@@ -482,7 +453,6 @@ mod tests {
         let system_root = tempfile::tempdir().unwrap();
         let user_root = tempfile::tempdir().unwrap();
         std::fs::create_dir(user_root.path().join("iTerm.app")).unwrap();
-        // System root empty; user root has the app — must still detect.
         assert!(super::iterm2_installed_in(&[
             system_root.path(),
             user_root.path()

@@ -1,6 +1,3 @@
-// URL validation Tauri commands. SSRF validator SSOT is `speedwave_runtime::url_validation`,
-// re-exported here (Tauri-bound commands only; runtime stays Tauri-free).
-
 pub(crate) use speedwave_runtime::url_validation::{
     is_private_on_premise, validate_collector_url, validate_url, PrivatePolicy,
 };
@@ -39,7 +36,6 @@ mod tests {
 
     #[test]
     fn open_url_rejects_private_ip() {
-        // Delegates to the runtime SSOT validator.
         assert!(open_url("https://127.0.0.1/".to_string()).is_err());
     }
 
@@ -51,7 +47,6 @@ mod tests {
 
     #[test]
     fn reexports_resolve() {
-        // Compile-time check that the re-exported symbols are reachable here.
         assert!(validate_url("https://example.com").is_ok());
         let url: url::Url = "http://10.0.0.1/".parse().unwrap();
         assert!(is_private_on_premise(&url, PrivatePolicy::BlockLoopback));

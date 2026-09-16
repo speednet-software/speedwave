@@ -249,7 +249,6 @@ export class ToolBlockComponent {
     if (override !== undefined) {
       return override;
     }
-    // Default to collapsed regardless of status.
     return true;
   }
 
@@ -262,7 +261,6 @@ export class ToolBlockComponent {
 
   /** Tailwind border-color class for the timeline left rail, keyed by tool status. */
   readonly borderClass = computed<string>(() => {
-    // Stopped tools use a muted gray rail.
     if (this.isStopped()) return 'border-[var(--ink-mute)]/50';
     return STATUS_BORDER[this.tool().status];
   });

@@ -38,8 +38,6 @@ export async function switchToProject(slug: string, timeoutMs = 180_000): Promis
     timeout: timeoutMs,
     timeoutMsg: `active_project did not become ${slug} — switch did not complete`,
   });
-  // The slug flips before compose_up finishes; wait for status to settle out of
-  // 'switching' so callers act on a ready project (no_provider returns at once).
   await waitForShellReady(timeoutMs);
 }
 
@@ -50,7 +48,8 @@ export async function containersRunning(project: string): Promise<boolean> {
       window as unknown as {
         __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<boolean> };
       }
-    ).__TAURI_INTERNALS__.invoke('check_containers_running', { project: proj })
+    ).__TAURI_INTERNALS__
+      .invoke('check_containers_running', { project: proj })
       .then((r) => done(r))
       .catch(() => done(false));
   }, project);

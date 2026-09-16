@@ -151,9 +151,7 @@ export class IdeBridgeComponent implements OnInit, OnDestroy {
       .then((unlisten) => {
         this.unlistenEvent = unlisten;
       })
-      .catch(() => {
-        // Tauri event listener not available outside desktop context
-      });
+      .catch(() => {});
   }
 
   /** Cleans up IDE polling interval, event fade timer, and Tauri event listener. */

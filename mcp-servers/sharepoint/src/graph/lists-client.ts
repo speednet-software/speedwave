@@ -12,8 +12,6 @@ export class ListsClient {
    */
   constructor(private readonly graph: GraphRequester) {}
 
-  // -- low-level URL builders ------------------------------------------------
-
   /** `/sites/{site-id}/lists`. */
   listsPath(): string {
     return `/sites/${this.graph.getSiteId()}/lists`;
@@ -43,8 +41,6 @@ export class ListsClient {
   itemPath(listId: string, itemId: string): string {
     return `${this.itemsPath(listId)}/${itemId}`;
   }
-
-  // -- request helpers -------------------------------------------------------
 
   /** GET /sites/{site-id}/lists — all lists on the configured site. */
   listLists<T = unknown>(): Promise<T | undefined> {
@@ -83,8 +79,6 @@ export class ListsClient {
   deleteList(listId: string): Promise<unknown> {
     return this.graph.graphRequest('DELETE', this.listPath(listId));
   }
-
-  // -- items -----------------------------------------------------------------
 
   /**
    * GET .../items?$expand=fields[&...query]; `$expand=fields` is always set.

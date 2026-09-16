@@ -1,12 +1,9 @@
 #!/usr/bin/env bats
-# Alignment guard: composite actions under .github/actions pin the same action refs as the
-# workflows, and Dependabot's github-actions entry scans them (a bare `/` covers workflows only).
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 DEPENDABOT="$REPO_ROOT/.github/dependabot.yml"
 COMPOSITE_GLOB="/.github/actions/*"
 
-# Lines of the github-actions `updates` entry, from its `- package-ecosystem:` line to the next entry.
 _actions_entry() {
     awk '
         /^  - package-ecosystem:/ { in_entry = ($3 == "github-actions") }
@@ -14,7 +11,6 @@ _actions_entry() {
     ' "$DEPENDABOT"
 }
 
-# `directories` items of the github-actions entry, quotes stripped.
 _actions_directories() {
     _actions_entry | awk '
         /^    directories:/ { in_dirs = 1; next }
@@ -23,13 +19,11 @@ _actions_directories() {
     ' | sort
 }
 
-# Repo-relative directories of tracked composite actions, e.g. `/.github/actions/setup-toolchain`.
 _composite_dirs() {
     git -C "$REPO_ROOT" ls-files -- '.github/actions/*/action.yml' '.github/actions/*/action.yaml' |
         sed -E 's|/action\.ya?ml$||; s|^|/|' | sort -u
 }
 
-# Names of github-actions groups lacking `group-by: dependency-name`.
 _actions_groups_without_group_by() {
     _actions_entry | awk '
         /^    groups:/ { in_groups = 1; next }
@@ -43,7 +37,6 @@ _actions_groups_without_group_by() {
     '
 }
 
-# `owner/repo[/path]<TAB>ref` for every external `uses:` in workflows and composite actions.
 _external_uses() {
     grep -h -o -E 'uses:[[:space:]]+[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_./-]+)?@[^[:space:]]+' \
         "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/actions/*/action.yml |

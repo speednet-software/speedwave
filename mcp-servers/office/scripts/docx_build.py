@@ -57,8 +57,6 @@ def _edit(src: str, output: str, ops: list) -> None:
     from docx import Document
 
     doc = Document(src)
-    # `find` strings already replaced earlier in this batch: a later op with the same `find`
-    # legitimately sees zero matches once consumed, and that is idempotent success, not a failure.
     already_replaced: set[str] = set()
     for op in ops:
         kind = op.get("op")
@@ -70,7 +68,6 @@ def _edit(src: str, output: str, ops: list) -> None:
             for para in doc.paragraphs:
                 if find in para.text:
                     matches += 1
-                    # Replace across the whole paragraph text (rebuild a single run).
                     new_text = para.text.replace(find, replace)
                     for r in list(para.runs):
                         r.text = ""

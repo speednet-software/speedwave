@@ -27,9 +27,7 @@ function findSrcRoot(): string {
       if (statSync(markerSpec).isFile() && statSync(markerSvc).isDirectory()) {
         return candidate;
       }
-    } catch {
-      // missing path — try the next candidate.
-    }
+    } catch {}
   }
   throw new Error(
     `forbidden-patterns: could not locate desktop/src/src starting from ${__dirname}`

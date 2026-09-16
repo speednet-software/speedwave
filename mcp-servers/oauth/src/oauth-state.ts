@@ -74,13 +74,11 @@ export function assertOAuthState(value: unknown): OAuthState {
       throw new Error(`oauth state: providerData['${k}'] must be a string`);
     }
   }
-  // Absent grantType = legacy SharePoint state → refresh_token (back-compat migration).
   const grantType: GrantType =
     obj.grantType === undefined ? 'refresh_token' : (obj.grantType as GrantType);
   if (grantType !== 'refresh_token' && grantType !== 'client_credentials') {
     throw new Error('oauth state: `grantType` must be refresh_token or client_credentials');
   }
-  // refresh_token grant needs a token; client_credentials re-mints, so empty is OK.
   if (typeof obj.refreshToken !== 'string') {
     throw new Error('oauth state: `refreshToken` must be a string');
   }

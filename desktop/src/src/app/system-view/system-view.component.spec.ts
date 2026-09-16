@@ -9,7 +9,6 @@ import type { HealthReport } from '../models/health';
 
 const MOCK_HEALTHY_REPORT: HealthReport = {
   containers: [
-    // Post-strip wire format: parse_container_entries removes the compose prefix.
     { name: 'claude', status: 'running', healthy: true },
     { name: 'mcp_hub', status: 'running', healthy: true },
     { name: 'mcp_redmine', status: 'starting', healthy: false },
@@ -72,8 +71,6 @@ describe('SystemViewComponent', () => {
   it('should create', () => {
     expect(component).toBeTruthy();
   });
-
-  // -- Happy path: renders a row per container --
 
   it('renders a row for every container in the health report', async () => {
     await component.ngOnInit();
@@ -145,8 +142,6 @@ describe('SystemViewComponent', () => {
     ).toBe('connected');
   });
 
-  // -- ARIA --
-
   it('includes a visually hidden caption describing the table', async () => {
     await component.ngOnInit();
     fixture.detectChanges();
@@ -158,7 +153,6 @@ describe('SystemViewComponent', () => {
   });
 
   it('adds an aria-label communicating the actual restart-all scope', async () => {
-    // recreate_project_containers recreates all project containers, not just the clicked row.
     await component.ngOnInit();
     fixture.detectChanges();
 
@@ -166,8 +160,6 @@ describe('SystemViewComponent', () => {
     expect(buttons[0].getAttribute('aria-label')).toBe('Restart all project containers');
     expect(buttons[0].textContent?.trim()).toBe('restart all');
   });
-
-  // -- Edge case: empty containers --
 
   it('shows an empty hint when health report has zero containers', async () => {
     mockTauri.invokeHandler = async () => MOCK_EMPTY_REPORT;
@@ -192,8 +184,6 @@ describe('SystemViewComponent', () => {
     expect(error?.textContent).toContain('No active project');
   });
 
-  // -- Error path --
-
   it('renders an error block when get_health rejects', async () => {
     mockTauri.invokeHandler = async () => {
       throw new Error('health unavailable');
@@ -208,8 +198,6 @@ describe('SystemViewComponent', () => {
     expect(error?.getAttribute('role')).toBe('alert');
   });
 
-  // -- State transitions --
-
   it('refresh interval schedules setInterval with the 5 s cadence', async () => {
     const spy = vi.spyOn(globalThis, 'setInterval');
     const clearSpy = vi.spyOn(globalThis, 'clearInterval');
@@ -221,7 +209,6 @@ describe('SystemViewComponent', () => {
       const [, delay] = spy.mock.calls[0];
       expect(delay).toBe(SYSTEM_REFRESH_INTERVAL_MS);
 
-      // ngOnDestroy clears the interval it created.
       component.ngOnDestroy();
       expect(clearSpy).toHaveBeenCalled();
     } finally {
@@ -265,7 +252,7 @@ describe('SystemViewComponent', () => {
 
     expect(calls).toContain('recreate_project_containers');
     expect(calls.filter((c) => c === 'get_health').length).toBeGreaterThanOrEqual(2);
-    expect(btn.disabled).toBe(false); // restored after completion
+    expect(btn.disabled).toBe(false);
   });
 
   it('disables the restart button while the restart is in flight', async () => {

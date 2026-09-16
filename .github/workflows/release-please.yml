@@ -18,13 +18,12 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0 (release-please 17.6.0 — node24 runtime; force-tag-creation with draft releases unchanged from 17.3.0)
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
         id: release
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
           target-branch: main
 
-      # release-please's own label call can fail transiently
       - name: Ensure release PR has autorelease label
         if: steps.release.outputs.pr
         continue-on-error: true
@@ -49,7 +48,6 @@ jobs:
           done
           echo "::warning::Failed to apply label after 3 retries"
 
-      # GitHub draft releases may not create the git ref desktop-release.yml needs
       - name: Ensure release tag exists
         if: steps.release.outputs.release_created == 'true'
         continue-on-error: true

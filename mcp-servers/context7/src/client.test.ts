@@ -68,7 +68,6 @@ describe('Context7Client.searchLibraries', () => {
       })
       .reply(200, JSON.stringify({ results: [] }));
 
-    // Assertion via intercept — if header missing, undici throws.
     await client.searchLibraries('react', 'h');
   });
 
@@ -463,7 +462,6 @@ describe('Context7Client misc', () => {
 
   it('aborts when response body exceeds MAX_RESPONSE_BYTES — OOM regression guard', async () => {
     const { client, mock } = makeClient();
-    // 6 MiB payload — over the 5 MiB cap.
     const oversized = 'x'.repeat(6 * 1024 * 1024);
     mock
       .intercept({ path: '/api/v2/libs/search?libraryName=react&query=q', method: 'GET' })

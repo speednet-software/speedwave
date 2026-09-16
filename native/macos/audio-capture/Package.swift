@@ -1,8 +1,6 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Embeds Resources/Info.plist into Mach-O `__TEXT,__info_plist` so the CLI binary
-// carries CFBundleIdentifier, NSAudioCaptureUsageDescription, NSMicrophoneUsageDescription.
 let package = Package(
     name: "audio-capture-cli",
     platforms: [.macOS(.v14)],

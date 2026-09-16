@@ -136,7 +136,6 @@ fn line_matches(rule: &Rule, line: &str) -> bool {
 
 #[test]
 fn engine_paths_go_through_ssot() {
-    // Self-verify the hard-coded index against PRIMITIVE_PATTERNS.
     assert_eq!(
         RULES[PRIMITIVE_RULE_IDX].patterns, PRIMITIVE_PATTERNS,
         "PRIMITIVE_RULE_IDX no longer points at the PRIMITIVE_PATTERNS rule — update it"
@@ -169,7 +168,6 @@ fn engine_paths_go_through_ssot() {
                 continue;
             }
             for (ri, rule) in RULES.iter().enumerate() {
-                // SSOT files own the join/translate logic; non-SSOT files must route through engine_path.
                 if is_ssot {
                     continue;
                 }

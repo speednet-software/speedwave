@@ -13,7 +13,6 @@ import type { ChatMessage, MessageBlock } from '../../models/chat';
 import { ChatMessageComponent } from '../message/chat-message.component';
 import { SpinIconComponent } from '../../shared/spin-icon.component';
 
-// `track` uses `msg.timestamp` until state-tree (ADR-044) gives `ChatMessage` a stable index.
 const SCROLL_BOTTOM_THRESHOLD_PX = 16;
 
 /** Scrollable message list with auto-scroll-to-bottom that pauses while the user reads earlier messages. */
@@ -93,10 +92,8 @@ export class ChatMessageListComponent implements AfterViewChecked, OnChanges {
   constructor() {
     effect(() => {
       const count = this.messages().length;
-      // Reading these signals subscribes the effect to streaming chunks too.
       this.currentBlocks();
       this.isStreaming();
-      // A new turn (length grew) re-arms auto-scroll.
       if (count > this.lastMessageCount) {
         this.shouldAutoScroll = true;
       }

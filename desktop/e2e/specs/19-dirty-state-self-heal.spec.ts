@@ -23,21 +23,15 @@ const HUB = `${composePrefix()}_${PROJECT}_mcp_hub`;
 const CLAUDE = `${composePrefix()}_${PROJECT}_claude`;
 const PROJECT_PREFIX = `${composePrefix()}_${PROJECT}_`;
 
-// The name store is shared across projects; spec 18 leaves e2e-second running and
-// its async teardown races our snapshot. Scope the live-entry invariant to e2e-test.
 function projectEntries(snapshot: Map<string, string>): Map<string, string> {
   return new Map([...snapshot].filter(([name]) => name.startsWith(PROJECT_PREFIX)));
 }
 
-// Rust SSOT for the token path: `<data_dir>/secrets/<project>/<service>-auth-token`
-// (tokens::init_secrets_dir_in + workers::ensure_worker_auth_token); rendered only while enabled.
 function serviceTokenPath(): string {
   const dataDir = process.env.SPEEDWAVE_DATA_DIR || join(homedir(), '.speedwave');
   return join(dataDir, 'secrets', PROJECT, `${SERVICE}-auth-token`);
 }
 
-// Absolute System32 path — a bare `powershell` PATH lookup is hijackable;
-// mirror of binary::system_powershell_path.
 function systemPowershellPath(): string {
   const systemRoot = process.env.SystemRoot || 'C:\\Windows';
   return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -92,19 +86,13 @@ describe('Dirty-state self-heal', function () {
     if (process.platform !== 'win32') {
       this.skip();
     }
-    // Three UI-confirmed restarts (enable, heal, cleanup-disable) at up to
-    // ~180s each — the suite's usual 300s budget cannot fit them.
     this.timeout(600_000);
 
     const token = serviceTokenPath();
     let before: string;
     try {
-      // Own the precondition inside the try so cleanup runs even if enable throws:
-      // the token renders only while context7 is enabled (workers::apply_worker_auth_tokens_with_dir).
       await setContext7('running');
       before = readFileSync(token, 'utf8');
-      // Rust mirror: fs_perms.rs::set_windows_acl_empty_for_test — a present,
-      // protected, zero-ACE DACL via SDDL D:P (never NULL, which grants everyone access).
       const psToken = token.replace(/'/g, "''");
       const script = [
         "$ErrorActionPreference = 'Stop'",
@@ -113,13 +101,10 @@ describe('Dirty-state self-heal', function () {
         `Set-Acl -LiteralPath '${psToken}' -AclObject $acl`,
         `$sddl = (Get-Acl -LiteralPath '${psToken}').Sddl`,
         'if ($sddl -notmatch \'D:P(AI)?(?!\\()\') { throw "plant no-op: unexpected SDDL $sddl" }',
-        // Expected path: an empty protected DACL denies all access, including the owner.
         'try {',
         `  [System.IO.File]::ReadAllText('${psToken}') | Out-Null`,
         "  throw 'plant no-op: read succeeded despite empty protected DACL'",
         '} catch [System.UnauthorizedAccessException] {}',
-        // Trailing statement: powershell.exe exits 1 with empty stdout/stderr when a
-        // successfully-caught empty catch{} is the script's last statement.
         'Write-Output PLANT_OK',
       ].join('; ');
       const plantOutput = execFileSync(
@@ -129,18 +114,12 @@ describe('Dirty-state self-heal', function () {
       );
       expect(plantOutput).toContain('PLANT_OK');
 
-      // Node/libuv's FILE_FLAG_BACKUP_SEMANTICS + an elevated runner's SeBackupPrivilege
-      // bypass the DACL, so the plant script's own .NET ReadAllText denial is the proof.
-
       await requestBackendRestart();
       await waitForHealthy(PROJECT);
 
-      // A fresh Uuid::new_v4() replaces the unreadable token (ensure_worker_auth_token,
-      // test-guarded by compose/mod.rs::test_worker_auth_token_regenerated_when_unreadable).
       const after = readFileSync(token, 'utf8');
       expect(after).not.toBe(before);
     } finally {
-      // Restore the suite's documented end state even on failure (07 runs last).
       await setContext7('disabled');
     }
   });

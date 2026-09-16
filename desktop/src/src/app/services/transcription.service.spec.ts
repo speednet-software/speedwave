@@ -105,7 +105,6 @@ describe('TranscriptionService', () => {
           live: true,
         },
       });
-      // The recording id is tracked at service level so it survives a remount.
       expect(svc.recordingSessionId()).toBe('sess-1');
       expect(svc.recordingSource()).toEqual(mixed);
       expect(svc.recordingLanguage()).toBe('pl');
@@ -151,7 +150,6 @@ describe('TranscriptionService', () => {
       await expect(svc.startRecording({ kind: 'system_wide' }, 'pl', true)).rejects.toThrow(
         'ipc down'
       );
-      // The backend still records; the Stop control must keep its target.
       expect(svc.recordingSessionId()).toBe('sess-1');
     });
   });
@@ -177,7 +175,6 @@ describe('TranscriptionService', () => {
     });
 
     it('is false for a record-only session even though live was requested', async () => {
-      // `models_used.live: null` is the host saying record-only; the request does not win.
       await startWithLiveModel(null);
       expect(svc.recordingLive()).toBe(false);
     });
@@ -190,7 +187,6 @@ describe('TranscriptionService', () => {
     });
 
     it('clears when a failed start rolls back successfully', async () => {
-      // Start for real first, or the assertion passes on the initial `null` either way.
       await startWithLiveModel('small');
       expect(svc.recordingLive()).toBe(true);
       mockTauri.listen = vi.fn(async () => {
@@ -296,7 +292,7 @@ describe('TranscriptionService', () => {
 
     it('resumeActiveRecording re-subscribes to a still-running recording', async () => {
       await startWith('sess-1');
-      await svc.detach(); // simulate the record tab being destroyed
+      await svc.detach();
       const seen: string[] = [];
       mockTauri.invokeHandler = async (cmd, args) => {
         seen.push(cmd);
@@ -325,7 +321,6 @@ describe('TranscriptionService', () => {
     it('subscribeToTranscript refuses to switch away from the in-progress recording', async () => {
       await startWith('sess-1');
       await expect(svc.subscribeToTranscript('sess-2')).rejects.toThrow('recording is in progress');
-      // The recording's own listener/snapshot must be untouched.
       expect(svc.recordingSessionId()).toBe('sess-1');
       expect(svc.active()?.id).toBe('sess-1');
     });
@@ -355,7 +350,6 @@ describe('TranscriptionService', () => {
       });
       expect(svc.liveDraft()).toBe('not yet committed');
 
-      // Simulate the record tab being remounted: re-subscribe to the *same* session.
       mockTauri.invokeHandler = async (cmd) => {
         if (cmd === 'subscribe_transcript') {
           return {
@@ -410,7 +404,6 @@ describe('TranscriptionService', () => {
       await subscribeWith(snapshot({ last_seq: 5, live_segments: [seg(0, 1, 'hi')] }));
       expect(svc.active()?.last_seq).toBe(5);
       expect(svc.active()?.live_segments.length).toBe(1);
-      // A stale event (seq <= 5) is ignored.
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'segment_appended',
         seq: 5,
@@ -441,7 +434,6 @@ describe('TranscriptionService', () => {
         seq: 1,
         segment: seg(0, 2, 'a'),
       });
-      // Out-of-order / replayed event — dropped.
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'segment_appended',
         seq: 1,
@@ -531,7 +523,6 @@ describe('TranscriptionService', () => {
       });
       const s = svc.active()!;
       expect(s.final_segments).toEqual([seg(0, 5, 'higher-quality')]);
-      // live_segments untouched (the offline pass doesn't rewrite them).
       expect(s.live_segments[0].text).toBe('live-text');
     });
 
@@ -542,14 +533,12 @@ describe('TranscriptionService', () => {
         levels: [0.12, 0.03],
       });
       expect(svc.audioLevels()).toEqual([0.12, 0.03]);
-      // Replayed/out-of-order level is dropped like any other event.
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'audio_level',
         seq: 1,
         levels: [0.9],
       });
       expect(svc.audioLevels()).toEqual([0.12, 0.03]);
-      // The meter is meaningless outside recording — status change clears it.
       mockTauri.dispatchEvent('transcript_event::sess-1', {
         kind: 'status_changed',
         seq: 2,
@@ -774,7 +763,6 @@ describe('TranscriptionService', () => {
     it('a snapshot rebuilds the raised set instead of blanking it', async () => {
       await subscribeWith(snapshot({ last_seq: 0 }));
       warn('capture_warning', 'microphone_stalled', 1);
-      // A reload re-subscribes; the host reports what is still raised.
       await subscribeWith(
         snapshot({ last_seq: 0, active_warnings: ['audio_dropped', 'system_audio_silent'] })
       );
@@ -804,7 +792,6 @@ describe('TranscriptionService', () => {
         return undefined;
       };
       const done = svc.downloadModel('large-v3');
-      // A macrotask lets the listener attach AND the invoke start.
       await new Promise((r) => setTimeout(r, 0));
       expect(svc.downloadingModelKey()).toBe('large-v3');
       mockTauri.dispatchEvent('transcription_model_status', {
@@ -857,7 +844,7 @@ describe('TranscriptionService', () => {
         total_bytes: 10,
       });
       expect(svc.downloadProgress()).toBeNull();
-      svc.clearDownloadTracking(); // stop the completion-poll timer started above
+      svc.clearDownloadTracking();
     });
 
     it('resumeDownloadTracking attaches without invoking the download command', async () => {
@@ -875,7 +862,7 @@ describe('TranscriptionService', () => {
         total_bytes: 100,
       });
       expect(svc.downloadProgress()?.downloaded_bytes).toBe(99);
-      svc.clearDownloadTracking(); // stop the completion-poll timer started above
+      svc.clearDownloadTracking();
     });
 
     it('clearDownloadTracking detaches the progress listener', async () => {
@@ -941,7 +928,6 @@ describe('TranscriptionService', () => {
       });
 
       it('tracks a download of the offline-pass model, which is a separate ack entry', async () => {
-        // Keying only off the live entry would poll forever while the other model downloads.
         let downloading = true;
         mockTauri.invokeHandler = async (cmd) =>
           cmd === 'recommended_transcription_model'

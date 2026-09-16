@@ -242,8 +242,6 @@ export class SettingsComponent implements OnInit, OnDestroy {
       this.loadProjectInfo();
     });
 
-    // Smooth-scroll to the URL fragment (native anchorScrolling can't reach our
-    // nested scroll container). See ADR-056.
     this.route.fragment
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((fragment) => this.scrollToFragment(fragment));
@@ -255,21 +253,17 @@ export class SettingsComponent implements OnInit, OnDestroy {
    * @param attempt - internal retry counter
    */
   private scrollToFragment(id: string | null, attempt = 0): void {
-    // Cancel any retry from a previous fragment so it can't fire post-destroy.
     if (this.scrollTimer !== null) {
       clearTimeout(this.scrollTimer);
       this.scrollTimer = null;
     }
     if (!id) return;
-    // CSS.escape guards against a fragment with CSS-special chars throwing
-    // (guarded — not present in every test environment).
     const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id;
     const el = this.host.nativeElement.querySelector(`#${safeId}`);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
     }
-    // Give up after ~1s of retries — the section never mounted (cosmetic).
     if (attempt < 20) {
       this.scrollTimer = setTimeout(() => this.scrollToFragment(id, attempt + 1), 50);
     }
@@ -296,9 +290,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     try {
       const result = await this.tauri.invoke<ProjectList>('list_projects');
       this.activeProject = result.active_project;
-    } catch {
-      // Not running inside Tauri
-    }
+    } catch {}
     this.cdr.markForCheck();
   }
 }

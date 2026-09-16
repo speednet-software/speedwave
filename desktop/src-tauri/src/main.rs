@@ -923,8 +923,7 @@ fn main() {
                 Err(e) => log::warn!("auto-check handle mutex poisoned: {e}"),
             }
 
-            // Post-setup migrations + CLI re-link + reconcile, ordered, off the
-            // main thread — the VM migrations can stop/start the VM (long downloads).
+            // Post-setup migrations, off the main thread.
             if setup_started {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {

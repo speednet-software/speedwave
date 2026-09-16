@@ -45,31 +45,27 @@ describe('ResizeHandleDirective', () => {
     handle.dispatchEvent(new PointerEvent(type, { clientY, button: 0, pointerId: 1 }));
   }
 
-  // ── accessibility attributes ──────────────────────────────────────────────
   it('exposes separator semantics and is focusable', () => {
     expect(handle.getAttribute('role')).toBe('separator');
     expect(handle.getAttribute('aria-orientation')).toBe('horizontal');
     expect(handle.getAttribute('tabindex')).toBe('0');
   });
 
-  // ── happy path — drag ─────────────────────────────────────────────────────
   it('emits start, cumulative up-positive deltas, then end', () => {
     pointer('pointerdown', 200);
-    pointer('pointermove', 170); // 30px up
-    pointer('pointermove', 150); // 50px up
+    pointer('pointermove', 170);
+    pointer('pointermove', 150);
     pointer('pointerup', 150);
     expect(host.log).toEqual(['start', 'end']);
     expect(host.deltas).toEqual([30, 50]);
   });
 
-  // ── edge — no move events before down are ignored ─────────────────────────
   it('ignores moves that arrive without a preceding pointerdown', () => {
     pointer('pointermove', 100);
     expect(host.deltas).toEqual([]);
     expect(host.log).toEqual([]);
   });
 
-  // ── keyboard ──────────────────────────────────────────────────────────────
   it('ArrowUp emits +keyStep, ArrowDown emits -keyStep, each a full gesture', () => {
     handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }));
     handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
@@ -82,13 +78,11 @@ describe('ResizeHandleDirective', () => {
     expect(host.log).toEqual([]);
   });
 
-  // ── reset ───────────────────────────────────────────────────────────────
   it('double-click emits reset', () => {
     handle.dispatchEvent(new MouseEvent('dblclick'));
     expect(host.log).toEqual(['reset']);
   });
 
-  // ── error path — disabled suppresses every gesture ────────────────────────
   it('emits nothing while disabled', () => {
     host.disabled.set(true);
     fixture.detectChanges();

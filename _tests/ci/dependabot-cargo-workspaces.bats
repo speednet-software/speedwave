@@ -1,12 +1,8 @@
 #!/usr/bin/env bats
-# Alignment guard: every standalone cargo workspace (own Cargo.lock) must sit in the single
-# cargo entry of dependabot.yml, grouped by dependency name, or a shared-manifest bump splits
-# into per-directory half-PRs that leave the other lockfiles stale.
 
 REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 DEPENDABOT="$REPO_ROOT/.github/dependabot.yml"
 
-# Lines of the cargo `updates` entry, from its `- package-ecosystem: cargo` line to the next entry.
 _cargo_entry() {
     awk '
         /^  - package-ecosystem:/ { in_cargo = ($3 == "cargo") }
@@ -14,7 +10,6 @@ _cargo_entry() {
     ' "$DEPENDABOT"
 }
 
-# `directories` items of the cargo entry, quotes stripped.
 _cargo_directories() {
     _cargo_entry | awk '
         /^    directories:/ { in_dirs = 1; next }
@@ -23,15 +18,12 @@ _cargo_directories() {
     ' | sort
 }
 
-# Repo-relative directories of tracked Cargo.lock files (`/` for the root workspace);
-# tracked-only so build outputs such as the bundle build-context never count as workspaces.
 _cargo_lock_dirs() {
     git -C "$REPO_ROOT" ls-files -- '*Cargo.lock' |
         grep -E '(^|/)Cargo\.lock$' |
         sed 's|/Cargo\.lock$||; s|^Cargo\.lock$||; s|^|/|' | sort
 }
 
-# Names of cargo groups lacking `group-by: dependency-name`.
 _cargo_groups_without_group_by() {
     _cargo_entry | awk '
         /^    groups:/ { in_groups = 1; next }

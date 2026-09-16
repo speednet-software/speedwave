@@ -8,7 +8,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 const { SCRIPTS_DIR } = vi.hoisted(() => {
-  // `process.execPath` and the temp dir are available without any import inside the factory.
   const dir =
     `${process.env.TMPDIR || process.env.TEMP || '/tmp'}/office-pyscripts-${process.pid}`.replace(
       /\/+/g,
@@ -16,7 +15,6 @@ const { SCRIPTS_DIR } = vi.hoisted(() => {
     );
   return { SCRIPTS_DIR: dir };
 });
-// Point the helper at `node` as the "python" interpreter and at our temp scripts dir.
 vi.mock('./config.js', () => ({
   PYTHON_BIN: process.execPath,
   SCRIPTS_DIR,
@@ -42,8 +40,6 @@ beforeAll(() => {
     path.join(SCRIPTS_DIR, 'crash-silent-stdout-noisy-stderr.py'),
     'process.stderr.write("libreoffice: fatal error, out of memory"); process.exit(1);'
   );
-  // Mirrors the real `script_runner.fail()` contract: JSON error on stdout, a much longer
-  // traceback on stderr, AND a non-zero exit — the case `runOk`'s generic path cannot see through.
   fs.writeFileSync(
     path.join(SCRIPTS_DIR, 'teaching-fail.py'),
     [
@@ -56,7 +52,6 @@ beforeAll(() => {
     path.join(SCRIPTS_DIR, 'crash-with-junk-stdout.py'),
     'process.stdout.write("not json"); process.stderr.write("stack trace"); process.exit(1);'
   );
-  // Prints a valid `{ok:true}` payload but still exits non-zero — the exit code must win.
   fs.writeFileSync(
     path.join(SCRIPTS_DIR, 'ok-json-but-nonzero-exit.py'),
     'process.stdout.write(JSON.stringify({ ok: true, value: 1 })); process.exit(3);'
@@ -99,7 +94,6 @@ describe('runPythonScript', () => {
     await expect(runPythonScript('teaching-fail.py', [])).rejects.toThrow(
       /sheet 'X' not found; workbook sheets are: \['Y'\]/
     );
-    // The traceback must not leak into the thrown message (it stayed on stderr only).
     await expect(runPythonScript('teaching-fail.py', [])).rejects.not.toThrow(
       /Traceback \(most recent call last\)/
     );

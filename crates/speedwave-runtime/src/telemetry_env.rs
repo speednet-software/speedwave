@@ -106,8 +106,6 @@ pub fn telemetry_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
 fn full_field_env_map(t: &ResolvedTelemetry) -> HashMap<String, String> {
     use TelemetryField as F;
     let mut m = HashMap::new();
-    // Inserts `<env_key_for(field)> = value` when the field has an env key. A
-    // macro (not a closure) so it doesn't hold a long-lived mutable borrow of `m`.
     macro_rules! put {
         ($field:expr, $value:expr) => {{
             if let Some(k) = env_key_for($field) {
@@ -264,8 +262,6 @@ mod tests {
 
     #[test]
     fn locked_env_map_carries_co_locked_field_under_kill_switch() {
-        // MDM kill-switches telemetry AND separately locks a privacy gate; the
-        // native managed-settings.json must still carry both locked keys.
         let mut t = enabled_sample();
         t.enabled = false;
         t.endpoint = None;
@@ -314,8 +310,6 @@ mod tests {
 
     #[test]
     fn protocol_wire_matches_serde_rename() {
-        // protocol_wire emits OTEL_EXPORTER_OTLP_PROTOCOL and MUST equal the enum's
-        // serde value (the OTLP SDK expects exactly those tokens) — one source of truth.
         for p in [
             OtlpProtocol::Grpc,
             OtlpProtocol::HttpProtobuf,

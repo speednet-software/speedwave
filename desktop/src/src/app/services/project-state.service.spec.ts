@@ -100,7 +100,6 @@ describe('ProjectStateService', () => {
 
       await service.init();
 
-      // Listeners should still work
       mockTauri.dispatchEvent('project_switch_started', { project: 'new' });
       expect(service.status()).toBe('switching');
     });
@@ -146,8 +145,6 @@ describe('ProjectStateService', () => {
     });
 
     it('reaches ready for a non-anthropic provider with no anthropic auth (needs_anthropic_auth=false)', async () => {
-      // Non-anthropic provider, no Anthropic creds, backend says auth not needed:
-      // gate must not strand the user on "auth required" (the free-model bug).
       mockTauri.invokeHandler = async (cmd: string) => {
         switch (cmd) {
           case 'list_projects':
@@ -191,8 +188,6 @@ describe('ProjectStateService', () => {
             return true;
           case 'get_auth_status':
             return {
-              // Stale Anthropic creds present, but the project was emptied:
-              // no-provider wins so the user is routed to pick a provider.
               api_key_configured: true,
               oauth_authenticated: true,
               needs_anthropic_auth: false,
@@ -371,7 +366,6 @@ describe('ProjectStateService', () => {
     });
 
     it('passes the health gate when get_health returns no report', async () => {
-      // Default handler returns undefined for get_health — gate must not block.
       await service.init();
 
       expect(service.status()).toBe('ready');
@@ -539,7 +533,6 @@ describe('ProjectStateService', () => {
 
       service.requestRestart();
 
-      // no_provider hides the restart overlay — start rather than set a dead flag.
       expect(ensureSpy).toHaveBeenCalled();
       expect(service.needsRestart).toBe(false);
     });
@@ -551,7 +544,6 @@ describe('ProjectStateService', () => {
 
       service.requestRestart();
 
-      // Overlay can't render while switching — flag stays down until we settle.
       expect(service.needsRestart).toBe(false);
       expect(ensureSpy).not.toHaveBeenCalled();
     });
@@ -564,7 +556,7 @@ describe('ProjectStateService', () => {
             api_key_configured: false,
             oauth_authenticated: false,
             needs_anthropic_auth: false,
-            provider_configured: true, // → ready
+            provider_configured: true,
           };
         }
         return undefined;
@@ -572,11 +564,9 @@ describe('ProjectStateService', () => {
       mockTauri.dispatchEvent('project_switch_started', { project: 'e2e-test' });
       expect(service.status()).toBe('switching');
 
-      // Save fires requestRestart while switching — deferred, not visible yet.
       service.requestRestart();
       expect(service.needsRestart).toBe(false);
 
-      // Switch settles → the deferred intent becomes a live needsRestart.
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'e2e-test' });
       await new Promise((r) => setTimeout(r, 0));
 
@@ -587,7 +577,7 @@ describe('ProjectStateService', () => {
     it('clears a deferred restart intent when the switch settles on no_provider', async () => {
       await service.init();
       mockTauri.dispatchEvent('project_switch_started', { project: 'bare' });
-      service.requestRestart(); // deferred while switching
+      service.requestRestart();
       expect(service.needsRestart).toBe(false);
 
       mockTauri.invokeHandler = async (cmd: string) => {
@@ -596,7 +586,7 @@ describe('ProjectStateService', () => {
             api_key_configured: false,
             oauth_authenticated: false,
             needs_anthropic_auth: false,
-            provider_configured: false, // → no_provider
+            provider_configured: false,
           };
         }
         return undefined;
@@ -604,11 +594,9 @@ describe('ProjectStateService', () => {
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'bare' });
       await new Promise((r) => setTimeout(r, 0));
 
-      // No-provider settle voids the intent — nothing is running to restart.
       expect(service.status()).toBe('no_provider');
       expect(service.needsRestart).toBe(false);
 
-      // The voided intent must not resurrect on a later ready settle.
       service.applyAuthStatus({
         api_key_configured: true,
         oauth_authenticated: false,
@@ -622,9 +610,8 @@ describe('ProjectStateService', () => {
     it('drops a deferred restart intent when a new switch starts', async () => {
       await service.init();
       service.status.set('switching');
-      service.requestRestart(); // deferred
+      service.requestRestart();
 
-      // A brand-new switch supersedes the stale deferred intent.
       mockTauri.dispatchEvent('project_switch_started', { project: 'other' });
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_auth_status') {
@@ -837,7 +824,6 @@ describe('ProjectStateService', () => {
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_auth_status') {
           return {
-            // Ready-looking flags, but the backend SSOT says no provider.
             status: 'no_provider',
             api_key_configured: true,
             oauth_authenticated: true,
@@ -888,7 +874,6 @@ describe('ProjectStateService', () => {
 
       mockTauri.dispatchEvent('project_switch_succeeded', { project: 'p' });
       await new Promise((r) => setTimeout(r, 0));
-      // 1 (started) + 1 (resolveSwitchSucceededStatus) + 1 (refreshProjectList).
       expect(cb).toHaveBeenCalledTimes(3);
     });
 
@@ -1014,7 +999,6 @@ describe('ProjectStateService', () => {
         applied_bundle_id: 'new-bundle',
       });
 
-      // Wait for the async error handling
       await new Promise((r) => setTimeout(r, 20));
       expect(service.status()).toBe('error');
       expect(service.error).toContain('check failed');
@@ -1069,7 +1053,6 @@ describe('ProjectStateService', () => {
       const spy = vi.spyOn(mockTauri, 'invoke');
       const first = service.ensureContainersRunning();
       await new Promise((r) => setTimeout(r, 0));
-      // The bundle-done listener re-enters ensure while the first run is mid-flight.
       service.status.set('rebuilding');
       const second = service.ensureContainersRunning();
       await new Promise((r) => setTimeout(r, 0));
@@ -1241,7 +1224,6 @@ describe('ProjectStateService', () => {
 
       await service.retryAuth();
 
-      // A failed check must not masquerade as "not authenticated".
       expect(service.status()).toBe('error');
       expect(service.error).toContain('connection refused');
       expect(mockLogger.error).toHaveBeenCalledWith(
@@ -1316,17 +1298,13 @@ describe('ProjectStateService', () => {
     });
 
     it('applyAuthStatus never downgrades a live ready session', () => {
-      // Opening Settings probes auth; a false negative (no_provider / auth_required)
-      // must not blank a running chat. Both pre-ready outcomes are ignored when ready.
       for (const auth of [
-        // → no_provider
         {
           api_key_configured: true,
           oauth_authenticated: true,
           needs_anthropic_auth: false,
           provider_configured: false,
         },
-        // → auth_required
         {
           api_key_configured: false,
           oauth_authenticated: false,
@@ -1402,7 +1380,6 @@ describe('ProjectStateService', () => {
     it('applyAuthStatus sets no_provider when provider_configured=false', () => {
       service.status.set('starting');
       service.applyAuthStatus({
-        // Auth flags are irrelevant: no-provider is checked first.
         api_key_configured: true,
         oauth_authenticated: true,
         needs_anthropic_auth: false,
@@ -1442,7 +1419,6 @@ describe('ProjectStateService', () => {
     it('applyAuthStatus promotes no_provider to ready from a discriminant payload', () => {
       service.status.set('no_provider');
       service.applyAuthStatus({
-        // Discriminant says ready even though the flags alone would not.
         status: 'ready',
         api_key_configured: false,
         oauth_authenticated: false,
@@ -1511,8 +1487,6 @@ describe('ProjectStateService', () => {
     });
 
     it('forceUnconfigured downgrades a live ready session (deliberate logout)', () => {
-      // Unlike applyAuthStatus, a user-initiated logout is not a false
-      // negative — the chat view must blank to the no_provider screen.
       service.status.set('ready');
       const cb = vi.fn();
       service.onChange(cb);
@@ -1597,7 +1571,6 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // justEnabled is null when no integration was just toggled.
       expect(spy).toHaveBeenCalledWith('restart_integration_containers', {
         project: 'test',
         justEnabled: null,
@@ -1608,8 +1581,6 @@ describe('ProjectStateService', () => {
     });
 
     it('restartContainers fires onRestartBegin before the Tauri invoke, and ready before restart-complete', async () => {
-      // Ordering invariant chat resume relies on: id snapshot at begin, then ready (nulls the
-      // live id) before restart-complete (reads the snapshot) — a reorder breaks resume.
       const order: string[] = [];
       service.onRestartBegin(async () => {
         order.push('begin');
@@ -1632,8 +1603,6 @@ describe('ProjectStateService', () => {
     });
 
     it('restartContainers clears a stale auth_required after switching to a no-auth provider', async () => {
-      // Repro: logged out (auth_required) → switch to local + restart. Backend
-      // now reports no auth needed, so the stale auth_required must clear.
       service.status.set('auth_required');
       mockTauri.invokeHandler = async (cmd: string) => {
         if (cmd === 'get_auth_status')
@@ -1660,7 +1629,6 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // The slash-cache miss is non-fatal: restart still completes.
       expect(service.needsRestart).toBe(false);
       expect(service.restartError).toBe('');
       expect(mockLogger.warn).toHaveBeenCalledWith(
@@ -1682,7 +1650,6 @@ describe('ProjectStateService', () => {
       };
 
       const promise = service.restartContainers();
-      // Allow microtasks to settle so the restart invoke is in flight.
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
@@ -1762,9 +1729,7 @@ describe('ProjectStateService', () => {
 
       await service.restartContainers();
 
-      // Slash cache must be invalidated before the next slash-menu open.
       expect(spy).toHaveBeenCalledWith('invalidate_slash_cache', { projectId: 'test' });
-      // onProjectReady/onProjectSettled fire so consumers re-fetch per-project state.
       expect(readyCallback).toHaveBeenCalled();
       expect(settledCallback).toHaveBeenCalled();
     });
@@ -1786,14 +1751,12 @@ describe('ProjectStateService', () => {
       await service.restartContainers();
 
       expect(service.restartError).toBe('boom');
-      // Post-success steps must not run when restart fails — state has not advanced.
       expect(spy).not.toHaveBeenCalledWith('invalidate_slash_cache', expect.anything());
       expect(readyCallback).not.toHaveBeenCalled();
       expect(settledCallback).not.toHaveBeenCalled();
     });
 
     it('restartContainers still fires onProjectReady when invalidate_slash_cache itself fails', async () => {
-      // Regression guard: ensures ready fires even when invalidation fails.
       service.requestRestart();
       mockTauri.invokeHandler = (cmd: string) => {
         if (cmd === 'invalidate_slash_cache') {
@@ -1892,7 +1855,6 @@ describe('ProjectStateService', () => {
         if (cmd === 'restart_integration_containers') order.push('restart');
         return undefined;
       };
-      // activeProject must be set for restartContainers to proceed.
       service.activeProject.set('p');
       await service.restartContainers();
       expect(order).toEqual(['begin', 'restart']);
@@ -1909,7 +1871,7 @@ describe('ProjectStateService', () => {
       };
       service.activeProject.set('p');
       await service.restartContainers();
-      expect(order).toEqual(['restart']); // restart still ran despite the rejecting hook
+      expect(order).toEqual(['restart']);
     });
   });
 
@@ -1952,7 +1914,6 @@ describe('ProjectStateService', () => {
     });
 
     it('passes the backend discriminant through as the SSOT, overriding contradictory flags', () => {
-      // no_provider despite every credential flag and provider_configured=true.
       expect(
         authStatusToProjectStatus(
           auth({
@@ -1964,19 +1925,15 @@ describe('ProjectStateService', () => {
           })
         )
       ).toBe('no_provider');
-      // ready despite provider_configured=false (backend already decided).
       expect(authStatusToProjectStatus(auth({ status: 'ready', provider_configured: false }))).toBe(
         'ready'
       );
-      // auth_required despite credentials being present.
       expect(
         authStatusToProjectStatus(
           auth({ status: 'auth_required', api_key_configured: true, oauth_authenticated: true })
         )
       ).toBe('auth_required');
     });
-
-    // The remaining cases exercise the legacy fallback (payload without `status`).
 
     it('no_provider wins first, regardless of credential flags', () => {
       expect(

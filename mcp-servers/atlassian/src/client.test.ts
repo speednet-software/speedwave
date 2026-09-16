@@ -6,8 +6,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AxiosRequestConfig } from 'axios';
 
-// ── axios mock ─────────────────────────────────────────────────────────────
-// `vi.mock` factories are hoisted; mocks come from `vi.hoisted()`.
 const { requestMock, createMock, readCredentialsMock } = vi.hoisted(() => ({
   requestMock: vi.fn(),
   createMock: vi.fn(),
@@ -26,7 +24,6 @@ vi.mock('axios', async () => {
   };
 });
 
-// ── auth mock (for initializeAtlassianClient) ──────────────────────────────
 vi.mock('./auth.js', () => ({
   readCredentials: () => readCredentialsMock(),
 }));
@@ -81,7 +78,6 @@ beforeEach(() => {
   readCredentialsMock.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
-  // Pin Math.random to 0 to make backoff jitter deterministic.
   vi.spyOn(Math, 'random').mockReturnValue(0);
 });
 
@@ -162,7 +158,6 @@ describe('request — retry policy', () => {
     const assertion = expect(p).rejects.toThrow();
     await vi.runAllTimersAsync();
     await assertion;
-    // initial try + 3 retries
     expect(requestMock).toHaveBeenCalledTimes(4);
   });
 
@@ -393,7 +388,6 @@ describe('formatError', () => {
   });
 
   it('a short ATATT-prefixed string (under 20 chars after the prefix) is not redacted', () => {
-    // scrub() regex requires {20,} chars; short strings pass through.
     expect(AtlassianClient.formatError('value: ATATTshort')).toMatch(/ATATTshort/);
   });
 

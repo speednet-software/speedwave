@@ -180,14 +180,12 @@ export class ModalOverlayComponent {
    * CDK dialog as the input toggles, and tears down on host destroy.
    */
   constructor() {
-    // Sync dialog open/closed state with the `open()` input.
     effect(() => {
       const isOpen = this.open();
       if (isOpen) this.openDialog();
       else this.closeDialog();
     });
 
-    // Tear down the dialog if the host component is destroyed mid-flight.
     inject(DestroyRef).onDestroy(() => this.closeDialog());
   }
 
