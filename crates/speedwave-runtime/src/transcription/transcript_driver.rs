@@ -1422,6 +1422,8 @@ mod tests {
     /// One real chunk, then endless idle keepalives — a silent source that never ends its stream.
     struct KeepaliveStream {
         sent_real: bool,
+        /// Signalled once, on the first keepalive pull; the real chunk is in the WAV by then.
+        idle: Option<std::sync::mpsc::Sender<()>>,
     }
     impl AudioStream for KeepaliveStream {
         fn next_chunk(
@@ -1431,9 +1433,20 @@ mod tests {
                 self.sent_real = true;
                 return Ok(Some(chunk_at(0, 1600, None)));
             }
+            if let Some(idle) = self.idle.take() {
+                let _ = idle.send(());
+            }
             std::thread::sleep(Duration::from_millis(5));
             Ok(Some(crate::transcription::audio::AudioChunk::keepalive()))
         }
+    }
+
+    /// Trips `stop` once the fixture signals it reached the pull under test: a stop that lands any
+    /// earlier ends the ingest before that pull ever runs.
+    fn stop_when(reached: &std::sync::mpsc::Receiver<()>, stop: &StopSignal) {
+        let handshake = reached.recv_timeout(Duration::from_secs(10));
+        stop.stop();
+        handshake.expect("the capture fixture never reached the pull the stop must land in");
     }
 
     #[test]
@@ -1442,10 +1455,14 @@ mod tests {
         let store = Arc::new(TranscriptStore::with_root(store_dir.path()));
         let id = mk_session(&store, &store_dir.path().join("ignored.wav"));
         let stop = StopSignal::new();
+        let (idle_tx, idle) = std::sync::mpsc::channel::<()>();
         let driver = TranscriptDriver::new(DriverConfig {
             id,
             store: store.clone(),
-            audio: Box::new(KeepaliveStream { sent_real: false }),
+            audio: Box::new(KeepaliveStream {
+                sent_real: false,
+                idle: Some(idle_tx),
+            }),
             transcriber: None,
             transcribe_opts: TranscribeOptions::for_language(Language::Pl),
             stop: stop.clone(),
@@ -1456,8 +1473,7 @@ mod tests {
             let out_wav = out_wav.clone();
             move || driver.run(&out_wav)
         });
-        std::thread::sleep(Duration::from_millis(150));
-        stop.stop();
+        stop_when(&idle, &stop);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !runner.is_finished() {
             assert!(
@@ -3006,8 +3022,8 @@ mod tests {
         assert!(crate::transcription::audio::wav_duration(&wav).is_some());
     }
 
-    /// One chunk, then blocks until `stop` trips and only then errors — a failure landing
-    /// after the decode loop's last poll (the decode side exits on stop, never seeing it).
+    /// One chunk, then trips `stop` and errors on the next pull — a failure landing after the
+    /// decode loop's last poll (the decode side exits on stop, never seeing it).
     struct LateErrorStream {
         pulled: bool,
         stop: StopSignal,
@@ -3020,15 +3036,13 @@ mod tests {
                 self.pulled = true;
                 return Ok(Some(chunk_at(0, 1600, None)));
             }
-            while !self.stop.is_stopped() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            self.stop.stop();
             Err(CaptureError::Failed("device vanished".to_string()))
         }
     }
 
-    /// One chunk after `stop` trips, with a warning queued on it — health landing after the
-    /// decode loop's last drain (the wind-down path must forward it).
+    /// Trips `stop` as it hands over its only chunk, with a warning queued on it — health landing
+    /// after the decode loop's last drain (the wind-down path must forward it).
     struct LateHealthStream {
         pulled: bool,
         stop: StopSignal,
@@ -3040,9 +3054,7 @@ mod tests {
             if self.pulled {
                 return Ok(None);
             }
-            while !self.stop.is_stopped() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            self.stop.stop();
             self.pulled = true;
             Ok(Some(chunk_at(0, 1600, None)))
         }
@@ -3078,13 +3090,7 @@ mod tests {
             stop: stop.clone(),
             time_base: Duration::ZERO,
         });
-        let runner = std::thread::spawn({
-            let wav = wav.clone();
-            move || driver.run(&wav)
-        });
-        std::thread::sleep(Duration::from_millis(150));
-        stop.stop();
-        runner.join().unwrap().unwrap();
+        driver.run(&wav).unwrap();
         let mut rx = sub.events;
         let mut saw = false;
         while let Ok(ev) = rx.try_recv() {
@@ -3121,13 +3127,7 @@ mod tests {
             stop: stop.clone(),
             time_base: Duration::ZERO,
         });
-        let runner = std::thread::spawn({
-            let wav = wav.clone();
-            move || driver.run(&wav)
-        });
-        std::thread::sleep(Duration::from_millis(150));
-        stop.stop();
-        let err = runner.join().unwrap().unwrap_err();
+        let err = driver.run(&wav).unwrap_err();
         assert!(err.to_string().contains("device vanished"), "got: {err}");
         assert!(matches!(
             store.get(id).unwrap().status,

@@ -602,6 +602,30 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "drops a non-alias settings.json model without a slash when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    for model in mistral Sonnet opus1 ""; do
+        printf '{"model":"%s"}' "${model}" > "${TEST_HOME}/.claude/settings.json"
+        run bash "${ENTRYPOINT}" echo ok
+        [ "$status" -eq 0 ]
+        run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model===undefined?0:1)"
+        [ "$status" -eq 0 ] || { echo "model kept: ${model}"; false; }
+    done
+}
+
+@test "keeps every Claude Code model alias when ANTHROPIC_MODEL is unset" {
+    printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
+    aliases="$(sed -n 's/.*claude-\.+|(\([a-z|]*\)).*/\1/p' "${ENTRYPOINT}" | tr '|' ' ')"
+    [[ " ${aliases} " == *" default "* && " ${aliases} " == *" opusplan "* ]]
+    for alias in ${aliases} "opusplan[1m]"; do
+        printf '{"model":"%s"}' "$alias" > "${TEST_HOME}/.claude/settings.json"
+        run bash "${ENTRYPOINT}" echo ok
+        [ "$status" -eq 0 ]
+        run node -e "const s=JSON.parse(require('fs').readFileSync('${TEST_HOME}/.claude/settings.json','utf8')); process.exit(s.model==='${alias}'?0:1)"
+        [ "$status" -eq 0 ] || { echo "alias dropped: ${alias}"; false; }
+    done
+}
+
 @test "leaves settings.json byte-identical when the template merge changes nothing" {
     printf '{"effortLevel":"high"}' > "${SPEEDWAVE_RESOURCES}/settings.json"
     printf '{"effortLevel":"low","model":"claude-opus-5"}' > "${TEST_HOME}/.claude/settings.json"

@@ -92,6 +92,19 @@ pub fn is_selectable_anthropic_model_id(id: &str) -> bool {
     })
 }
 
+/// Claude Code's built-in `--model` aliases, in the order Claude Code's docs list them;
+/// `containers/entrypoint.sh`'s settings.json foreign-model guard mirrors this list.
+pub const CLAUDE_CODE_MODEL_ALIASES: &[&str] = &[
+    "default", "best", "fable", "sonnet", "opus", "haiku", "opusplan",
+];
+
+const CLAUDE_CODE_FAMILY_ALIASES: &[(&str, &str)] = &[
+    ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
+    ("haiku", "Haiku"),
+    ("fable", "Fable"),
+];
+
 /// Maps a Claude Code family alias (`opus|sonnet|haiku|fable`, optional `[1m]`) to the
 /// family's `latest` catalog id; anything else passes through verbatim (validity is separate).
 pub fn resolve_model_alias(value: &str) -> String {
@@ -99,12 +112,12 @@ pub fn resolve_model_alias(value: &str) -> String {
         Some(base) => (base, "[1m]"),
         None => (value, ""),
     };
-    let family_prefix = match word {
-        "opus" => "Opus",
-        "sonnet" => "Sonnet",
-        "haiku" => "Haiku",
-        "fable" => "Fable",
-        _ => return value.to_string(),
+    let Some((_, family_prefix)) = CLAUDE_CODE_FAMILY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == word)
+        .copied()
+    else {
+        return value.to_string();
     };
     ANTHROPIC_MODELS
         .iter()
@@ -935,6 +948,30 @@ mod tests {
     fn resolve_model_alias_fable_1m_is_selectable_because_latest_fable_has_a_1m_price() {
         let resolved = resolve_model_alias("fable[1m]");
         assert!(is_selectable_anthropic_model_id(&resolved));
+    }
+
+    #[test]
+    fn entrypoint_foreign_model_regex_matches_claude_code_model_aliases() {
+        let sh = include_str!("../../../containers/entrypoint.sh");
+        let expected = format!(
+            "(claude-.+|({})(\\[1m\\])?)",
+            CLAUDE_CODE_MODEL_ALIASES.join("|")
+        );
+        assert!(
+            sh.contains(&expected),
+            "entrypoint.sh's foreign-model guard must read {expected} — \
+             rebuild it from CLAUDE_CODE_MODEL_ALIASES"
+        );
+    }
+
+    #[test]
+    fn claude_code_family_aliases_are_a_subset_of_model_aliases() {
+        for (alias, _) in CLAUDE_CODE_FAMILY_ALIASES.iter() {
+            assert!(
+                CLAUDE_CODE_MODEL_ALIASES.contains(alias),
+                "family alias '{alias}' must also be listed in CLAUDE_CODE_MODEL_ALIASES"
+            );
+        }
     }
 
     #[test]

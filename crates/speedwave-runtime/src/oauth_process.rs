@@ -216,6 +216,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn is_oauth_alive_returns_true_when_listener_accepts() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

@@ -128,6 +128,7 @@ export class EffortSliderComponent {
   }
 
   protected onHandlePointerDown(event: PointerEvent): void {
+    if (event.button !== 0) return;
     event.preventDefault();
     this.dragging = true;
     (event.target as HTMLElement).setPointerCapture?.(event.pointerId);

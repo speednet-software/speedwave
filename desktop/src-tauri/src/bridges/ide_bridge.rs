@@ -1227,6 +1227,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::parallel(host_addressing)]
     fn test_ide_bridge_new_returns_valid_instance() {
         let bridge = IdeBridge::new().unwrap();
         assert!(bridge._tcp_port > 0, "TCP port should be assigned");

@@ -4,14 +4,15 @@ import { signal } from '@angular/core';
 import { By } from '@angular/platform-browser';
 import { CdkTextareaAutosize } from '@angular/cdk/text-field';
 import { ComposerComponent } from './composer.component';
-import { ProjectStateService } from '../../services/project-state.service';
+import { ProjectStateService, type AuthStatusResponse } from '../../services/project-state.service';
+import { TauriService } from '../../services/tauri.service';
+import { LoggerService } from '../../services/logger.service';
+import { MockTauriService } from '../../testing/mock-tauri.service';
+import { makeMockLogger } from '../../testing/mock-logger';
 import { SlashService } from '../slash/slash.service';
 
 class ProjectStateStub {
   readonly activeProject = signal<string | null>(null);
-  onProjectReady(_cb: () => void): () => void {
-    return () => undefined;
-  }
 }
 
 class SlashServiceStub {
@@ -744,5 +745,98 @@ describe('ComposerComponent', () => {
       expect(emitted).toEqual([]);
       expect(transcriptRow()).not.toBeNull();
     });
+  });
+
+  describe('attachment error', () => {
+    function attachmentErrorEl(): HTMLElement | null {
+      return rootEl.querySelector<HTMLElement>('[data-testid="composer-attachment-error"]');
+    }
+
+    function makeDropEvent(files: File[]): DragEvent {
+      const dataTransfer = { types: ['Files'], files, dropEffect: 'none' };
+      const ev = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+      Object.defineProperty(ev, 'dataTransfer', { value: dataTransfer, configurable: true });
+      return ev;
+    }
+
+    it('shows an English error when an image is dropped with no active project', () => {
+      const dropTarget = rootEl.querySelector('[appFileDrop]') as HTMLElement;
+      const file = new File(['x'], 'a.png', { type: 'image/png' });
+
+      dropTarget.dispatchEvent(makeDropEvent([file]));
+      fixture.detectChanges();
+
+      expect(attachmentErrorEl()?.textContent?.trim()).toBe(
+        'Select a project before attaching an image.'
+      );
+    });
+  });
+});
+
+describe('ComposerComponent slash discovery with the real project and slash services', () => {
+  const READY: AuthStatusResponse = {
+    status: 'ready',
+    api_key_configured: false,
+    oauth_authenticated: true,
+    needs_anthropic_auth: true,
+    provider_configured: true,
+  };
+
+  let projectState: ProjectStateService;
+  let slash: SlashService;
+  let discoveries: number;
+
+  beforeEach(() => {
+    discoveries = 0;
+    const tauri = new MockTauriService();
+    tauri.invokeHandler = (cmd) => {
+      if (cmd !== 'list_slash_commands') return Promise.resolve(undefined);
+      discoveries++;
+      return Promise.resolve({ commands: [], source: 'Init' });
+    };
+    TestBed.configureTestingModule({
+      imports: [ComposerComponent],
+      providers: [
+        { provide: TauriService, useValue: tauri },
+        { provide: LoggerService, useValue: makeMockLogger() },
+      ],
+    });
+    projectState = TestBed.inject(ProjectStateService);
+    slash = TestBed.inject(SlashService);
+    projectState.activeProject.set('acme');
+  });
+
+  function mountComposer(): ComponentFixture<ComposerComponent> {
+    const created = TestBed.createComponent(ComposerComponent);
+    created.detectChanges();
+    return created;
+  }
+
+  async function signIn(): Promise<void> {
+    projectState.forceUnconfigured();
+    projectState.applyAuthStatus(READY);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
+
+  it('refreshes once per sign-in however many composers were mounted before', async () => {
+    const refresh = vi.spyOn(slash, 'refresh');
+    mountComposer().destroy();
+    mountComposer().destroy();
+    const live = mountComposer();
+
+    await signIn();
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(discoveries).toBe(1);
+    live.destroy();
+  });
+
+  it('refreshes once per sign-in while no composer is mounted', async () => {
+    mountComposer().destroy();
+
+    await signIn();
+    await signIn();
+
+    expect(discoveries).toBe(2);
   });
 });
