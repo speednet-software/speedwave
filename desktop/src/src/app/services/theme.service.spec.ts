@@ -1,1 +1,446 @@
-aW1wb3J0IHsgVGVzdEJlZCB9IGZyb20gJ0Bhbmd1bGFyL2NvcmUvdGVzdGluZyc7CmltcG9ydCB7CiAgVGhlbWVTZXJ2aWNlLAogIERFRkFVTFRfVEhFTUVfTU9ERSwKICBUSEVNRV9NT0RFUywKICBUSEVNRV9TVE9SQUdFX0tFWSwKICBNT0RFX1NUT1JBR0VfS0VZLAogIGFwcGx5UGVyc2lzdGVkVGhlbWVPblN0YXJ0dXAsCiAgdHlwZSBUaGVtZUlkLAogIHR5cGUgVGhlbWVNb2RlLAp9IGZyb20gJy4vdGhlbWUuc2VydmljZSc7CgovKioKICogSW5zdGFsbHMgYSBjb250cm9sbGFibGUgYG1hdGNoTWVkaWFgIG9uIGB3aW5kb3dgOyByZXR1cm5zIGBmaXJlQ2hhbmdlYCB0byBzaW11bGF0ZSBPUwogKiB0aGVtZSB0b2dnbGVzIGFuZCBgcmVzdG9yZWAgdG8gcmVtb3ZlIHRoZSBzdHViLgogKiBAcGFyYW0gcHJlZmVyc0RhcmsgLSBJbml0aWFsIGBtYXRjaGVzYCBmb3IgYChwcmVmZXJzLWNvbG9yLXNjaGVtZTogZGFyaylgLgogKi8KZnVuY3Rpb24gbW9ja01hdGNoTWVkaWEocHJlZmVyc0Rhcms6IGJvb2xlYW4pOiB7CiAgZmlyZUNoYW5nZTogKHByZWZlcnNEYXJrTm93OiBib29sZWFuKSA9PiB2b2lkOwogIHJlc3RvcmU6ICgpID0+IHZvaWQ7Cn0gewogIGNvbnN0IG9yaWdpbmFsID0gT2JqZWN0LmdldE93blByb3BlcnR5RGVzY3JpcHRvcih3aW5kb3csICdtYXRjaE1lZGlhJyk7CiAgY29uc3QgbGlzdGVuZXJzID0gbmV3IFNldDwoZTogTWVkaWFRdWVyeUxpc3RFdmVudCkgPT4gdm9pZD4oKTsKICBjb25zdCBtcSA9IHsKICAgIG1hdGNoZXM6IHByZWZlcnNEYXJrLAogICAgbWVkaWE6ICcocHJlZmVycy1jb2xvci1zY2hlbWU6IGRhcmspJywKICAgIG9uY2hhbmdlOiBudWxsLAogICAgYWRkRXZlbnRMaXN0ZW5lcjogKAogICAgICBfOiBzdHJpbmcsCiAgICAgIGZuOiAoZTogTWVkaWFRdWVyeUxpc3RFdmVudCkgPT4gdm9pZCwKICAgICAgb3B0aW9ucz86IHsgc2lnbmFsPzogQWJvcnRTaWduYWwgfQogICAgKSA9PiB7CiAgICAgIGxpc3RlbmVycy5hZGQoZm4pOwogICAgICBvcHRpb25zPy5zaWduYWw/LmFkZEV2ZW50TGlzdGVuZXIoJ2Fib3J0JywgKCkgPT4gbGlzdGVuZXJzLmRlbGV0ZShmbikpOwogICAgfSwKICAgIHJlbW92ZUV2ZW50TGlzdGVuZXI6IChfOiBzdHJpbmcsIGZuOiAoZTogTWVkaWFRdWVyeUxpc3RFdmVudCkgPT4gdm9pZCkgPT4gbGlzdGVuZXJzLmRlbGV0ZShmbiksCiAgICBhZGRMaXN0ZW5lcjogKGZuOiAoZTogTWVkaWFRdWVyeUxpc3RFdmVudCkgPT4gdm9pZCkgPT4gbGlzdGVuZXJzLmFkZChmbiksCiAgICByZW1vdmVMaXN0ZW5lcjogKGZuOiAoZTogTWVkaWFRdWVyeUxpc3RFdmVudCkgPT4gdm9pZCkgPT4gbGlzdGVuZXJzLmRlbGV0ZShmbiksCiAgICBkaXNwYXRjaEV2ZW50OiAoKSA9PiBmYWxzZSwKICB9IGFzIHVua25vd24gYXMgTWVkaWFRdWVyeUxpc3Q7CiAgT2JqZWN0LmRlZmluZVByb3BlcnR5KHdpbmRvdywgJ21hdGNoTWVkaWEnLCB7CiAgICBjb25maWd1cmFibGU6IHRydWUsCiAgICB3cml0YWJsZTogdHJ1ZSwKICAgIHZhbHVlOiAoKSA9PiBtcSwKICB9KTsKICByZXR1cm4gewogICAgZmlyZUNoYW5nZTogKHByZWZlcnNEYXJrTm93OiBib29sZWFuKSA9PiB7CiAgICAgIChtcSBhcyB1bmtub3duIGFzIHsgbWF0Y2hlczogYm9vbGVhbiB9KS5tYXRjaGVzID0gcHJlZmVyc0RhcmtOb3c7CiAgICAgIGZvciAoY29uc3QgZm4gb2YgbGlzdGVuZXJzKSBmbih7IG1hdGNoZXM6IHByZWZlcnNEYXJrTm93IH0gYXMgTWVkaWFRdWVyeUxpc3RFdmVudCk7CiAgICB9LAogICAgcmVzdG9yZTogKCkgPT4gewogICAgICBpZiAob3JpZ2luYWwpIHsKICAgICAgICBPYmplY3QuZGVmaW5lUHJvcGVydHkod2luZG93LCAnbWF0Y2hNZWRpYScsIG9yaWdpbmFsKTsKICAgICAgfSBlbHNlIHsKICAgICAgICBSZWZsZWN0LmRlbGV0ZVByb3BlcnR5KHdpbmRvdyBhcyB1bmtub3duIGFzIFJlY29yZDxzdHJpbmcsIHVua25vd24+LCAnbWF0Y2hNZWRpYScpOwogICAgICB9CiAgICB9LAogIH07Cn0KCi8qKiBCdWlsZCBhIGZyZXNoIGluLW1lbW9yeSBgU3RvcmFnZWAtc2hhcGVkIG9iamVjdCBmb3IgZWFjaCB0ZXN0LiAqLwpmdW5jdGlvbiBtYWtlTWVtb3J5U3RvcmFnZSgpOiBTdG9yYWdlIHsKICBjb25zdCBkYXRhID0gbmV3IE1hcDxzdHJpbmcsIHN0cmluZz4oKTsKICByZXR1cm4gewogICAgZ2V0IGxlbmd0aCgpIHsKICAgICAgcmV0dXJuIGRhdGEuc2l6ZTsKICAgIH0sCiAgICBjbGVhcjogKCkgPT4gZGF0YS5jbGVhcigpLAogICAgZ2V0SXRlbTogKGtleTogc3RyaW5nKSA9PiBkYXRhLmdldChrZXkpID8/IG51bGwsCiAgICBzZXRJdGVtOiAoa2V5OiBzdHJpbmcsIHZhbHVlOiBzdHJpbmcpID0+IHsKICAgICAgZGF0YS5zZXQoa2V5LCBTdHJpbmcodmFsdWUpKTsKICAgIH0sCiAgICByZW1vdmVJdGVtOiAoa2V5OiBzdHJpbmcpID0+IHsKICAgICAgZGF0YS5kZWxldGUoa2V5KTsKICAgIH0sCiAgICBrZXk6IChpbmRleDogbnVtYmVyKSA9PiBBcnJheS5mcm9tKGRhdGEua2V5cygpKVtpbmRleF0gPz8gbnVsbCwKICB9Owp9CgpkZXNjcmliZSgnVGhlbWVTZXJ2aWNlJywgKCkgPT4gewogIGxldCBvcmlnaW5hbExvY2FsU3RvcmFnZTogUHJvcGVydHlEZXNjcmlwdG9yIHwgdW5kZWZpbmVkOwoKICBiZWZvcmVFYWNoKCgpID0+IHsKICAgIG9yaWdpbmFsTG9jYWxTdG9yYWdlID0gT2JqZWN0LmdldE93blByb3BlcnR5RGVzY3JpcHRvcihnbG9iYWxUaGlzLCAnbG9jYWxTdG9yYWdlJyk7CiAgICBPYmplY3QuZGVmaW5lUHJvcGVydHkoZ2xvYmFsVGhpcywgJ2xvY2FsU3RvcmFnZScsIHsKICAgICAgY29uZmlndXJhYmxlOiB0cnVlLAogICAgICB3cml0YWJsZTogdHJ1ZSwKICAgICAgdmFsdWU6IG1ha2VNZW1vcnlTdG9yYWdlKCksCiAgICB9KTsKICAgIGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5yZW1vdmVBdHRyaWJ1dGUoJ2RhdGEtdGhlbWUnKTsKICB9KTsKCiAgYWZ0ZXJFYWNoKCgpID0+IHsKICAgIGlmIChvcmlnaW5hbExvY2FsU3RvcmFnZSkgewogICAgICBPYmplY3QuZGVmaW5lUHJvcGVydHkoZ2xvYmFsVGhpcywgJ2xvY2FsU3RvcmFnZScsIG9yaWdpbmFsTG9jYWxTdG9yYWdlKTsKICAgIH0gZWxzZSB7CiAgICAgIFJlZmxlY3QuZGVsZXRlUHJvcGVydHkoZ2xvYmFsVGhpcyBhcyBSZWNvcmQ8c3RyaW5nLCB1bmtub3duPiwgJ2xvY2FsU3RvcmFnZScpOwogICAgfQogICAgZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LnJlbW92ZUF0dHJpYnV0ZSgnZGF0YS10aGVtZScpOwogICAgZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5yZW1vdmUoJ2RhcmsnKTsKICB9KTsKCiAgZnVuY3Rpb24gY3JlYXRlKCk6IFRoZW1lU2VydmljZSB7CiAgICBUZXN0QmVkLnJlc2V0VGVzdGluZ01vZHVsZSgpOwogICAgVGVzdEJlZC5jb25maWd1cmVUZXN0aW5nTW9kdWxlKHt9KTsKICAgIHJldHVybiBUZXN0QmVkLmluamVjdChUaGVtZVNlcnZpY2UpOwogIH0KCiAgaXQoJ2RlZmF1bHRzIHRvIGVtYmVyIHdoZW4gbm90aGluZyBpcyBzdG9yZWQgYW5kIHJlbW92ZXMgZGF0YS10aGVtZScsICgpID0+IHsKICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgZXhwZWN0KHN2Yy50aGVtZSgpKS50b0JlPFRoZW1lSWQ+KCdlbWJlcicpOwogICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5oYXNBdHRyaWJ1dGUoJ2RhdGEtdGhlbWUnKSkudG9CZShmYWxzZSk7CiAgfSk7CgogIGl0KCdoeWRyYXRlcyBhIHByZXZpb3VzbHkgcGVyc2lzdGVkIHRoZW1lIGZyb20gbG9jYWxTdG9yYWdlJywgKCkgPT4gewogICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oVEhFTUVfU1RPUkFHRV9LRVksICdtaW50Jyk7CiAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgIGV4cGVjdChzdmMudGhlbWUoKSkudG9CZTxUaGVtZUlkPignbWludCcpOwogICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5nZXRBdHRyaWJ1dGUoJ2RhdGEtdGhlbWUnKSkudG9CZSgnbWludCcpOwogIH0pOwoKICBpdCgnd3JpdGVzIGRhdGEtdGhlbWUgKyBwZXJzaXN0cyB3aGVuIHNldFRoZW1lIHN3aXRjaGVzIHRvIGEgbm9uLWRlZmF1bHQgdGhlbWUnLCAoKSA9PiB7CiAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgIHN2Yy5zZXRUaGVtZSgnY3JpbXNvbicpOwogICAgZXhwZWN0KHN2Yy50aGVtZSgpKS50b0JlPFRoZW1lSWQ+KCdjcmltc29uJyk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmdldEF0dHJpYnV0ZSgnZGF0YS10aGVtZScpKS50b0JlKCdjcmltc29uJyk7CiAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oVEhFTUVfU1RPUkFHRV9LRVkpKS50b0JlKCdjcmltc29uJyk7CiAgfSk7CgogIGl0KCdyZW1vdmVzIGRhdGEtdGhlbWUgd2hlbiBzd2l0Y2hpbmcgYmFjayB0byB0aGUgZW1iZXIgZGVmYXVsdCcsICgpID0+IHsKICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgc3ZjLnNldFRoZW1lKCdjcmltc29uJyk7CiAgICBzdmMuc2V0VGhlbWUoJ2VtYmVyJyk7CiAgICBleHBlY3Qoc3ZjLnRoZW1lKCkpLnRvQmU8VGhlbWVJZD4oJ2VtYmVyJyk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50Lmhhc0F0dHJpYnV0ZSgnZGF0YS10aGVtZScpKS50b0JlKGZhbHNlKTsKICAgIGV4cGVjdChsb2NhbFN0b3JhZ2UuZ2V0SXRlbShUSEVNRV9TVE9SQUdFX0tFWSkpLnRvQmUoJ2VtYmVyJyk7CiAgfSk7CgogIGl0KCd0cmVhdHMgdW5rbm93biBzdG9yZWQgdmFsdWVzIGFzIGVtYmVyJywgKCkgPT4gewogICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oVEhFTUVfU1RPUkFHRV9LRVksICdib2d1cycpOwogICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICBleHBlY3Qoc3ZjLnRoZW1lKCkpLnRvQmU8VGhlbWVJZD4oJ2VtYmVyJyk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50Lmhhc0F0dHJpYnV0ZSgnZGF0YS10aGVtZScpKS50b0JlKGZhbHNlKTsKICB9KTsKCiAgaXQoJ3RyZWF0cyBhIHByZXZpb3VzbHkgcGVyc2lzdGVkIGFtYmVyIChub3cgcmVtb3ZlZCkgYXMgdGhlIGVtYmVyIGRlZmF1bHQnLCAoKSA9PiB7CiAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShUSEVNRV9TVE9SQUdFX0tFWSwgJ2FtYmVyJyk7CiAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgIGV4cGVjdChzdmMudGhlbWUoKSkudG9CZTxUaGVtZUlkPignZW1iZXInKTsKICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuaGFzQXR0cmlidXRlKCdkYXRhLXRoZW1lJykpLnRvQmUoZmFsc2UpOwogIH0pOwoKICBpdCgndHJlYXRzIGFuIGVtcHR5IHN0b3JlZCB2YWx1ZSBhcyBlbWJlcicsICgpID0+IHsKICAgIGxvY2FsU3RvcmFnZS5zZXRJdGVtKFRIRU1FX1NUT1JBR0VfS0VZLCAnJyk7CiAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgIGV4cGVjdChzdmMudGhlbWUoKSkudG9CZTxUaGVtZUlkPignZW1iZXInKTsKICB9KTsKCiAgaXQoJ2lzIGEgbm8tb3Agd2hlbiBzZXRUaGVtZSBpcyBjYWxsZWQgd2l0aCB0aGUgY3VycmVudCB0aGVtZScsICgpID0+IHsKICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgc3ZjLnNldFRoZW1lKCdtaW50Jyk7CiAgICBjb25zdCBjYWxsc0JlZm9yZSA9IGxvY2FsU3RvcmFnZS5nZXRJdGVtKFRIRU1FX1NUT1JBR0VfS0VZKTsKICAgIHN2Yy5zZXRUaGVtZSgnbWludCcpOwogICAgZXhwZWN0KHN2Yy50aGVtZSgpKS50b0JlPFRoZW1lSWQ+KCdtaW50Jyk7CiAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oVEhFTUVfU1RPUkFHRV9LRVkpKS50b0JlKGNhbGxzQmVmb3JlKTsKICB9KTsKCiAgaXQoJ3N1cnZpdmVzIGEgbG9jYWxTdG9yYWdlIHdyaXRlIGZhaWx1cmUgd2l0aG91dCB0aHJvd2luZycsICgpID0+IHsKICAgIE9iamVjdC5kZWZpbmVQcm9wZXJ0eShnbG9iYWxUaGlzLCAnbG9jYWxTdG9yYWdlJywgewogICAgICBjb25maWd1cmFibGU6IHRydWUsCiAgICAgIHdyaXRhYmxlOiB0cnVlLAogICAgICB2YWx1ZTogewogICAgICAgIGdldEl0ZW06ICgpID0+IG51bGwsCiAgICAgICAgc2V0SXRlbTogKCkgPT4gewogICAgICAgICAgdGhyb3cgbmV3IEVycm9yKCdxdW90YScpOwogICAgICAgIH0sCiAgICAgICAgcmVtb3ZlSXRlbTogKCkgPT4gdW5kZWZpbmVkLAogICAgICAgIGNsZWFyOiAoKSA9PiB1bmRlZmluZWQsCiAgICAgICAga2V5OiAoKSA9PiBudWxsLAogICAgICAgIGxlbmd0aDogMCwKICAgICAgfSBzYXRpc2ZpZXMgU3RvcmFnZSwKICAgIH0pOwoKICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgZXhwZWN0KCgpID0+IHN2Yy5zZXRUaGVtZSgnY3JpbXNvbicpKS5ub3QudG9UaHJvdygpOwogICAgZXhwZWN0KHN2Yy50aGVtZSgpKS50b0JlPFRoZW1lSWQ+KCdjcmltc29uJyk7CiAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmdldEF0dHJpYnV0ZSgnZGF0YS10aGVtZScpKS50b0JlKCdjcmltc29uJyk7CiAgfSk7CgogIGRlc2NyaWJlKCdtb2RlIGF4aXMnLCAoKSA9PiB7CiAgICBsZXQgbWVkaWE6IFJldHVyblR5cGU8dHlwZW9mIG1vY2tNYXRjaE1lZGlhPjsKCiAgICBiZWZvcmVFYWNoKCgpID0+IHsKICAgICAgbWVkaWEgPSBtb2NrTWF0Y2hNZWRpYShmYWxzZSk7CiAgICB9KTsKCiAgICBhZnRlckVhY2goKCkgPT4gewogICAgICBtZWRpYS5yZXN0b3JlKCk7CiAgICB9KTsKCiAgICAvLyBIYXBweSBwYXRocwogICAgaXQoJ2RlZmF1bHRzIHRvIGF1dG8gYW5kIGZvbGxvd3MgYSBsaWdodCBzeXN0ZW0gd2hlbiBubyBtb2RlIGlzIHBlcnNpc3RlZCAoZmlyc3QgcnVuKScsICgpID0+IHsKICAgICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICAgIGV4cGVjdChzdmMubW9kZSgpKS50b0JlPFRoZW1lTW9kZT4oJ2F1dG8nKTsKICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZShmYWxzZSk7CiAgICAgIC8vIEZpcnN0IHJ1biBtdXN0IG5vdCBwZXJzaXN0IGEgY2hvaWNlIHRoZSB1c2VyIG5ldmVyIG1hZGUuCiAgICAgIGV4cGVjdChsb2NhbFN0b3JhZ2UuZ2V0SXRlbShNT0RFX1NUT1JBR0VfS0VZKSkudG9CZU51bGwoKTsKICAgIH0pOwoKICAgIGl0KCdkZWZhdWx0cyB0byBhdXRvIGFuZCBmb2xsb3dzIGEgZGFyayBzeXN0ZW0gd2hlbiBubyBtb2RlIGlzIHBlcnNpc3RlZCAoZmlyc3QgcnVuKScsICgpID0+IHsKICAgICAgbWVkaWEucmVzdG9yZSgpOwogICAgICBtZWRpYSA9IG1vY2tNYXRjaE1lZGlhKHRydWUpOwogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgZXhwZWN0KHN2Yy5tb2RlKCkpLnRvQmU8VGhlbWVNb2RlPignYXV0bycpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKHRydWUpOwogICAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSkpLnRvQmVOdWxsKCk7CiAgICB9KTsKCiAgICBpdCgnc2V0TW9kZSgibGlnaHQiKSByZW1vdmVzIC5kYXJrIGFuZCBwZXJzaXN0cyB0aGUgY2hvaWNlJywgKCkgPT4gewogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgc3ZjLnNldE1vZGUoJ2xpZ2h0Jyk7CiAgICAgIGV4cGVjdChzdmMubW9kZSgpKS50b0JlPFRoZW1lTW9kZT4oJ2xpZ2h0Jyk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUoZmFsc2UpOwogICAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSkpLnRvQmUoJ2xpZ2h0Jyk7CiAgICB9KTsKCiAgICBpdCgnc2V0TW9kZSgiZGFyayIpIGFkZHMgLmRhcmsgYW5kIHBlcnNpc3RzIHRoZSBjaG9pY2UnLCAoKSA9PiB7CiAgICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgICBzdmMuc2V0TW9kZSgnbGlnaHQnKTsKICAgICAgc3ZjLnNldE1vZGUoJ2RhcmsnKTsKICAgICAgZXhwZWN0KHN2Yy5tb2RlKCkpLnRvQmU8VGhlbWVNb2RlPignZGFyaycpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKHRydWUpOwogICAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSkpLnRvQmUoJ2RhcmsnKTsKICAgIH0pOwoKICAgIGl0KCdoeWRyYXRlcyBwZXJzaXN0ZWQgImxpZ2h0IiBtb2RlIGF0IHN0YXJ0dXAsIGJlYXRpbmcgc3lzdGVtIGRhcmsgcHJlZmVyZW5jZScsICgpID0+IHsKICAgICAgbWVkaWEucmVzdG9yZSgpOwogICAgICBtZWRpYSA9IG1vY2tNYXRjaE1lZGlhKHRydWUpOwogICAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShNT0RFX1NUT1JBR0VfS0VZLCAnbGlnaHQnKTsKICAgICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICAgIGV4cGVjdChzdmMubW9kZSgpKS50b0JlPFRoZW1lTW9kZT4oJ2xpZ2h0Jyk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUoZmFsc2UpOwogICAgfSk7CgogICAgLy8gRWRnZSBjYXNlcwogICAgaXQoJ3RyZWF0cyB1bmtub3duIHN0b3JlZCBtb2RlIGFzIHRoZSBmaXJzdC1ydW4gZGVmYXVsdCcsICgpID0+IHsKICAgICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSwgJ3NlcGlhJyk7CiAgICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgICBleHBlY3Qoc3ZjLm1vZGUoKSkudG9CZTxUaGVtZU1vZGU+KCdhdXRvJyk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUoZmFsc2UpOwogICAgfSk7CgogICAgaXQoJ3NldE1vZGUoImF1dG8iKSB3aXRoIHByZWZlcnMtY29sb3Itc2NoZW1lPWRhcmsgYWRkcyAuZGFyayB3aGlsZSBrZWVwaW5nIG1vZGUoKT09PSJhdXRvIicsICgpID0+IHsKICAgICAgbWVkaWEucmVzdG9yZSgpOwogICAgICBtZWRpYSA9IG1vY2tNYXRjaE1lZGlhKHRydWUpOwogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgc3ZjLnNldE1vZGUoJ2F1dG8nKTsKICAgICAgZXhwZWN0KHN2Yy5tb2RlKCkpLnRvQmU8VGhlbWVNb2RlPignYXV0bycpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKHRydWUpOwogICAgfSk7CgogICAgaXQoJ3NldE1vZGUoImF1dG8iKSB3aXRoIHByZWZlcnMtY29sb3Itc2NoZW1lPWxpZ2h0IHJlbW92ZXMgLmRhcmsgd2hpbGUga2VlcGluZyBtb2RlKCk9PT0iYXV0byInLCAoKSA9PiB7CiAgICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgICBzdmMuc2V0TW9kZSgnYXV0bycpOwogICAgICBleHBlY3Qoc3ZjLm1vZGUoKSkudG9CZTxUaGVtZU1vZGU+KCdhdXRvJyk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUoZmFsc2UpOwogICAgfSk7CgogICAgaXQoJ2lzIGEgbm8tb3Agd2hlbiBzZXRNb2RlIGlzIGNhbGxlZCB3aXRoIHRoZSBjdXJyZW50IG1vZGUnLCAoKSA9PiB7CiAgICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgICBzdmMuc2V0TW9kZSgnbGlnaHQnKTsKICAgICAgY29uc3QgcGVyc2lzdGVkID0gbG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSk7CiAgICAgIHN2Yy5zZXRNb2RlKCdsaWdodCcpOwogICAgICBleHBlY3Qoc3ZjLm1vZGUoKSkudG9CZTxUaGVtZU1vZGU+KCdsaWdodCcpOwogICAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSkpLnRvQmUocGVyc2lzdGVkKTsKICAgIH0pOwoKICAgIGl0KCdoeWRyYXRlcyBwZXJzaXN0ZWQgImF1dG8iIG1vZGUgYXQgc3RhcnR1cCwgYXBwbHlpbmcgc3lzdGVtIGRhcmsgcHJlZmVyZW5jZScsICgpID0+IHsKICAgICAgbWVkaWEucmVzdG9yZSgpOwogICAgICBtZWRpYSA9IG1vY2tNYXRjaE1lZGlhKHRydWUpOwogICAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShNT0RFX1NUT1JBR0VfS0VZLCAnYXV0bycpOwogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgZXhwZWN0KHN2Yy5tb2RlKCkpLnRvQmU8VGhlbWVNb2RlPignYXV0bycpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKHRydWUpOwogICAgfSk7CgogICAgaXQoJ3N0b3BzIHJlYWN0aW5nIHRvIHByZWZlcnMtY29sb3Itc2NoZW1lIGNoYW5nZXMgYWZ0ZXIgbmdPbkRlc3Ryb3knLCAoKSA9PiB7CiAgICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgICBzdmMuc2V0TW9kZSgnYXV0bycpOwogICAgICBzdmMubmdPbkRlc3Ryb3koKTsKICAgICAgbWVkaWEuZmlyZUNoYW5nZSh0cnVlKTsKICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZShmYWxzZSk7CiAgICB9KTsKCiAgICBpdCgncmVhY3RzIHRvIHByZWZlcnMtY29sb3Itc2NoZW1lIGNoYW5nZXMgd2hpbGUgaW4gYXV0byBtb2RlJywgKCkgPT4gewogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgc3ZjLnNldE1vZGUoJ2F1dG8nKTsKICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZShmYWxzZSk7CiAgICAgIG1lZGlhLmZpcmVDaGFuZ2UodHJ1ZSk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuY2xhc3NMaXN0LmNvbnRhaW5zKCdkYXJrJykpLnRvQmUodHJ1ZSk7CiAgICAgIG1lZGlhLmZpcmVDaGFuZ2UoZmFsc2UpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKGZhbHNlKTsKICAgIH0pOwoKICAgIGl0KCdpZ25vcmVzIHByZWZlcnMtY29sb3Itc2NoZW1lIGNoYW5nZXMgd2hlbiBtb2RlIGlzIGV4cGxpY2l0IChsaWdodCknLCAoKSA9PiB7CiAgICAgIGNvbnN0IHN2YyA9IGNyZWF0ZSgpOwogICAgICBzdmMuc2V0TW9kZSgnbGlnaHQnKTsKICAgICAgbWVkaWEuZmlyZUNoYW5nZSh0cnVlKTsKICAgICAgZXhwZWN0KHN2Yy5tb2RlKCkpLnRvQmU8VGhlbWVNb2RlPignbGlnaHQnKTsKICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZShmYWxzZSk7CiAgICB9KTsKCiAgICBpdCgnc2V0TW9kZSBkb2VzIG5vdCB0b3VjaCB0aGUgYWNjZW50IHRoZW1lJywgKCkgPT4gewogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgc3ZjLnNldFRoZW1lKCdtaW50Jyk7CiAgICAgIHN2Yy5zZXRNb2RlKCdsaWdodCcpOwogICAgICBleHBlY3Qoc3ZjLnRoZW1lKCkpLnRvQmU8VGhlbWVJZD4oJ21pbnQnKTsKICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5nZXRBdHRyaWJ1dGUoJ2RhdGEtdGhlbWUnKSkudG9CZSgnbWludCcpOwogICAgfSk7CgogICAgaXQoJ3NldFRoZW1lIGRvZXMgbm90IHRvdWNoIHRoZSBtb2RlIGNsYXNzIG9yIHNpZ25hbCcsICgpID0+IHsKICAgICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICAgIHN2Yy5zZXRNb2RlKCdsaWdodCcpOwogICAgICBzdmMuc2V0VGhlbWUoJ2lyaXMnKTsKICAgICAgZXhwZWN0KHN2Yy5tb2RlKCkpLnRvQmU8VGhlbWVNb2RlPignbGlnaHQnKTsKICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZShmYWxzZSk7CiAgICB9KTsKCiAgICBpdCgnc3Vydml2ZXMgYSBsb2NhbFN0b3JhZ2Ugd3JpdGUgZmFpbHVyZSBmb3IgbW9kZSB3aXRob3V0IHRocm93aW5nJywgKCkgPT4gewogICAgICBPYmplY3QuZGVmaW5lUHJvcGVydHkoZ2xvYmFsVGhpcywgJ2xvY2FsU3RvcmFnZScsIHsKICAgICAgICBjb25maWd1cmFibGU6IHRydWUsCiAgICAgICAgd3JpdGFibGU6IHRydWUsCiAgICAgICAgdmFsdWU6IHsKICAgICAgICAgIGdldEl0ZW06ICgpID0+IG51bGwsCiAgICAgICAgICBzZXRJdGVtOiAoKSA9PiB7CiAgICAgICAgICAgIHRocm93IG5ldyBFcnJvcigncXVvdGEnKTsKICAgICAgICAgIH0sCiAgICAgICAgICByZW1vdmVJdGVtOiAoKSA9PiB1bmRlZmluZWQsCiAgICAgICAgICBjbGVhcjogKCkgPT4gdW5kZWZpbmVkLAogICAgICAgICAga2V5OiAoKSA9PiBudWxsLAogICAgICAgICAgbGVuZ3RoOiAwLAogICAgICAgIH0gc2F0aXNmaWVzIFN0b3JhZ2UsCiAgICAgIH0pOwogICAgICBjb25zdCBzdmMgPSBjcmVhdGUoKTsKICAgICAgZXhwZWN0KCgpID0+IHN2Yy5zZXRNb2RlKCdsaWdodCcpKS5ub3QudG9UaHJvdygpOwogICAgICBleHBlY3Qoc3ZjLm1vZGUoKSkudG9CZTxUaGVtZU1vZGU+KCdsaWdodCcpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKGZhbHNlKTsKICAgIH0pOwoKICAgIGl0KCdmYWxscyBiYWNrIHRvIGxpZ2h0IHdoZW4gbWF0Y2hNZWRpYSBpcyB1bmF2YWlsYWJsZSBhbmQgbW9kZSBpcyBhdXRvJywgKCkgPT4gewogICAgICBtZWRpYS5yZXN0b3JlKCk7CiAgICAgIGNvbnN0IG9yaWdpbmFsID0gT2JqZWN0LmdldE93blByb3BlcnR5RGVzY3JpcHRvcih3aW5kb3csICdtYXRjaE1lZGlhJyk7CiAgICAgIFJlZmxlY3QuZGVsZXRlUHJvcGVydHkod2luZG93IGFzIHVua25vd24gYXMgUmVjb3JkPHN0cmluZywgdW5rbm93bj4sICdtYXRjaE1lZGlhJyk7CiAgICAgIHRyeSB7CiAgICAgICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICAgICAgc3ZjLnNldE1vZGUoJ2F1dG8nKTsKICAgICAgICBleHBlY3Qoc3ZjLm1vZGUoKSkudG9CZTxUaGVtZU1vZGU+KCdhdXRvJyk7CiAgICAgICAgZXhwZWN0KGRvY3VtZW50LmRvY3VtZW50RWxlbWVudC5jbGFzc0xpc3QuY29udGFpbnMoJ2RhcmsnKSkudG9CZShmYWxzZSk7CiAgICAgIH0gZmluYWxseSB7CiAgICAgICAgaWYgKG9yaWdpbmFsKSBPYmplY3QuZGVmaW5lUHJvcGVydHkod2luZG93LCAnbWF0Y2hNZWRpYScsIG9yaWdpbmFsKTsKICAgICAgfQogICAgfSk7CgogICAgaXQoJ1RIRU1FX01PREVTIGlzIHRoZSBjYW5vbmljYWwgbGlzdCcsICgpID0+IHsKICAgICAgZXhwZWN0KFRIRU1FX01PREVTKS50b0VxdWFsKFsnbGlnaHQnLCAnZGFyaycsICdhdXRvJ10pOwogICAgfSk7CgogICAgaXQoJ0RFRkFVTFRfVEhFTUVfTU9ERSBpcyBhdXRvIChmaXJzdCBydW4gZm9sbG93cyB0aGUgT1MpJywgKCkgPT4gewogICAgICBleHBlY3QoREVGQVVMVF9USEVNRV9NT0RFKS50b0JlPFRoZW1lTW9kZT4oJ2F1dG8nKTsKICAgIH0pOwoKICAgIC8vIFBpbnMgdGhlIGxpdGVyYWwgdGhlIGFudGktRk9VQyBzY3JpcHQgaW4gaW5kZXguaHRtbCBkZXBlbmRzIG9uLgogICAgaXQoJ01PREVfU1RPUkFHRV9LRVkgbWF0Y2hlcyB0aGUgbGl0ZXJhbCB1c2VkIGJ5IHRoZSBhbnRpLUZPVUMgc2NyaXB0JywgKCkgPT4gewogICAgICBleHBlY3QoTU9ERV9TVE9SQUdFX0tFWSkudG9CZSgnc3BlZWR3YXZlLXRoZW1lLW1vZGUnKTsKICAgIH0pOwoKICAgIGl0KCdkb2VzIG5vdCByZS1wZXJzaXN0IHdoaWxlIGluIGF1dG8gbW9kZSBvbiBzeXN0ZW0gdGhlbWUgY2hhbmdlcycsICgpID0+IHsKICAgICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICAgIHN2Yy5zZXRNb2RlKCdhdXRvJyk7CiAgICAgIGxvY2FsU3RvcmFnZS5yZW1vdmVJdGVtKE1PREVfU1RPUkFHRV9LRVkpOwogICAgICBtZWRpYS5maXJlQ2hhbmdlKHRydWUpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKHRydWUpOwogICAgICBleHBlY3QobG9jYWxTdG9yYWdlLmdldEl0ZW0oTU9ERV9TVE9SQUdFX0tFWSkpLnRvQmVOdWxsKCk7CiAgICB9KTsKCiAgICBpdCgnY2xlYW5zIHVwIHZpYSByZW1vdmVMaXN0ZW5lciB3aGVuIGFkZEV2ZW50TGlzdGVuZXIgaXMgYWJzZW50IChsZWdhY3kgV2ViS2l0KScsICgpID0+IHsKICAgICAgbWVkaWEucmVzdG9yZSgpOwogICAgICBjb25zdCBsaXN0ZW5lcnMgPSBuZXcgU2V0PChlOiBNZWRpYVF1ZXJ5TGlzdEV2ZW50KSA9PiB2b2lkPigpOwogICAgICBjb25zdCBsZWdhY3lNcSA9IHsKICAgICAgICBtYXRjaGVzOiBmYWxzZSwKICAgICAgICBtZWRpYTogJyhwcmVmZXJzLWNvbG9yLXNjaGVtZTogZGFyayknLAogICAgICAgIG9uY2hhbmdlOiBudWxsLAogICAgICAgIGFkZExpc3RlbmVyOiAoZm46IChlOiBNZWRpYVF1ZXJ5TGlzdEV2ZW50KSA9PiB2b2lkKSA9PiBsaXN0ZW5lcnMuYWRkKGZuKSwKICAgICAgICByZW1vdmVMaXN0ZW5lcjogKGZuOiAoZTogTWVkaWFRdWVyeUxpc3RFdmVudCkgPT4gdm9pZCkgPT4gbGlzdGVuZXJzLmRlbGV0ZShmbiksCiAgICAgICAgZGlzcGF0Y2hFdmVudDogKCkgPT4gZmFsc2UsCiAgICAgIH0gYXMgdW5rbm93biBhcyBNZWRpYVF1ZXJ5TGlzdDsKICAgICAgY29uc3Qgb3JpZ2luYWwgPSBPYmplY3QuZ2V0T3duUHJvcGVydHlEZXNjcmlwdG9yKHdpbmRvdywgJ21hdGNoTWVkaWEnKTsKICAgICAgT2JqZWN0LmRlZmluZVByb3BlcnR5KHdpbmRvdywgJ21hdGNoTWVkaWEnLCB7CiAgICAgICAgY29uZmlndXJhYmxlOiB0cnVlLAogICAgICAgIHdyaXRhYmxlOiB0cnVlLAogICAgICAgIHZhbHVlOiAoKSA9PiBsZWdhY3lNcSwKICAgICAgfSk7CiAgICAgIHRyeSB7CiAgICAgICAgY29uc3Qgc3ZjID0gY3JlYXRlKCk7CiAgICAgICAgc3ZjLnNldE1vZGUoJ2F1dG8nKTsKICAgICAgICBleHBlY3QobGlzdGVuZXJzLnNpemUpLnRvQmUoMSk7CiAgICAgICAgc3ZjLm5nT25EZXN0cm95KCk7CiAgICAgICAgZXhwZWN0KGxpc3RlbmVycy5zaXplKS50b0JlKDApOwogICAgICAgIGZvciAoY29uc3QgZm4gb2YgbGlzdGVuZXJzKSBmbih7IG1hdGNoZXM6IHRydWUgfSBhcyBNZWRpYVF1ZXJ5TGlzdEV2ZW50KTsKICAgICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmNsYXNzTGlzdC5jb250YWlucygnZGFyaycpKS50b0JlKGZhbHNlKTsKICAgICAgfSBmaW5hbGx5IHsKICAgICAgICBpZiAob3JpZ2luYWwpIE9iamVjdC5kZWZpbmVQcm9wZXJ0eSh3aW5kb3csICdtYXRjaE1lZGlhJywgb3JpZ2luYWwpOwogICAgICB9CiAgICB9KTsKICB9KTsKICBkZXNjcmliZSgnYXBwbHlQZXJzaXN0ZWRUaGVtZU9uU3RhcnR1cCcsICgpID0+IHsKICAgIGZ1bmN0aW9uIHJ1bkluaXRpYWxpemVyKCk6IHZvaWQgewogICAgICBUZXN0QmVkLnJlc2V0VGVzdGluZ01vZHVsZSgpOwogICAgICBUZXN0QmVkLmNvbmZpZ3VyZVRlc3RpbmdNb2R1bGUoe30pOwogICAgICBUZXN0QmVkLnJ1bkluSW5qZWN0aW9uQ29udGV4dCgoKSA9PiBhcHBseVBlcnNpc3RlZFRoZW1lT25TdGFydHVwKCkpOwogICAgfQoKICAgIGl0KCdhcHBsaWVzIHRoZSBwZXJzaXN0ZWQgYWNjZW50IHRoZW1lIHRvIDxodG1sPiBhdCBib290IHdpdGhvdXQgb3BlbmluZyBTZXR0aW5ncycsICgpID0+IHsKICAgICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oVEhFTUVfU1RPUkFHRV9LRVksICdpcmlzJyk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuaGFzQXR0cmlidXRlKCdkYXRhLXRoZW1lJykpLnRvQmUoZmFsc2UpOwogICAgICBydW5Jbml0aWFsaXplcigpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmdldEF0dHJpYnV0ZSgnZGF0YS10aGVtZScpKS50b0JlKCdpcmlzJyk7CiAgICB9KTsKCiAgICBpdCgnbGVhdmVzIGRhdGEtdGhlbWUgdW5zZXQgd2hlbiB0aGUgcGVyc2lzdGVkIHRoZW1lIGlzIHRoZSBlbWJlciBkZWZhdWx0JywgKCkgPT4gewogICAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShUSEVNRV9TVE9SQUdFX0tFWSwgJ2VtYmVyJyk7CiAgICAgIHJ1bkluaXRpYWxpemVyKCk7CiAgICAgIGV4cGVjdChkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQuaGFzQXR0cmlidXRlKCdkYXRhLXRoZW1lJykpLnRvQmUoZmFsc2UpOwogICAgfSk7CgogICAgaXQoJ2h5ZHJhdGVzIHRoZSByb290IHNpbmdsZXRvbiBzbyBhIGxhdGVyIGluamVjdGlvbiByZWZsZWN0cyB0aGUgYm9vdCB0aGVtZScsICgpID0+IHsKICAgICAgbG9jYWxTdG9yYWdlLnNldEl0ZW0oVEhFTUVfU1RPUkFHRV9LRVksICdjeWFuJyk7CiAgICAgIFRlc3RCZWQucmVzZXRUZXN0aW5nTW9kdWxlKCk7CiAgICAgIFRlc3RCZWQuY29uZmlndXJlVGVzdGluZ01vZHVsZSh7fSk7CiAgICAgIFRlc3RCZWQucnVuSW5JbmplY3Rpb25Db250ZXh0KCgpID0+IGFwcGx5UGVyc2lzdGVkVGhlbWVPblN0YXJ0dXAoKSk7CiAgICAgIGNvbnN0IHN2YyA9IFRlc3RCZWQuaW5qZWN0KFRoZW1lU2VydmljZSk7CiAgICAgIGV4cGVjdChzdmMudGhlbWUoKSkudG9CZTxUaGVtZUlkPignY3lhbicpOwogICAgICBleHBlY3QoZG9jdW1lbnQuZG9jdW1lbnRFbGVtZW50LmdldEF0dHJpYnV0ZSgnZGF0YS10aGVtZScpKS50b0JlKCdjeWFuJyk7CiAgICB9KTsKICB9KTsKfSk7Cg==
+import { TestBed } from '@angular/core/testing';
+import {
+  ThemeService,
+  DEFAULT_THEME_MODE,
+  THEME_MODES,
+  THEME_STORAGE_KEY,
+  MODE_STORAGE_KEY,
+  applyPersistedThemeOnStartup,
+  type ThemeId,
+  type ThemeMode,
+} from './theme.service';
+
+/**
+ * Installs a controllable `matchMedia` on `window`; returns `fireChange` to simulate OS
+ * theme toggles and `restore` to remove the stub.
+ * @param prefersDark - Initial `matches` for `(prefers-color-scheme: dark)`.
+ */
+function mockMatchMedia(prefersDark: boolean): {
+  fireChange: (prefersDarkNow: boolean) => void;
+  restore: () => void;
+} {
+  const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+  const listeners = new Set<(e: MediaQueryListEvent) => void>();
+  const mq = {
+    matches: prefersDark,
+    media: '(prefers-color-scheme: dark)',
+    onchange: null,
+    addEventListener: (
+      _: string,
+      fn: (e: MediaQueryListEvent) => void,
+      options?: { signal?: AbortSignal }
+    ) => {
+      listeners.add(fn);
+      options?.signal?.addEventListener('abort', () => listeners.delete(fn));
+    },
+    removeEventListener: (_: string, fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
+    addListener: (fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
+    removeListener: (fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
+    dispatchEvent: () => false,
+  } as unknown as MediaQueryList;
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: () => mq,
+  });
+  return {
+    fireChange: (prefersDarkNow: boolean) => {
+      (mq as unknown as { matches: boolean }).matches = prefersDarkNow;
+      for (const fn of listeners) fn({ matches: prefersDarkNow } as MediaQueryListEvent);
+    },
+    restore: () => {
+      if (original) {
+        Object.defineProperty(window, 'matchMedia', original);
+      } else {
+        Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia');
+      }
+    },
+  };
+}
+
+/** Build a fresh in-memory `Storage`-shaped object for each test. */
+function makeMemoryStorage(): Storage {
+  const data = new Map<string, string>();
+  return {
+    get length() {
+      return data.size;
+    },
+    clear: () => data.clear(),
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      data.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      data.delete(key);
+    },
+    key: (index: number) => Array.from(data.keys())[index] ?? null,
+  };
+}
+
+describe('ThemeService', () => {
+  let originalLocalStorage: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      writable: true,
+      value: makeMemoryStorage(),
+    });
+    document.documentElement.removeAttribute('data-theme');
+  });
+
+  afterEach(() => {
+    if (originalLocalStorage) {
+      Object.defineProperty(globalThis, 'localStorage', originalLocalStorage);
+    } else {
+      Reflect.deleteProperty(globalThis as Record<string, unknown>, 'localStorage');
+    }
+    document.documentElement.removeAttribute('data-theme');
+    document.documentElement.classList.remove('dark');
+  });
+
+  function create(): ThemeService {
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({});
+    return TestBed.inject(ThemeService);
+  }
+
+  it('defaults to ember when nothing is stored and removes data-theme', () => {
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('hydrates a previously persisted theme from localStorage', () => {
+    localStorage.setItem(THEME_STORAGE_KEY, 'mint');
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('mint');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('mint');
+  });
+
+  it('writes data-theme + persists when setTheme switches to a non-default theme', () => {
+    const svc = create();
+    svc.setTheme('crimson');
+    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('crimson');
+  });
+
+  it('removes data-theme when switching back to the ember default', () => {
+    const svc = create();
+    svc.setTheme('crimson');
+    svc.setTheme('ember');
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('ember');
+  });
+
+  it('treats unknown stored values as ember', () => {
+    localStorage.setItem(THEME_STORAGE_KEY, 'bogus');
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('treats a previously persisted amber (now removed) as the ember default', () => {
+    localStorage.setItem(THEME_STORAGE_KEY, 'amber');
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('ember');
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('treats an empty stored value as ember', () => {
+    localStorage.setItem(THEME_STORAGE_KEY, '');
+    const svc = create();
+    expect(svc.theme()).toBe<ThemeId>('ember');
+  });
+
+  it('is a no-op when setTheme is called with the current theme', () => {
+    const svc = create();
+    svc.setTheme('mint');
+    const callsBefore = localStorage.getItem(THEME_STORAGE_KEY);
+    svc.setTheme('mint');
+    expect(svc.theme()).toBe<ThemeId>('mint');
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe(callsBefore);
+  });
+
+  it('survives a localStorage write failure without throwing', () => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      writable: true,
+      value: {
+        getItem: () => null,
+        setItem: () => {
+          throw new Error('quota');
+        },
+        removeItem: () => undefined,
+        clear: () => undefined,
+        key: () => null,
+        length: 0,
+      } satisfies Storage,
+    });
+
+    const svc = create();
+    expect(() => svc.setTheme('crimson')).not.toThrow();
+    expect(svc.theme()).toBe<ThemeId>('crimson');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('crimson');
+  });
+
+  describe('mode axis', () => {
+    let media: ReturnType<typeof mockMatchMedia>;
+
+    beforeEach(() => {
+      media = mockMatchMedia(false);
+    });
+
+    afterEach(() => {
+      media.restore();
+    });
+
+    // Happy paths
+    it('defaults to auto and follows a light system when no mode is persisted (first run)', () => {
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      // First run must not persist a choice the user never made.
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('defaults to auto and follows a dark system when no mode is persisted (first run)', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('setMode("light") removes .dark and persists the choice', () => {
+      const svc = create();
+      svc.setMode('light');
+      expect(svc.mode()).toBe<ThemeMode>('light');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBe('light');
+    });
+
+    it('setMode("dark") adds .dark and persists the choice', () => {
+      const svc = create();
+      svc.setMode('light');
+      svc.setMode('dark');
+      expect(svc.mode()).toBe<ThemeMode>('dark');
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBe('dark');
+    });
+
+    it('hydrates persisted "light" mode at startup, beating system dark preference', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      localStorage.setItem(MODE_STORAGE_KEY, 'light');
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('light');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    // Edge cases
+    it('treats unknown stored mode as the first-run default', () => {
+      localStorage.setItem(MODE_STORAGE_KEY, 'sepia');
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('setMode("auto") with prefers-color-scheme=dark adds .dark while keeping mode()==="auto"', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      const svc = create();
+      svc.setMode('auto');
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+    });
+
+    it('setMode("auto") with prefers-color-scheme=light removes .dark while keeping mode()==="auto"', () => {
+      const svc = create();
+      svc.setMode('auto');
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('is a no-op when setMode is called with the current mode', () => {
+      const svc = create();
+      svc.setMode('light');
+      const persisted = localStorage.getItem(MODE_STORAGE_KEY);
+      svc.setMode('light');
+      expect(svc.mode()).toBe<ThemeMode>('light');
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBe(persisted);
+    });
+
+    it('hydrates persisted "auto" mode at startup, applying system dark preference', () => {
+      media.restore();
+      media = mockMatchMedia(true);
+      localStorage.setItem(MODE_STORAGE_KEY, 'auto');
+      const svc = create();
+      expect(svc.mode()).toBe<ThemeMode>('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+    });
+
+    it('stops reacting to prefers-color-scheme changes after ngOnDestroy', () => {
+      const svc = create();
+      svc.setMode('auto');
+      svc.ngOnDestroy();
+      media.fireChange(true);
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('reacts to prefers-color-scheme changes while in auto mode', () => {
+      const svc = create();
+      svc.setMode('auto');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+      media.fireChange(true);
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      media.fireChange(false);
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('ignores prefers-color-scheme changes when mode is explicit (light)', () => {
+      const svc = create();
+      svc.setMode('light');
+      media.fireChange(true);
+      expect(svc.mode()).toBe<ThemeMode>('light');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('setMode does not touch the accent theme', () => {
+      const svc = create();
+      svc.setTheme('mint');
+      svc.setMode('light');
+      expect(svc.theme()).toBe<ThemeId>('mint');
+      expect(document.documentElement.getAttribute('data-theme')).toBe('mint');
+    });
+
+    it('setTheme does not touch the mode class or signal', () => {
+      const svc = create();
+      svc.setMode('light');
+      svc.setTheme('iris');
+      expect(svc.mode()).toBe<ThemeMode>('light');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('survives a localStorage write failure for mode without throwing', () => {
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        writable: true,
+        value: {
+          getItem: () => null,
+          setItem: () => {
+            throw new Error('quota');
+          },
+          removeItem: () => undefined,
+          clear: () => undefined,
+          key: () => null,
+          length: 0,
+        } satisfies Storage,
+      });
+      const svc = create();
+      expect(() => svc.setMode('light')).not.toThrow();
+      expect(svc.mode()).toBe<ThemeMode>('light');
+      expect(document.documentElement.classList.contains('dark')).toBe(false);
+    });
+
+    it('falls back to light when matchMedia is unavailable and mode is auto', () => {
+      media.restore();
+      const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+      Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'matchMedia');
+      try {
+        const svc = create();
+        svc.setMode('auto');
+        expect(svc.mode()).toBe<ThemeMode>('auto');
+        expect(document.documentElement.classList.contains('dark')).toBe(false);
+      } finally {
+        if (original) Object.defineProperty(window, 'matchMedia', original);
+      }
+    });
+
+    it('THEME_MODES is the canonical list', () => {
+      expect(THEME_MODES).toEqual(['light', 'dark', 'auto']);
+    });
+
+    it('DEFAULT_THEME_MODE is auto (first run follows the OS)', () => {
+      expect(DEFAULT_THEME_MODE).toBe<ThemeMode>('auto');
+    });
+
+    // Pins the literal the anti-FOUC script in index.html depends on.
+    it('MODE_STORAGE_KEY matches the literal used by the anti-FOUC script', () => {
+      expect(MODE_STORAGE_KEY).toBe('speedwave-theme-mode');
+    });
+
+    it('does not re-persist while in auto mode on system theme changes', () => {
+      const svc = create();
+      svc.setMode('auto');
+      localStorage.removeItem(MODE_STORAGE_KEY);
+      media.fireChange(true);
+      expect(document.documentElement.classList.contains('dark')).toBe(true);
+      expect(localStorage.getItem(MODE_STORAGE_KEY)).toBeNull();
+    });
+
+    it('cleans up via removeListener when addEventListener is absent (legacy WebKit)', () => {
+      media.restore();
+      const listeners = new Set<(e: MediaQueryListEvent) => void>();
+      const legacyMq = {
+        matches: false,
+        media: '(prefers-color-scheme: dark)',
+        onchange: null,
+        addListener: (fn: (e: MediaQueryListEvent) => void) => listeners.add(fn),
+        removeListener: (fn: (e: MediaQueryListEvent) => void) => listeners.delete(fn),
+        dispatchEvent: () => false,
+      } as unknown as MediaQueryList;
+      const original = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        writable: true,
+        value: () => legacyMq,
+      });
+      try {
+        const svc = create();
+        svc.setMode('auto');
+        expect(listeners.size).toBe(1);
+        svc.ngOnDestroy();
+        expect(listeners.size).toBe(0);
+        for (const fn of listeners) fn({ matches: true } as MediaQueryListEvent);
+        expect(document.documentElement.classList.contains('dark')).toBe(false);
+      } finally {
+        if (original) Object.defineProperty(window, 'matchMedia', original);
+      }
+    });
+  });
+  describe('applyPersistedThemeOnStartup', () => {
+    function runInitializer(): void {
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({});
+      TestBed.runInInjectionContext(() => applyPersistedThemeOnStartup());
+    }
+
+    it('applies the persisted accent theme to <html> at boot without opening Settings', () => {
+      localStorage.setItem(THEME_STORAGE_KEY, 'iris');
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+      runInitializer();
+      expect(document.documentElement.getAttribute('data-theme')).toBe('iris');
+    });
+
+    it('leaves data-theme unset when the persisted theme is the ember default', () => {
+      localStorage.setItem(THEME_STORAGE_KEY, 'ember');
+      runInitializer();
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    });
+
+    it('hydrates the root singleton so a later injection reflects the boot theme', () => {
+      localStorage.setItem(THEME_STORAGE_KEY, 'cyan');
+      TestBed.resetTestingModule();
+      TestBed.configureTestingModule({});
+      TestBed.runInInjectionContext(() => applyPersistedThemeOnStartup());
+      const svc = TestBed.inject(ThemeService);
+      expect(svc.theme()).toBe<ThemeId>('cyan');
+      expect(document.documentElement.getAttribute('data-theme')).toBe('cyan');
+    });
+  });
+});
