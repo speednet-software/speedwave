@@ -171,6 +171,33 @@ teardown() {
     [ ! -e "$DEST/build-context/containers/proxy/target" ]
 }
 
+@test "bundle script copy survives a tar writer still flushing after the extractor reached end-of-archive" {
+    local stub_dir="$DEST/stub-bin" stub_log="$DEST/tar-stub.log" real_tar
+    real_tar="$(command -v tar)"
+    [ -x "$real_tar" ]
+    mkdir -p "$stub_dir"
+    cat >"$stub_dir/tar" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-cf" ]; then
+    "$REAL_TAR" "$@" || exit $?
+    echo intercepted >>"$TAR_STUB_LOG"
+    for _ in 1 2 3 4 5 6; do
+        sleep 0.5
+        head -c 512 /dev/zero || exit 1
+    done
+    exit 0
+fi
+exec "$REAL_TAR" "$@"
+EOF
+    chmod +x "$stub_dir/tar"
+
+    REAL_TAR="$real_tar" TAR_STUB_LOG="$stub_log" PATH="$stub_dir:$PATH" run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l <"$stub_log" | tr -d ' ')" -eq 2 ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
+    [ -f "$DEST/build-context/containers/crates/pii-engine/Cargo.toml" ]
+}
+
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
