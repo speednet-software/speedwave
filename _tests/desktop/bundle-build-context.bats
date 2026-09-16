@@ -33,6 +33,15 @@ tree_fingerprint() {
     done
 }
 
+PROXY_TARGET_PLANT="$BATS_TEST_DIRNAME/../../containers/proxy/target/debug/deps/rustcbats0PLANT"
+
+reap_proxy_target_plant() {
+    local proxy="$BATS_TEST_DIRNAME/../../containers/proxy"
+    chmod u+rw "$PROXY_TARGET_PLANT" 2>/dev/null || true
+    rm_with_retry "$PROXY_TARGET_PLANT"
+    rmdir "$proxy/target/debug/deps" "$proxy/target/debug" "$proxy/target" 2>/dev/null || true
+}
+
 setup() {
     DEST="$(mktemp -d "${TMPDIR:-/tmp}/bundle-bats.XXXXXX")"
     export BUNDLE_DEST="$DEST"
@@ -40,16 +49,19 @@ setup() {
 
 teardown() {
     rm_with_retry "$DEST"
+    reap_proxy_target_plant
 }
 
 @test "bundle script exists and is executable" {
     [ -x "$SCRIPT" ]
 }
 
-@test "bundle script creates build-context/containers/" {
+@test "bundle script creates build-context/containers/ with its dotfiles and nested dirs" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     [ -d "$DEST/build-context/containers" ]
+    [ -f "$DEST/build-context/containers/.dockerignore" ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
 }
 
 @test "bundle script copies Containerfile.claude" {
@@ -88,7 +100,7 @@ teardown() {
     fi
 }
 
-@test "bundle script prunes host build outputs from containers/ (target, dist, node_modules)" {
+@test "bundle script excludes host build outputs from containers/ at copy time (target, dist, node_modules)" {
     local marker="$BATS_TEST_DIRNAME/../../containers/.bats-prune-check"
     trap 'rm_with_retry "$marker"' RETURN
     mkdir -p "$marker/target" "$marker/dist" "$marker/node_modules"
@@ -103,6 +115,19 @@ teardown() {
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/target" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/dist" ]
     [ ! -d "$DEST/build-context/containers/.bats-prune-check/node_modules" ]
+}
+
+@test "bundle script never enumerates containers/proxy/target: an unreadable transient rustc deps file cannot break the copy" {
+    mkdir -p "$(dirname "$PROXY_TARGET_PLANT")"
+    echo transient > "$PROXY_TARGET_PLANT"
+    chmod 000 "$PROXY_TARGET_PLANT"
+    [ -e "$PROXY_TARGET_PLANT" ]
+
+    run "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -f "$DEST/build-context/containers/proxy/src/main.rs" ]
+    [ ! -e "$DEST/build-context/containers/proxy/target" ]
+    [ -e "$PROXY_TARGET_PLANT" ]
 }
 
 @test "bundle script creates mcp-servers with tsconfig.base.json" {
@@ -274,7 +299,7 @@ EOF
         [[ "$resolved" == *'$'* ]] && continue
         checked=$((checked + 1))
         [ -e "$resolved" ] || { echo "Source path does not exist: $src (resolved: $resolved)"; return 1; }
-    done < <(grep -E '^\s*cp ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR)/[^"]+"' | tr -d '"' | sort -u)
+    done < <(grep -E '^\s*(cp|copy_tree) ' "$SCRIPT" | grep -oE '"\$(REPO_ROOT|MCP_SERVERS_DIR)/[^"]+"' | tr -d '"' | sort -u)
     [ "$checked" -gt 0 ]
 }
 

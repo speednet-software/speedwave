@@ -65,26 +65,28 @@ if ((-not $wasmArtifacts) -or ($wasmArtifacts | Where-Object { $_.Length -eq 0 }
 }
 
 
-New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
-Copy-Item -Recurse containers "$dest\build-context\containers"
-
-New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
-Copy-Item -Recurse crates\pii-engine "$dest\build-context\containers\crates\pii-engine"
-
-New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
-Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
-
-function Remove-BuildOutputs {
-    param([string]$root)
-    foreach ($dir in Get-ChildItem -Path $root -Directory -Force) {
-        if ($dir.Name -in 'target', 'dist', 'node_modules') {
-            Remove-Item -Recurse -Force $dir.FullName
+function Copy-Tree {
+    param([string]$src, [string]$destParent)
+    $destDir = Join-Path $destParent (Split-Path -Leaf $src)
+    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $src -Force) {
+        if ($item.PSIsContainer) {
+            if ($item.Name -in 'target', 'dist', 'node_modules') { continue }
+            Copy-Tree $item.FullName $destDir
         } else {
-            Remove-BuildOutputs $dir.FullName
+            Copy-Item -LiteralPath $item.FullName -Destination $destDir
         }
     }
 }
-Remove-BuildOutputs "$dest\build-context\containers"
+
+New-Item -ItemType Directory -Path "$dest\build-context" -Force | Out-Null
+Copy-Tree containers "$dest\build-context"
+
+New-Item -ItemType Directory -Path "$dest\build-context\containers\crates" -Force | Out-Null
+Copy-Tree crates\pii-engine "$dest\build-context\containers\crates"
+
+New-Item -ItemType Directory -Path "$dest\build-context\containers\mcp-servers\policies" -Force | Out-Null
+Copy-Item "$mcpServersDir\policies\rules.yaml" "$dest\build-context\containers\mcp-servers\policies\rules.yaml"
 
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 Get-ChildItem -Path "$dest\build-context\containers" -Recurse -Include '*.sh' -File |

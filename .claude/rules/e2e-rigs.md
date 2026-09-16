@@ -18,5 +18,6 @@ Rules for the clean-install rig pipeline and the engine-level bats suites (`_tes
 ## Suite discipline
 
 - Engine access in bats only via the word-split `ENGINE_EXEC` contract (`${ENGINE_EXEC+set}` distinguishes unset from empty-on-purpose); every bats invocation carries `--print-output-on-failure`.
+- A `trap … RETURN` inside a bats test fires as soon as the first inner function returns (`run` included; bats sets `functrace`), not at test end: a plant the test asserts on after `run` is reaped in `teardown()`, never by a RETURN trap.
 - Everything planted lives under a test-owned prefix/sentinel id and is reaped in teardown even on failure; plants are asserted (exact counts) before the behavior under test runs — a silently failed plant must fail loudly, never pass vacuously.
 - `extract-zip` must stay out of `desktop/e2e`'s tree: it writes through symlinks outside the extraction dir and no patched release exists (GHSA-7pqw-9j4j-h8q3, last publish 2.0.1). It reaches the rig only through `@puppeteer/browsers` 2.x, which the `^3.2.1` entry in `overrides` replaces; that entry is security config, not cosmetics — package-lock.json does not record overrides, so a fresh install without it resolves back to 2.x. Guard: `_tests/desktop/e2e-rig-deps.bats`, in `make test`.
