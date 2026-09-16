@@ -21,7 +21,7 @@ fn sanitize_output_line(line: &str) -> String {
 }
 
 fn redact_err(e: &impl std::fmt::Display) -> String {
-    sanitize_output_line(&e.to_string())
+    sanitize_output_line(&format!("{e:#}"))
 }
 
 #[expect(

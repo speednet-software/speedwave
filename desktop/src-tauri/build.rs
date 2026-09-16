@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     if let Err(e) = run() {
-        println!("cargo:warning=build.rs failed: {e}");
+        let mut message = e.to_string();
+        let mut source = std::error::Error::source(e.as_ref());
+        while let Some(cause) = source {
+            message.push_str(&format!(": {cause}"));
+            source = std::error::Error::source(cause);
+        }
+        println!("cargo:warning=build.rs failed: {message}");
         std::process::exit(1);
     }
 }

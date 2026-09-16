@@ -70,21 +70,6 @@ use workers::{
 };
 pub use workers::{enabled_hub_service_ids, worker_os_url_state, WorkerOsUrlState};
 
-#[cfg(test)]
-thread_local! {
-    static TEST_BUILD_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-fn resolve_bundle_manifest() -> anyhow::Result<bundle::BundleManifest> {
-    #[cfg(test)]
-    {
-        if let Some(root) = TEST_BUILD_ROOT.with(|r| r.borrow().clone()) {
-            return bundle::load_current_bundle_manifest_from(&root);
-        }
-    }
-    bundle::load_current_bundle_manifest()
-}
-
 const COMPOSE_TEMPLATE: &str = include_str!("../../../../containers/compose.template.yml");
 
 const IMAGE_PLACEHOLDERS: &[(&str, &str)] = &[
@@ -207,6 +192,7 @@ pub fn render_compose(
     runtime: Option<&crate::runtime::LockedRuntime>,
     bridges: &HostBridgesInfo,
 ) -> anyhow::Result<String> {
+    let bundle_manifest = bundle::load_current_bundle_manifest()?;
     render_compose_in(
         consts::data_dir(),
         project_name,
@@ -214,12 +200,23 @@ pub fn render_compose(
         resolved_config,
         integrations,
         runtime,
-        bridges,
+        RenderInputs {
+            bridges,
+            bundle_manifest: &bundle_manifest,
+        },
     )
 }
 
-/// Env-free core of [`render_compose`]: paths derive from the explicit `data_dir`
-/// (tests pass a tempdir); the public no-arg shim resolves `data_dir()`.
+/// Host-resolved inputs of one render, gathered by the [`render_compose`] shim.
+pub struct RenderInputs<'a> {
+    /// Host bridge lock state.
+    pub bridges: &'a HostBridgesInfo,
+    /// Manifest whose per-image hashes become the image tags.
+    pub bundle_manifest: &'a bundle::BundleManifest,
+}
+
+/// Env-free core of [`render_compose`]: paths derive from the explicit `data_dir`;
+/// the public shim resolves `data_dir()` and loads the bundle manifest.
 pub fn render_compose_in(
     data_dir: &Path,
     project_name: &str,
@@ -227,8 +224,12 @@ pub fn render_compose_in(
     resolved_config: &ResolvedClaudeConfig,
     integrations: &ResolvedIntegrationsConfig,
     runtime: Option<&crate::runtime::LockedRuntime>,
-    bridges: &HostBridgesInfo,
+    inputs: RenderInputs<'_>,
 ) -> anyhow::Result<String> {
+    let RenderInputs {
+        bridges,
+        bundle_manifest,
+    } = inputs;
     crate::validation::validate_project_name(project_name)?;
     if !Path::new(project_dir).is_dir() {
         anyhow::bail!(
@@ -251,7 +252,6 @@ pub fn render_compose_in(
 
     let port_hub = consts::PORT_BASE;
     let port_worker = consts::PORT_WORKER;
-    let bundle_manifest = resolve_bundle_manifest()?;
 
     let mut yaml = COMPOSE_TEMPLATE.to_string();
     yaml = yaml.replace("${COMPOSE_PREFIX}", consts::compose_prefix());
@@ -1116,12 +1116,14 @@ mod tests {
 
     const SECURITY_RULE_COUNT: usize = 52;
 
-    fn test_build_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("crate manifest dir has a workspace grandparent")
-            .to_path_buf()
+    fn test_bundle_manifest() -> bundle::BundleManifest {
+        bundle::BundleManifest {
+            image_hashes: build::IMAGES
+                .iter()
+                .map(|img| (img.name.to_string(), format!("test-bundle-{}", img.name)))
+                .collect(),
+            ..bundle::BundleManifest::for_tests("test-bundle")
+        }
     }
 
     fn tmp_project_dir() -> &'static str {
@@ -1138,14 +1140,6 @@ mod tests {
         runtime: Option<&crate::runtime::LockedRuntime>,
         bridges: &HostBridgesInfo,
     ) -> anyhow::Result<String> {
-        struct BuildRootGuard;
-        impl Drop for BuildRootGuard {
-            fn drop(&mut self) {
-                TEST_BUILD_ROOT.with(|r| *r.borrow_mut() = None);
-            }
-        }
-        TEST_BUILD_ROOT.with(|r| *r.borrow_mut() = Some(test_build_root()));
-        let _guard = BuildRootGuard;
         render_compose_in(
             data_dir,
             project_name,
@@ -1153,7 +1147,10 @@ mod tests {
             resolved_config,
             integrations,
             runtime,
-            bridges,
+            RenderInputs {
+                bridges,
+                bundle_manifest: &test_bundle_manifest(),
+            },
         )
     }
 
@@ -2572,7 +2569,7 @@ services:
             llm: configured_anthropic_llm(),
             ..Default::default()
         };
-        let manifest = bundle::load_current_bundle_manifest_from(&test_build_root()).unwrap();
+        let manifest = test_bundle_manifest();
 
         let yaml = render_compose_isolated(
             data_dir.path(),
