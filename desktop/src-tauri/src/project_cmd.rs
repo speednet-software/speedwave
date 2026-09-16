@@ -74,10 +74,7 @@ pub(crate) async fn switch_project(
     let oauth_for_teardown = oauth_arc.clone();
     let switch_result = tokio::task::spawn_blocking(move || {
         if let Err(e) = containers_cmd::ensure_images_ready() {
-            return SwitchResult::Failed {
-                error: e,
-                cleanup_error: None,
-            };
+            return SwitchResult::failed(e, None);
         }
         let rt = speedwave_runtime::runtime::detect_runtime();
         switch_project_core(&prev_clone, &new_clone, &rt, &|proj, rt| {

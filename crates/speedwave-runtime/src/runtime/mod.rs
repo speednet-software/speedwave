@@ -315,7 +315,7 @@ pub trait CommandRunner: Send + Sync {
                             "{} failed with exit code {:?}: {}",
                             program,
                             status.code(),
-                            detail
+                            user_facing_failure_text(&program, detail)
                         );
                     }
                 }
@@ -366,7 +366,42 @@ impl RealRunner {
 fn run_failure(cmd: &str, stderr: &[u8], stdout: &[u8]) -> anyhow::Error {
     let stderr = decode_wsl_output(stderr);
     let stdout = decode_wsl_output(stdout);
-    anyhow::anyhow!("{} failed: {}", cmd, combine_outputs(&stderr, &stdout))
+    let combined = combine_outputs(&stderr, &stdout);
+    anyhow::anyhow!(
+        "{} failed: {}",
+        cmd,
+        user_facing_failure_text(cmd, &combined)
+    )
+}
+
+const LOGRUS_CHATTER_LEVELS: [&str; 5] = ["trace", "debug", "info", "warning", "warn"];
+
+fn logrus_level(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if !line.starts_with("time=") {
+        return None;
+    }
+    let (_, rest) = line.split_once(" level=")?;
+    rest.split(char::is_whitespace).next()
+}
+
+fn is_logrus_chatter(line: &str) -> bool {
+    logrus_level(line).is_some_and(|level| LOGRUS_CHATTER_LEVELS.contains(&level))
+}
+
+fn user_facing_failure_text(cmd: &str, raw: &str) -> String {
+    let kept: Vec<&str> = raw
+        .lines()
+        .filter(|line| !is_logrus_chatter(line) && !line.trim().is_empty())
+        .collect();
+    if kept.is_empty() || !raw.lines().any(is_logrus_chatter) {
+        return crate::log_sanitizer::sanitize(raw);
+    }
+    log::debug!(
+        "full output of the failed {cmd} command:\n{}",
+        crate::log_sanitizer::sanitize(raw)
+    );
+    crate::log_sanitizer::sanitize(&kept.join("\n"))
 }
 
 impl CommandRunner for RealRunner {
@@ -1509,6 +1544,181 @@ mod tests {
     fn run_failure_passes_plain_utf8_through() {
         let err = run_failure("nerdctl", b"no such container speedwave_x_claude", b"");
         assert!(err.to_string().contains("no such container"));
+    }
+
+    const NERDCTL_RUN_CHATTER: &str = "time=\"2026-09-16T10:00:00+02:00\" level=info msg=\"Running [/usr/local/bin/nerdctl run -d --name speedwave_acme_mcp-context7 -e=MCP_CONTEXT7_AUTH_TOKEN=00000000-0000-4000-8000-000000000001 --label io.speedwave.project=acme docker.io/speedwave/context7:1]\"";
+    const NERDCTL_FATAL: &str = "time=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"error while creating container speedwave_acme_mcp-context7: exit status 1\"";
+    const WORKER_TOKEN_ARG: &str = "-e=MCP_X_AUTH_TOKEN=abc";
+
+    #[test]
+    fn run_failure_keeps_only_the_fatal_line_of_a_compose_up_failure() {
+        let stderr = format!("{NERDCTL_RUN_CHATTER}\n{NERDCTL_FATAL}\n");
+        let msg = run_failure("limactl", stderr.as_bytes(), b"").to_string();
+        assert_eq!(msg, format!("limactl failed: {NERDCTL_FATAL}"));
+    }
+
+    #[test]
+    fn run_failure_never_returns_a_worker_auth_token_from_the_argv_echo() {
+        let stderr = format!("{NERDCTL_RUN_CHATTER}\n{NERDCTL_FATAL}\n");
+        let stdout = format!(
+            "time=\"2026-09-16T10:00:00+02:00\" level=info msg=\"Running [nerdctl run {WORKER_TOKEN_ARG} image]\""
+        );
+        let msg = run_failure("wsl.exe", stderr.as_bytes(), stdout.as_bytes()).to_string();
+        assert!(
+            !msg.contains("00000000-0000-4000-8000-000000000001"),
+            "leaked: {msg}"
+        );
+        assert!(!msg.contains(WORKER_TOKEN_ARG), "leaked: {msg}");
+        assert!(
+            !msg.contains("Running ["),
+            "argv echo must not reach the error: {msg}"
+        );
+        assert!(
+            msg.contains("exit status 1"),
+            "fatal reason must survive: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_failure_redacts_a_worker_auth_token_inside_a_kept_fatal_line() {
+        let stderr = format!(
+            "time=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"failed to run [nerdctl run {WORKER_TOKEN_ARG} image]: exit status 1\""
+        );
+        let msg = run_failure("limactl", stderr.as_bytes(), b"").to_string();
+        assert!(
+            msg.contains("level=fatal"),
+            "fatal line must survive: {msg}"
+        );
+        assert!(!msg.contains(WORKER_TOKEN_ARG), "leaked: {msg}");
+        assert!(
+            msg.contains("-e=MCP_X_AUTH_TOKEN=***REDACTED*** image]"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_failure_keeps_unstructured_lines_next_to_the_fatal_line() {
+        let stderr = format!(
+            "ssh: connect to host lima-speedwave port 60022: Connection refused\n{NERDCTL_RUN_CHATTER}\ntime=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"exit status 255\"\n"
+        );
+        let msg = run_failure("limactl", stderr.as_bytes(), b"").to_string();
+        assert_eq!(
+            msg,
+            "limactl failed: ssh: connect to host lima-speedwave port 60022: Connection refused\ntime=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"exit status 255\""
+        );
+    }
+
+    #[test]
+    fn run_failure_keeps_level_error_lines_and_drops_warnings() {
+        let stderr = b"time=\"2026-09-16T10:00:00+02:00\" level=warning msg=\"ignored\"\ntime=\"2026-09-16T10:00:01+02:00\" level=error msg=\"boom\"";
+        let msg = run_failure("wsl.exe", stderr, b"").to_string();
+        assert_eq!(
+            msg,
+            "wsl.exe failed: time=\"2026-09-16T10:00:01+02:00\" level=error msg=\"boom\""
+        );
+    }
+
+    #[test]
+    fn run_failure_falls_back_to_the_redacted_full_text_when_every_line_is_chatter() {
+        let stderr = format!(
+            "{NERDCTL_RUN_CHATTER}\ntime=\"2026-09-16T10:00:01+02:00\" level=info msg=\"done\""
+        );
+        let msg = run_failure("limactl", stderr.as_bytes(), b"").to_string();
+        assert!(msg.contains("Running ["), "got: {msg}");
+        assert!(msg.contains("msg=\"done\""), "got: {msg}");
+        assert!(
+            !msg.contains("00000000-0000-4000-8000-000000000001"),
+            "leaked: {msg}"
+        );
+        assert!(
+            msg.contains("MCP_CONTEXT7_AUTH_TOKEN=***REDACTED***"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_failure_leaves_output_without_logrus_lines_byte_exact() {
+        let stderr = b"Access is denied.\r\nError code: Wsl/Service/E_ACCESSDENIED";
+        let msg = run_failure("wsl.exe", stderr, b"").to_string();
+        assert_eq!(
+            msg,
+            "wsl.exe failed: Access is denied.\r\nError code: Wsl/Service/E_ACCESSDENIED"
+        );
+    }
+
+    #[test]
+    fn run_failure_drops_blank_lines_only_next_to_dropped_chatter() {
+        let stderr = format!("{NERDCTL_RUN_CHATTER}\n\n{NERDCTL_FATAL}\n");
+        let msg = run_failure("limactl", stderr.as_bytes(), b"").to_string();
+        assert_eq!(msg, format!("limactl failed: {NERDCTL_FATAL}"));
+
+        let only_chatter = format!("{NERDCTL_RUN_CHATTER}\n\n{NERDCTL_RUN_CHATTER}");
+        let msg = run_failure("limactl", only_chatter.as_bytes(), b"").to_string();
+        assert!(msg.contains("Running ["), "got: {msg}");
+        assert!(
+            msg.contains("\n\n"),
+            "blank line survives without a reduction: {msg:?}"
+        );
+
+        let msg = run_failure("wsl.exe", b"first\r\n\r\nsecond", b"").to_string();
+        assert_eq!(msg, "wsl.exe failed: first\r\n\r\nsecond");
+    }
+
+    #[test]
+    fn run_failure_with_empty_streams_has_an_empty_detail() {
+        assert_eq!(
+            run_failure("limactl", b"", b"").to_string(),
+            "limactl failed: "
+        );
+    }
+
+    #[test]
+    fn run_failure_shaping_keeps_the_propagation_and_name_store_classifiers_working() {
+        let enoent = format!(
+            "{NERDCTL_RUN_CHATTER}\ntime=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"open /Users/u/.speedwave/compose/acme/compose.yml: no such file or directory\""
+        );
+        assert!(is_propagation_error(&run_failure(
+            "limactl",
+            enoent.as_bytes(),
+            b""
+        )));
+
+        let name = own_name("acme", "mcp_hub");
+        let conflict = format!(
+            "{NERDCTL_RUN_CHATTER}\ntime=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"name-store error\\nname \\\"{name}\\\" is already used by ID \\\"{DEAD_ID}\\\"\""
+        );
+        let err = run_failure("limactl", conflict.as_bytes(), b"");
+        assert_eq!(
+            name_store_conflicts(&err, "acme"),
+            vec![(name, DEAD_ID.to_string())]
+        );
+
+        let cni = format!(
+            "{NERDCTL_RUN_CHATTER}\ntime=\"2026-09-16T10:00:01+02:00\" level=fatal msg=\"cni.setup failed: chain already exists\""
+        );
+        assert!(is_stale_cni_error(&run_failure(
+            "limactl",
+            cni.as_bytes(),
+            b""
+        )));
+    }
+
+    #[test]
+    fn logrus_level_parses_only_logrus_text_lines() {
+        assert_eq!(
+            logrus_level("time=\"x\" level=info msg=\"y\""),
+            Some("info")
+        );
+        assert_eq!(
+            logrus_level("  time=\"x\" level=fatal msg=EOF"),
+            Some("fatal")
+        );
+        assert_eq!(logrus_level("level=info msg=\"no time prefix\""), None);
+        assert_eq!(
+            logrus_level("ssh: connect to host lima port 60022: Connection refused"),
+            None
+        );
+        assert_eq!(logrus_level(""), None);
     }
 
     #[test]
